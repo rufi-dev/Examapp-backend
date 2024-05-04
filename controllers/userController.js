@@ -56,7 +56,7 @@ const registerUser = asyncHandler(async (req, res) => {
     res.cookie("token", token, {
         path: "/",
         httpOnly: true,
-        expires: new Date(Date.now() + 1000 * 86400), // 1 day
+        //expires: new Date(Date.now() + 1000 * 86400), // 1 day
         sameSite: "none",
         secure: true
     })
@@ -135,7 +135,7 @@ const loginUser = asyncHandler(async (req, res) => {
         res.cookie("token", token, {
             path: "/",
             httpOnly: true,
-            expires: new Date(Date.now() + 1000 * 86400), // 1 day
+            //expires: new Date(Date.now() + 1000 * 86400), // 1 day
             sameSite: "none",
             secure: true
         })
@@ -263,77 +263,77 @@ const loginWithCode = asyncHandler(async (req, res) => {
 
 // Send Verification Email
 const sendVerificationEmail = asyncHandler(async (req, res) => {
-    const user = await User.findById(req.user.id)
+    // const user = await User.findById(req.user.id)
 
-    if (!user) {
-        res.status(404)
-        throw new Error('User not found')
-    }
+    // if (!user) {
+    //     res.status(404)
+    //     throw new Error('User not found')
+    // }
 
     // if (user.isVerified) {
     //     res.status(400)
     //     throw new Error('User already verified')
     // }
 
-    let token = await Token.findOne({ userId: user._id })
+    // let token = await Token.findOne({ userId: user._id })
 
-    if (token) {
-        await token.deleteOne()
-    }
+    // if (token) {
+    //     await token.deleteOne()
+    // }
 
-    // Create Verification Token and Save
-    const verificationToken = crypto.randomBytes(32).toString("hex") + user._id
+    // // Create Verification Token and Save
+    // const verificationToken = crypto.randomBytes(32).toString("hex") + user._id
 
-    //Hash token and save
-    const hashedToken = hashToken(verificationToken)
-    await new Token({
-        userId: user._id,
-        vToken: hashedToken,
-        createdAt: Date.now(),
-        expiresAt: Date.now() + 60 * (60 * 1000) // 1hour
-    }).save()
+    // //Hash token and save
+    // const hashedToken = hashToken(verificationToken)
+    // await new Token({
+    //     userId: user._id,
+    //     vToken: hashedToken,
+    //     createdAt: Date.now(),
+    //     expiresAt: Date.now() + 60 * (60 * 1000) // 1hour
+    // }).save()
 
-    //Construct Verification URL
-    const verificationUrl = `${process.env.FRONTEND_URL}/verify/${verificationToken}`
+    // //Construct Verification URL
+    // const verificationUrl = `${process.env.FRONTEND_URL}/verify/${verificationToken}`
 
-    //Send Verification Email
-    const subject = "Verify Your Account - MATH"
-    const send_to = user.email
-    const sent_from = process.env.EMAIL_USER
-    const reply_to = "noreply@rufi.com"
-    const template = "verifyEmail"
-    const name = user.name
-    const link = verificationUrl
+    // //Send Verification Email
+    // const subject = "Verify Your Account - MATH"
+    // const send_to = user.email
+    // const sent_from = process.env.EMAIL_USER
+    // const reply_to = "noreply@rufi.com"
+    // const template = "verifyEmail"
+    // const name = user.name
+    // const link = verificationUrl
 
-    try {
-        await sendEmail(subject, send_to, sent_from, reply_to, template, name, link)
-        res.status(200).json({ message: "Verification Email Sent" })
-    } catch (error) {
-        res.status(500)
-        throw new Error('Verification Email not sent, please try again')
-    }
+    // try {
+    //     await sendEmail(subject, send_to, sent_from, reply_to, template, name, link)
+    //     res.status(200).json({ message: "Verification Email Sent" })
+    // } catch (error) {
+    //     res.status(500)
+    //     throw new Error('Verification Email not sent, please try again')
+    // }
 })
 
 // Verify User
 const verifyUser = asyncHandler(async (req, res) => {
-    const { verificationToken } = req.params
+    // const { verificationToken } = req.params
 
-    const hashedToken = hashToken(verificationToken)
-    console.log(hashedToken)
+    // const hashedToken = hashToken(verificationToken)
+    // console.log(hashedToken)
 
-    const userToken = await Token.findOne({
-        vToken: hashedToken,
-        expiresAt: { $gt: Date.now() }
-    })
+    // const userToken = await Token.findOne({
+    //     vToken: hashedToken,
+    //     expiresAt: { $gt: Date.now() }
+    // })
 
 
-    if (!userToken) {
-        res.status(404)
-        throw new Error('Invalid or Expired Token!')
-    }
+    // if (!userToken) {
+    //     res.status(404)
+    //     throw new Error('Invalid or Expired Token!')
+    // }
 
     // Find user
-    const user = await User.findOne({ _id: userToken.userId })
+    // const user = await User.findOne({ _id: userToken.userId })
 
     // if (user.isVerified) {
     //     res.status(400)
@@ -341,12 +341,12 @@ const verifyUser = asyncHandler(async (req, res) => {
     // }
 
     // Now verify the user
-    user.isVerified = true
-    await user.save()
+    // user.isVerified = true
+    // await user.save()
 
-    res.status(200).json({
-        message: "Account verification successful"
-    })
+    // res.status(200).json({
+    //     message: "Account verification successful"
+    // })
 })
 
 // Logout User
