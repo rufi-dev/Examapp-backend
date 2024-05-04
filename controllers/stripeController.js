@@ -26,8 +26,8 @@ const payExam = asyncHandler(async (req, res) => {
                 }
             ],
             mode: 'payment',
-            success_url: `http://localhost:5173/myExams?token=${token}&examId=${exam._id}&success=true`,
-            cancel_url: `http://localhost:5173/myExams?canceled=true`,
+            success_url: `${process.env.FRONTEND_URL}/myExams?token=${token}&examId=${exam._id}&success=true`,
+            cancel_url: `${process.env.FRONTEND_URL}/myExams?canceled=true`,
         })
         res.send({ url: session.url });
     } catch (error) {
