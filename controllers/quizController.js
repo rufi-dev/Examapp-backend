@@ -102,6 +102,7 @@ const addExam = asyncHandler(async (req, res) => {
     videoLink,
     totalMarks,
     passingMarks,
+    pdf
   } = req.body;
   const { classId } = req.params;
   console.log({
@@ -112,11 +113,11 @@ const addExam = asyncHandler(async (req, res) => {
     deadline,
     totalMarks,
     passingMarks,
-    pdf: req.file,
+    pdf,
   });
 
   // Check if all required fields are present
-  if (!name || !duration || !totalMarks || !passingMarks || !req.file) {
+  if (!name || !duration || !totalMarks || !passingMarks || !pdf) {
     res
       .status(400)
       .json({ success: false, message: "All fields are required" });
@@ -125,13 +126,11 @@ const addExam = asyncHandler(async (req, res) => {
 
   try {
     // Create a PDF entry
-    const pdf = new PDF({
-      data: req.file.path,
-      path: req.file.path,
-      contentType: req.file.mimetype,
+    const pdfModel = new PDF({
+      path: pdf,
     });
     // Save the PDF entry to the database
-    const savedPdf = await pdf.save();
+    const savedPdf = await pdfModel.save();
 
     // Create an exam entry with the PDF ID
 
