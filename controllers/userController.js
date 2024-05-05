@@ -128,7 +128,6 @@ const loginUser = asyncHandler(async (req, res) => {
     // }
 
     // Generate token
-    console.log(user.id)
     const token = generateToken(user._id)
 
     if (user && isPasswordCorrect) {
@@ -468,7 +467,6 @@ const loginStatus = asyncHandler(async (req, res) => {
     console.log(req.cookies)
     //Verify Token
     const verified = jwt.verify(token, process.env.JWT_SECRET)
-    console.log(verified)
 
     if (verified) {
         return res.json(true)
