@@ -464,7 +464,6 @@ const loginStatus = asyncHandler(async (req, res) => {
     if (!token) {
         return res.json(false)
     }
-    console.log(req.cookies)
     //Verify Token
     const verified = jwt.verify(token, process.env.JWT_SECRET)
 
