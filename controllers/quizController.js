@@ -98,23 +98,14 @@ const addExam = asyncHandler(async (req, res) => {
     name,
     duration,
     price,
-    deadline,
+    startDate,
+    endDate,
     videoLink,
-    totalMarks,
-    passingMarks,
-    pdf
-  } = req.body;
-  const { classId } = req.params;
-  console.log({
-    name,
-    duration,
-    price,
-    videoLink,
-    deadline,
     totalMarks,
     passingMarks,
     pdf,
-  });
+  } = req.body;
+  const { classId } = req.params;
 
   // Check if all required fields are present
   if (!name || !duration || !totalMarks || !passingMarks || !pdf) {
@@ -123,7 +114,6 @@ const addExam = asyncHandler(async (req, res) => {
       .json({ success: false, message: "All fields are required" });
     return;
   }
-
   try {
     // Create a PDF entry
     const pdfModel = new PDF({
@@ -143,14 +133,14 @@ const addExam = asyncHandler(async (req, res) => {
       name,
       duration,
       price,
-      deadline,
       totalMarks,
       passingMarks,
       videoLink,
+      startDate,
+      endDate,
       class: classId,
       pdf: savedPdf._id, // Assign the PDF ID to the exam's pdf field
     });
-
     // Save the exam entry
     await newExam.save();
 
@@ -304,7 +294,7 @@ const getExamsByClass = asyncHandler(async (req, res) => {
 
   const objectId = new mongoose.Types.ObjectId(classId);
 
-  const exams = await Exam.find({ class: objectId });
+  const exams = await Exam.find({ class: objectId }).populate("questions");
 
   if (!exams) {
     res.status(500);
@@ -348,7 +338,7 @@ const getExams = asyncHandler(async (req, res) => {
 
   if (!exams) {
     res.status(500);
-    throw new Error("No Exams Added yet");
+    throw new Error("No Exams Found yet");
   }
 
   res.status(200).json(exams);
@@ -357,7 +347,7 @@ const getExams = asyncHandler(async (req, res) => {
 const getExam = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
-  const exam = await Exam.findById(id);
+  const exam = await Exam.findById(id).populate("pdf").populate('questions');
 
   if (!exam) {
     res.status(404);
@@ -383,7 +373,7 @@ const addQuestion = asyncHandler(async (req, res) => {
     return;
   }
 
-  if (exam.questions.length > 0) {
+  if (exam.questions != null || exam.questions) {
     res.status(404);
     throw new Error("Bu Imtahanda Suallar artıq mövcüddur");
   }
@@ -393,7 +383,7 @@ const addQuestion = asyncHandler(async (req, res) => {
     exam: convertedExamId,
   });
 
-  exam.questions.push(newQuestion._id);
+  exam.questions= newQuestion._id;
   await exam.save().then(() => {
     res
       .status(200)
@@ -488,15 +478,15 @@ const addPhotoToResult = asyncHandler(async (req, res) => {
   const { resultId } = req.params;
   const { photo } = req.body;
   if (!resultId) {
-    res.status(400)
-    throw new Error("Nəticə id si lazım")
+    res.status(400);
+    throw new Error("Nəticə id si lazım");
   }
 
   const result = await Result.findById(resultId);
 
   if (!result) {
-    res.status(404)
-    throw new Error("Nəticə tapılmadı")
+    res.status(404);
+    throw new Error("Nəticə tapılmadı");
   }
 
   result.photos.push(photo);
@@ -533,7 +523,7 @@ const getResultsByExam = asyncHandler(async (req, res) => {
     throw new Error("No Exam Found!");
   }
 
-  const results = await Result.find({  examId })
+  const results = await Result.find({ examId })
     .populate("examId")
     .populate("userId");
 
@@ -618,26 +608,49 @@ const editQuestion = asyncHandler(async (req, res) => {
 
 const editExam = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const { name, price, duration, totalMarks, passingMarks, tag } = req.body;
+  const {
+    name,
+    price,
+    endDate,
+    videoLink,
+    startDate,
+    duration,
+    totalMarks,
+    passingMarks,
+    pdfPath,
+  } = req.body;
   const examExists = await Exam.findById(examId);
-  const tagId = new mongoose.Types.ObjectId(tag.id);
+  console.log(req.body);
   if (examExists) {
+    // Update the exam fields
     await Exam.findByIdAndUpdate(examId, {
-      examId,
       name,
+      startDate,
+      endDate,
+      videoLink,
       price,
       duration,
       totalMarks,
       passingMarks,
-      tag: tagId,
     });
 
+    if (pdfPath) {
+      const pdfModel = new PDF({
+        path: pdfPath,
+      });
+      const savedPdf = await pdfModel.save();
+
+      await Exam.findByIdAndUpdate(examId, {
+        pdf: savedPdf._id,
+      });
+    }
+
     res.status(200).json({
-      message: "Exam updated successfully",
+      message: "İmtahan uğurla yeniləndi!",
     });
   } else {
     res.status(404);
-    throw new Error("Exam not found!");
+    throw new Error("İmtahan tapılamdı!");
   }
 });
 
@@ -799,5 +812,5 @@ module.exports = {
   getPdfByExam,
   deleteAllQuestions,
   getExamTagandClass,
-  getResultsByExam
+  getResultsByExam,
 };

@@ -10,7 +10,10 @@ const examSchema = Schema({
         type: Number,
         required: true
     },
-    dedline: {
+    startDate: {
+        type: Date
+    },
+    endDate: {
         type: Date
     },
     price: {
@@ -30,10 +33,10 @@ const examSchema = Schema({
         type: String,
         required: false
     },
-    questions: [{
+    questions: {
         type: Schema.Types.ObjectId,
         ref: 'Question'
-    }],
+    },
     pdf: {
         type: Schema.Types.ObjectId,
         ref: 'PDF',
