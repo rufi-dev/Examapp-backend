@@ -13,6 +13,7 @@ const protect = asyncHandler(async (req, res, next) => {
 
     // Verify Token
     const verified = jwt.verify(token, process.env.JWT_SECRET);
+    console.log("protect verified: ", verified)
 
     //Get UserId from Token
     const user = await User.findById(verified.id).select("-password");
@@ -29,10 +30,12 @@ const protect = asyncHandler(async (req, res, next) => {
 
     req.user = user;
     next();
+    console.log("protect token: ", token)
+    console.log("protect user: ", user)
   } catch (error) {
     res.status(401);
     console.log("protect: ", error);
-    throw new Error(`Not authorized, please login: ${error}`);
+    throw new Error(`Not authorized, please login`);
   }
 });
 
