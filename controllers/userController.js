@@ -16,70 +16,74 @@ const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // Register User
 const registerUser = asyncHandler(async (req, res) => {
-  const { name, email, password } = req.body;
+    try {
+        const { name, email, password } = req.body;
 
-  // Validation
-  if (!name || !email || !password) {
-    res.status(400);
-    throw new Error("Zəhmət olmasa bütün xanaları doldurun");
-  }
-
-  if (password.length < 6) {
-    res.status(400);
-    throw new Error("Şifrə ən azı 6 karakter uzunluğunda olmalıdır");
-  }
-
-  // Check if the user already exists
-  const userExist = await User.findOne({ email });
-
-  if (userExist) {
-    res.status(400);
-    throw new Error("Bu Email artıq mövcüddur!");
-  }
-
-  // Get user agent
-  const ua = parser(req.headers["user-agent"]);
-  const userAgent = ua.ua;
-
-  // Create a new user
-  const user = await User.create({
-    name,
-    email,
-    password,
-    userAgent,
-  });
-
-  // Generate token
-  const token = generateToken(user._id);
-
-  // Send HTTP-only cookie
-  res.cookie("token", token, {
-    path: "/",
-    httpOnly: true,
-    //expires: new Date(Date.now() + 1000 * 86400), // 1 day
-    sameSite: "none",
-    secure: true,
-  });
-
-  if (user) {
-    const { _id, name, email, phone, bio, photo, role, isVerified, userAgent } =
-      user;
-    res.status(201).json({
-      _id,
-      name,
-      email,
-      phone,
-      bio,
-      photo,
-      role,
-      isVerified,
-      userAgent,
-      token,
-    });
-  } else {
-    res.status(400);
-    throw new Error("Invalid user data");
-  }
+        // Validation
+        if (!name || !email || !password) {
+          res.status(400);
+          throw new Error("Zəhmət olmasa bütün xanaları doldurun");
+        }
+      
+        if (password.length < 6) {
+          res.status(400);
+          throw new Error("Şifrə ən azı 6 karakter uzunluğunda olmalıdır");
+        }
+      
+        // Check if the user already exists
+        const userExist = await User.findOne({ email });
+      
+        if (userExist) {
+          res.status(400);
+          throw new Error("Bu Email artıq mövcüddur!");
+        }
+      
+        // Get user agent
+        const ua = parser(req.headers["user-agent"]);
+        const userAgent = ua.ua;
+      
+        // Create a new user
+        const user = await User.create({
+          name,
+          email,
+          password,
+          userAgent,
+        });
+      
+        // Generate token
+        const token = generateToken(user._id);
+      
+        // Send HTTP-only cookie
+        res.cookie("token", token, {
+          path: "/",
+          httpOnly: true,
+          //expires: new Date(Date.now() + 1000 * 86400), // 1 day
+          sameSite: "none",
+          secure: true,
+        });
+      
+        if (user) {
+          const { _id, name, email, phone, bio, photo, role, isVerified, userAgent } =
+            user;
+          res.status(201).json({
+            _id,
+            name,
+            email,
+            phone,
+            bio,
+            photo,
+            role,
+            isVerified,
+            userAgent,
+            token,
+          });
+        } else {
+          res.status(400);
+          throw new Error("Invalid user data");
+        } 
+    } catch (error) {
+        console.log("register catch: ", error)
+    }
 });
 
 // Login User
