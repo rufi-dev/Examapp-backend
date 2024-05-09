@@ -16,134 +16,43 @@ const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // Register User
 const registerUser = asyncHandler(async (req, res) => {
-    try {
-        const { name, email, password } = req.body;
+  try {
+    const { name, email, password } = req.body;
 
-        // Validation
-        if (!name || !email || !password) {
-          res.status(400);
-          throw new Error("Zəhmət olmasa bütün xanaları doldurun");
-        }
-      
-        if (password.length < 6) {
-          res.status(400);
-          throw new Error("Şifrə ən azı 6 karakter uzunluğunda olmalıdır");
-        }
-      
-        // Check if the user already exists
-        const userExist = await User.findOne({ email });
-      
-        if (userExist) {
-          res.status(400);
-          throw new Error("Bu Email artıq mövcüddur!");
-        }
-      
-        // Get user agent
-        const ua = parser(req.headers["user-agent"]);
-        const userAgent = ua.ua;
-      
-        // Create a new user
-        const user = await User.create({
-          name,
-          email,
-          password,
-          userAgent,
-        });
-      
-        // Generate token
-        const token = generateToken(user._id);
-      
-        // Send HTTP-only cookie
-        res.cookie("token", token, {
-          path: "/",
-          httpOnly: true,
-          //expires: new Date(Date.now() + 1000 * 86400), // 1 day
-          sameSite: "none",
-          secure: true,
-        });
-      
-        if (user) {
-          const { _id, name, email, phone, bio, photo, role, isVerified, userAgent } =
-            user;
-          res.status(201).json({
-            _id,
-            name,
-            email,
-            phone,
-            bio,
-            photo,
-            role,
-            isVerified,
-            userAgent,
-            token,
-          });
-        } else {
-          res.status(400);
-          throw new Error("Invalid user data");
-        } 
-    } catch (error) {
-        console.log("register catch: ", error)
+    // Validation
+    if (!name || !email || !password) {
+      res.status(400);
+      throw new Error("Zəhmət olmasa bütün xanaları doldurun");
     }
-});
 
-// Login User
-const loginUser = asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
+    if (password.length < 6) {
+      res.status(400);
+      throw new Error("Şifrə ən azı 6 karakter uzunluğunda olmalıdır");
+    }
 
-  //Validation
-  if (!email || !password) {
-    res.status(400);
-    throw new Error("Email və Şifrə Əlavə edin");
-  }
+    // Check if the user already exists
+    const userExist = await User.findOne({ email });
 
-  const user = await User.findOne({ email });
+    if (userExist) {
+      res.status(400);
+      throw new Error("Bu Email artıq mövcüddur!");
+    }
 
-  if (!user) {
-    res.status(400);
-    throw new Error("Belə bir istifadəcimiz mövcud deyil");
-  }
+    // Get user agent
+    const ua = parser(req.headers["user-agent"]);
+    const userAgent = ua.ua;
 
-  const isPasswordCorrect = await bcrypt.compare(password, user.password);
-  if (!isPasswordCorrect) {
-    res.status(400);
-    throw new Error("Email və ya şifrə yanlışdır");
-  }
+    // Create a new user
+    const user = await User.create({
+      name,
+      email,
+      password,
+      userAgent,
+    });
 
-  // Trigger 2FA for unknown user agent
-  // const ua = parser(req.headers["user-agent"])
-  // const thisUserAgent = ua.ua;
+    // Generate token
+    const token = generateToken(user._id);
 
-  // const allowedAgent = user.userAgent.includes(thisUserAgent)
-
-  // if (!allowedAgent) {
-  //     // Generate 6 digit code
-  //     const loginCode = Math.floor(100000 + Math.random() * 900000)
-  //     console.log(loginCode)
-  //     //Encrypt login code
-  //     const encryptedLoginCode = cryptr.encrypt(loginCode.toString())
-
-  //     // Delete the token if exists
-  //     let userToken = await Token.findOne({ userId: user._id })
-  //     if (userToken) {
-  //         await userToken.deleteOne()
-  //     }
-
-  //     //Save token to DB
-  //     await new Token({
-  //         userId: user._id,
-  //         lToken: encryptedLoginCode,
-  //         createdAt: Date.now(),
-  //         expiresAt: Date.now() + 60 * (60 * 1000) // 1hour
-  //     }).save()
-
-  //     res.status(400)
-  //     throw new Error("New browser or device detected")
-  // }
-
-  // Generate token
-  const token = generateToken(user._id);
-  console.log("loginuser: ", token);
-  if (user && isPasswordCorrect) {
     // Send HTTP-only cookie
     res.cookie("token", token, {
       path: "/",
@@ -152,24 +61,137 @@ const loginUser = asyncHandler(async (req, res) => {
       sameSite: "none",
       secure: true,
     });
-    const { _id, name, email, phone, bio, photo, role, isVerified, userAgent } =
-      user;
 
-    res.status(200).json({
-      _id,
-      name,
-      email,
-      phone,
-      bio,
-      photo,
-      role,
-      isVerified,
-      userAgent,
-      token,
-    });
-  } else {
-    res.status(500);
-    throw new Error("Something went wrong, please try again");
+    if (user) {
+      const {
+        _id,
+        name,
+        email,
+        phone,
+        bio,
+        photo,
+        role,
+        isVerified,
+        userAgent,
+      } = user;
+      res.status(201).json({
+        _id,
+        name,
+        email,
+        phone,
+        bio,
+        photo,
+        role,
+        isVerified,
+        userAgent,
+        token,
+      });
+    } else {
+      res.status(400);
+      throw new Error("Invalid user data");
+    }
+  } catch (error) {
+    console.log("register catch: ", error);
+  }
+});
+
+// Login User
+const loginUser = asyncHandler(async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    //Validation
+    if (!email || !password) {
+      res.status(400);
+      throw new Error("Email və Şifrə Əlavə edin");
+    }
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      res.status(400);
+      throw new Error("Belə bir istifadəcimiz mövcud deyil");
+    }
+
+    const isPasswordCorrect = await bcrypt.compare(password, user.password);
+    if (!isPasswordCorrect) {
+      res.status(400);
+      throw new Error("Email və ya şifrə yanlışdır");
+    }
+
+    // Trigger 2FA for unknown user agent
+    // const ua = parser(req.headers["user-agent"])
+    // const thisUserAgent = ua.ua;
+
+    // const allowedAgent = user.userAgent.includes(thisUserAgent)
+
+    // if (!allowedAgent) {
+    //     // Generate 6 digit code
+    //     const loginCode = Math.floor(100000 + Math.random() * 900000)
+    //     console.log(loginCode)
+    //     //Encrypt login code
+    //     const encryptedLoginCode = cryptr.encrypt(loginCode.toString())
+
+    //     // Delete the token if exists
+    //     let userToken = await Token.findOne({ userId: user._id })
+    //     if (userToken) {
+    //         await userToken.deleteOne()
+    //     }
+
+    //     //Save token to DB
+    //     await new Token({
+    //         userId: user._id,
+    //         lToken: encryptedLoginCode,
+    //         createdAt: Date.now(),
+    //         expiresAt: Date.now() + 60 * (60 * 1000) // 1hour
+    //     }).save()
+
+    //     res.status(400)
+    //     throw new Error("New browser or device detected")
+    // }
+
+    // Generate token
+    const token = generateToken(user._id);
+    console.log("loginuser: ", token);
+    if (user && isPasswordCorrect) {
+      // Send HTTP-only cookie
+      res.cookie("token", token, {
+        path: "/",
+        httpOnly: true,
+        //expires: new Date(Date.now() + 1000 * 86400), // 1 day
+        sameSite: "none",
+        secure: true,
+      });
+      const {
+        _id,
+        name,
+        email,
+        phone,
+        bio,
+        photo,
+        role,
+        isVerified,
+        userAgent,
+      } = user;
+
+      res.status(200).json({
+        _id,
+        name,
+        email,
+        phone,
+        bio,
+        photo,
+        role,
+        isVerified,
+        userAgent,
+        token,
+      });
+    } else {
+      res.status(500);
+      throw new Error("Something went wrong, please try again");
+    }
+  } catch (error) {
+    console.log("login catch: ", error);
   }
 });
 
@@ -387,43 +409,42 @@ const logoutUser = asyncHandler(async (req, res) => {
 
 // Get User
 const getUser = asyncHandler(async (req, res) => {
-    try {
-        const user = await User.findById(req.user._id);
+  try {
+    const user = await User.findById(req.user._id);
 
-        if (user) {
-          const {
-            _id,
-            name,
-            email,
-            phone,
-            bio,
-            photo,
-            role,
-            exams,
-            isVerified,
-            userAgent,
-          } = user;
-      
-          res.status(200).json({
-            _id,
-            name,
-            email,
-            phone,
-            bio,
-            photo,
-            role,
-            exams,
-            isVerified,
-            userAgent,
-          });
-        } else {
-          res.status(404);
-          throw new Error("User not found!");
-        }
-    } catch (error) {
-        console.log("getUsercatch: ", error)
+    if (user) {
+      const {
+        _id,
+        name,
+        email,
+        phone,
+        bio,
+        photo,
+        role,
+        exams,
+        isVerified,
+        userAgent,
+      } = user;
+
+      res.status(200).json({
+        _id,
+        name,
+        email,
+        phone,
+        bio,
+        photo,
+        role,
+        exams,
+        isVerified,
+        userAgent,
+      });
+    } else {
+      res.status(404);
+      throw new Error("User not found!");
     }
-
+  } catch (error) {
+    console.log("getUsercatch: ", error);
+  }
 });
 
 // Get User By Id
