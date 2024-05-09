@@ -97,10 +97,10 @@ const loginUser = asyncHandler(async (req, res) => {
     }
 
     // Trigger 2FA for unknown user agent
-    const ua = parser(req.headers["user-agent"])
-    const thisUserAgent = ua.ua;
+    // const ua = parser(req.headers["user-agent"])
+    // const thisUserAgent = ua.ua;
 
-    const allowedAgent = user.userAgent.includes(thisUserAgent)
+    // const allowedAgent = user.userAgent.includes(thisUserAgent)
 
     // if (!allowedAgent) {
     //     // Generate 6 digit code
@@ -129,7 +129,7 @@ const loginUser = asyncHandler(async (req, res) => {
 
     // Generate token
     const token = generateToken(user._id)
-
+    console.log("loginuser: ", token)
     if (user && isPasswordCorrect) {
         // Send HTTP-only cookie
         res.cookie("token", token, {
@@ -470,6 +470,7 @@ const loginStatus = asyncHandler(async (req, res) => {
     if (verified) {
         return res.json(true)
     }
+    console.log("loginstatus:", token)
     return res.json(false)
 })
 
