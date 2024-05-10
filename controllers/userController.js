@@ -113,6 +113,8 @@ const loginUser = asyncHandler(async (req, res) => {
       throw new Error("Belə bir istifadəcimiz mövcud deyil");
     }
 
+    console.log("login user", user)
+
     const isPasswordCorrect = await bcrypt.compare(password, user.password);
     if (!isPasswordCorrect) {
       res.status(400);
@@ -152,7 +154,7 @@ const loginUser = asyncHandler(async (req, res) => {
 
     // Generate token
     const token = generateToken(user._id);
-    console.log("loginuser: ", token);
+    console.log("login token: ", token);
     if (user && isPasswordCorrect) {
       // Send HTTP-only cookie
       res.cookie("token", token, {
