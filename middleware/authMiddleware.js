@@ -5,7 +5,7 @@ const User = require("../models/userModel");
 const protect = asyncHandler(async (req, res, next) => {
   try {
     const token = req.cookies.token;
-
+    console.log("protect req.cookies: ",req.cookies)
     if (!token) {
       res.status(401);
       throw new Error("Not authorized, please login");
