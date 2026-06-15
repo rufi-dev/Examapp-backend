@@ -438,8 +438,21 @@ const addResult = asyncHandler(async (req, res) => {
     throw new Error("No Exam found");
   }
 
-  // Enforce maximum attempts (maxTry). 0 means unlimited.
   const examForCheck = await Exam.findById(examId);
+
+  // Enforce the exam's open window on the server (defends against direct API
+  // calls / URL manipulation that bypass the client-side checks).
+  const nowMs = Date.now();
+  if (examForCheck?.startDate && new Date(examForCheck.startDate).getTime() > nowMs) {
+    res.status(400);
+    throw new Error("İmtahan hələ başlamayıb");
+  }
+  if (examForCheck?.endDate && new Date(examForCheck.endDate).getTime() < nowMs) {
+    res.status(400);
+    throw new Error("İmtahan artıq bitib");
+  }
+
+  // Enforce maximum attempts (maxTry). 0 means unlimited.
   if (examForCheck?.maxTry && examForCheck.maxTry > 0) {
     const attemptCount = await Result.countDocuments({ userId: user._id, examId });
     if (attemptCount >= examForCheck.maxTry) {
