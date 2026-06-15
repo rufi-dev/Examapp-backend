@@ -462,10 +462,12 @@ function resultVisibility(exam, user) {
     return { canSeeScore: true, canSeeAnswers: true };
   if (!exam) return { canSeeScore: false, canSeeAnswers: false };
   const now = Date.now();
+  // The "after end" gate applies only to the correct answers (the part that's
+  // sensitive to sharing). The score shows immediately when enabled.
   const afterEndOk =
     !exam.revealAfterEnd || !exam.endDate || now > new Date(exam.endDate).getTime();
   return {
-    canSeeScore: exam.showScore !== false && afterEndOk,
+    canSeeScore: exam.showScore !== false,
     canSeeAnswers: exam.showCorrectAnswers === true && afterEndOk,
   };
 }
