@@ -40,9 +40,9 @@ const examSchema = Schema({
     // Result visibility for students:
     showScore: { type: Boolean, default: true },
     showCorrectAnswers: { type: Boolean, default: false },
-    // If true, the above only take effect after endDate (prevents answer
-    // sharing during the exam window).
-    revealAfterEnd: { type: Boolean, default: false },
+    // If true (default), the above only take effect after endDate (prevents
+    // answer sharing during the exam window).
+    revealAfterEnd: { type: Boolean, default: true },
     questions: {
         type: Schema.Types.ObjectId,
         ref: 'Question'
