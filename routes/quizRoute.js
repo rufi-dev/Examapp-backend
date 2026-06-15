@@ -21,6 +21,7 @@ const {
   editExam,
   editTag,
   addResult,
+  startAttempt,
   getResultsByUser,
   addPhotoToResult,
   getResultsByUserByExam,
@@ -76,6 +77,7 @@ router.get("/getClass/:id", getClass);
 router.patch("/editExam/:examId", protect, teacherOnly, editExam);
 router.delete("/deleteExam/:examId", protect, teacherOnly, deleteExam);
 router.patch("/editTag/:tagId", protect, teacherOnly, editTag);
+router.post("/exam/:examId/start", protect, startAttempt);
 router.post("/addResult/:examId", protect, verifiedOnly, addResult);
 router.get("/getResultsByUser", protect, verifiedOnly, getResultsByUser);
 router.get(

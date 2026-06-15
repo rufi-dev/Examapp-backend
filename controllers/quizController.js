@@ -5,6 +5,7 @@ const Tag = require("../models/tagModel");
 const Class = require("../models/classModel");
 const Question = require("../models/questionModel");
 const Result = require("../models/resultModel");
+const Attempt = require("../models/attemptModel");
 const User = require("../models/userModel");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
@@ -417,83 +418,184 @@ const getExamTagandClass = asyncHandler(async (req, res) => {
   res.status(200).json({ tag, _class });
 });
 
-const addResult = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user._id);
-  const {
-    attempts,
-    earnPoints,
-    selectedAnswers,
-    correctAnswers,
-    correctAnswersByType,
-  } = req.body;
+// Position-based point distribution: the first 18 questions share 55 points,
+// the rest share 45 (total 100). For <=18 questions the full 100 is split.
+function questionPoints(count) {
+  const FIRST = 18;
+  const FP = 55;
+  const SP = 45;
+  const n = Number(count) || 0;
+  if (n <= 0) return [];
+  const a = Math.min(FIRST, n);
+  const b = n - a;
+  const pts = new Array(n);
+  if (b === 0) {
+    const each = 100 / a;
+    for (let i = 0; i < n; i++) pts[i] = each;
+  } else {
+    const ea = FP / a;
+    const eb = SP / b;
+    for (let i = 0; i < n; i++) pts[i] = i < a ? ea : eb;
+  }
+  return pts;
+}
+
+const ATTEMPT_GRACE_MS = 30 * 1000;
+
+// Start (or resume) a server-tracked attempt. The server owns the deadline and
+// returns the questions WITHOUT the correct answers, so neither the timer nor
+// the answer key can be read or tampered with on the client.
+const startAttempt = asyncHandler(async (req, res) => {
   const { examId } = req.params;
+  const user = await User.findById(req.user._id);
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found!");
+  }
+  if (!user.isVerified) return res.status(403).json({ reason: "unverified" });
+
+  const exam = await Exam.findById(examId).populate("questions");
+  if (!exam) {
+    res.status(404);
+    throw new Error("Exam not found");
+  }
+
+  const now = Date.now();
+  if (exam.startDate && new Date(exam.startDate).getTime() > now)
+    return res.status(403).json({ reason: "not_started" });
+  if (exam.endDate && new Date(exam.endDate).getTime() < now)
+    return res.status(403).json({ reason: "finished" });
+
+  const correctAnswers = exam.questions?.correctAnswers || [];
+  if (!correctAnswers.length) return res.status(403).json({ reason: "no_questions" });
+
+  const payload = (attempt) => ({
+    attemptId: attempt._id,
+    expiresAt: attempt.expiresAt,
+    name: exam.name,
+    duration: exam.duration,
+    questions: correctAnswers.map((q) => ({ type: q.type, options: q.options })),
+  });
+
+  // Resume an active, non-expired attempt if one exists.
+  let attempt = await Attempt.findOne({
+    userId: user._id,
+    examId,
+    submitted: false,
+  }).sort({ createdAt: -1 });
+
+  if (attempt) {
+    if (new Date(attempt.expiresAt).getTime() > now) {
+      return res.status(200).json(payload(attempt));
+    }
+    attempt.submitted = true; // expired without submitting -> a used try
+    await attempt.save();
+  }
+
+  // Enforce maxTry (number of started tries; also counts legacy results).
+  const maxTry = exam.maxTry || 0;
+  if (maxTry > 0) {
+    const [attemptCount, resultCount] = await Promise.all([
+      Attempt.countDocuments({ userId: user._id, examId }),
+      Result.countDocuments({ userId: user._id, examId }),
+    ]);
+    if (Math.max(attemptCount, resultCount) >= maxTry)
+      return res.status(403).json({ reason: "max_tries" });
+  }
+
+  const startedAt = new Date(now);
+  const expiresAt = new Date(now + (exam.duration || 0) * 1000);
+  attempt = await Attempt.create({ userId: user._id, examId, startedAt, expiresAt });
+
+  return res.status(200).json(payload(attempt));
+});
+
+const addResult = asyncHandler(async (req, res) => {
+  const { examId } = req.params;
+  const { selectedAnswers } = req.body;
+  const user = await User.findById(req.user._id);
 
   if (!user) {
     res.status(404);
     throw new Error("User not found!");
   }
-
   if (!examId) {
     res.status(404);
     throw new Error("No Exam found");
   }
 
-  const examForCheck = await Exam.findById(examId);
-
-  // Enforce the exam's open window on the server (defends against direct API
-  // calls / URL manipulation that bypass the client-side checks).
-  const nowMs = Date.now();
-  if (examForCheck?.startDate && new Date(examForCheck.startDate).getTime() > nowMs) {
-    res.status(400);
-    throw new Error("İmtahan hələ başlamayıb");
-  }
-  if (examForCheck?.endDate && new Date(examForCheck.endDate).getTime() < nowMs) {
-    res.status(400);
-    throw new Error("İmtahan artıq bitib");
-  }
-
-  // Enforce maximum attempts (maxTry). 0 means unlimited.
-  if (examForCheck?.maxTry && examForCheck.maxTry > 0) {
-    const attemptCount = await Result.countDocuments({ userId: user._id, examId });
-    if (attemptCount >= examForCheck.maxTry) {
-      res.status(400);
-      throw new Error("Maksimum cəhd sayına çatmısınız");
-    }
-  }
-
-  const newResult = await Result.create({
-    userId: user._id,
-    examId,
-    attempts,
-    earnPoints,
-    selectedAnswers,
-    correctAnswers,
-    correctAnswersByType,
-  });
-
-  if (!newResult) {
-    res.status(500);
-    throw new Error("Result couldn't be saved");
-  }
-
-  const exam = await Exam.findById(examId);
-
+  const exam = await Exam.findById(examId).populate("questions");
   if (!exam) {
     res.status(404);
     throw new Error("No Exam found");
   }
+
+  const now = Date.now();
+  if (exam.startDate && new Date(exam.startDate).getTime() > now) {
+    res.status(400);
+    throw new Error("İmtahan hələ başlamayıb");
+  }
+  if (exam.endDate && new Date(exam.endDate).getTime() < now) {
+    res.status(400);
+    throw new Error("İmtahan artıq bitib");
+  }
+
+  // The in-progress attempt is the source of truth for the deadline.
+  const attempt = await Attempt.findOne({
+    userId: user._id,
+    examId,
+    submitted: false,
+  }).sort({ createdAt: -1 });
+  if (!attempt) {
+    res.status(400);
+    throw new Error("Aktiv imtahan cəhdi tapılmadı");
+  }
+  if (new Date(attempt.expiresAt).getTime() + ATTEMPT_GRACE_MS < now) {
+    attempt.submitted = true;
+    await attempt.save();
+    res.status(400);
+    throw new Error("İmtahan vaxtı bitib");
+  }
+
+  // Score on the server, against answers the client never received.
+  const correct = exam.questions?.correctAnswers || [];
+  const points = questionPoints(correct.length);
+  const sel = Array.isArray(selectedAnswers) ? selectedAnswers : [];
+  const counts = { Cm: 0, Co: 0, Cd: 0, Cma: 0 };
+  let earnedPoints = 0;
+  correct.forEach((ca, i) => {
+    const s = sel[i];
+    if (s && s.answer != null && s.answer !== "" && s.answer === ca.answer) {
+      earnedPoints += points[i] || 0;
+      if (counts[ca.type] !== undefined) counts[ca.type]++;
+    }
+  });
+  earnedPoints = Math.round(earnedPoints * 100) / 100;
+
+  const newResult = await Result.create({
+    userId: user._id,
+    examId,
+    attempts: sel.filter((a) => a && a.answer).length,
+    earnPoints: earnedPoints,
+    selectedAnswers: sel.map((a) => ({ type: a?.type, answer: a?.answer })),
+    correctAnswers: correct.map((a) => ({ type: a.type, answer: a.answer })),
+    correctAnswersByType: [
+      { type: "Cm", count: counts.Cm },
+      { type: "Co", count: counts.Co },
+      { type: "Cd", count: counts.Cd },
+      { type: "Cma", count: counts.Cma },
+    ],
+  });
+
+  attempt.submitted = true;
+  await attempt.save();
+
   exam.results.push(newResult._id);
   await exam.save();
-
   user.results.push(newResult._id);
   await user.save();
 
-  if (newResult) {
-    res.status(200).json({ message: "Result has been saved" });
-  } else {
-    res.status(500);
-    throw new Error("Result couldn't be saved");
-  }
+  res.status(200).json({ message: "Result has been saved", earnPoints: earnedPoints });
 });
 
 const addPhotoToResult = asyncHandler(async (req, res) => {
@@ -823,6 +925,7 @@ module.exports = {
   editTag,
   addPhotoToResult,
   addResult,
+  startAttempt,
   getResultsByUser,
   getResultsByUserByExam,
   getClass,
