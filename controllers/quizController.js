@@ -360,29 +360,38 @@ const addQuestion = asyncHandler(async (req, res) => {
     return;
   }
 
-  // Check if answers already exist for the specified exam
   const exam = await Exam.findById(examId);
   if (!exam) {
     res.status(404).json({ message: "Exam not found" });
     return;
   }
 
-  if (exam.questions != null || exam.questions) {
-    res.status(404);
-    throw new Error("Bu Imtahanda Suallar artıq mövcüddur");
+  // If this exam already has a question set, replace its answers instead of
+  // refusing — this lets admins re-save / edit the answer key.
+  if (exam.questions) {
+    const updated = await Question.findByIdAndUpdate(
+      exam.questions,
+      { correctAnswers },
+      { new: true }
+    );
+    if (updated) {
+      return res
+        .status(200)
+        .json({ message: "Answers updated successfully", newQuestion: updated });
+    }
+    // Linked question doc is missing (dangling ref): fall through and recreate.
   }
+
   const convertedExamId = new mongoose.Types.ObjectId(examId);
   const newQuestion = await Question.create({
     correctAnswers,
     exam: convertedExamId,
   });
 
-  exam.questions= newQuestion._id;
-  await exam.save().then(() => {
-    res
-      .status(200)
-      .json({ message: "Answers added successfully", newQuestion });
-  });
+  exam.questions = newQuestion._id;
+  await exam.save();
+
+  res.status(200).json({ message: "Answers added successfully", newQuestion });
 });
 
 const getExamTagandClass = asyncHandler(async (req, res) => {
