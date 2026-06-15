@@ -106,6 +106,9 @@ const addExam = asyncHandler(async (req, res) => {
     totalMarks,
     passingMarks,
     maxTry,
+    showScore,
+    showCorrectAnswers,
+    revealAfterEnd,
     pdf,
   } = req.body;
   const { classId } = req.params;
@@ -139,6 +142,9 @@ const addExam = asyncHandler(async (req, res) => {
       totalMarks,
       passingMarks,
       maxTry,
+      showScore: showScore === "true" || showScore === true,
+      showCorrectAnswers: showCorrectAnswers === "true" || showCorrectAnswers === true,
+      revealAfterEnd: revealAfterEnd === "true" || revealAfterEnd === true,
       videoLink,
       startDate,
       endDate,
@@ -342,14 +348,24 @@ const getExams = asyncHandler(async (req, res) => {
 const getExam = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
-  const exam = await Exam.findById(id).populate("pdf").populate('questions');
+  const exam = await Exam.findById(id).populate("pdf").populate("questions");
 
   if (!exam) {
     res.status(404);
     throw new Error("No exams found");
   }
 
-  res.status(200).json(exam);
+  // Never expose the correct answers to students through the exam payload.
+  const isStaff = req.user && (req.user.role === "admin" || req.user.role === "teacher");
+  const obj = exam.toObject();
+  if (!isStaff && obj.questions && Array.isArray(obj.questions.correctAnswers)) {
+    obj.questions.correctAnswers = obj.questions.correctAnswers.map((q) => ({
+      type: q.type,
+      options: q.options,
+    }));
+  }
+
+  res.status(200).json(obj);
 });
 
 const addQuestion = asyncHandler(async (req, res) => {
@@ -438,6 +454,34 @@ function questionPoints(count) {
     for (let i = 0; i < n; i++) pts[i] = i < a ? ea : eb;
   }
   return pts;
+}
+
+// What a viewer is allowed to see of a result. Teachers/admins see everything.
+function resultVisibility(exam, user) {
+  if (user && (user.role === "admin" || user.role === "teacher"))
+    return { canSeeScore: true, canSeeAnswers: true };
+  if (!exam) return { canSeeScore: false, canSeeAnswers: false };
+  const now = Date.now();
+  const afterEndOk =
+    !exam.revealAfterEnd || !exam.endDate || now > new Date(exam.endDate).getTime();
+  return {
+    canSeeScore: exam.showScore !== false && afterEndOk,
+    canSeeAnswers: exam.showCorrectAnswers === true && afterEndOk,
+  };
+}
+
+// Strip a result down to what the viewer may see.
+function applyResultVisibility(result, vis) {
+  const obj = typeof result.toObject === "function" ? result.toObject() : { ...result };
+  obj.visibility = vis;
+  if (!vis.canSeeScore) {
+    obj.earnPoints = null;
+    obj.correctAnswersByType = null;
+  }
+  if (!vis.canSeeAnswers) {
+    obj.correctAnswers = null;
+  }
+  return obj;
 }
 
 const ATTEMPT_GRACE_MS = 30 * 1000;
@@ -635,7 +679,9 @@ const getResultsByUser = asyncHandler(async (req, res) => {
     throw new Error("No results found");
   }
 
-  res.status(200).json(results);
+  res.status(200).json(
+    results.map((r) => applyResultVisibility(r, resultVisibility(r.examId, user)))
+  );
 });
 
 const getResultsByExam = asyncHandler(async (req, res) => {
@@ -683,13 +729,19 @@ const getResultsByUserByExam = asyncHandler(async (req, res) => {
     throw new Error("No results found!");
   }
 
-  res.status(200).json(results);
+  const vis = resultVisibility(exam, user);
+  res.status(200).json(results.map((r) => applyResultVisibility(r, vis)));
 });
 
 const reviewByResult = asyncHandler(async (req, res) => {
   const { resultId } = req.params;
 
   const user = await User.findById(req.user._id);
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found!");
+  }
+
   const result = await Result.findById(resultId).populate({
     path: "examId",
     populate: {
@@ -700,11 +752,31 @@ const reviewByResult = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("No Result Found!");
   }
-  if (!user) {
-    res.status(404);
-    throw new Error("User not found!");
+
+  const isStaff = user.role === "admin" || user.role === "teacher";
+  const isOwner = result.userId?.toString() === user._id.toString();
+  if (!isOwner && !isStaff) {
+    res.status(403);
+    throw new Error("Bu nəticəyə icazəniz yoxdur");
   }
-  res.status(200).json(result);
+
+  const vis = resultVisibility(result.examId, user);
+  const obj = result.toObject();
+  obj.visibility = vis;
+  if (!vis.canSeeScore) {
+    obj.earnPoints = null;
+    obj.correctAnswersByType = null;
+  }
+  if (!vis.canSeeAnswers) {
+    obj.correctAnswers = null;
+    if (obj.examId && obj.examId.questions && Array.isArray(obj.examId.questions.correctAnswers)) {
+      obj.examId.questions.correctAnswers = obj.examId.questions.correctAnswers.map((q) => ({
+        type: q.type,
+        options: q.options,
+      }));
+    }
+  }
+  res.status(200).json(obj);
 });
 
 const editQuestion = asyncHandler(async (req, res) => {
@@ -742,6 +814,9 @@ const editExam = asyncHandler(async (req, res) => {
     totalMarks,
     passingMarks,
     maxTry,
+    showScore,
+    showCorrectAnswers,
+    revealAfterEnd,
     pdfPath,
   } = req.body;
   const examExists = await Exam.findById(examId);
@@ -758,6 +833,9 @@ const editExam = asyncHandler(async (req, res) => {
       totalMarks,
       passingMarks,
       maxTry,
+      showScore: showScore === true || showScore === "true",
+      showCorrectAnswers: showCorrectAnswers === true || showCorrectAnswers === "true",
+      revealAfterEnd: revealAfterEnd === true || revealAfterEnd === "true",
     });
 
     if (pdfPath) {

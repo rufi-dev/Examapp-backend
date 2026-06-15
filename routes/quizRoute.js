@@ -70,8 +70,8 @@ router.delete(
   teacherOnly,
   deleteQuestion
 );
-router.get("/getQuestionsByExam/:examId", protect, getQuestionsByExam);
-router.get("/getExam/:id", getExam);
+router.get("/getQuestionsByExam/:examId", protect, teacherOnly, getQuestionsByExam);
+router.get("/getExam/:id", protect, getExam);
 router.get("/getTag/:id", getTag);
 router.get("/getClass/:id", getClass);
 router.patch("/editExam/:examId", protect, teacherOnly, editExam);
