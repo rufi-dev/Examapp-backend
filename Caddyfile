@@ -1,0 +1,6 @@
+# SITE_ADDRESS comes from the environment (set in .env / docker-compose).
+# Caddy automatically obtains and renews a Let's Encrypt certificate for it.
+{$SITE_ADDRESS} {
+	encode zstd gzip
+	reverse_proxy backend:5000
+}

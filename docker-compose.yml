@@ -1,0 +1,40 @@
+# Backend + Caddy (automatic HTTPS) for Hetzner.
+# Caddy terminates TLS and reverse-proxies to the Express backend.
+#
+#   docker compose up -d --build
+#
+# Requires a .env file in this directory (copy from .env.example).
+services:
+  backend:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    expose:
+      - "5000" # internal only; Caddy is the public entrypoint
+    networks:
+      - web
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # The backend's own public hostname (no scheme), e.g. 5.75.1.2.sslip.io
+      SITE_ADDRESS: ${SITE_ADDRESS}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # persists issued certificates
+      - caddy_config:/config
+    networks:
+      - web
+
+networks:
+  web:
+
+volumes:
+  caddy_data:
+  caddy_config:

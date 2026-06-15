@@ -13,6 +13,10 @@ const errorHandler = require('./middleware/errorMiddleware')
 
 const app = express()
 
+// Behind Caddy/nginx in production: trust the reverse proxy so req.secure,
+// req.protocol and req.ip reflect the original HTTPS request.
+app.set("trust proxy", 1)
+
 // Middlewares
 app.use(express.json())
 app.use(express.urlencoded({ extended: false }))
