@@ -88,7 +88,7 @@ router.post("/addExamToUser/:examId", protect, verifiedOnly, addExamToUser);
 router.post(
   "/addExamToUserById/:userId",
   protect,
-  // teacherOnly,
+  teacherOnly,
   addExamToUserById
 );
 router.get("/getExamsByUser", protect, verifiedOnly, getExamsByUser);

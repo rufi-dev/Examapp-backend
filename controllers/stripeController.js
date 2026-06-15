@@ -32,6 +32,7 @@ const payExam = asyncHandler(async (req, res) => {
         res.send({ url: session.url });
     } catch (error) {
         console.log(error)
+        res.status(500).json({ message: 'Payment session could not be created' })
     }
    
 })

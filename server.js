@@ -20,7 +20,19 @@ app.use(cookieParser())
 app.use(bodyParser.json())
 app.use(
     cors({
-        origin: ["https://sinaqriyaziyyat.vercel.app", "http://localhost:5173"],
+        origin: function (origin, callback) {
+            // Allow no-origin requests (curl/postman), the production site,
+            // and any localhost port in dev (Vite may fall back to 5174, 5175, ...)
+            if (
+                !origin ||
+                origin === "https://sinaqriyaziyyat.vercel.app" ||
+                /^http:\/\/localhost:\d+$/.test(origin)
+            ) {
+                callback(null, true)
+            } else {
+                callback(new Error("Not allowed by CORS: " + origin))
+            }
+        },
         credentials: true
     })
 )

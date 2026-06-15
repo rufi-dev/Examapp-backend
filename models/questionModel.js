@@ -14,6 +14,10 @@ const questionSchema = Schema(
           enum: ["Cm", "Co", "Cd", "Cma"], // Add other possible types if needed
           required: true,
         },
+        options: {
+          type: [String],
+          default: undefined,
+        },
       },
     ],
     exam: {

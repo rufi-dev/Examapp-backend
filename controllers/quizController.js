@@ -53,6 +53,7 @@ const addClass = asyncHandler(async (req, res) => {
     res.status(201).json({ message: "Class has been saved", newClass });
   } catch (e) {
     console.log(e);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -103,6 +104,7 @@ const addExam = asyncHandler(async (req, res) => {
     videoLink,
     totalMarks,
     passingMarks,
+    maxTry,
     pdf,
   } = req.body;
   const { classId } = req.params;
@@ -135,6 +137,7 @@ const addExam = asyncHandler(async (req, res) => {
       price,
       totalMarks,
       passingMarks,
+      maxTry,
       videoLink,
       startDate,
       endDate,
@@ -187,58 +190,49 @@ const getPdfByExam = asyncHandler(async (req, res) => {
 
 const addExamToUser = asyncHandler(async (req, res) => {
   const { token } = req.query;
+  const { examId } = req.params;
 
-  if (!token) {
-    res.status(500);
-    throw new Error("Invalid Token");
+  const user = await User.findById(req.user._id);
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found!");
+  }
+  if (!examId) {
+    res.status(404);
+    throw new Error("No Exam found");
   }
 
-  try {
+  const exam = await Exam.findById(examId);
+  if (!exam) {
+    res.status(404);
+    throw new Error("No Exam found");
+  }
+
+  // Paid exams require a valid Stripe-issued token. Free exams (price 0)
+  // are added directly, with no payment step.
+  if (token) {
     const decodedToken = jwt.verify(token, process.env.JWT_SECRET);
-    const { userId } = decodedToken;
-
-    if (!userId) {
-      res.status(404);
-      throw new Error("User or Exam not found");
+    if (!decodedToken.userId) {
+      res.status(401);
+      throw new Error("Unauthorized");
     }
-
-    const { examId } = req.params;
-    const user = await User.findById(req.user._id);
-
-    if (!user) {
-      res.status(404);
-      throw new Error("User not found!");
-    }
-    if (!examId) {
-      res.status(404);
-      throw new Error("No Exam found");
-    }
-
-    const isExamExist = user.exams.includes(examId);
-
-    const exam = await Exam.findById(examId);
-
-    if (!exam) {
-      res.status(404);
-      throw new Error("No Exam found");
-    }
-
-    if (isExamExist) {
-      res.status(500);
-      throw new Error("Exam has already been added!");
-    } else {
-      user.exams.push(examId);
-      await user.save();
-
-      exam.users.push(user._id);
-      await exam.save();
-
-      res.status(200).json(exam);
-    }
-  } catch (error) {
-    console.error("Invalid token:", error);
-    res.status(401).json({ message: "Unauthorized" });
+  } else if (exam.price && Number(exam.price) > 0) {
+    res.status(400);
+    throw new Error("Bu imtahan ödənişlidir");
   }
+
+  if (user.exams.includes(examId)) {
+    res.status(400);
+    throw new Error("Bu imtahan artıq əlavə edilib");
+  }
+
+  user.exams.push(examId);
+  await user.save();
+
+  exam.users.push(user._id);
+  await exam.save();
+
+  res.status(200).json(exam);
 });
 
 const addExamToUserById = asyncHandler(async (req, res) => {
@@ -425,52 +419,58 @@ const addResult = asyncHandler(async (req, res) => {
   } = req.body;
   const { examId } = req.params;
 
-  try {
-    if (!user) {
-      res.status(404);
-      throw new Error("User not found!");
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found!");
+  }
+
+  if (!examId) {
+    res.status(404);
+    throw new Error("No Exam found");
+  }
+
+  // Enforce maximum attempts (maxTry). 0 means unlimited.
+  const examForCheck = await Exam.findById(examId);
+  if (examForCheck?.maxTry && examForCheck.maxTry > 0) {
+    const attemptCount = await Result.countDocuments({ userId: user._id, examId });
+    if (attemptCount >= examForCheck.maxTry) {
+      res.status(400);
+      throw new Error("Maksimum cəhd sayına çatmısınız");
     }
+  }
 
-    if (!examId) {
-      res.status(404);
-      throw new Error("No Exam found");
-    }
+  const newResult = await Result.create({
+    userId: user._id,
+    examId,
+    attempts,
+    earnPoints,
+    selectedAnswers,
+    correctAnswers,
+    correctAnswersByType,
+  });
 
-    const newResult = await Result.create({
-      userId: user._id,
-      examId,
-      attempts,
-      earnPoints,
-      selectedAnswers,
-      correctAnswers,
-      correctAnswersByType,
-    });
+  if (!newResult) {
+    res.status(500);
+    throw new Error("Result couldn't be saved");
+  }
 
-    if (!newResult) {
-      res.status(500);
-      throw new Error("Result couldn't be saved");
-    }
+  const exam = await Exam.findById(examId);
 
-    const exam = await Exam.findById(examId);
+  if (!exam) {
+    res.status(404);
+    throw new Error("No Exam found");
+  }
+  exam.results.push(newResult._id);
+  await exam.save();
 
-    if (!exam) {
-      res.status(404);
-      throw new Error("No Exam found");
-    }
-    exam.results.push(newResult._id);
-    await exam.save();
+  user.results.push(newResult._id);
+  await user.save();
 
-    user.results.push(newResult._id);
-    await user.save();
-
-    if (newResult) {
-      res.status(200).json({ message: "Result has been saved" });
-    } else {
-      res.status(500);
-      throw new Error("Result couldn't be saved");
-    }
-  } catch (error) {
-    console.log(error);
+  if (newResult) {
+    res.status(200).json({ message: "Result has been saved" });
+  } else {
+    res.status(500);
+    throw new Error("Result couldn't be saved");
   }
 });
 
@@ -617,6 +617,7 @@ const editExam = asyncHandler(async (req, res) => {
     duration,
     totalMarks,
     passingMarks,
+    maxTry,
     pdfPath,
   } = req.body;
   const examExists = await Exam.findById(examId);
@@ -632,6 +633,7 @@ const editExam = asyncHandler(async (req, res) => {
       duration,
       totalMarks,
       passingMarks,
+      maxTry,
     });
 
     if (pdfPath) {
@@ -682,7 +684,7 @@ const deleteQuestion = asyncHandler(async (req, res) => {
   const exam = await Exam.findOne({ questions: question._id });
 
   if (exam) {
-    exam.questions.remove(question._id);
+    exam.questions = undefined;
     await exam.save();
   } else {
     res.status(404);

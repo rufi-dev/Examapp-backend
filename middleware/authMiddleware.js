@@ -33,9 +33,12 @@ const protect = asyncHandler(async (req, res, next) => {
     console.log("protect token: ", token)
     console.log("protect user: ", user)
   } catch (error) {
-    res.status(401);
     console.log("protect: ", error);
-    throw new Error(`Not authorized, please login`);
+    if (res.statusCode === 200) {
+      res.status(401);
+      throw new Error("Not authorized, please login");
+    }
+    throw error;
   }
 });
 

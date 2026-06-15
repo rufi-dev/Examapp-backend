@@ -4,7 +4,7 @@ const Achivement = require("../models/achivementModel")
 const addAchivement = asyncHandler(async (req, res) => {
     const { title, about, photo, size } = req.body
 
-    if (!title, !about, !photo) {
+    if (!title || !about || !photo) {
         res.status(400)
         throw new Error("All fields are required")
     }

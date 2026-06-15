@@ -33,6 +33,10 @@ const examSchema = Schema({
         type: String,
         required: false
     },
+    maxTry: {
+        type: Number,
+        default: 0
+    },
     questions: {
         type: Schema.Types.ObjectId,
         ref: 'Question'

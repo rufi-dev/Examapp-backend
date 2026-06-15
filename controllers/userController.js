@@ -12,7 +12,11 @@ const { OAuth2Client } = require("google-auth-library");
 
 const cryptr = new Cryptr(process.env.CRYPTR_KEY);
 
-const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const client = new OAuth2Client(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  "postmessage"
+);
 
 // Register User
 const registerUser = asyncHandler(async (req, res) => {
@@ -92,6 +96,9 @@ const registerUser = asyncHandler(async (req, res) => {
     }
   } catch (error) {
     console.log("register catch: ", error);
+    res
+      .status(res.statusCode && res.statusCode >= 400 ? res.statusCode : 400)
+      .json({ message: error.message });
   }
 });
 
@@ -194,6 +201,9 @@ const loginUser = asyncHandler(async (req, res) => {
     }
   } catch (error) {
     console.log("login catch: ", error);
+    res
+      .status(res.statusCode && res.statusCode >= 400 ? res.statusCode : 400)
+      .json({ message: error.message });
   }
 });
 
@@ -325,73 +335,80 @@ const loginWithCode = asyncHandler(async (req, res) => {
 
 // Send Verification Email
 const sendVerificationEmail = asyncHandler(async (req, res) => {
-  // const user = await User.findById(req.user.id)
-  // if (!user) {
-  //     res.status(404)
-  //     throw new Error('User not found')
-  // }
-  // if (user.isVerified) {
-  //     res.status(400)
-  //     throw new Error('User already verified')
-  // }
-  // let token = await Token.findOne({ userId: user._id })
-  // if (token) {
-  //     await token.deleteOne()
-  // }
-  // // Create Verification Token and Save
-  // const verificationToken = crypto.randomBytes(32).toString("hex") + user._id
-  // //Hash token and save
-  // const hashedToken = hashToken(verificationToken)
-  // await new Token({
-  //     userId: user._id,
-  //     vToken: hashedToken,
-  //     createdAt: Date.now(),
-  //     expiresAt: Date.now() + 60 * (60 * 1000) // 1hour
-  // }).save()
-  // //Construct Verification URL
-  // const verificationUrl = `${process.env.FRONTEND_URL}/verify/${verificationToken}`
-  // //Send Verification Email
-  // const subject = "Verify Your Account - MATH"
-  // const send_to = user.email
-  // const sent_from = process.env.EMAIL_USER
-  // const reply_to = "noreply@rufi.com"
-  // const template = "verifyEmail"
-  // const name = user.name
-  // const link = verificationUrl
-  // try {
-  //     await sendEmail(subject, send_to, sent_from, reply_to, template, name, link)
-  //     res.status(200).json({ message: "Verification Email Sent" })
-  // } catch (error) {
-  //     res.status(500)
-  //     throw new Error('Verification Email not sent, please try again')
-  // }
+  const user = await User.findById(req.user.id);
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found");
+  }
+  if (user.isVerified) {
+    res.status(400);
+    throw new Error("User already verified");
+  }
+  let token = await Token.findOne({ userId: user._id });
+  if (token) {
+    await token.deleteOne();
+  }
+  // Create Verification Token and Save
+  const verificationToken = crypto.randomBytes(32).toString("hex") + user._id;
+  //Hash token and save
+  const hashedToken = hashToken(verificationToken);
+  await new Token({
+    userId: user._id,
+    vToken: hashedToken,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 60 * (60 * 1000), // 1hour
+  }).save();
+  //Construct Verification URL
+  const verificationUrl = `${process.env.FRONTEND_URL}/verify/${verificationToken}`;
+  //Send Verification Email
+  const subject = "Verify Your Account - MATH";
+  const send_to = user.email;
+  const sent_from = process.env.EMAIL_USER;
+  const reply_to = "noreply@rufi.com";
+  const template = "verifyEmail";
+  const name = user.name;
+  const link = verificationUrl;
+  try {
+    await sendEmail(
+      subject,
+      send_to,
+      sent_from,
+      reply_to,
+      template,
+      name,
+      link
+    );
+    res.status(200).json({ message: "Verification Email Sent" });
+  } catch (error) {
+    res.status(500);
+    throw new Error("Verification Email not sent, please try again");
+  }
 });
 
 // Verify User
 const verifyUser = asyncHandler(async (req, res) => {
-  // const { verificationToken } = req.params
-  // const hashedToken = hashToken(verificationToken)
-  // console.log(hashedToken)
-  // const userToken = await Token.findOne({
-  //     vToken: hashedToken,
-  //     expiresAt: { $gt: Date.now() }
-  // })
-  // if (!userToken) {
-  //     res.status(404)
-  //     throw new Error('Invalid or Expired Token!')
-  // }
+  const { verificationToken } = req.params;
+  const hashedToken = hashToken(verificationToken);
+  const userToken = await Token.findOne({
+    vToken: hashedToken,
+    expiresAt: { $gt: Date.now() },
+  });
+  if (!userToken) {
+    res.status(404);
+    throw new Error("Invalid or Expired Token!");
+  }
   // Find user
-  // const user = await User.findOne({ _id: userToken.userId })
-  // if (user.isVerified) {
-  //     res.status(400)
-  //     throw new Error('User is already verified')
-  // }
+  const user = await User.findOne({ _id: userToken.userId });
+  if (user.isVerified) {
+    res.status(400);
+    throw new Error("User is already verified");
+  }
   // Now verify the user
-  // user.isVerified = true
-  // await user.save()
-  // res.status(200).json({
-  //     message: "Account verification successful"
-  // })
+  user.isVerified = true;
+  await user.save();
+  res.status(200).json({
+    message: "Account verification successful",
+  });
 });
 
 // Logout User
@@ -446,6 +463,9 @@ const getUser = asyncHandler(async (req, res) => {
     }
   } catch (error) {
     console.log("getUsercatch: ", error);
+    res
+      .status(res.statusCode && res.statusCode >= 400 ? res.statusCode : 500)
+      .json({ message: error.message });
   }
 });
 
@@ -547,7 +567,9 @@ const loginStatus = asyncHandler(async (req, res) => {
     console.log("loginstatus:", token);
     return res.json(false);
   } catch (error) {
-    console.log("loginstatuscatch:", error);
+    // Malformed/expired token -> treat as logged out instead of hanging the request
+    console.log("loginstatuscatch:", error.message);
+    return res.json(false);
   }
 });
 
@@ -738,10 +760,15 @@ const changePassword = asyncHandler(async (req, res) => {
 
 // Login With Google
 const loginWithGoogle = asyncHandler(async (req, res) => {
-  const { userToken } = req.body;
+  const { code } = req.body;
+
+  // Exchange the one-time auth code (from the frontend popup "auth-code" flow)
+  // for tokens, server-side. This avoids the GSI button's third-party-cookie
+  // requirement that breaks in modern browsers.
+  const { tokens } = await client.getToken(code);
 
   const ticket = await client.verifyIdToken({
-    idToken: userToken,
+    idToken: tokens.id_token,
     audience: process.env.GOOGLE_CLIENT_ID,
   });
 
