@@ -644,6 +644,9 @@ function applyResultVisibility(result, vis) {
   }
   if (!vis.canSeeAnswers) {
     obj.correctAnswers = null;
+    // Per-result solution/feedback photos (teacher-added) also reveal answers —
+    // hide them until answers are allowed to be shown.
+    obj.photos = [];
   }
   // Sanitize the populated exam (examId): a student never gets the password or
   // pdf location through a result, and solution media + the answer key only once
@@ -670,6 +673,16 @@ function applyResultVisibility(result, vis) {
 }
 
 const ATTEMPT_GRACE_MS = 30 * 1000;
+
+// Effective deadline for a live attempt: its stored expiry, but never later than
+// the exam's CURRENT endDate. So if a teacher shortens endDate while a student
+// is mid-exam, the attempt is cut down to the new endDate on resume/status/
+// submit (the stored expiresAt was only capped at endDate when it was created).
+function effectiveExpiry(attempt, exam) {
+  let t = new Date(attempt.expiresAt).getTime();
+  if (exam && exam.endDate) t = Math.min(t, new Date(exam.endDate).getTime());
+  return t;
+}
 
 // Start (or resume) a server-tracked attempt. The server owns the deadline and
 // returns the questions WITHOUT the correct answers, so neither the timer nor
@@ -710,7 +723,9 @@ const startAttempt = asyncHandler(async (req, res) => {
 
   const payload = (attempt) => ({
     attemptId: attempt._id,
-    expiresAt: attempt.expiresAt,
+    // Effective deadline (capped at the exam's CURRENT endDate) so a shortened
+    // window takes effect on the client timer immediately on resume.
+    expiresAt: new Date(effectiveExpiry(attempt, exam)),
     name: exam.name,
     duration: exam.duration,
     antiCheat: !!exam.antiCheat,
@@ -734,7 +749,7 @@ const startAttempt = asyncHandler(async (req, res) => {
   }).sort({ createdAt: -1 });
 
   if (attempt) {
-    if (new Date(attempt.expiresAt).getTime() > now) {
+    if (effectiveExpiry(attempt, exam) > now) {
       return res.status(200).json(payload(attempt));
     }
     attempt.submitted = true; // expired without submitting -> a used try
@@ -849,20 +864,37 @@ const getExamRank = asyncHandler(async (req, res) => {
 // this user (so "Start" can become "Resume")? Server-truth only.
 const attemptStatus = asyncHandler(async (req, res) => {
   const { examId } = req.params;
+  const exam = await Exam.findById(examId);
   const attempt = await Attempt.findOne({
     userId: req.user._id,
     examId,
     submitted: false,
   }).sort({ createdAt: -1 });
-  const active =
-    !!attempt && new Date(attempt.expiresAt).getTime() > Date.now();
+  const exp = attempt ? effectiveExpiry(attempt, exam) : 0;
+  const active = !!attempt && exp > Date.now();
+
+  // Used-try count exactly as startAttempt enforces it (started attempts OR
+  // results, whichever is higher), so the details page can show accurate tries
+  // left instead of counting results only.
+  const maxTry = exam?.maxTry || 0;
+  let used = 0;
+  if (maxTry > 0) {
+    const [attemptCount, resultCount] = await Promise.all([
+      Attempt.countDocuments({ userId: req.user._id, examId }),
+      Result.countDocuments({ userId: req.user._id, examId }),
+    ]);
+    used = Math.max(attemptCount, resultCount);
+  }
+
   // Expose the live anti-cheat state so a second device sharing this attempt
   // can mirror the count and finish/redirect when it's terminated elsewhere.
   res.status(200).json({
     active,
-    expiresAt: active ? attempt.expiresAt : null,
+    expiresAt: active ? new Date(exp) : null,
     violations: attempt ? attempt.violations || 0 : 0,
     terminated: attempt ? !!attempt.terminated : false,
+    used,
+    maxTry,
   });
 });
 
@@ -879,13 +911,16 @@ const reportViolation = asyncHandler(async (req, res) => {
   const { attemptId } = req.body || {};
   const filter = { userId: req.user._id, examId, submitted: false };
   if (attemptId && mongoose.Types.ObjectId.isValid(attemptId)) filter._id = attemptId;
-  const attempt = await Attempt.findOne(filter).sort({ createdAt: -1 });
+  const [exam, attempt] = await Promise.all([
+    Exam.findById(examId),
+    Attempt.findOne(filter).sort({ createdAt: -1 }),
+  ]);
 
   if (!attempt) {
     return res.status(404).json({ reason: "no_active_attempt" });
   }
-  // Ignore reports after the deadline (the attempt is effectively over).
-  if (new Date(attempt.expiresAt).getTime() + (ATTEMPT_GRACE_MS || 0) < Date.now()) {
+  // Ignore reports after the (effective, endDate-capped) deadline.
+  if (effectiveExpiry(attempt, exam) + (ATTEMPT_GRACE_MS || 0) < Date.now()) {
     return res.status(200).json({
       violations: attempt.violations || 0,
       terminated: !!attempt.terminated,
@@ -961,7 +996,7 @@ const addResult = asyncHandler(async (req, res) => {
       .status(409)
       .json({ reason: "already_submitted", message: "İmtahan artıq bağlanıb" });
   }
-  if (new Date(attempt.expiresAt).getTime() + ATTEMPT_GRACE_MS < now) {
+  if (effectiveExpiry(attempt, exam) + ATTEMPT_GRACE_MS < now) {
     res.status(400);
     throw new Error("İmtahan vaxtı bitib");
   }
@@ -991,7 +1026,8 @@ const addResult = asyncHandler(async (req, res) => {
   const norm = (v) => String(v ?? "").trim();
   correct.forEach((ca, i) => {
     const s = sel[i];
-    const answered = s && s.answer != null && s.answer !== "";
+    // Whitespace-only answers count as BLANK (no penalty), not wrong.
+    const answered = s && s.answer != null && norm(s.answer) !== "";
     if (answered && norm(s.answer) === norm(ca.answer)) {
       earnedPoints += points[i] || 0;
       if (counts[ca.type] !== undefined) counts[ca.type]++;
@@ -1027,8 +1063,10 @@ const addResult = asyncHandler(async (req, res) => {
     // tampered client body can never lower the violations on the final result.
     violations: Math.max(attempt.violations || 0, Number(violations) || 0),
     terminated: isTerminated,
-    selectedAnswers: sel.map((a) => ({ type: a?.type, answer: a?.answer })),
-    correctAnswers: correct.map((a) => ({ type: a.type, answer: a.answer })),
+    // Normalize on write: store the trimmed answers that scoring used, so every
+    // display surface (review, PDF, analytics) agrees with the score.
+    selectedAnswers: sel.map((a) => ({ type: a?.type, answer: norm(a?.answer) })),
+    correctAnswers: correct.map((a) => ({ type: a.type, answer: norm(a.answer) })),
     correctAnswersByType: [
       { type: "Cm", count: counts.Cm },
       { type: "Co", count: counts.Co },
@@ -1088,6 +1126,9 @@ const getResultsByUser = asyncHandler(async (req, res) => {
   );
 });
 
+// STAFF ONLY (route is protect+teacherOnly). This returns RAW, unsanitized
+// results (full userId + examId, score + answers) with no per-viewer visibility
+// gating, so it MUST never be exposed on a student-reachable route.
 const getResultsByExam = asyncHandler(async (req, res) => {
   const { examId } = req.params;
   const exam = await Exam.findById(examId);
