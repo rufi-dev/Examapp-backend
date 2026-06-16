@@ -11,6 +11,8 @@ services:
     env_file: .env
     expose:
       - "5000" # internal only; Caddy is the public entrypoint
+    volumes:
+      - uploads:/app/uploads # persist uploaded PDFs across rebuilds
     networks:
       - web
 
@@ -36,5 +38,6 @@ networks:
   web:
 
 volumes:
+  uploads:
   caddy_data:
   caddy_config:

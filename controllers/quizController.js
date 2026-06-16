@@ -165,6 +165,17 @@ const addExam = asyncHandler(async (req, res) => {
   }
 });
 
+// Store an exam PDF on the server's disk and return its public URL. Used
+// instead of Cloudinary so large PDFs aren't blocked by the 10MB limit.
+const uploadPdf = asyncHandler(async (req, res) => {
+  if (!req.file) {
+    res.status(400);
+    throw new Error("Fayl tapılmadı");
+  }
+  const url = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+  res.status(200).json({ url, filename: req.file.filename });
+});
+
 const getPdfByExam = asyncHandler(async (req, res) => {
   const { examId } = req.params;
 
@@ -1006,6 +1017,7 @@ module.exports = {
   addPhotoToResult,
   addResult,
   startAttempt,
+  uploadPdf,
   getResultsByUser,
   getResultsByUserByExam,
   getClass,

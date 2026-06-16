@@ -37,7 +37,10 @@ app.use(
                 callback(new Error("Not allowed by CORS: " + origin))
             }
         },
-        credentials: true
+        credentials: true,
+        // Let the PDF viewer read length/range headers (efficient streaming
+        // of server-hosted PDFs).
+        exposedHeaders: ["Content-Length", "Content-Range", "Accept-Ranges"],
     })
 )
 

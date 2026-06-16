@@ -9,6 +9,7 @@ const {
   addExam,
   getExamsByClass,
   getPdfByExam,
+  uploadPdf,
   addTag,
   getTags,
   addQuestion,
@@ -40,6 +41,8 @@ const {
 const router = express.Router();
 
 const multer = require("multer");
+const fs = require("fs");
+if (!fs.existsSync("uploads")) fs.mkdirSync("uploads", { recursive: true });
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -51,6 +54,14 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage })
 
+// Dedicated PDF storage: unique .pdf filenames, served from /uploads.
+const pdfStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, "uploads/"),
+  filename: (req, file, cb) =>
+    cb(null, `${Date.now()}-${Math.round(Math.random() * 1e6)}.pdf`),
+});
+const pdfUpload = multer({ storage: pdfStorage, limits: { fileSize: 100 * 1024 * 1024 } });
+
 
 router.post("/addTag", protect, teacherOnly, addTag);
 router.post("/addClass/:tagId", protect, teacherOnly, addClass);
@@ -58,6 +69,7 @@ router.get("/getTags", getTags);
 router.post("/addExam/:classId", upload.single("pdf"), protect, teacherOnly, addExam);
 router.post("/addPhotoToResult/:resultId", protect, teacherOnly, addPhotoToResult);
 router.get("/getPdfByExam/:examId", protect, getPdfByExam);
+router.post("/uploadPdf", protect, teacherOnly, pdfUpload.single("file"), uploadPdf);
 router.get("/getExamTagandClass/:examId", protect, getExamTagandClass);
 router.get("/getResultsByExam/:examId", protect, teacherOnly, getResultsByExam);
 router.get("/getExamsByClass/:classId", getExamsByClass);
