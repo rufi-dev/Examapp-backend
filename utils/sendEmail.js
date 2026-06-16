@@ -3,6 +3,14 @@ const hbs = require('nodemailer-express-handlebars');
 const path = require('path');
 
 const sendEmail = async (subject, send_to, sent_from, reply_to, template, name, link) => {
+    // Global kill-switch. While EMAIL_ENABLED is not "true", skip sending
+    // entirely: no mail goes out and no SMTP errors surface anywhere. Set
+    // EMAIL_ENABLED=true (with real EMAIL_* credentials) to re-activate.
+    if (process.env.EMAIL_ENABLED !== "true") {
+        console.log(`[email disabled] skipped "${subject}" -> ${send_to}`);
+        return { skipped: true };
+    }
+
     const port = Number(process.env.EMAIL_PORT) || 587;
 
     // Create Email Transporter
