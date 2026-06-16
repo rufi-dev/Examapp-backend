@@ -42,6 +42,13 @@ const examSchema = Schema({
         type: Number,
         default: 0
     },
+    // Optional access password. When non-empty, a student must enter it to
+    // start the exam (enforced server-side in startAttempt). Never sent to
+    // students in any payload.
+    password: {
+        type: String,
+        default: ""
+    },
     // Result visibility for students:
     showScore: { type: Boolean, default: true },
     showCorrectAnswers: { type: Boolean, default: false },

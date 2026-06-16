@@ -121,6 +121,7 @@ const addExam = asyncHandler(async (req, res) => {
     showScore,
     showCorrectAnswers,
     revealAfterEnd,
+    password,
     pdf,
   } = req.body;
   const { classId } = req.params;
@@ -157,6 +158,7 @@ const addExam = asyncHandler(async (req, res) => {
       showScore: showScore === "true" || showScore === true,
       showCorrectAnswers: showCorrectAnswers === "true" || showCorrectAnswers === true,
       revealAfterEnd: revealAfterEnd === "true" || revealAfterEnd === true,
+      password: typeof password === "string" ? password : "",
       videoLink,
       startDate,
       endDate,
@@ -202,6 +204,23 @@ const getPdfByExam = asyncHandler(async (req, res) => {
     if (!exam) {
       res.status(404);
       throw new Error("Exam not found!");
+    }
+
+    // Students may only fetch the PDF once they've actually started an attempt
+    // (which requires the exam password, if any) or already have a result.
+    // This keeps the questions PDF behind the same gate as the answer sheet.
+    const isStaff =
+      req.user && (req.user.role === "admin" || req.user.role === "teacher");
+    if (!isStaff) {
+      const [hasAttempt, hasResult] = await Promise.all([
+        Attempt.countDocuments({ userId: req.user._id, examId }),
+        Result.countDocuments({ userId: req.user._id, examId }),
+      ]);
+      if (!hasAttempt && !hasResult) {
+        return res
+          .status(403)
+          .json({ reason: "no_access", error: "İmtahana giriş yoxdur" });
+      }
     }
 
     // Fetch the PDF associated with the exam
@@ -381,11 +400,17 @@ const getExam = asyncHandler(async (req, res) => {
   // Never expose the correct answers to students through the exam payload.
   const isStaff = req.user && (req.user.role === "admin" || req.user.role === "teacher");
   const obj = exam.toObject();
-  if (!isStaff && obj.questions && Array.isArray(obj.questions.correctAnswers)) {
-    obj.questions.correctAnswers = obj.questions.correctAnswers.map((q) => ({
-      type: q.type,
-      options: q.options,
-    }));
+  if (!isStaff) {
+    if (obj.questions && Array.isArray(obj.questions.correctAnswers)) {
+      obj.questions.correctAnswers = obj.questions.correctAnswers.map((q) => ({
+        type: q.type,
+        options: q.options,
+      }));
+    }
+    // Never leak the access password or the PDF location to students here;
+    // the PDF is fetched only through the gated getPdfByExam.
+    delete obj.password;
+    delete obj.pdf;
   }
 
   res.status(200).json(obj);
@@ -532,6 +557,16 @@ const startAttempt = asyncHandler(async (req, res) => {
     return res.status(403).json({ reason: "not_started" });
   if (exam.endDate && new Date(exam.endDate).getTime() < now)
     return res.status(403).json({ reason: "finished" });
+
+  // Password gate (server-authoritative): checked before any attempt is
+  // resumed/created and before questions are returned, so a missing/wrong
+  // password means no access — even on resume, and even via a tampered URL.
+  if (exam.password && String(exam.password).length) {
+    const provided = (req.body && req.body.password) || "";
+    if (!provided) return res.status(403).json({ reason: "password_required" });
+    if (String(provided) !== String(exam.password))
+      return res.status(403).json({ reason: "password_wrong" });
+  }
 
   const correctAnswers = exam.questions?.correctAnswers || [];
   if (!correctAnswers.length) return res.status(403).json({ reason: "no_questions" });
@@ -841,6 +876,7 @@ const editExam = asyncHandler(async (req, res) => {
     showCorrectAnswers,
     revealAfterEnd,
     solutionPhotos,
+    password,
     pdfPath,
   } = req.body;
   const examExists = await Exam.findById(examId);
@@ -863,6 +899,8 @@ const editExam = asyncHandler(async (req, res) => {
     // Only touch the solution images when the client sends them, so partial
     // edits don't wipe the existing list.
     if (Array.isArray(solutionPhotos)) update.solutionPhotos = solutionPhotos;
+    // Empty string disables the password; undefined leaves it unchanged.
+    if (typeof password === "string") update.password = password;
     await Exam.findByIdAndUpdate(examId, update);
 
     if (pdfPath) {
