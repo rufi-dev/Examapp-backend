@@ -457,31 +457,24 @@ const getExamTagandClass = asyncHandler(async (req, res) => {
   res.status(200).json({ tag, _class });
 });
 
-// Position-based point distribution: the first 18 questions share 55 points,
-// the rest share 45 (total exactly 100). For <=18 questions the full 100 is
-// split. Leftover cents are spread one-by-one (largest remainder) so the
-// per-question points are 2-decimal values that sum to exactly 100 — no
-// rounding drift (e.g. 55/18 becomes 3.06 ×10 + 3.05 ×8 = 55.00).
-function distributePoints(total, n) {
-  if (n <= 0) return [];
-  const cents = Math.round(total * 100);
-  const base = Math.floor(cents / n);
-  const rem = cents - base * n;
-  const out = new Array(n);
-  for (let i = 0; i < n; i++) out[i] = (base + (i < rem ? 1 : 0)) / 100;
-  return out;
-}
-
+// Position-based point distribution. The last group's per-question value is
+// rounded to 2 decimals (45/7 -> 6.43) and the first 18 questions split
+// whatever remains, so every question in a group is worth the same and the
+// grand total is exactly 100 (e.g. (100 - 6.43*7)/18 = 3.055 each -> the
+// sheet is 3.055*18 + 6.43*7 = 100). For <=18 questions the full 100 is split.
 function questionPoints(count) {
   const FIRST = 18;
-  const FP = 55;
   const SP = 45;
   const n = Number(count) || 0;
   if (n <= 0) return [];
   const a = Math.min(FIRST, n);
   const b = n - a;
-  if (b === 0) return distributePoints(100, n);
-  return [...distributePoints(FP, a), ...distributePoints(SP, b)];
+  if (b === 0) return new Array(n).fill(100 / a);
+  const secondEach = Math.round((SP / b) * 100) / 100; // 6.43
+  const firstEach = (100 - secondEach * b) / a; // 3.055
+  const pts = new Array(n);
+  for (let i = 0; i < n; i++) pts[i] = i < a ? firstEach : secondEach;
+  return pts;
 }
 
 // What a viewer is allowed to see of a result. Teachers/admins see everything.
