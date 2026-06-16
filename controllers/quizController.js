@@ -9,6 +9,18 @@ const Attempt = require("../models/attemptModel");
 const User = require("../models/userModel");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
+const fs = require("fs");
+const path = require("path");
+
+// Delete a server-hosted PDF file from disk. No-op for remote (Cloudinary) URLs.
+function deleteLocalPdf(pdfUrl) {
+  if (!pdfUrl || typeof pdfUrl !== "string") return;
+  const marker = "/uploads/";
+  const i = pdfUrl.indexOf(marker);
+  if (i === -1) return;
+  const name = path.basename(pdfUrl.slice(i + marker.length).split(/[?#]/)[0]);
+  if (name) fs.unlink(path.join("uploads", name), () => {});
+}
 
 // Add Tag
 const addTag = asyncHandler(async (req, res) => {
@@ -852,6 +864,14 @@ const editExam = asyncHandler(async (req, res) => {
     });
 
     if (pdfPath) {
+      // Replacing the PDF: delete the previous file + record first.
+      if (examExists.pdf) {
+        const oldPdf = await PDF.findById(examExists.pdf);
+        if (oldPdf) {
+          deleteLocalPdf(oldPdf.path);
+          await oldPdf.deleteOne();
+        }
+      }
       const pdfModel = new PDF({
         path: pdfPath,
       });
@@ -928,6 +948,15 @@ const deleteExam = asyncHandler(async (req, res) => {
   if (questions && questions.length > 0) {
     for (const question of questions) {
       await question.deleteOne();
+    }
+  }
+
+  // Remove the exam's PDF (file on disk + record).
+  if (exam.pdf) {
+    const pdfDoc = await PDF.findById(exam.pdf);
+    if (pdfDoc) {
+      deleteLocalPdf(pdfDoc.path);
+      await pdfDoc.deleteOne();
     }
   }
 
