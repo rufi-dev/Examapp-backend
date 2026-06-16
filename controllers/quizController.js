@@ -935,23 +935,14 @@ const deleteAllQuestions = asyncHandler(async (req, res) => {
   res.status(200).json({ message: "All questions deleted successfully" });
 });
 
-const deleteExam = asyncHandler(async (req, res) => {
-  const { examId } = req.params;
-
+// Fully remove an exam: questions, PDF (disk + record), results, attempts, and
+// every reference to it (users, class, tag).
+async function purgeExam(examId) {
   const exam = await Exam.findById(examId);
-  if (!exam) {
-    res.status(404);
-    throw new Error("Exam not found!");
-  }
-  const questions = await Question.find({ exam: exam._id });
+  if (!exam) return;
 
-  if (questions && questions.length > 0) {
-    for (const question of questions) {
-      await question.deleteOne();
-    }
-  }
+  await Question.deleteMany({ exam: exam._id });
 
-  // Remove the exam's PDF (file on disk + record).
   if (exam.pdf) {
     const pdfDoc = await PDF.findById(exam.pdf);
     if (pdfDoc) {
@@ -960,8 +951,73 @@ const deleteExam = asyncHandler(async (req, res) => {
     }
   }
 
+  const results = await Result.find({ examId: exam._id }).select("_id");
+  const resultIds = results.map((r) => r._id);
+  await Result.deleteMany({ examId: exam._id });
+  await Attempt.deleteMany({ examId: exam._id });
+
+  await User.updateMany(
+    {},
+    { $pull: { exams: exam._id, results: { $in: resultIds } } }
+  );
+  if (exam.class) await Class.updateOne({ _id: exam.class }, { $pull: { exams: exam._id } });
+  await Tag.updateMany({}, { $pull: { exams: exam._id } });
+
   await exam.deleteOne();
+}
+
+// Remove a class and every exam under it.
+async function purgeClass(classId) {
+  const _class = await Class.findById(classId);
+  if (!_class) return;
+  const exams = await Exam.find({ class: classId }).select("_id");
+  for (const e of exams) await purgeExam(e._id);
+  if (_class.tag) await Tag.updateOne({ _id: _class.tag }, { $pull: { classes: classId } });
+  await _class.deleteOne();
+}
+
+// Remove a tag and every class + exam under it.
+async function purgeTag(tagId) {
+  const tag = await Tag.findById(tagId);
+  if (!tag) return;
+  const classes = await Class.find({ tag: tagId }).select("_id");
+  for (const c of classes) await purgeClass(c._id);
+  const orphanExams = await Exam.find({ tag: tagId }).select("_id");
+  for (const e of orphanExams) await purgeExam(e._id);
+  await tag.deleteOne();
+}
+
+const deleteExam = asyncHandler(async (req, res) => {
+  const { examId } = req.params;
+  const exam = await Exam.findById(examId);
+  if (!exam) {
+    res.status(404);
+    throw new Error("Exam not found!");
+  }
+  await purgeExam(examId);
   res.status(200).json({ message: "Exam deleted succesfully" });
+});
+
+const deleteClass = asyncHandler(async (req, res) => {
+  const { classId } = req.params;
+  const _class = await Class.findById(classId);
+  if (!_class) {
+    res.status(404);
+    throw new Error("Class not found!");
+  }
+  await purgeClass(classId);
+  res.status(200).json({ message: "Class deleted successfully" });
+});
+
+const deleteTag = asyncHandler(async (req, res) => {
+  const { tagId } = req.params;
+  const tag = await Tag.findById(tagId);
+  if (!tag) {
+    res.status(404);
+    throw new Error("Tag not found!");
+  }
+  await purgeTag(tagId);
+  res.status(200).json({ message: "Tag deleted successfully" });
 });
 
 const deleteMyExam = asyncHandler(async (req, res) => {
@@ -1042,6 +1098,8 @@ module.exports = {
   addClass,
   getClassesByTag,
   deleteExam,
+  deleteClass,
+  deleteTag,
   editTag,
   addPhotoToResult,
   addResult,

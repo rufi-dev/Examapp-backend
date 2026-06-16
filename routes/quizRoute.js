@@ -20,6 +20,8 @@ const {
   getExam,
   getTag,
   editExam,
+  deleteClass,
+  deleteTag,
   editTag,
   addResult,
   startAttempt,
@@ -88,6 +90,8 @@ router.get("/getTag/:id", getTag);
 router.get("/getClass/:id", getClass);
 router.patch("/editExam/:examId", protect, teacherOnly, editExam);
 router.delete("/deleteExam/:examId", protect, teacherOnly, deleteExam);
+router.delete("/deleteClass/:classId", protect, teacherOnly, deleteClass);
+router.delete("/deleteTag/:tagId", protect, teacherOnly, deleteTag);
 router.patch("/editTag/:tagId", protect, teacherOnly, editTag);
 router.post("/exam/:examId/start", protect, startAttempt);
 router.post("/addResult/:examId", protect, verifiedOnly, addResult);
