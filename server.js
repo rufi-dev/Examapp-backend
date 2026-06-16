@@ -8,6 +8,7 @@ const userRoute = require('./routes/userRoute')
 const quizRoute = require('./routes/quizRoute')
 const achivementRoute = require('./routes/achivementRoute')
 const stripeRoute = require('./routes/stripeRoute')
+const notificationRoute = require('./routes/notificationRoute')
 const errorHandler = require('./middleware/errorMiddleware')
 
 
@@ -49,6 +50,7 @@ app.use("/api/users", userRoute)
 app.use("/api/quiz", quizRoute)
 app.use("/api/achivement", achivementRoute)
 app.use("/api/stripe", stripeRoute)
+app.use("/api/notifications", notificationRoute)
 app.use('/uploads', express.static('uploads'));
 
 app.get('/', (req, res) => {

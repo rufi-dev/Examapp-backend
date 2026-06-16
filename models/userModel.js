@@ -57,7 +57,11 @@ const userSchema = Schema(
         results: [{
             type: Schema.Types.ObjectId,
             ref: "Result"
-        }]
+        }],
+        // Last time this user opened the notifications bell (drives unread count).
+        notificationsSeenAt: {
+            type: Date,
+        }
     },
     {
         timestamps: true,
