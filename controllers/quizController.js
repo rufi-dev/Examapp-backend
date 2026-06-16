@@ -458,7 +458,20 @@ const getExamTagandClass = asyncHandler(async (req, res) => {
 });
 
 // Position-based point distribution: the first 18 questions share 55 points,
-// the rest share 45 (total 100). For <=18 questions the full 100 is split.
+// the rest share 45 (total exactly 100). For <=18 questions the full 100 is
+// split. Leftover cents are spread one-by-one (largest remainder) so the
+// per-question points are 2-decimal values that sum to exactly 100 — no
+// rounding drift (e.g. 55/18 becomes 3.06 ×10 + 3.05 ×8 = 55.00).
+function distributePoints(total, n) {
+  if (n <= 0) return [];
+  const cents = Math.round(total * 100);
+  const base = Math.floor(cents / n);
+  const rem = cents - base * n;
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) out[i] = (base + (i < rem ? 1 : 0)) / 100;
+  return out;
+}
+
 function questionPoints(count) {
   const FIRST = 18;
   const FP = 55;
@@ -467,16 +480,8 @@ function questionPoints(count) {
   if (n <= 0) return [];
   const a = Math.min(FIRST, n);
   const b = n - a;
-  const pts = new Array(n);
-  if (b === 0) {
-    const each = 100 / a;
-    for (let i = 0; i < n; i++) pts[i] = each;
-  } else {
-    const ea = FP / a;
-    const eb = SP / b;
-    for (let i = 0; i < n; i++) pts[i] = i < a ? ea : eb;
-  }
-  return pts;
+  if (b === 0) return distributePoints(100, n);
+  return [...distributePoints(FP, a), ...distributePoints(SP, b)];
 }
 
 // What a viewer is allowed to see of a result. Teachers/admins see everything.
