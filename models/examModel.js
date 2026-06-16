@@ -49,6 +49,13 @@ const examSchema = Schema({
         type: String,
         default: ""
     },
+    // Negative marking: when enabled, every `wrongPerPenalty` wrong answers
+    // cancel `correctPerPenalty` correct answers' worth of points (server-side).
+    negativeMarking: { type: Boolean, default: false },
+    wrongPerPenalty: { type: Number, default: 3 },
+    correctPerPenalty: { type: Number, default: 1 },
+    // When enabled, the exam runner activates anti-cheat measures.
+    antiCheat: { type: Boolean, default: false },
     // Result visibility for students:
     showScore: { type: Boolean, default: true },
     showCorrectAnswers: { type: Boolean, default: false },

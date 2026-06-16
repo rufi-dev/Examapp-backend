@@ -122,6 +122,10 @@ const addExam = asyncHandler(async (req, res) => {
     showCorrectAnswers,
     revealAfterEnd,
     password,
+    negativeMarking,
+    wrongPerPenalty,
+    correctPerPenalty,
+    antiCheat,
     pdf,
   } = req.body;
   const { classId } = req.params;
@@ -159,6 +163,10 @@ const addExam = asyncHandler(async (req, res) => {
       showCorrectAnswers: showCorrectAnswers === "true" || showCorrectAnswers === true,
       revealAfterEnd: revealAfterEnd === "true" || revealAfterEnd === true,
       password: typeof password === "string" ? password : "",
+      negativeMarking: negativeMarking === "true" || negativeMarking === true,
+      wrongPerPenalty: Math.max(1, Number(wrongPerPenalty) || 3),
+      correctPerPenalty: Math.max(1, Number(correctPerPenalty) || 1),
+      antiCheat: antiCheat === "true" || antiCheat === true,
       videoLink,
       startDate,
       endDate,
@@ -560,6 +568,7 @@ const startAttempt = asyncHandler(async (req, res) => {
     expiresAt: attempt.expiresAt,
     name: exam.name,
     duration: exam.duration,
+    antiCheat: !!exam.antiCheat,
     questions: correctAnswers.map((q) => ({ type: q.type, options: q.options })),
   });
 
@@ -683,7 +692,7 @@ const attemptStatus = asyncHandler(async (req, res) => {
 
 const addResult = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const { selectedAnswers } = req.body;
+  const { selectedAnswers, violations } = req.body;
   const user = await User.findById(req.user._id);
 
   if (!user) {
@@ -734,13 +743,28 @@ const addResult = asyncHandler(async (req, res) => {
   const sel = Array.isArray(selectedAnswers) ? selectedAnswers : [];
   const counts = { Cm: 0, Co: 0, Cd: 0, Cma: 0 };
   let earnedPoints = 0;
+  let wrongCount = 0;
   correct.forEach((ca, i) => {
     const s = sel[i];
-    if (s && s.answer != null && s.answer !== "" && s.answer === ca.answer) {
+    const answered = s && s.answer != null && s.answer !== "";
+    if (answered && s.answer === ca.answer) {
       earnedPoints += points[i] || 0;
       if (counts[ca.type] !== undefined) counts[ca.type]++;
+    } else if (answered) {
+      wrongCount += 1; // answered but wrong (blanks are never penalised)
     }
   });
+
+  // Negative marking: every `wrongPerPenalty` wrong answers cancel
+  // `correctPerPenalty` questions' worth of points (using the average value,
+  // since total is always 100). Score never goes below 0.
+  if (exam.negativeMarking && (exam.wrongPerPenalty || 0) > 0) {
+    const n = correct.length || 1;
+    const avgPerQuestion = 100 / n;
+    const units = Math.floor(wrongCount / exam.wrongPerPenalty);
+    const cancelledCorrects = units * (exam.correctPerPenalty || 1);
+    earnedPoints = Math.max(0, earnedPoints - cancelledCorrects * avgPerQuestion);
+  }
   earnedPoints = Math.round(earnedPoints * 100) / 100;
 
   const newResult = await Result.create({
@@ -748,6 +772,7 @@ const addResult = asyncHandler(async (req, res) => {
     examId,
     attempts: sel.filter((a) => a && a.answer).length,
     earnPoints: earnedPoints,
+    violations: Math.max(0, Number(violations) || 0),
     selectedAnswers: sel.map((a) => ({ type: a?.type, answer: a?.answer })),
     correctAnswers: correct.map((a) => ({ type: a.type, answer: a.answer })),
     correctAnswersByType: [
@@ -946,6 +971,10 @@ const editExam = asyncHandler(async (req, res) => {
     revealAfterEnd,
     solutionPhotos,
     password,
+    negativeMarking,
+    wrongPerPenalty,
+    correctPerPenalty,
+    antiCheat,
     pdfPath,
   } = req.body;
   const examExists = await Exam.findById(examId);
@@ -964,6 +993,10 @@ const editExam = asyncHandler(async (req, res) => {
       showScore: showScore === true || showScore === "true",
       showCorrectAnswers: showCorrectAnswers === true || showCorrectAnswers === "true",
       revealAfterEnd: revealAfterEnd === true || revealAfterEnd === "true",
+      negativeMarking: negativeMarking === true || negativeMarking === "true",
+      wrongPerPenalty: Math.max(1, Number(wrongPerPenalty) || 3),
+      correctPerPenalty: Math.max(1, Number(correctPerPenalty) || 1),
+      antiCheat: antiCheat === true || antiCheat === "true",
     };
     // Only touch the solution images when the client sends them, so partial
     // edits don't wipe the existing list.

@@ -63,6 +63,12 @@ const resultSchema = Schema(
         },
       },
     ],
+    // Anti-cheat: number of detected violations (tab switch / blur / leaving
+    // fullscreen) during the attempt. 0 when anti-cheat is off.
+    violations: {
+      type: Number,
+      default: 0,
+    },
   },
   {
     timestamps: true,
