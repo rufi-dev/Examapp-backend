@@ -649,7 +649,12 @@ const startAttempt = asyncHandler(async (req, res) => {
   }
 
   const startedAt = new Date(now);
-  const expiresAt = new Date(now + (exam.duration || 0) * 1000);
+  // The personal duration timer, but never past the exam's closing time: a
+  // student who starts near endDate is cut off at endDate, not given the full
+  // duration. expiresAt is server-stored, so the timer survives reloads.
+  let expMs = now + (exam.duration || 0) * 1000;
+  if (exam.endDate) expMs = Math.min(expMs, new Date(exam.endDate).getTime());
+  const expiresAt = new Date(expMs);
   attempt = await Attempt.create({ userId: user._id, examId, startedAt, expiresAt });
 
   return res.status(200).json(payload(attempt));
@@ -1270,7 +1275,14 @@ const getExamsByUser = asyncHandler(async (req, res) => {
   }
 });
 
+// Authoritative server clock so client countdowns (exam opening, deadline)
+// stay correct even if the device clock is wrong. Returns only the time.
+const serverTime = asyncHandler(async (req, res) => {
+  res.status(200).json({ now: Date.now() });
+});
+
 module.exports = {
+  serverTime,
   addExam,
   getExamsByClass,
   addTag,

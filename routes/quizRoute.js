@@ -6,6 +6,7 @@ const {
   verifiedOnly,
 } = require("../middleware/authMiddleware");
 const {
+  serverTime,
   addExam,
   getExamsByClass,
   getPdfByExam,
@@ -71,6 +72,7 @@ const pdfUpload = multer({ storage: pdfStorage, limits: { fileSize: 100 * 1024 *
 
 router.post("/addTag", protect, teacherOnly, addTag);
 router.post("/addClass/:tagId", protect, teacherOnly, addClass);
+router.get("/server-time", serverTime);
 router.get("/getTags", getTags);
 router.post("/addExam/:classId", upload.single("pdf"), protect, teacherOnly, addExam);
 router.post("/addPhotoToResult/:resultId", protect, teacherOnly, addPhotoToResult);
