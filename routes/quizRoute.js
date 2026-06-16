@@ -23,6 +23,7 @@ const {
   deleteClass,
   deleteTag,
   editTag,
+  editClass,
   addResult,
   startAttempt,
   getResultsByUser,
@@ -93,6 +94,7 @@ router.delete("/deleteExam/:examId", protect, teacherOnly, deleteExam);
 router.delete("/deleteClass/:classId", protect, teacherOnly, deleteClass);
 router.delete("/deleteTag/:tagId", protect, teacherOnly, deleteTag);
 router.patch("/editTag/:tagId", protect, teacherOnly, editTag);
+router.patch("/editClass/:classId", protect, teacherOnly, editClass);
 router.post("/exam/:examId/start", protect, startAttempt);
 router.post("/addResult/:examId", protect, verifiedOnly, addResult);
 router.get("/getResultsByUser", protect, verifiedOnly, getResultsByUser);

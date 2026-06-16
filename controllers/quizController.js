@@ -842,13 +842,13 @@ const editExam = asyncHandler(async (req, res) => {
     showScore,
     showCorrectAnswers,
     revealAfterEnd,
+    solutionPhotos,
     pdfPath,
   } = req.body;
   const examExists = await Exam.findById(examId);
-  console.log(req.body);
   if (examExists) {
     // Update the exam fields
-    await Exam.findByIdAndUpdate(examId, {
+    const update = {
       name,
       startDate,
       endDate,
@@ -861,7 +861,11 @@ const editExam = asyncHandler(async (req, res) => {
       showScore: showScore === true || showScore === "true",
       showCorrectAnswers: showCorrectAnswers === true || showCorrectAnswers === "true",
       revealAfterEnd: revealAfterEnd === true || revealAfterEnd === "true",
-    });
+    };
+    // Only touch the solution images when the client sends them, so partial
+    // edits don't wipe the existing list.
+    if (Array.isArray(solutionPhotos)) update.solutionPhotos = solutionPhotos;
+    await Exam.findByIdAndUpdate(examId, update);
 
     if (pdfPath) {
       // Replacing the PDF: delete the previous file + record first.
@@ -905,6 +909,22 @@ const editTag = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("Tag not found!");
   }
+});
+
+const editClass = asyncHandler(async (req, res) => {
+  const { classId } = req.params;
+  const { level } = req.body;
+  if (!level) {
+    res.status(400);
+    throw new Error("Sinif xanasını doldurun");
+  }
+  const classExists = await Class.findById(classId);
+  if (!classExists) {
+    res.status(404);
+    throw new Error("Sinif tapılmadı!");
+  }
+  await Class.findByIdAndUpdate(classId, { level });
+  res.status(200).json({ message: "Sinif uğurla yeniləndi" });
 });
 
 const deleteQuestion = asyncHandler(async (req, res) => {
@@ -1101,6 +1121,7 @@ module.exports = {
   deleteClass,
   deleteTag,
   editTag,
+  editClass,
   addPhotoToResult,
   addResult,
   startAttempt,

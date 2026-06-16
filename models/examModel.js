@@ -33,6 +33,11 @@ const examSchema = Schema({
         type: String,
         required: false
     },
+    // Shared written solution images (added once per exam by the teacher,
+    // shown to every student in their review alongside the video solution).
+    solutionPhotos: [{
+        type: String,
+    }],
     maxTry: {
         type: Number,
         default: 0
