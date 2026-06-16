@@ -27,6 +27,7 @@ const {
   addResult,
   startAttempt,
   attemptStatus,
+  getExamRank,
   getResultsByUser,
   addPhotoToResult,
   getResultsByUserByExam,
@@ -98,6 +99,7 @@ router.patch("/editTag/:tagId", protect, teacherOnly, editTag);
 router.patch("/editClass/:classId", protect, teacherOnly, editClass);
 router.post("/exam/:examId/start", protect, startAttempt);
 router.get("/exam/:examId/attemptStatus", protect, attemptStatus);
+router.get("/exam/:examId/rank", protect, getExamRank);
 router.post("/addResult/:examId", protect, verifiedOnly, addResult);
 router.get("/getResultsByUser", protect, verifiedOnly, getResultsByUser);
 router.get(

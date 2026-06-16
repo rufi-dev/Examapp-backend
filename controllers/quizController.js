@@ -618,6 +618,55 @@ const startAttempt = asyncHandler(async (req, res) => {
   return res.status(200).json(payload(attempt));
 });
 
+// A student's standing on an exam (rank + percentile), computed server-side so
+// other students' scores/identities are never exposed. Gated by the exam's
+// score visibility (teachers/admins always allowed).
+const getExamRank = asyncHandler(async (req, res) => {
+  const { examId } = req.params;
+  const exam = await Exam.findById(examId);
+  if (!exam) {
+    res.status(404);
+    throw new Error("Exam not found");
+  }
+  const user = await User.findById(req.user._id);
+  const isStaff = user && (user.role === "admin" || user.role === "teacher");
+  const vis = resultVisibility(exam, user);
+  if (!isStaff && !vis.canSeeScore) {
+    return res.status(200).json({ visible: false });
+  }
+
+  const results = await Result.find({ examId }).select("userId earnPoints");
+  // Rank by each user's BEST score.
+  const bestByUser = new Map();
+  for (const r of results) {
+    if (r.earnPoints == null) continue;
+    const uid = r.userId.toString();
+    const cur = bestByUser.get(uid);
+    if (cur == null || r.earnPoints > cur) bestByUser.set(uid, r.earnPoints);
+  }
+  const scores = [...bestByUser.values()].sort((a, b) => b - a);
+  const total = scores.length;
+  const myBest = bestByUser.get(user._id.toString());
+  if (myBest == null) {
+    return res.status(200).json({ visible: true, participated: false, total });
+  }
+  const above = scores.filter((s) => s > myBest).length;
+  const rank = above + 1;
+  const percentile = total > 1 ? Math.round(((total - rank) / (total - 1)) * 100) : 100;
+  const average = total ? Math.round((scores.reduce((a, b) => a + b, 0) / total) * 10) / 10 : 0;
+
+  res.status(200).json({
+    visible: true,
+    participated: true,
+    rank,
+    total,
+    percentile,
+    average,
+    top: scores[0],
+    your: myBest,
+  });
+});
+
 // Lightweight check used by the details page: is there an exam in progress for
 // this user (so "Start" can become "Resume")? Server-truth only.
 const attemptStatus = asyncHandler(async (req, res) => {
@@ -1182,6 +1231,7 @@ module.exports = {
   addResult,
   startAttempt,
   attemptStatus,
+  getExamRank,
   uploadPdf,
   getResultsByUser,
   getResultsByUserByExam,
