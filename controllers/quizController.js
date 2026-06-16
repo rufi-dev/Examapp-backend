@@ -88,7 +88,10 @@ const getClass = asyncHandler(async (req, res) => {
 
 // Get Tags
 const getTags = asyncHandler(async (req, res) => {
-  const tags = await Tag.find().populate("exams");
+  // Public endpoint: do NOT populate exams (that would expose raw exam docs —
+  // including legacy password/answer fields — to anyone). The category list
+  // only needs the tag fields themselves.
+  const tags = await Tag.find();
 
   if (!tags) {
     res.status(404);
@@ -411,6 +414,10 @@ function sanitizeExamForStudent(exam) {
   }
   delete obj.password;
   delete obj.pdf;
+  // Solution media reveals the answers — never expose it on a pre-exam payload
+  // (listing / details / my-exams). It is shown only in the gated review.
+  delete obj.videoLink;
+  delete obj.solutionPhotos;
   return obj;
 }
 
@@ -637,6 +644,27 @@ function applyResultVisibility(result, vis) {
   }
   if (!vis.canSeeAnswers) {
     obj.correctAnswers = null;
+  }
+  // Sanitize the populated exam (examId): a student never gets the password or
+  // pdf location through a result, and solution media + the answer key only once
+  // answers are allowed to be revealed.
+  const ex = obj.examId;
+  if (ex && typeof ex === "object") {
+    delete ex.password;
+    delete ex.pdf;
+    if (!vis.canSeeAnswers) {
+      delete ex.videoLink;
+      ex.solutionPhotos = [];
+      if (ex.questions && Array.isArray(ex.questions.correctAnswers)) {
+        ex.questions = {
+          ...ex.questions,
+          correctAnswers: ex.questions.correctAnswers.map((q) => ({
+            type: q.type,
+            options: q.options,
+          })),
+        };
+      }
+    }
   }
   return obj;
 }
@@ -908,14 +936,11 @@ const addResult = asyncHandler(async (req, res) => {
   }
 
   const now = Date.now();
-  if (exam.startDate && new Date(exam.startDate).getTime() > now) {
-    res.status(400);
-    throw new Error("İmtahan hələ başlamayıb");
-  }
-  if (exam.endDate && new Date(exam.endDate).getTime() < now) {
-    res.status(400);
-    throw new Error("İmtahan artıq bitib");
-  }
+  // NOTE: we deliberately do NOT hard-reject on exam.startDate/endDate here.
+  // The attempt's expiresAt (already capped at endDate) PLUS the grace window
+  // below is the single source of truth, so a valid final submit that lands a
+  // few seconds after endDate (auto-submit / network lag) is still accepted
+  // instead of silently losing the whole result.
 
   // The in-progress attempt is the source of truth for the deadline. Atomically
   // claim THIS specific attempt (bound by attemptId when the client supplies it)
@@ -960,10 +985,14 @@ const addResult = asyncHandler(async (req, res) => {
   const counts = { Cm: 0, Co: 0, Cd: 0, Cma: 0 };
   let earnedPoints = 0;
   let wrongCount = 0;
+  // Trim surrounding whitespace before comparing (a trailing space/newline on a
+  // typed answer shouldn't mark it wrong). Letter answers are unaffected. Deeper
+  // tolerance (case, internal spacing) is left as a deliberate grading choice.
+  const norm = (v) => String(v ?? "").trim();
   correct.forEach((ca, i) => {
     const s = sel[i];
     const answered = s && s.answer != null && s.answer !== "";
-    if (answered && s.answer === ca.answer) {
+    if (answered && norm(s.answer) === norm(ca.answer)) {
       earnedPoints += points[i] || 0;
       if (counts[ca.type] !== undefined) counts[ca.type]++;
     } else if (answered) {
@@ -1095,7 +1124,10 @@ const getResultsByUserByExam = asyncHandler(async (req, res) => {
     throw new Error("User not found!");
   }
 
+  // Ascending by creation so the frontend's "last array item == latest result"
+  // assumption holds (Mongo does not guarantee natural order).
   const results = await Result.find({ userId: user._id, examId })
+    .sort({ createdAt: 1 })
     .populate("examId")
     .populate("userId");
 
@@ -1136,22 +1168,7 @@ const reviewByResult = asyncHandler(async (req, res) => {
   }
 
   const vis = resultVisibility(result.examId, user);
-  const obj = result.toObject();
-  obj.visibility = vis;
-  if (!vis.canSeeScore) {
-    obj.earnPoints = null;
-    obj.correctAnswersByType = null;
-  }
-  if (!vis.canSeeAnswers) {
-    obj.correctAnswers = null;
-    if (obj.examId && obj.examId.questions && Array.isArray(obj.examId.questions.correctAnswers)) {
-      obj.examId.questions.correctAnswers = obj.examId.questions.correctAnswers.map((q) => ({
-        type: q.type,
-        options: q.options,
-      }));
-    }
-  }
-  res.status(200).json(obj);
+  res.status(200).json(applyResultVisibility(result, vis));
 });
 
 const editQuestion = asyncHandler(async (req, res) => {
