@@ -16,9 +16,26 @@ const attemptSchema = new Schema(
     violations: { type: Number, default: 0 },
     terminated: { type: Boolean, default: false },
   },
-  { timestamps: true }
+  // Indexes are built explicitly at startup (after a one-time dedup) so the
+  // unique partial index below can't fail to build on legacy duplicate data.
+  { timestamps: true, autoIndex: false }
 );
 
 attemptSchema.index({ userId: 1, examId: 1 });
+
+// At most ONE active (unsubmitted) attempt per user/exam, enforced by the DB so
+// parallel /start requests can't race past maxTry by creating several live
+// attempts. (Submitted attempts are excluded, so retries are still allowed.)
+attemptSchema.index(
+  { userId: 1, examId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { submitted: false },
+    // Distinct name: without it, this collides with the index above (same key
+    // pattern) and MongoDB rejects it with IndexKeySpecsConflict, silently
+    // leaving NO uniqueness — which defeats the whole single-active-attempt fix.
+    name: "uniq_active_attempt",
+  }
+);
 
 module.exports = mongoose.model("Attempt", attemptSchema);

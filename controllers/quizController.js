@@ -11,6 +11,10 @@ const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const fs = require("fs");
 const path = require("path");
+const Stripe = require("stripe");
+// Only used to VERIFY a checkout session was actually paid before unlocking a
+// paid exam. Null if Stripe isn't configured (paid adds then fail closed).
+const stripe = process.env.STRIPE_KEY ? Stripe(process.env.STRIPE_KEY) : null;
 
 // Delete a server-hosted PDF file from disk. No-op for remote (Cloudinary) URLs.
 function deleteLocalPdf(pdfUrl) {
@@ -282,15 +286,56 @@ const addExamToUser = asyncHandler(async (req, res) => {
     throw new Error("No Exam found");
   }
 
-  // Paid exams require a valid Stripe-issued token. Free exams (price 0)
+  // Paid exams require a real, verified Stripe payment. Free exams (price 0)
   // are added directly, with no payment step.
+  const isPaid = exam.price && Number(exam.price) > 0;
   if (token) {
-    const decodedToken = jwt.verify(token, process.env.JWT_SECRET);
-    if (!decodedToken.userId) {
+    let decodedToken;
+    try {
+      decodedToken = jwt.verify(token, process.env.JWT_SECRET);
+    } catch {
       res.status(401);
       throw new Error("Unauthorized");
     }
-  } else if (exam.price && Number(exam.price) > 0) {
+    // Bind the token to THIS user, THIS exam, and the purchase token type: a
+    // token minted for one user/exam (or a login token) can't be replayed here.
+    if (
+      decodedToken.typ !== "exam_purchase" ||
+      !decodedToken.userId ||
+      String(decodedToken.userId) !== String(req.user._id) ||
+      String(decodedToken.examId) !== String(examId)
+    ) {
+      res.status(401);
+      throw new Error("Unauthorized");
+    }
+    // PROOF OF PAYMENT: a self-minted token is NOT proof a payment happened, so
+    // for paid exams verify the Stripe Checkout Session was actually paid (and
+    // belongs to this user+exam). Fail closed.
+    if (isPaid) {
+      const sessionId = req.query.session_id;
+      if (!stripe) {
+        res.status(500);
+        throw new Error("Ödəniş yoxlanışı konfiqurasiya olunmayıb");
+      }
+      let session;
+      try {
+        session = sessionId
+          ? await stripe.checkout.sessions.retrieve(String(sessionId))
+          : null;
+      } catch {
+        session = null;
+      }
+      if (
+        !session ||
+        session.payment_status !== "paid" ||
+        String(session.metadata?.userId) !== String(req.user._id) ||
+        String(session.metadata?.examId) !== String(examId)
+      ) {
+        res.status(402);
+        throw new Error("Ödəniş təsdiqlənmədi");
+      }
+    }
+  } else if (isPaid) {
     res.status(400);
     throw new Error("Bu imtahan ödənişlidir");
   }
@@ -306,7 +351,8 @@ const addExamToUser = asyncHandler(async (req, res) => {
   exam.users.push(user._id);
   await exam.save();
 
-  res.status(200).json(exam);
+  // Never echo the access password / pdf location back to the student.
+  res.status(200).json(sanitizeExamForStudent(exam));
 });
 
 const addExamToUserById = asyncHandler(async (req, res) => {
@@ -346,6 +392,28 @@ const addExamToUserById = asyncHandler(async (req, res) => {
   }
 });
 
+// Strip an exam down to what a STUDENT may receive: no answer key, no access
+// password, no direct PDF location. Used by every student-facing exam payload
+// (the class listing and the single-exam fetch) so answers can't be read before
+// (or instead of) starting. The PDF is reachable only via the gated route.
+function sanitizeExamForStudent(exam) {
+  const obj = typeof exam.toObject === "function" ? exam.toObject() : { ...exam };
+  if (obj.questions && Array.isArray(obj.questions.correctAnswers)) {
+    // Build a NEW questions object so we never mutate a shared/populated doc
+    // (a plain {...exam} is only a shallow copy of the top level).
+    obj.questions = {
+      ...obj.questions,
+      correctAnswers: obj.questions.correctAnswers.map((q) => ({
+        type: q.type,
+        options: q.options,
+      })),
+    };
+  }
+  delete obj.password;
+  delete obj.pdf;
+  return obj;
+}
+
 const getExamsByClass = asyncHandler(async (req, res) => {
   const { classId } = req.params;
   if (!classId) {
@@ -372,8 +440,11 @@ const getExamsByClass = asyncHandler(async (req, res) => {
   // Students only see published exams; teachers/admins see hidden ones too.
   const isStaff =
     req.user && (req.user.role === "admin" || req.user.role === "teacher");
-  const visible = isStaff ? exams : exams.filter((e) => !e.hidden);
-
+  if (isStaff) {
+    return res.status(200).json(exams);
+  }
+  // Non-staff: hide drafts AND strip answer keys / password / pdf from each exam.
+  const visible = exams.filter((e) => !e.hidden).map(sanitizeExamForStudent);
   res.status(200).json(visible);
 });
 
@@ -444,24 +515,13 @@ const getExam = asyncHandler(async (req, res) => {
     throw new Error("No exams found");
   }
 
-  // Never expose the correct answers to students through the exam payload.
+  // Never expose the correct answers / password / pdf to students.
   const isStaff = req.user && (req.user.role === "admin" || req.user.role === "teacher");
-  const obj = exam.toObject();
   if (!isStaff) {
-    if (obj.questions && Array.isArray(obj.questions.correctAnswers)) {
-      obj.questions.correctAnswers = obj.questions.correctAnswers.map((q) => ({
-        type: q.type,
-        options: q.options,
-      }));
-    }
-    // Never leak the access password or the PDF location to students here;
-    // the PDF is fetched only through the gated getPdfByExam.
-    delete obj.password;
-    delete obj.pdf;
-  } else if (obj.pdf?.path) {
-    obj.pdf.path = httpsify(obj.pdf.path);
+    return res.status(200).json(sanitizeExamForStudent(exam));
   }
-
+  const obj = exam.toObject();
+  if (obj.pdf?.path) obj.pdf.path = httpsify(obj.pdf.path);
   res.status(200).json(obj);
 });
 
@@ -607,6 +667,16 @@ const startAttempt = asyncHandler(async (req, res) => {
     return res.status(403).json({ reason: "not_started" });
   }
 
+  // Ownership gate: a student must have ACQUIRED the exam (free add, paid
+  // purchase, or teacher assignment) before starting it. Without this, any
+  // verified user could start a paid/unassigned exam just by POSTing its id.
+  const owns =
+    user.exams.some((e) => e.toString() === String(examId)) ||
+    exam.users.some((u) => u.toString() === user._id.toString());
+  if (!isStaff && !owns) {
+    return res.status(403).json({ reason: "not_owned" });
+  }
+
   const now = Date.now();
   const correctAnswers = exam.questions?.correctAnswers || [];
 
@@ -678,7 +748,22 @@ const startAttempt = asyncHandler(async (req, res) => {
   let expMs = now + (exam.duration || 0) * 1000;
   if (exam.endDate) expMs = Math.min(expMs, new Date(exam.endDate).getTime());
   const expiresAt = new Date(expMs);
-  attempt = await Attempt.create({ userId: user._id, examId, startedAt, expiresAt });
+  try {
+    attempt = await Attempt.create({ userId: user._id, examId, startedAt, expiresAt });
+  } catch (e) {
+    // The partial-unique index allows only ONE active (unsubmitted) attempt per
+    // user/exam. A concurrent start that lost the race gets the winner's attempt
+    // instead of creating a second one (which would defeat maxTry).
+    if (e && e.code === 11000) {
+      const existing = await Attempt.findOne({
+        userId: user._id,
+        examId,
+        submitted: false,
+      }).sort({ createdAt: -1 });
+      if (existing) return res.status(200).json(payload(existing));
+    }
+    throw e;
+  }
 
   return res.status(200).json(payload(attempt));
 });
@@ -700,11 +785,11 @@ const getExamRank = asyncHandler(async (req, res) => {
     return res.status(200).json({ visible: false });
   }
 
-  const results = await Result.find({ examId }).select("userId earnPoints");
-  // Rank by each user's BEST score.
+  const results = await Result.find({ examId }).select("userId earnPoints terminated");
+  // Rank by each user's BEST score; terminated (cheating) results are excluded.
   const bestByUser = new Map();
   for (const r of results) {
-    if (r.earnPoints == null) continue;
+    if (r.earnPoints == null || r.terminated) continue;
     const uid = r.userId.toString();
     const cur = bestByUser.get(uid);
     if (cur == null || r.earnPoints > cur) bestByUser.set(uid, r.earnPoints);
@@ -763,11 +848,10 @@ const ANTICHEAT_LIMIT = 3;
 // reaches here it is permanent.
 const reportViolation = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const attempt = await Attempt.findOne({
-    userId: req.user._id,
-    examId,
-    submitted: false,
-  }).sort({ createdAt: -1 });
+  const { attemptId } = req.body || {};
+  const filter = { userId: req.user._id, examId, submitted: false };
+  if (attemptId && mongoose.Types.ObjectId.isValid(attemptId)) filter._id = attemptId;
+  const attempt = await Attempt.findOne(filter).sort({ createdAt: -1 });
 
   if (!attempt) {
     return res.status(404).json({ reason: "no_active_attempt" });
@@ -794,7 +878,7 @@ const reportViolation = asyncHandler(async (req, res) => {
 
 const addResult = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const { selectedAnswers, violations, terminated } = req.body;
+  const { selectedAnswers, violations, terminated, attemptId } = req.body;
   const user = await User.findById(req.user._id);
 
   if (!user) {
@@ -812,6 +896,17 @@ const addResult = asyncHandler(async (req, res) => {
     throw new Error("No Exam found");
   }
 
+  // Ownership backstop (defense in depth — a result can't exist without an
+  // attempt, which already requires ownership, but enforce it here too).
+  const isStaff = user.role === "admin" || user.role === "teacher";
+  const owns =
+    user.exams.some((e) => e.toString() === String(examId)) ||
+    exam.users.some((u) => u.toString() === user._id.toString());
+  if (!isStaff && !owns) {
+    res.status(403);
+    throw new Error("Bu imtahana giriş yoxdur");
+  }
+
   const now = Date.now();
   if (exam.startDate && new Date(exam.startDate).getTime() > now) {
     res.status(400);
@@ -822,12 +917,17 @@ const addResult = asyncHandler(async (req, res) => {
     throw new Error("İmtahan artıq bitib");
   }
 
-  // The in-progress attempt is the source of truth for the deadline.
-  // Atomically claim the live attempt (submitted: false -> true) so two devices
-  // sharing it can't both create a result. The loser is told the exam is
+  // The in-progress attempt is the source of truth for the deadline. Atomically
+  // claim THIS specific attempt (bound by attemptId when the client supplies it)
+  // so two devices sharing the exam can't both create a result, and a stale
+  // client can't claim a different attempt. The loser is told the exam is
   // already closed — not an error, just "go to the result page".
+  const claimFilter = { userId: user._id, examId, submitted: false };
+  if (attemptId && mongoose.Types.ObjectId.isValid(attemptId)) {
+    claimFilter._id = attemptId;
+  }
   const attempt = await Attempt.findOneAndUpdate(
-    { userId: user._id, examId, submitted: false },
+    claimFilter,
     { $set: { submitted: true } },
     { sort: { createdAt: -1 }, new: false }
   );
@@ -839,6 +939,18 @@ const addResult = asyncHandler(async (req, res) => {
   if (new Date(attempt.expiresAt).getTime() + ATTEMPT_GRACE_MS < now) {
     res.status(400);
     throw new Error("İmtahan vaxtı bitib");
+  }
+
+  // maxTry backstop: cap the number of scored results even if a race created an
+  // extra attempt. The just-claimed attempt is already consumed as a used try.
+  const maxTry = exam.maxTry || 0;
+  if (maxTry > 0) {
+    const resultCount = await Result.countDocuments({ userId: user._id, examId });
+    if (resultCount >= maxTry) {
+      return res
+        .status(403)
+        .json({ reason: "max_tries", message: "Maksimum cəhd sayına çatmısınız" });
+    }
   }
 
   // Score on the server, against answers the client never received.
@@ -871,6 +983,12 @@ const addResult = asyncHandler(async (req, res) => {
   }
   earnedPoints = Math.round(earnedPoints * 100) / 100;
 
+  // A terminated (anti-cheat) attempt scores ZERO and is server-decided: a
+  // modified client can't keep working past termination and still bank points.
+  const isTerminated =
+    !!attempt.terminated || terminated === true || terminated === "true";
+  if (isTerminated) earnedPoints = 0;
+
   const newResult = await Result.create({
     userId: user._id,
     examId,
@@ -879,8 +997,7 @@ const addResult = asyncHandler(async (req, res) => {
     // Server-authoritative: the attempt's recorded count is the floor, so a
     // tampered client body can never lower the violations on the final result.
     violations: Math.max(attempt.violations || 0, Number(violations) || 0),
-    terminated:
-      !!attempt.terminated || terminated === true || terminated === "true",
+    terminated: isTerminated,
     selectedAnswers: sel.map((a) => ({ type: a?.type, answer: a?.answer })),
     correctAnswers: correct.map((a) => ({ type: a.type, answer: a.answer })),
     correctAnswersByType: [
@@ -1340,11 +1457,8 @@ const getExamsByUser = asyncHandler(async (req, res) => {
     throw new Error("User not found!");
   }
 
-  if (user.exams.length > 0) {
-    res.status(200).json(user.exams);
-  } else {
-    res.status(200).json([]);
-  }
+  // The "my exams" list must not carry the access password or pdf location.
+  res.status(200).json((user.exams || []).map((e) => sanitizeExamForStudent(e)));
 });
 
 // Authoritative server clock so client countdowns (exam opening, deadline)

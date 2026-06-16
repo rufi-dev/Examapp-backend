@@ -9,7 +9,25 @@ const quizRoute = require('./routes/quizRoute')
 const achivementRoute = require('./routes/achivementRoute')
 const stripeRoute = require('./routes/stripeRoute')
 const notificationRoute = require('./routes/notificationRoute')
+const Attempt = require('./models/attemptModel')
 const errorHandler = require('./middleware/errorMiddleware')
+
+// Collapse any pre-existing duplicate ACTIVE attempts (keep the newest, mark the
+// rest submitted) so the unique partial index can build, then ensure indexes
+// exist. Idempotent: a no-op once there are no duplicates.
+async function prepareAttempts() {
+    const dupes = await Attempt.aggregate([
+        { $match: { submitted: false } },
+        { $sort: { createdAt: -1 } },
+        { $group: { _id: { u: "$userId", e: "$examId" }, ids: { $push: "$_id" } } },
+        { $match: { "ids.1": { $exists: true } } },
+    ])
+    for (const d of dupes) {
+        const [, ...older] = d.ids // keep ids[0] (newest); retire the rest
+        await Attempt.updateMany({ _id: { $in: older } }, { $set: { submitted: true } })
+    }
+    await Attempt.createIndexes()
+}
 
 
 const app = express()
@@ -65,7 +83,15 @@ const PORT = process.env.PORT || 5000
 
 mongoose
     .connect(process.env.MONGO_URI)
-    .then(() => {
+    .then(async () => {
+        try {
+            await prepareAttempts()
+        } catch (e) {
+            // Non-fatal so a transient DB hiccup doesn't block boot, but loud:
+            // a missing uniqueness index silently disables the single-active-
+            // attempt guarantee.
+            console.error("[ATTEMPT INDEX] prep FAILED — single-active-attempt uniqueness NOT enforced:", e.message)
+        }
         app.listen(PORT, () => {
             console.log("Connected to DB and listening on port:", PORT)
         })
