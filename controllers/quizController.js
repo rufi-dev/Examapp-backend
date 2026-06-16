@@ -437,7 +437,9 @@ const getExamsByClass = asyncHandler(async (req, res) => {
 
   const objectId = new mongoose.Types.ObjectId(classId);
 
-  const exams = await Exam.find({ class: objectId }).populate("questions");
+  // No questions populate: the exam-card listing doesn't render any question
+  // data, so sending populated question/option arrays per card is wasted payload.
+  const exams = await Exam.find({ class: objectId });
 
   if (!exams) {
     res.status(500);
@@ -875,10 +877,11 @@ const attemptStatus = asyncHandler(async (req, res) => {
 
   // Used-try count exactly as startAttempt enforces it (started attempts OR
   // results, whichever is higher), so the details page can show accurate tries
-  // left instead of counting results only.
+  // left. Only computed when ?counts=1 (the details page) — the in-exam 8s poll
+  // never reads it, so it skips these two extra counts every tick.
   const maxTry = exam?.maxTry || 0;
   let used = 0;
-  if (maxTry > 0) {
+  if (req.query.counts && maxTry > 0) {
     const [attemptCount, resultCount] = await Promise.all([
       Attempt.countDocuments({ userId: req.user._id, examId }),
       Result.countDocuments({ userId: req.user._id, examId }),

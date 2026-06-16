@@ -81,6 +81,13 @@ const resultSchema = Schema(
   }
 );
 
+// Indexes for the hot result queries: per-user-per-exam (maxTry counts, a
+// student's results, the rank "best score" reads) and per-exam (rankings,
+// results-by-exam). Without these, countDocuments/find full-scan the collection
+// and get slower as results grow.
+resultSchema.index({ userId: 1, examId: 1, createdAt: 1 });
+resultSchema.index({ examId: 1 });
+
 const ResultModel = mongoose.model("Result", resultSchema);
 
 module.exports = ResultModel;
