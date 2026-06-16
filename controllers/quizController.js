@@ -553,23 +553,7 @@ const startAttempt = asyncHandler(async (req, res) => {
   }
 
   const now = Date.now();
-  if (exam.startDate && new Date(exam.startDate).getTime() > now)
-    return res.status(403).json({ reason: "not_started" });
-  if (exam.endDate && new Date(exam.endDate).getTime() < now)
-    return res.status(403).json({ reason: "finished" });
-
-  // Password gate (server-authoritative): checked before any attempt is
-  // resumed/created and before questions are returned, so a missing/wrong
-  // password means no access — even on resume, and even via a tampered URL.
-  if (exam.password && String(exam.password).length) {
-    const provided = (req.body && req.body.password) || "";
-    if (!provided) return res.status(403).json({ reason: "password_required" });
-    if (String(provided) !== String(exam.password))
-      return res.status(403).json({ reason: "password_wrong" });
-  }
-
   const correctAnswers = exam.questions?.correctAnswers || [];
-  if (!correctAnswers.length) return res.status(403).json({ reason: "no_questions" });
 
   const payload = (attempt) => ({
     attemptId: attempt._id,
@@ -579,7 +563,12 @@ const startAttempt = asyncHandler(async (req, res) => {
     questions: correctAnswers.map((q) => ({ type: q.type, options: q.options })),
   });
 
-  // Resume an active, non-expired attempt if one exists.
+  // RESUME: a non-expired, unsubmitted attempt is already in progress, so it is
+  // returned WITHOUT re-checking the password, window or tries. An attempt only
+  // exists because the server created one (after the password, if any), so a
+  // resume can't be forged from the client, and the deadline (expiresAt) is
+  // unchanged — resuming can never buy extra time or skip the password for a
+  // fresh start.
   let attempt = await Attempt.findOne({
     userId: user._id,
     examId,
@@ -593,6 +582,23 @@ const startAttempt = asyncHandler(async (req, res) => {
     attempt.submitted = true; // expired without submitting -> a used try
     await attempt.save();
   }
+
+  // NEW START from here on: enforce the window, password, questions, max tries.
+  if (exam.startDate && new Date(exam.startDate).getTime() > now)
+    return res.status(403).json({ reason: "not_started" });
+  if (exam.endDate && new Date(exam.endDate).getTime() < now)
+    return res.status(403).json({ reason: "finished" });
+
+  // Password gate (server-authoritative): a missing/wrong password means no new
+  // attempt and no questions, even via a tampered URL.
+  if (exam.password && String(exam.password).length) {
+    const provided = (req.body && req.body.password) || "";
+    if (!provided) return res.status(403).json({ reason: "password_required" });
+    if (String(provided) !== String(exam.password))
+      return res.status(403).json({ reason: "password_wrong" });
+  }
+
+  if (!correctAnswers.length) return res.status(403).json({ reason: "no_questions" });
 
   // Enforce maxTry (number of started tries; also counts legacy results).
   const maxTry = exam.maxTry || 0;
@@ -610,6 +616,20 @@ const startAttempt = asyncHandler(async (req, res) => {
   attempt = await Attempt.create({ userId: user._id, examId, startedAt, expiresAt });
 
   return res.status(200).json(payload(attempt));
+});
+
+// Lightweight check used by the details page: is there an exam in progress for
+// this user (so "Start" can become "Resume")? Server-truth only.
+const attemptStatus = asyncHandler(async (req, res) => {
+  const { examId } = req.params;
+  const attempt = await Attempt.findOne({
+    userId: req.user._id,
+    examId,
+    submitted: false,
+  }).sort({ createdAt: -1 });
+  const active =
+    !!attempt && new Date(attempt.expiresAt).getTime() > Date.now();
+  res.status(200).json({ active, expiresAt: active ? attempt.expiresAt : null });
 });
 
 const addResult = asyncHandler(async (req, res) => {
@@ -1161,6 +1181,7 @@ module.exports = {
   addPhotoToResult,
   addResult,
   startAttempt,
+  attemptStatus,
   uploadPdf,
   getResultsByUser,
   getResultsByUserByExam,
