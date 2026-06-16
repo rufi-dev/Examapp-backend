@@ -597,6 +597,10 @@ const startAttempt = asyncHandler(async (req, res) => {
     name: exam.name,
     duration: exam.duration,
     antiCheat: !!exam.antiCheat,
+    // Server-truth anti-cheat state so a reload/resume restores the real count
+    // (it can't be wiped by refreshing or clearing localStorage).
+    violations: attempt.violations || 0,
+    terminated: !!attempt.terminated,
     questions: correctAnswers.map((q) => ({ type: q.type, options: q.options })),
   });
 
@@ -723,6 +727,45 @@ const attemptStatus = asyncHandler(async (req, res) => {
   res.status(200).json({ active, expiresAt: active ? attempt.expiresAt : null });
 });
 
+// Anti-cheat limit, server-side source of truth (mirrors the client constant).
+const ANTICHEAT_LIMIT = 3;
+
+// Records ONE anti-cheat violation against the live attempt and returns the
+// authoritative count. The server (not the browser) owns the tally and decides
+// when the exam is terminated, so editing JS/localStorage or reloading can't
+// reduce it. Reporting is the only thing the client controls; once a violation
+// reaches here it is permanent.
+const reportViolation = asyncHandler(async (req, res) => {
+  const { examId } = req.params;
+  const attempt = await Attempt.findOne({
+    userId: req.user._id,
+    examId,
+    submitted: false,
+  }).sort({ createdAt: -1 });
+
+  if (!attempt) {
+    return res.status(404).json({ reason: "no_active_attempt" });
+  }
+  // Ignore reports after the deadline (the attempt is effectively over).
+  if (new Date(attempt.expiresAt).getTime() + (ATTEMPT_GRACE_MS || 0) < Date.now()) {
+    return res.status(200).json({
+      violations: attempt.violations || 0,
+      terminated: !!attempt.terminated,
+      limit: ANTICHEAT_LIMIT,
+    });
+  }
+
+  attempt.violations = (attempt.violations || 0) + 1;
+  if (attempt.violations >= ANTICHEAT_LIMIT) attempt.terminated = true;
+  await attempt.save();
+
+  res.status(200).json({
+    violations: attempt.violations,
+    terminated: attempt.terminated,
+    limit: ANTICHEAT_LIMIT,
+  });
+});
+
 const addResult = asyncHandler(async (req, res) => {
   const { examId } = req.params;
   const { selectedAnswers, violations, terminated } = req.body;
@@ -805,8 +848,11 @@ const addResult = asyncHandler(async (req, res) => {
     examId,
     attempts: sel.filter((a) => a && a.answer).length,
     earnPoints: earnedPoints,
-    violations: Math.max(0, Number(violations) || 0),
-    terminated: terminated === true || terminated === "true",
+    // Server-authoritative: the attempt's recorded count is the floor, so a
+    // tampered client body can never lower the violations on the final result.
+    violations: Math.max(attempt.violations || 0, Number(violations) || 0),
+    terminated:
+      !!attempt.terminated || terminated === true || terminated === "true",
     selectedAnswers: sel.map((a) => ({ type: a?.type, answer: a?.answer })),
     correctAnswers: correct.map((a) => ({ type: a.type, answer: a.answer })),
     correctAnswersByType: [
@@ -1306,6 +1352,7 @@ module.exports = {
   addResult,
   startAttempt,
   attemptStatus,
+  reportViolation,
   getExamRank,
   uploadPdf,
   getResultsByUser,
