@@ -352,7 +352,29 @@ const getExamsByClass = asyncHandler(async (req, res) => {
     throw new Error("No Exams Added yet");
   }
 
-  res.status(200).json(exams);
+  // Students only see published exams; teachers/admins see hidden ones too.
+  const isStaff =
+    req.user && (req.user.role === "admin" || req.user.role === "teacher");
+  const visible = isStaff ? exams : exams.filter((e) => !e.hidden);
+
+  res.status(200).json(visible);
+});
+
+// Quick publish/hide toggle for an exam (no other fields touched).
+const setExamHidden = asyncHandler(async (req, res) => {
+  const { examId } = req.params;
+  const { hidden } = req.body;
+  const exam = await Exam.findById(examId);
+  if (!exam) {
+    res.status(404);
+    throw new Error("İmtahan tapılmadı");
+  }
+  exam.hidden = hidden === true || hidden === "true";
+  await exam.save();
+  res.status(200).json({
+    message: exam.hidden ? "İmtahan gizlədildi" : "İmtahan göstərildi",
+    hidden: exam.hidden,
+  });
 });
 
 const getClassesByTag = asyncHandler(async (req, res) => {
@@ -558,6 +580,12 @@ const startAttempt = asyncHandler(async (req, res) => {
   if (!exam) {
     res.status(404);
     throw new Error("Exam not found");
+  }
+
+  // Hidden (draft) exams are not accessible to students, even via a direct URL.
+  const isStaff = user.role === "admin" || user.role === "teacher";
+  if (exam.hidden && !isStaff) {
+    return res.status(403).json({ reason: "not_started" });
   }
 
   const now = Date.now();
@@ -1260,6 +1288,7 @@ module.exports = {
   deleteTag,
   editTag,
   editClass,
+  setExamHidden,
   addPhotoToResult,
   addResult,
   startAttempt,

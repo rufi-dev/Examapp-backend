@@ -24,6 +24,7 @@ const {
   deleteTag,
   editTag,
   editClass,
+  setExamHidden,
   addResult,
   startAttempt,
   attemptStatus,
@@ -77,7 +78,7 @@ router.get("/getPdfByExam/:examId", protect, getPdfByExam);
 router.post("/uploadPdf", protect, teacherOnly, pdfUpload.single("file"), uploadPdf);
 router.get("/getExamTagandClass/:examId", protect, getExamTagandClass);
 router.get("/getResultsByExam/:examId", protect, teacherOnly, getResultsByExam);
-router.get("/getExamsByClass/:classId", getExamsByClass);
+router.get("/getExamsByClass/:classId", protect, getExamsByClass);
 router.get("/getClassesByTag/:tagId", getClassesByTag);
 router.post("/addQuestion/:examId", protect, teacherOnly, addQuestion);
 router.patch("/editQuestion/:questionId", protect, teacherOnly, editQuestion);
@@ -97,6 +98,7 @@ router.delete("/deleteClass/:classId", protect, teacherOnly, deleteClass);
 router.delete("/deleteTag/:tagId", protect, teacherOnly, deleteTag);
 router.patch("/editTag/:tagId", protect, teacherOnly, editTag);
 router.patch("/editClass/:classId", protect, teacherOnly, editClass);
+router.patch("/setExamHidden/:examId", protect, teacherOnly, setExamHidden);
 router.post("/exam/:examId/start", protect, startAttempt);
 router.get("/exam/:examId/attemptStatus", protect, attemptStatus);
 router.get("/exam/:examId/rank", protect, getExamRank);

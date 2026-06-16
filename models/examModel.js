@@ -56,6 +56,8 @@ const examSchema = Schema({
     correctPerPenalty: { type: Number, default: 1 },
     // When enabled, the exam runner activates anti-cheat measures.
     antiCheat: { type: Boolean, default: false },
+    // Hidden = a draft only staff can see; students can't list or start it.
+    hidden: { type: Boolean, default: false },
     // Result visibility for students:
     showScore: { type: Boolean, default: true },
     showCorrectAnswers: { type: Boolean, default: false },
