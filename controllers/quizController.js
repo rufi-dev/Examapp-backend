@@ -189,12 +189,26 @@ const addExam = asyncHandler(async (req, res) => {
 
 // Store an exam PDF on the server's disk and return its public URL. Used
 // instead of Cloudinary so large PDFs aren't blocked by the 10MB limit.
+// Older PDF paths were saved as http:// (Express saw the internal request as
+// http behind the proxy). An HTTPS page — and especially an installed PWA,
+// which has no "load anyway" escape hatch — blocks http subresources as mixed
+// content, so the viewer shows "PDF yüklənmədi". Upgrade any non-local http URL
+// to https on the way out; this fixes existing exams with no DB migration.
+const httpsify = (url) =>
+  typeof url === "string" &&
+  /^http:\/\//i.test(url) &&
+  !/localhost|127\.0\.0\.1/i.test(url)
+    ? url.replace(/^http:\/\//i, "https://")
+    : url;
+
 const uploadPdf = asyncHandler(async (req, res) => {
   if (!req.file) {
     res.status(400);
     throw new Error("Fayl tapılmadı");
   }
-  const url = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+  const url = httpsify(
+    `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`
+  );
   res.status(200).json({ url, filename: req.file.filename });
 });
 
@@ -239,7 +253,10 @@ const getPdfByExam = asyncHandler(async (req, res) => {
       throw new Error("PDF not found");
     }
 
-    res.status(200).json(pdf);
+    // Force https so the PWA's mixed-content guard doesn't block the viewer.
+    const out = pdf.toObject();
+    out.path = httpsify(out.path);
+    res.status(200).json(out);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -441,6 +458,8 @@ const getExam = asyncHandler(async (req, res) => {
     // the PDF is fetched only through the gated getPdfByExam.
     delete obj.password;
     delete obj.pdf;
+  } else if (obj.pdf?.path) {
+    obj.pdf.path = httpsify(obj.pdf.path);
   }
 
   res.status(200).json(obj);
