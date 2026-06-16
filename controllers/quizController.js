@@ -743,7 +743,14 @@ const attemptStatus = asyncHandler(async (req, res) => {
   }).sort({ createdAt: -1 });
   const active =
     !!attempt && new Date(attempt.expiresAt).getTime() > Date.now();
-  res.status(200).json({ active, expiresAt: active ? attempt.expiresAt : null });
+  // Expose the live anti-cheat state so a second device sharing this attempt
+  // can mirror the count and finish/redirect when it's terminated elsewhere.
+  res.status(200).json({
+    active,
+    expiresAt: active ? attempt.expiresAt : null,
+    violations: attempt ? attempt.violations || 0 : 0,
+    terminated: attempt ? !!attempt.terminated : false,
+  });
 });
 
 // Anti-cheat limit, server-side source of truth (mirrors the client constant).
@@ -816,18 +823,20 @@ const addResult = asyncHandler(async (req, res) => {
   }
 
   // The in-progress attempt is the source of truth for the deadline.
-  const attempt = await Attempt.findOne({
-    userId: user._id,
-    examId,
-    submitted: false,
-  }).sort({ createdAt: -1 });
+  // Atomically claim the live attempt (submitted: false -> true) so two devices
+  // sharing it can't both create a result. The loser is told the exam is
+  // already closed — not an error, just "go to the result page".
+  const attempt = await Attempt.findOneAndUpdate(
+    { userId: user._id, examId, submitted: false },
+    { $set: { submitted: true } },
+    { sort: { createdAt: -1 }, new: false }
+  );
   if (!attempt) {
-    res.status(400);
-    throw new Error("Aktiv imtahan cəhdi tapılmadı");
+    return res
+      .status(409)
+      .json({ reason: "already_submitted", message: "İmtahan artıq bağlanıb" });
   }
   if (new Date(attempt.expiresAt).getTime() + ATTEMPT_GRACE_MS < now) {
-    attempt.submitted = true;
-    await attempt.save();
     res.status(400);
     throw new Error("İmtahan vaxtı bitib");
   }
@@ -882,9 +891,7 @@ const addResult = asyncHandler(async (req, res) => {
     ],
   });
 
-  attempt.submitted = true;
-  await attempt.save();
-
+  // (The attempt was already claimed as submitted above, atomically.)
   exam.results.push(newResult._id);
   await exam.save();
   user.results.push(newResult._id);
