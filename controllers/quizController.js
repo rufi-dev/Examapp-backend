@@ -720,7 +720,7 @@ const attemptStatus = asyncHandler(async (req, res) => {
 
 const addResult = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const { selectedAnswers, violations } = req.body;
+  const { selectedAnswers, violations, terminated } = req.body;
   const user = await User.findById(req.user._id);
 
   if (!user) {
@@ -801,6 +801,7 @@ const addResult = asyncHandler(async (req, res) => {
     attempts: sel.filter((a) => a && a.answer).length,
     earnPoints: earnedPoints,
     violations: Math.max(0, Number(violations) || 0),
+    terminated: terminated === true || terminated === "true",
     selectedAnswers: sel.map((a) => ({ type: a?.type, answer: a?.answer })),
     correctAnswers: correct.map((a) => ({ type: a.type, answer: a.answer })),
     correctAnswersByType: [

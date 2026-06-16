@@ -63,11 +63,16 @@ const resultSchema = Schema(
         },
       },
     ],
-    // Anti-cheat: number of detected violations (tab switch / blur / leaving
-    // fullscreen) during the attempt. 0 when anti-cheat is off.
+    // Anti-cheat: number of detected violations (tab switch / minimize /
+    // second monitor) during the attempt. 0 when anti-cheat is off.
     violations: {
       type: Number,
       default: 0,
+    },
+    // True when the exam was auto-submitted because the violation limit was hit.
+    terminated: {
+      type: Boolean,
+      default: false,
     },
   },
   {
