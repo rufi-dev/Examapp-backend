@@ -2,6 +2,7 @@ const asyncHandler = require("express-async-handler");
 const User = require("../models/userModel");
 const bcrypt = require("bcryptjs");
 const { generateToken, hashToken, getToken } = require("../utils/index");
+const { recordDebug } = require("../utils/debugLog");
 const parser = require("ua-parser-js");
 const jwt = require("jsonwebtoken");
 const { sendEmail } = require("../utils/sendEmail");
@@ -161,8 +162,15 @@ const loginUser = asyncHandler(async (req, res) => {
 
     // Generate token
     const token = generateToken(user._id);
-    console.log("login token: ", token);
     if (user && isPasswordCorrect) {
+      // Diagnostic: which device logged in (to correlate with later failures).
+      recordDebug({
+        kind: "login_ok",
+        message: "password",
+        email: user.email,
+        ua: req.headers["user-agent"],
+        ip: req.ip,
+      });
       // Send HTTP-only cookie
       res.cookie("token", token, {
         path: "/",
@@ -837,6 +845,15 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
   if (user) {
     // Generate token
     const token = generateToken(user._id);
+
+    // Diagnostic: which device logged in (to correlate with later failures).
+    recordDebug({
+      kind: "login_ok",
+      message: "google",
+      email: user.email,
+      ua: req.headers["user-agent"],
+      ip: req.ip,
+    });
 
     // Send HTTP-only cookie
     res.cookie("token", token, {
