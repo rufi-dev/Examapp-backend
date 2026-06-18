@@ -1,7 +1,7 @@
 const asyncHandler = require("express-async-handler");
 const User = require("../models/userModel");
 const bcrypt = require("bcryptjs");
-const { generateToken, hashToken } = require("../utils/index");
+const { generateToken, hashToken, getToken } = require("../utils/index");
 const parser = require("ua-parser-js");
 const jwt = require("jsonwebtoken");
 const { sendEmail } = require("../utils/sendEmail");
@@ -554,7 +554,7 @@ const getUsers = asyncHandler(async (req, res) => {
 // Login Status
 const loginStatus = asyncHandler(async (req, res) => {
   try {
-    const token = req.cookies.token;
+    const token = getToken(req);
     if (!token) {
       return res.json(false);
     }

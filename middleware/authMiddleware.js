@@ -1,11 +1,12 @@
 const asyncHandler = require("express-async-handler");
 const jwt = require("jsonwebtoken");
 const User = require("../models/userModel");
+const { getToken } = require("../utils/index");
 
 const protect = asyncHandler(async (req, res, next) => {
   try {
-    const token = req.cookies.token;
-    console.log("protect req.cookies: ",req.cookies)
+    // Authorization: Bearer header first (reliable cross-domain), cookie fallback.
+    const token = getToken(req);
     if (!token) {
       res.status(401);
       throw new Error("Not authorized, please login");
@@ -13,7 +14,6 @@ const protect = asyncHandler(async (req, res, next) => {
 
     // Verify Token
     const verified = jwt.verify(token, process.env.JWT_SECRET);
-    console.log("protect verified: ", verified)
 
     //Get UserId from Token
     const user = await User.findById(verified.id).select("-password");
@@ -30,10 +30,7 @@ const protect = asyncHandler(async (req, res, next) => {
 
     req.user = user;
     next();
-    console.log("protect token: ", token)
-    console.log("protect user: ", user)
   } catch (error) {
-    console.log("protect: ", error);
     if (res.statusCode === 200) {
       res.status(401);
       throw new Error("Not authorized, please login");
