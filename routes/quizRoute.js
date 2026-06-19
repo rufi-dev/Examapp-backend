@@ -46,6 +46,7 @@ const {
   getExamTagandClass,
   getResultsByExam
 } = require("../controllers/quizController");
+const { extractQuestions } = require("../controllers/aiController");
 const router = express.Router();
 
 const multer = require("multer");
@@ -70,8 +71,23 @@ const pdfStorage = multer.diskStorage({
 });
 const pdfUpload = multer({ storage: pdfStorage, limits: { fileSize: 100 * 1024 * 1024 } });
 
+// In-memory PDF (kept only long enough to base64-encode for the AI extractor;
+// 32MB is Anthropic's per-request PDF cap).
+const memUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 32 * 1024 * 1024 },
+});
+
 
 router.post("/addTag", protect, teacherOnly, addTag);
+// AI: extract structured questions from an uploaded PDF (teacher reviews + saves).
+router.post(
+  "/extractQuestions/:examId",
+  protect,
+  teacherOnly,
+  memUpload.single("pdf"),
+  extractQuestions
+);
 router.post("/addClass/:tagId", protect, teacherOnly, addClass);
 router.get("/server-time", serverTime);
 router.get("/getTags", getTags);
