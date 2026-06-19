@@ -56,6 +56,13 @@ const examSchema = Schema({
     correctPerPenalty: { type: Number, default: 1 },
     // When enabled, the exam runner activates anti-cheat measures.
     antiCheat: { type: Boolean, default: false },
+    // Multi-select (Cs) partial credit: award proportional points
+    // (correct picks − wrong picks, floored at 0) instead of all-or-nothing.
+    partialCredit: { type: Boolean, default: false },
+    // Per-student randomization of structured choice order (Cm/Cs). The actual
+    // permutation is stored on each Attempt so resume is stable and the server
+    // can map the student's picks back to the original indices on submit.
+    shuffleOptions: { type: Boolean, default: false },
     // Hidden = a draft only staff can see; students can't list or start it.
     hidden: { type: Boolean, default: false },
     // Result visibility for students:
@@ -64,6 +71,10 @@ const examSchema = Schema({
     // If true (default), the above only take effect after endDate (prevents
     // answer sharing during the exam window).
     revealAfterEnd: { type: Boolean, default: true },
+    // "pdf" = questions live in an uploaded PDF (answer key only). "structured"
+    // = native questions (text/options/images/latex) built in-app. Default pdf
+    // keeps every existing exam unchanged.
+    mode: { type: String, enum: ["pdf", "structured"], default: "pdf" },
     questions: {
         type: Schema.Types.ObjectId,
         ref: 'Question'

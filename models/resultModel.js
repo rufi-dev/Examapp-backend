@@ -27,8 +27,10 @@ const resultSchema = Schema(
         type: {
           type: String,
         },
+        // Mixed: a string (Cm letter / open text), a number/array of indices
+        // (structured single/multi), or a {leftIdx: rightId} map (matching).
         answer: {
-          type: String,
+          type: Schema.Types.Mixed,
         },
       },
     ],
@@ -38,9 +40,9 @@ const resultSchema = Schema(
           type: String,
           required: true,
         },
+        // Mixed (see above). A renderable "correct value" for the review screen.
         answer: {
-          type: String,
-          required: true,
+          type: Schema.Types.Mixed,
         },
       },
     ],

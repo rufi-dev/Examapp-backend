@@ -133,24 +133,34 @@ const addExam = asyncHandler(async (req, res) => {
     wrongPerPenalty,
     correctPerPenalty,
     antiCheat,
+    partialCredit,
+    shuffleOptions,
     pdf,
+    mode,
   } = req.body;
   const { classId } = req.params;
 
+  // "structured" exams have native in-app questions (no PDF). Any other value
+  // (or absent) means the legacy PDF flow, which still hard-requires a PDF.
+  const isStructured = mode === "structured";
+
   // Check if all required fields are present
-  if (!name || !duration || !totalMarks || !passingMarks || !pdf) {
+  if (!name || !duration || !totalMarks || !passingMarks || (!isStructured && !pdf)) {
     res
       .status(400)
       .json({ success: false, message: "All fields are required" });
     return;
   }
   try {
-    // Create a PDF entry
-    const pdfModel = new PDF({
-      path: pdf,
-    });
-    // Save the PDF entry to the database
-    const savedPdf = await pdfModel.save();
+    // Create a PDF entry only in PDF mode. Structured exams have no PDF doc.
+    let savedPdf = null;
+    if (!isStructured) {
+      const pdfModel = new PDF({
+        path: pdf,
+      });
+      // Save the PDF entry to the database
+      savedPdf = await pdfModel.save();
+    }
 
     // Create an exam entry with the PDF ID
 
@@ -166,6 +176,7 @@ const addExam = asyncHandler(async (req, res) => {
       totalMarks,
       passingMarks,
       maxTry,
+      mode: isStructured ? "structured" : "pdf",
       showScore: showScore === "true" || showScore === true,
       showCorrectAnswers: showCorrectAnswers === "true" || showCorrectAnswers === true,
       revealAfterEnd: revealAfterEnd === "true" || revealAfterEnd === true,
@@ -174,11 +185,14 @@ const addExam = asyncHandler(async (req, res) => {
       wrongPerPenalty: Math.max(1, Number(wrongPerPenalty) || 3),
       correctPerPenalty: Math.max(1, Number(correctPerPenalty) || 1),
       antiCheat: antiCheat === "true" || antiCheat === true,
+      partialCredit: partialCredit === "true" || partialCredit === true,
+      shuffleOptions: shuffleOptions === "true" || shuffleOptions === true,
       videoLink,
       startDate,
       endDate,
       class: classId,
-      pdf: savedPdf._id, // Assign the PDF ID to the exam's pdf field
+      // Only PDF exams carry a pdf reference.
+      ...(savedPdf ? { pdf: savedPdf._id } : {}),
     });
     // Save the exam entry
     await newExam.save();
@@ -395,6 +409,72 @@ const addExamToUserById = asyncHandler(async (req, res) => {
   }
 });
 
+// Strip ONE correctAnswers[] item down to what a student may see. PDF items
+// keep just {type, options} (the letters a/b/c/d). Structured items keep their
+// DISPLAY content (text, image(s), latex, choices' text/image/latex) but NEVER
+// the answer key: `correct` (the right indices), matching `pairs`, and the
+// canonical `answer` string are all dropped. Single source of truth shared by
+// every student-facing payload (listing, details, review-when-hidden, the
+// /start runner payload) so a leak can't slip in through one path.
+// Fisher-Yates shuffle (returns a NEW array, leaves input untouched). Used to
+// de-correlate the matching right column so its display order can't reveal the
+// correct pairing.
+function shuffled(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// Build a per-question choice permutation for a shuffled-options attempt:
+// { qIndex: perm } where perm[displayPos] = originalChoiceIndex. Only Cm/Cs
+// questions with 2+ choices get an entry; returns undefined when nothing to shuffle.
+function buildOptionOrder(correctAnswers) {
+  const order = {};
+  (correctAnswers || []).forEach((q, idx) => {
+    if (
+      (q.type === "Cm" || q.type === "Cs") &&
+      Array.isArray(q.choices) &&
+      q.choices.length > 1
+    ) {
+      order[idx] = shuffled(q.choices.map((_, k) => k));
+    }
+  });
+  return Object.keys(order).length ? order : undefined;
+}
+
+function sanitizeQuestionItem(q) {
+  const out = { type: q.type };
+  // Legacy PDF letters.
+  if (q.options !== undefined) out.options = q.options;
+  // Structured question content (absent on PDF exams).
+  if (q.text !== undefined) out.text = q.text;
+  if (q.image !== undefined) out.image = q.image;
+  if (q.images !== undefined) out.images = q.images;
+  if (q.latex !== undefined) out.latex = q.latex;
+  if (Array.isArray(q.choices)) {
+    out.choices = q.choices.map((c) => ({
+      text: c.text,
+      image: c.image,
+      latex: c.latex,
+    }));
+  }
+  if (Array.isArray(q.pairs)) {
+    // Matching: send the LEFT column in order and the RIGHT column SHUFFLED,
+    // each side carrying only display content. The correct pairing
+    // (pairs[k].left <-> pairs[k].right) is NEVER sent; the server re-derives
+    // correctness from the submitted {leftIndex: rightText} map on scoring.
+    out.lefts = q.pairs.map((p) => ({ text: p.left, latex: p.leftLatex, image: p.leftImage }));
+    out.rights = shuffled(
+      q.pairs.map((p) => ({ text: p.right, latex: p.rightLatex, image: p.rightImage }))
+    );
+  }
+  // NOTE: q.correct, q.pairs and q.answer are intentionally omitted.
+  return out;
+}
+
 // Strip an exam down to what a STUDENT may receive: no answer key, no access
 // password, no direct PDF location. Used by every student-facing exam payload
 // (the class listing and the single-exam fetch) so answers can't be read before
@@ -406,10 +486,7 @@ function sanitizeExamForStudent(exam) {
     // (a plain {...exam} is only a shallow copy of the top level).
     obj.questions = {
       ...obj.questions,
-      correctAnswers: obj.questions.correctAnswers.map((q) => ({
-        type: q.type,
-        options: q.options,
-      })),
+      correctAnswers: obj.questions.correctAnswers.map(sanitizeQuestionItem),
     };
   }
   delete obj.password;
@@ -543,6 +620,27 @@ const addQuestion = asyncHandler(async (req, res) => {
     return;
   }
 
+  // Light validation for STRUCTURED items (legacy PDF items carry just an
+  // `answer` string and skip all of this). A choice question must have options
+  // and a marked correct answer; a matching question needs at least two pairs.
+  for (const ca of Array.isArray(correctAnswers) ? correctAnswers : []) {
+    if (!ca) continue;
+    if (ca.type === "Cm" || ca.type === "Cs") {
+      if (Array.isArray(ca.choices)) {
+        if (!ca.choices.length) {
+          return res.status(400).json({ message: "Sual üçün ən azı bir variant lazımdır" });
+        }
+        if (!Array.isArray(ca.correct) || ca.correct.length === 0) {
+          return res.status(400).json({ message: "Düzgün cavab seçilməlidir" });
+        }
+      }
+    } else if (ca.type === "Cma" && Array.isArray(ca.pairs)) {
+      if (ca.pairs.length < 2) {
+        return res.status(400).json({ message: "Uyğunlaşdırma sualı ən azı 2 cüt tələb edir" });
+      }
+    }
+  }
+
   const exam = await Exam.findById(examId);
   if (!exam) {
     res.status(404).json({ message: "Exam not found" });
@@ -663,10 +761,7 @@ function applyResultVisibility(result, vis) {
       if (ex.questions && Array.isArray(ex.questions.correctAnswers)) {
         ex.questions = {
           ...ex.questions,
-          correctAnswers: ex.questions.correctAnswers.map((q) => ({
-            type: q.type,
-            options: q.options,
-          })),
+          correctAnswers: ex.questions.correctAnswers.map(sanitizeQuestionItem),
         };
       }
     }
@@ -723,20 +818,44 @@ const startAttempt = asyncHandler(async (req, res) => {
   const now = Date.now();
   const correctAnswers = exam.questions?.correctAnswers || [];
 
-  const payload = (attempt) => ({
-    attemptId: attempt._id,
-    // Effective deadline (capped at the exam's CURRENT endDate) so a shortened
-    // window takes effect on the client timer immediately on resume.
-    expiresAt: new Date(effectiveExpiry(attempt, exam)),
-    name: exam.name,
-    duration: exam.duration,
-    antiCheat: !!exam.antiCheat,
-    // Server-truth anti-cheat state so a reload/resume restores the real count
-    // (it can't be wiped by refreshing or clearing localStorage).
-    violations: attempt.violations || 0,
-    terminated: !!attempt.terminated,
-    questions: correctAnswers.map((q) => ({ type: q.type, options: q.options })),
-  });
+  const payload = (attempt) => {
+    const order = attempt.optionOrder || null;
+    return {
+      attemptId: attempt._id,
+      // Effective deadline (capped at the exam's CURRENT endDate) so a shortened
+      // window takes effect on the client timer immediately on resume.
+      expiresAt: new Date(effectiveExpiry(attempt, exam)),
+      name: exam.name,
+      duration: exam.duration,
+      antiCheat: !!exam.antiCheat,
+      // Server-truth anti-cheat state so a reload/resume restores the real count
+      // (it can't be wiped by refreshing or clearing localStorage).
+      violations: attempt.violations || 0,
+      terminated: !!attempt.terminated,
+      // "pdf" or "structured" so the runner knows whether to show the PDF panel
+      // or render native questions.
+      mode: exam.mode === "structured" ? "structured" : "pdf",
+      // Same sanitizer as every other student payload: display content only, the
+      // answer key (`correct`/`pairs`/`answer`) is never sent to the runner. When
+      // options are shuffled, reorder each Cm/Cs question's choices by THIS
+      // attempt's stored permutation (stable across resumes).
+      questions: correctAnswers.map((q, idx) => {
+        const item = sanitizeQuestionItem(q);
+        const perm = order && order[idx];
+        // Only apply the stored permutation when it still aligns with the current
+        // choices. If the question was edited mid-attempt (choice count changed),
+        // fall back to canonical order so picks can't map to stale indices.
+        if (
+          Array.isArray(perm) &&
+          Array.isArray(item.choices) &&
+          perm.length === item.choices.length
+        ) {
+          item.choices = perm.map((o) => item.choices[o]);
+        }
+        return item;
+      }),
+    };
+  };
 
   // RESUME: a non-expired, unsubmitted attempt is already in progress, so it is
   // returned WITHOUT re-checking the password, window or tries. An attempt only
@@ -793,8 +912,21 @@ const startAttempt = asyncHandler(async (req, res) => {
   let expMs = now + (exam.duration || 0) * 1000;
   if (exam.endDate) expMs = Math.min(expMs, new Date(exam.endDate).getTime());
   const expiresAt = new Date(expMs);
+  // Per-student choice shuffle: generate the permutation ONCE at creation and
+  // store it on the attempt, so resume shows the same order and submit can map
+  // the picks back to original indices.
+  const optionOrder =
+    exam.shuffleOptions && exam.mode === "structured"
+      ? buildOptionOrder(correctAnswers)
+      : undefined;
   try {
-    attempt = await Attempt.create({ userId: user._id, examId, startedAt, expiresAt });
+    attempt = await Attempt.create({
+      userId: user._id,
+      examId,
+      startedAt,
+      expiresAt,
+      ...(optionOrder ? { optionOrder } : {}),
+    });
   } catch (e) {
     // The partial-unique index allows only ONE active (unsubmitted) attempt per
     // user/exam. A concurrent start that lost the race gets the winner's attempt
@@ -942,6 +1074,104 @@ const reportViolation = asyncHandler(async (req, res) => {
   });
 });
 
+// Trim surrounding whitespace before comparing (a trailing space/newline on a
+// typed answer shouldn't mark it wrong). Letters/indices are unaffected.
+const norm = (v) => String(v ?? "").trim();
+
+// Does this selection count as a (non-blank) answer? Generalized over the answer
+// shapes: a string (letter/typed), a number/index (structured Cm), an array of
+// indices (Cs), or a {leftIdx: rightVal} map (Cma). Index 0 must count, so we
+// can't use a plain truthiness check.
+function isAnswered(sel) {
+  if (!sel) return false;
+  const a = sel.answer;
+  if (a == null) return false;
+  if (Array.isArray(a)) return a.length > 0;
+  if (typeof a === "object") return Object.keys(a).length > 0;
+  return String(a).trim() !== "";
+}
+
+// Per-type correctness. The single source of scoring truth, run server-side
+// against the answer key the client never received.
+function isCorrectAnswer(ca, sel) {
+  if (!isAnswered(sel)) return false;
+  const a = sel.answer;
+  switch (ca.type) {
+    case "Cm": {
+      // Structured single-choice (has `choices`): compare the chosen INDEX to
+      // the one correct index. Legacy PDF single-choice: compare the LETTER.
+      if (Array.isArray(ca.choices) && ca.choices.length) {
+        const want = Array.isArray(ca.correct) ? ca.correct[0] : ca.correct;
+        return Number(a) === Number(want);
+      }
+      return norm(a) === norm(ca.answer);
+    }
+    case "Cs": {
+      // Multi-select: set-equality of chosen indices vs the correct set.
+      const want = (Array.isArray(ca.correct) ? ca.correct : []).map(Number).sort((x, y) => x - y);
+      const got = (Array.isArray(a) ? a : []).map(Number).sort((x, y) => x - y);
+      return want.length > 0 && want.length === got.length && want.every((v, k) => v === got[k]);
+    }
+    case "Cma": {
+      // Matching: every left's chosen right must equal the correct right.
+      const pairs = Array.isArray(ca.pairs) ? ca.pairs : [];
+      if (!pairs.length || typeof a !== "object" || Array.isArray(a)) return false;
+      return pairs.every((p, k) => norm(a[k]) === norm(p.right));
+    }
+    case "Co":
+    case "Cd":
+    default:
+      // Open/typed (and any legacy type): trimmed string compare.
+      return norm(a) === norm(ca.answer);
+  }
+}
+
+// Fractional score (0..1) for one question. 1 = fully correct. When the exam
+// enables partial credit, a multi-select (Cs) answer earns
+// (correct picks − wrong picks) / (number of correct), floored at 0. Everything
+// else is all-or-nothing.
+function answerScore(ca, sel, partialCredit) {
+  if (!isAnswered(sel)) return 0;
+  if (isCorrectAnswer(ca, sel)) return 1;
+  if (partialCredit && ca.type === "Cs") {
+    const want = new Set((Array.isArray(ca.correct) ? ca.correct : []).map(Number));
+    if (!want.size) return 0;
+    const got = Array.isArray(sel.answer) ? sel.answer.map(Number) : [];
+    const seen = new Set();
+    let correctPicked = 0;
+    let wrongPicked = 0;
+    for (const g of got) {
+      if (seen.has(g)) continue; // ignore duplicate picks
+      seen.add(g);
+      if (want.has(g)) correctPicked += 1;
+      else wrongPicked += 1;
+    }
+    return Math.max(0, (correctPicked - wrongPicked) / want.size);
+  }
+  return 0;
+}
+
+// What to PERSIST for the student's selection. Strings are trimmed (so every
+// display surface matches the score); numbers/arrays/maps are stored raw.
+function storableAnswer(a) {
+  if (a == null) return "";
+  if (typeof a === "string") return a.trim();
+  return a;
+}
+
+// A renderable "correct value" for the review screen. Structured choice
+// questions store the correct index/indices; matching stores the right column;
+// everything else stores the trimmed answer string.
+function renderableCorrect(ca) {
+  if (Array.isArray(ca.choices) && ca.choices.length) {
+    return Array.isArray(ca.correct) ? ca.correct : [];
+  }
+  if (ca.type === "Cma" && Array.isArray(ca.pairs)) {
+    return ca.pairs.map((p) => p.right);
+  }
+  return norm(ca.answer);
+}
+
 const addResult = asyncHandler(async (req, res) => {
   const { examId } = req.params;
   const { selectedAnswers, violations, terminated, attemptId } = req.body;
@@ -1019,23 +1249,48 @@ const addResult = asyncHandler(async (req, res) => {
   // Score on the server, against answers the client never received.
   const correct = exam.questions?.correctAnswers || [];
   const points = questionPoints(correct.length);
-  const sel = Array.isArray(selectedAnswers) ? selectedAnswers : [];
-  const counts = { Cm: 0, Co: 0, Cd: 0, Cma: 0 };
+  let sel = Array.isArray(selectedAnswers) ? selectedAnswers : [];
+
+  // Per-student option shuffle: map the student's DISPLAY-order picks back to the
+  // ORIGINAL choice indices (using this attempt's stored permutation), so scoring
+  // and the stored result are always in canonical, unshuffled index space.
+  if (attempt.optionOrder) {
+    const order = attempt.optionOrder;
+    sel = sel.map((a, i) => {
+      const perm = order[i];
+      if (!a || !Array.isArray(perm)) return a;
+      const ca = correct[i];
+      if (!ca || (ca.type !== "Cm" && ca.type !== "Cs")) return a;
+      // Question edited since the attempt started (choice count changed): the
+      // stored perm no longer aligns, so score this question canonically rather
+      // than mapping picks to stale original indices.
+      if (!Array.isArray(ca.choices) || ca.choices.length !== perm.length) return a;
+      const back = (d) => {
+        const n = Number(d);
+        return Number.isInteger(n) && n >= 0 && n < perm.length ? perm[n] : n;
+      };
+      if (Array.isArray(a.answer)) return { ...a, answer: a.answer.map(back) };
+      if (a.answer === "" || a.answer == null) return a;
+      return { ...a, answer: back(a.answer) };
+    });
+  }
+
+  const counts = { Cm: 0, Cs: 0, Co: 0, Cd: 0, Cma: 0 };
   let earnedPoints = 0;
   let wrongCount = 0;
-  // Trim surrounding whitespace before comparing (a trailing space/newline on a
-  // typed answer shouldn't mark it wrong). Letter answers are unaffected. Deeper
-  // tolerance (case, internal spacing) is left as a deliberate grading choice.
-  const norm = (v) => String(v ?? "").trim();
   correct.forEach((ca, i) => {
     const s = sel[i];
-    // Whitespace-only answers count as BLANK (no penalty), not wrong.
-    const answered = s && s.answer != null && norm(s.answer) !== "";
-    if (answered && norm(s.answer) === norm(ca.answer)) {
-      earnedPoints += points[i] || 0;
+    // Blank (no selection / whitespace-only) counts as unanswered: no points,
+    // no penalty. `isAnswered` is index-0-safe and shape-agnostic.
+    if (!isAnswered(s)) return;
+    // Fractional: 1 = fully correct; 0<frac<1 only for Cs when partial credit is
+    // on. Fully-wrong (frac 0) feeds negative marking; partials are not penalised.
+    const frac = answerScore(ca, s, exam.partialCredit);
+    earnedPoints += (points[i] || 0) * frac;
+    if (frac >= 1) {
       if (counts[ca.type] !== undefined) counts[ca.type]++;
-    } else if (answered) {
-      wrongCount += 1; // answered but wrong (blanks are never penalised)
+    } else if (frac <= 0) {
+      wrongCount += 1;
     }
   });
 
@@ -1060,18 +1315,20 @@ const addResult = asyncHandler(async (req, res) => {
   const newResult = await Result.create({
     userId: user._id,
     examId,
-    attempts: sel.filter((a) => a && a.answer).length,
+    attempts: sel.filter(isAnswered).length,
     earnPoints: earnedPoints,
     // Server-authoritative: the attempt's recorded count is the floor, so a
     // tampered client body can never lower the violations on the final result.
     violations: Math.max(attempt.violations || 0, Number(violations) || 0),
     terminated: isTerminated,
-    // Normalize on write: store the trimmed answers that scoring used, so every
-    // display surface (review, PDF, analytics) agrees with the score.
-    selectedAnswers: sel.map((a) => ({ type: a?.type, answer: norm(a?.answer) })),
-    correctAnswers: correct.map((a) => ({ type: a.type, answer: norm(a.answer) })),
+    // Store the selection that scoring used: strings trimmed (so review/PDF/
+    // analytics agree with the score), structured indices/maps stored raw. The
+    // correct side stores a renderable key (indices for choices, text otherwise).
+    selectedAnswers: sel.map((a) => ({ type: a?.type, answer: storableAnswer(a?.answer) })),
+    correctAnswers: correct.map((a) => ({ type: a.type, answer: renderableCorrect(a) })),
     correctAnswersByType: [
       { type: "Cm", count: counts.Cm },
+      { type: "Cs", count: counts.Cs },
       { type: "Co", count: counts.Co },
       { type: "Cd", count: counts.Cd },
       { type: "Cma", count: counts.Cma },
@@ -1259,6 +1516,8 @@ const editExam = asyncHandler(async (req, res) => {
     wrongPerPenalty,
     correctPerPenalty,
     antiCheat,
+    partialCredit,
+    shuffleOptions,
     pdfPath,
   } = req.body;
   const examExists = await Exam.findById(examId);
@@ -1281,6 +1540,8 @@ const editExam = asyncHandler(async (req, res) => {
       wrongPerPenalty: Math.max(1, Number(wrongPerPenalty) || 3),
       correctPerPenalty: Math.max(1, Number(correctPerPenalty) || 1),
       antiCheat: antiCheat === true || antiCheat === "true",
+      partialCredit: partialCredit === true || partialCredit === "true",
+      shuffleOptions: shuffleOptions === true || shuffleOptions === "true",
     };
     // Only touch the solution images when the client sends them, so partial
     // edits don't wipe the existing list.
