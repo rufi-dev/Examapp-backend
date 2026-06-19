@@ -75,6 +75,9 @@ const examSchema = Schema({
     // = native questions (text/options/images/latex) built in-app. Default pdf
     // keeps every existing exam unchanged.
     mode: { type: String, enum: ["pdf", "structured"], default: "pdf" },
+    // Structured exam pagination: how many questions a student sees per page
+    // (0 = show all on one page). Set from the structured builder.
+    questionsPerPage: { type: Number, default: 0 },
     questions: {
         type: Schema.Types.ObjectId,
         ref: 'Question'

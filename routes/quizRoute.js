@@ -46,7 +46,7 @@ const {
   getExamTagandClass,
   getResultsByExam
 } = require("../controllers/quizController");
-const { extractQuestions } = require("../controllers/aiController");
+const { extractQuestions, getAiUsage } = require("../controllers/aiController");
 const router = express.Router();
 
 const multer = require("multer");
@@ -88,6 +88,8 @@ router.post(
   memUpload.single("pdf"),
   extractQuestions
 );
+// Admin-only AI spend dashboard data.
+router.get("/aiUsage", protect, adminOnly, getAiUsage);
 router.post("/addClass/:tagId", protect, teacherOnly, addClass);
 router.get("/server-time", serverTime);
 router.get("/getTags", getTags);

@@ -613,7 +613,7 @@ const getExam = asyncHandler(async (req, res) => {
 
 const addQuestion = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const { correctAnswers } = req.body;
+  const { correctAnswers, questionsPerPage } = req.body;
 
   if (!correctAnswers || !examId) {
     res.status(400).json({ message: "All fields are required" });
@@ -645,6 +645,16 @@ const addQuestion = asyncHandler(async (req, res) => {
   if (!exam) {
     res.status(404).json({ message: "Exam not found" });
     return;
+  }
+
+  // Persist the structured per-page layout (0 = show all) alongside the answer
+  // key, so saving questions also saves this setting in one round-trip.
+  if (questionsPerPage !== undefined) {
+    const qpp = Math.max(0, Math.min(50, Number(questionsPerPage) || 0));
+    if (exam.questionsPerPage !== qpp) {
+      exam.questionsPerPage = qpp;
+      await exam.save();
+    }
   }
 
   // If this exam already has a question set, replace its answers instead of
@@ -835,6 +845,9 @@ const startAttempt = asyncHandler(async (req, res) => {
       // "pdf" or "structured" so the runner knows whether to show the PDF panel
       // or render native questions.
       mode: exam.mode === "structured" ? "structured" : "pdf",
+      // Structured pagination: questions per page (0 = all on one page). The
+      // runner paginates native questions; ignored for PDF exams.
+      questionsPerPage: exam.questionsPerPage || 0,
       // Same sanitizer as every other student payload: display content only, the
       // answer key (`correct`/`pairs`/`answer`) is never sent to the runner. When
       // options are shuffled, reorder each Cm/Cs question's choices by THIS

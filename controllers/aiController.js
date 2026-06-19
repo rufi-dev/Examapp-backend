@@ -2,6 +2,8 @@ const asyncHandler = require("express-async-handler");
 const AnthropicPkg = require("@anthropic-ai/sdk");
 // CJS interop: the constructor is the default export on recent builds.
 const Anthropic = AnthropicPkg.default || AnthropicPkg;
+const AiUsage = require("../models/aiUsageModel");
+const User = require("../models/userModel");
 
 // Lazy client so the server still boots without the key (the feature just
 // returns a clear error until ANTHROPIC_API_KEY is set in the env).
@@ -88,15 +90,49 @@ Output one item per question, in document order, using these types:
 - "Cma": matching (left column items paired with right column items).
 
 Rules:
-- "text": the question statement as plain text. Put any mathematical formula in "latex" as a valid KaTeX/LaTeX string (e.g. "\\\\frac{a}{b}", "\\\\int_0^1 x^2\\\\,dx"). Use "latex" on a choice/pair side the same way. If there is no formula, use an empty string "".
-- "choices": for Cm/Cs, one object per option in the order shown (drop the A/B/C labels — they are implicit by position). For Co/Cma, use an empty array.
+- "text": the FULL question statement, with every mathematical formula written INLINE, at the EXACT position it appears, as LaTeX wrapped in single dollar signs ($...$). Keep the math in the same order and place as the document — do NOT move formulas to the end. Examples:
+  - "3500-ün $\\\\frac{5}{7}$ hissəsini tapın."
+  - "$\\\\begin{cases}x^{2}y-xy^{2}=12\\\\\\\\xy=6\\\\end{cases}$ tənliklər sistemindən $x^{2}+y^{2}$-nın cəmini tapın."
+  - "$\\\\sqrt{3}=a$ və $\\\\sqrt{5}=b$ olarsa, $\\\\sqrt{540}$ ədədini $a$ və $b$ ilə əvəz edin."
+  Use $$...$$ only for a big standalone display formula. Write a literal dollar sign as \\\\$.
+- "latex": ALWAYS return an empty string "". All math now lives inline inside the text fields, never in a separate field.
+- "choices": for Cm/Cs, one object per option in the order shown (drop the A/B/C labels — they are implicit by position). Put each option's text in "text" with any math inline via $...$ (e.g. "$9ab$", "2500"). Set the choice "latex" to "". For Co/Cma, use an empty array.
 - "correct": indices (0-based) into "choices" of the correct option(s) — ONLY if the PDF itself marks/states the correct answer (e.g. an answer key, a highlighted option, or a stated solution). If the correct answer is NOT given in the PDF, return an EMPTY array. NEVER guess or solve the question to fill this — leave it empty for the teacher to mark.
-- "pairs": for Cma, one object per correct left<->right pair. Empty array otherwise. Right values must be distinct.
-- "openAnswer": for Co, the correct answer text ONLY if the PDF states it; otherwise "".
+- "pairs": for Cma, one object per correct left<->right pair. Put math inline in "left"/"right" via $...$ and set "leftLatex"/"rightLatex" to "". Empty array otherwise. Right values must be distinct.
+- "openAnswer": for Co, the correct answer text (math inline via $...$) ONLY if the PDF states it; otherwise "".
 - "hasFigure": true if the question depends on a diagram, graph, geometric figure, or image that cannot be represented as text/LaTeX (the teacher will add the image). Still extract the surrounding text.
-- "explanation": a worked solution/explanation ONLY if the PDF provides one; otherwise "".
+- "explanation": a worked solution/explanation (math inline via $...$) ONLY if the PDF provides one; otherwise "".
 
 Transcribe faithfully. Do not invent questions, options, or answers. If the PDF is a question bank with no answer key, every "correct" array is empty and that is correct.`;
+
+// Claude Opus 4.8 pricing (USD per 1M tokens). Cache write (5-min ephemeral) is
+// 1.25x base input; cache read is 0.1x base input. Output includes thinking.
+const PRICE_PER_MTOK = { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 };
+
+// Turn an Anthropic usage object into a token breakdown + USD cost for THIS call,
+// so the teacher can see (and tally) what each extraction cost.
+function computeCost(u) {
+  if (!u) return null;
+  const input = u.input_tokens || 0;
+  const output = u.output_tokens || 0;
+  const cacheWrite = u.cache_creation_input_tokens || 0;
+  const cacheRead = u.cache_read_input_tokens || 0;
+  const usd =
+    (input * PRICE_PER_MTOK.input +
+      output * PRICE_PER_MTOK.output +
+      cacheWrite * PRICE_PER_MTOK.cacheWrite +
+      cacheRead * PRICE_PER_MTOK.cacheRead) /
+    1e6;
+  return {
+    model: "claude-opus-4-8",
+    inputTokens: input,
+    outputTokens: output,
+    cacheWriteTokens: cacheWrite,
+    cacheReadTokens: cacheRead,
+    totalTokens: input + output + cacheWrite + cacheRead,
+    usd: Number(usd.toFixed(4)),
+  };
+}
 
 // Extract structured questions from an uploaded PDF using Claude. Teacher-only.
 // Returns { questions: [...] } in the builder's shape for review (never saved
@@ -167,7 +203,93 @@ const extractQuestions = asyncHandler(async (req, res) => {
   }
 
   const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
-  res.status(200).json({ success: true, questions, usage: message.usage });
+  const cost = computeCost(message.usage);
+
+  // Persist the usage so admins can see per-teacher spend (best-effort: a logging
+  // failure must never break the extraction the teacher is waiting on).
+  if (cost && req.user?._id) {
+    try {
+      await AiUsage.create({
+        user: req.user._id,
+        exam: req.params.examId,
+        model: cost.model,
+        inputTokens: cost.inputTokens,
+        outputTokens: cost.outputTokens,
+        cacheWriteTokens: cost.cacheWriteTokens,
+        cacheReadTokens: cost.cacheReadTokens,
+        totalTokens: cost.totalTokens,
+        usd: cost.usd,
+        questions: questions.length,
+      });
+    } catch (e) {
+      console.error("AiUsage log failed:", e?.message);
+    }
+  }
+
+  res.status(200).json({ success: true, questions, usage: message.usage, cost });
 });
 
-module.exports = { extractQuestions };
+// Admin-only: AI spend per admin/teacher (+ grand totals + recent activity).
+const getAiUsage = asyncHandler(async (req, res) => {
+  const agg = await AiUsage.aggregate([
+    {
+      $group: {
+        _id: "$user",
+        extractions: { $sum: 1 },
+        totalUsd: { $sum: "$usd" },
+        totalTokens: { $sum: "$totalTokens" },
+        inputTokens: { $sum: "$inputTokens" },
+        outputTokens: { $sum: "$outputTokens" },
+        questions: { $sum: "$questions" },
+        lastUsedAt: { $max: "$createdAt" },
+      },
+    },
+  ]);
+  const byUser = new Map(agg.map((a) => [String(a._id), a]));
+
+  const staff = await User.find({ role: { $in: ["admin", "teacher"] } })
+    .select("name email role photo createdAt")
+    .lean();
+
+  const rows = staff.map((u) => {
+    const a = byUser.get(String(u._id));
+    return {
+      _id: u._id,
+      name: u.name,
+      email: u.email,
+      role: u.role,
+      photo: u.photo,
+      createdAt: u.createdAt,
+      extractions: a?.extractions || 0,
+      questions: a?.questions || 0,
+      inputTokens: a?.inputTokens || 0,
+      outputTokens: a?.outputTokens || 0,
+      totalTokens: a?.totalTokens || 0,
+      totalUsd: Number((a?.totalUsd || 0).toFixed(4)),
+      lastUsedAt: a?.lastUsedAt || null,
+    };
+  });
+  rows.sort((x, y) => y.totalUsd - x.totalUsd);
+
+  const totals = rows.reduce(
+    (t, r) => ({
+      usd: t.usd + r.totalUsd,
+      tokens: t.tokens + r.totalTokens,
+      extractions: t.extractions + r.extractions,
+      questions: t.questions + r.questions,
+    }),
+    { usd: 0, tokens: 0, extractions: 0, questions: 0 }
+  );
+  totals.usd = Number(totals.usd.toFixed(4));
+
+  const recent = await AiUsage.find()
+    .sort({ createdAt: -1 })
+    .limit(25)
+    .populate("user", "name email role")
+    .populate("exam", "name")
+    .lean();
+
+  res.status(200).json({ rows, totals, recent });
+});
+
+module.exports = { extractQuestions, getAiUsage };
