@@ -46,11 +46,21 @@ app.use(bodyParser.json())
 app.use(
     cors({
         origin: function (origin, callback) {
-            // Allow no-origin requests (curl/postman), the production site,
+            // Allowed production origins. More can be added via CORS_ORIGINS
+            // (comma-separated) in .env without changing code.
+            const allowedOrigins = [
+                "https://examopia.com",
+                "https://www.examopia.com",
+                "https://sinaqriyaziyyat.vercel.app",
+                ...(process.env.CORS_ORIGINS
+                    ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean)
+                    : []),
+            ]
+            // Allow no-origin requests (curl/postman), the production sites,
             // and any localhost port in dev (Vite may fall back to 5174, 5175, ...)
             if (
                 !origin ||
-                origin === "https://sinaqriyaziyyat.vercel.app" ||
+                allowedOrigins.includes(origin) ||
                 /^http:\/\/localhost:\d+$/.test(origin)
             ) {
                 callback(null, true)
