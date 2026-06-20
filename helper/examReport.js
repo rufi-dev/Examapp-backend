@@ -200,11 +200,15 @@ async function sendExamReport(exam, results) {
     "📎 PDF + Excel əlavə olunub",
   ].join("\n");
 
+  let sent = 0;
+  let failed = 0;
   for (const chatId of recips) {
-    await sendTelegramDocument(chatId, xlsx, `${slug}.xlsx`, caption);
-    await sendTelegramDocument(chatId, pdf, `${slug}.pdf`);
+    const a = await sendTelegramDocument(chatId, xlsx, `${slug}.xlsx`, caption);
+    const b = await sendTelegramDocument(chatId, pdf, `${slug}.pdf`);
+    if (a?.ok && b?.ok) sent += 1;
+    else failed += 1;
   }
-  return { sent: recips.length };
+  return { sent, failed };
 }
 
 module.exports = { buildResultsExcel, buildResultsPdf, sendExamReport, computeStats };

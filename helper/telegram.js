@@ -32,12 +32,17 @@ async function tgApi(method, body) {
 
 async function sendTelegram(chatId, text) {
   if (!chatId) return null;
-  return tgApi("sendMessage", {
+  const r = await tgApi("sendMessage", {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
     disable_web_page_preview: true,
   });
+  if (r && r.ok === false) {
+    // eslint-disable-next-line no-console
+    console.error(`[TELEGRAM] sendMessage rejected (${chatId}):`, r.description);
+  }
+  return r;
 }
 
 // Upload a generated file (Buffer) to a chat as a document (multipart).
@@ -55,7 +60,12 @@ async function sendTelegramDocument(chatId, buffer, filename, caption) {
       method: "POST",
       body: form,
     });
-    return await res.json();
+    const json = await res.json();
+    if (json && json.ok === false) {
+      // eslint-disable-next-line no-console
+      console.error(`[TELEGRAM] sendDocument rejected (${chatId}):`, json.description);
+    }
+    return json;
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("[TELEGRAM] sendDocument failed:", e.message);

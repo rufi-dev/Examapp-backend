@@ -20,18 +20,26 @@ async function runDueExamReports() {
     reportSentAt: null, // matches missing-or-null
   });
   for (const exam of exams) {
+    // success stays true unless a send actually FAILS — so a transient failure
+    // (network, cold start, Telegram hiccup) leaves reportSentAt null and the
+    // next tick retries, instead of marking it sent and losing the report.
+    // Nothing-to-do (0 results / 0 recipients) still counts as done.
+    let success = true;
     try {
       const results = await Result.find({ examId: exam._id }).populate(
         "userId",
         "name email phone"
       );
-      if (results.length) await sendExamReport(exam, results);
+      if (results.length) {
+        const r = await sendExamReport(exam, results);
+        if (r.failed > 0) success = false;
+      }
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error("[REPORT] exam", String(exam._id), "failed:", e.message);
+      success = false;
     }
-    // Mark sent regardless (even with 0 results / 0 recipients) so the exam
-    // isn't reprocessed on every tick.
+    if (!success) continue; // retry on the next tick (within the window)
     try {
       exam.reportSentAt = new Date();
       await exam.save();
