@@ -51,7 +51,6 @@ app.use(
             const allowedOrigins = [
                 "https://examopia.com",
                 "https://www.examopia.com",
-                "https://sinaqriyaziyyat.vercel.app",
                 ...(process.env.CORS_ORIGINS
                     ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean)
                     : []),
