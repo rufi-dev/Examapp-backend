@@ -7,6 +7,7 @@ const Question = require("../models/questionModel");
 const Result = require("../models/resultModel");
 const Attempt = require("../models/attemptModel");
 const User = require("../models/userModel");
+const Enrollment = require("../models/enrollmentModel");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const fs = require("fs");
@@ -26,6 +27,50 @@ function deleteLocalPdf(pdfUrl) {
   if (name) fs.unlink(path.join("uploads", name), () => {});
 }
 
+// ---- visibility scoping -----------------------------------------------------
+// Categories/classes/exams are owned by the teacher who created them. Teachers
+// see only their own; students see only what their APPROVED class enrollments
+// expose; admins see everything. Every list/read endpoint funnels through these.
+
+const isStaffUser = (u) => !!u && (u.role === "admin" || u.role === "teacher");
+const isAdminUser = (u) => !!u && u.role === "admin";
+
+// A short, unambiguous join code (no easily-confused chars).
+const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+function genJoinCode(len = 6) {
+  let s = "";
+  for (let i = 0; i < len; i++) s += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+  return s;
+}
+async function uniqueJoinCode() {
+  for (let i = 0; i < 8; i++) {
+    const code = genJoinCode();
+    // eslint-disable-next-line no-await-in-loop
+    if (!(await Class.exists({ joinCode: code }))) return code;
+  }
+  return genJoinCode(8); // extremely unlikely fallback
+}
+
+// Class ids the student is APPROVED in (the heart of student visibility).
+async function approvedClassIds(userId) {
+  const rows = await Enrollment.find({ student: userId, status: "approved" }).select("class").lean();
+  return rows.map((r) => r.class);
+}
+
+async function studentApprovedInClass(userId, classId) {
+  if (!userId || !classId) return false;
+  return !!(await Enrollment.exists({ student: userId, class: classId, status: "approved" }));
+}
+
+// Can this user see/open a given class doc? admin → yes; teacher → only own;
+// student → only when approved-enrolled.
+async function canAccessClass(user, classDoc) {
+  if (!classDoc) return false;
+  if (isAdminUser(user)) return true;
+  if (isStaffUser(user)) return classDoc.owner && String(classDoc.owner) === String(user._id);
+  return studentApprovedInClass(user._id, classDoc._id);
+}
+
 // Add Tag
 const addTag = asyncHandler(async (req, res) => {
   const { name } = req.body;
@@ -34,25 +79,29 @@ const addTag = asyncHandler(async (req, res) => {
     throw new Error("Name field required");
   }
 
-  const exists = await Tag.findOne({ name });
+  // Categories are per-owner now, so only block a duplicate name WITHIN this
+  // teacher's own categories (two teachers may each have a "Riyaziyyat").
+  const exists = await Tag.findOne({ name, owner: req.user._id });
 
   if (exists) {
     res.status(500);
     throw new Error("Tag with this name already exists");
   }
 
-  await Tag.create({ name });
-  res.status(200).json({ name });
+  const tag = await Tag.create({ name, owner: req.user._id });
+  res.status(200).json({ name, _id: tag._id });
 });
 
 // Add Class
 const addClass = asyncHandler(async (req, res) => {
-  const { level } = req.body;
+  const { name, level } = req.body;
   const { tagId } = req.params;
 
   try {
-    if (!level) {
-      res.status(400).json({ error: "Level field required" });
+    // A class needs a label: a text name (preferred) or the legacy numeric level.
+    const label = typeof name === "string" ? name.trim() : "";
+    if (!label && !level) {
+      res.status(400).json({ error: "Sinif adını daxil edin" });
       return;
     }
 
@@ -62,8 +111,19 @@ const addClass = asyncHandler(async (req, res) => {
       res.status(404).json({ error: "No Tag found" });
       return;
     }
+    // A teacher can only add a class under a category they own (admins anywhere).
+    if (!isAdminUser(req.user) && tag.owner && String(tag.owner) !== String(req.user._id)) {
+      res.status(403).json({ error: "Bu kateqoriya sizə aid deyil" });
+      return;
+    }
 
-    const newClass = await Class.create({ level, tag: tagId });
+    const newClass = await Class.create({
+      name: label || undefined,
+      level: level !== undefined && level !== "" ? level : undefined,
+      tag: tagId,
+      owner: req.user._id,
+      joinCode: await uniqueJoinCode(),
+    });
     tag.classes.push(newClass._id);
     await tag.save();
 
@@ -82,26 +142,37 @@ const getClass = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("No class found");
   }
-
-  res.status(200).json(_class);
-});
-
-// Get Tags
-const getTags = asyncHandler(async (req, res) => {
-  // Public endpoint: do NOT populate exams (that would expose raw exam docs —
-  // including legacy password/answer fields — to anyone). The category list
-  // only needs the tag fields themselves.
-  const tags = await Tag.find();
-
-  if (!tags) {
-    res.status(404);
-    throw new Error("No tags found");
+  if (!(await canAccessClass(req.user, _class))) {
+    res.status(403);
+    throw new Error("Bu sinifə giriş yoxdur");
   }
-
-  res.status(200).json(tags);
+  // Hide the join code from students; staff/owner keep it (to share with students).
+  const obj = _class.toObject();
+  if (!isStaffUser(req.user)) delete obj.joinCode;
+  res.status(200).json(obj);
 });
 
-// Get Tags
+// Get Tags (categories) — scoped to who's asking.
+const getTags = asyncHandler(async (req, res) => {
+  let filter;
+  if (isAdminUser(req.user)) {
+    filter = {};
+  } else if (isStaffUser(req.user)) {
+    filter = { owner: req.user._id };
+  } else {
+    // Student: only categories that contain a class they're APPROVED in.
+    const classIds = await approvedClassIds(req.user._id);
+    const classes = await Class.find({ _id: { $in: classIds } }).select("tag").lean();
+    const tagIds = [...new Set(classes.map((c) => c.tag).filter(Boolean).map(String))];
+    filter = { _id: { $in: tagIds } };
+  }
+  // Do NOT populate exams (that would expose raw exam docs). The category list
+  // only needs the tag fields themselves.
+  const tags = await Tag.find(filter);
+  res.status(200).json(tags || []);
+});
+
+// Get a single category — access-checked.
 const getTag = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const tag = await Tag.findById(id);
@@ -109,6 +180,24 @@ const getTag = asyncHandler(async (req, res) => {
   if (!tag) {
     res.status(404);
     throw new Error("No tag found");
+  }
+
+  let allowed = false;
+  if (isAdminUser(req.user)) {
+    allowed = true;
+  } else if (isStaffUser(req.user)) {
+    allowed = tag.owner && String(tag.owner) === String(req.user._id);
+  } else {
+    const classIdsInTag = await Class.find({ tag: id }).distinct("_id");
+    allowed = !!(await Enrollment.exists({
+      student: req.user._id,
+      status: "approved",
+      class: { $in: classIdsInTag },
+    }));
+  }
+  if (!allowed) {
+    res.status(403);
+    throw new Error("Bu kateqoriyaya giriş yoxdur");
   }
 
   res.status(200).json(tag);
@@ -191,6 +280,7 @@ const addExam = asyncHandler(async (req, res) => {
       startDate,
       endDate,
       class: classId,
+      owner: req.user._id,
       // Only PDF exams carry a pdf reference.
       ...(savedPdf ? { pdf: savedPdf._id } : {}),
     });
@@ -512,25 +602,22 @@ const getExamsByClass = asyncHandler(async (req, res) => {
     throw new Error("No Class Found");
   }
 
-  const objectId = new mongoose.Types.ObjectId(classId);
+  // Visibility gate: owner/admin, or a student approved-enrolled in this class.
+  if (!(await canAccessClass(req.user, exists))) {
+    res.status(403);
+    throw new Error("Bu sinifə giriş yoxdur");
+  }
 
   // No questions populate: the exam-card listing doesn't render any question
   // data, so sending populated question/option arrays per card is wasted payload.
-  const exams = await Exam.find({ class: objectId });
+  const exams = await Exam.find({ class: exists._id });
 
-  if (!exams) {
-    res.status(500);
-    throw new Error("No Exams Added yet");
+  // Owner/admin reached here see everything (incl. drafts).
+  if (isStaffUser(req.user)) {
+    return res.status(200).json(exams || []);
   }
-
-  // Students only see published exams; teachers/admins see hidden ones too.
-  const isStaff =
-    req.user && (req.user.role === "admin" || req.user.role === "teacher");
-  if (isStaff) {
-    return res.status(200).json(exams);
-  }
-  // Non-staff: hide drafts AND strip answer keys / password / pdf from each exam.
-  const visible = exams.filter((e) => !e.hidden).map(sanitizeExamForStudent);
+  // Student: hide drafts AND strip answer keys / password / pdf from each exam.
+  const visible = (exams || []).filter((e) => !e.hidden).map(sanitizeExamForStudent);
   res.status(200).json(visible);
 });
 
@@ -566,29 +653,34 @@ const getClassesByTag = asyncHandler(async (req, res) => {
   }
 
   try {
-    const classes = await Class.find({ tag: tagId });
-
-    if (classes.length === 0) {
-      res.status(404).json({ message: "No classes found for this tag" });
-      return;
+    let filter = { tag: tagId };
+    if (isAdminUser(req.user)) {
+      // all classes in this tag
+    } else if (isStaffUser(req.user)) {
+      filter.owner = req.user._id; // teacher: only their own classes
+    } else {
+      // student: only the classes in this tag they're approved in
+      const classIds = await approvedClassIds(req.user._id);
+      filter._id = { $in: classIds };
     }
 
-    res.status(200).json(classes);
+    const classes = await Class.find(filter).lean();
+    // Students never receive the join code.
+    if (!isStaffUser(req.user)) classes.forEach((c) => delete c.joinCode);
+
+    res.status(200).json(classes || []);
   } catch (error) {
     console.error("Error fetching classes by tag:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
+// Used by the teacher "İmtahan nəticələri" list — scoped so a teacher sees only
+// their OWN exams (admins see all).
 const getExams = asyncHandler(async (req, res) => {
-  const exams = await Exam.find({});
-
-  if (!exams) {
-    res.status(500);
-    throw new Error("No Exams Found yet");
-  }
-
-  res.status(200).json(exams);
+  const filter = isAdminUser(req.user) ? {} : { owner: req.user._id };
+  const exams = await Exam.find(filter);
+  res.status(200).json(exams || []);
 });
 
 const getExam = asyncHandler(async (req, res) => {
@@ -601,11 +693,30 @@ const getExam = asyncHandler(async (req, res) => {
     throw new Error("No exams found");
   }
 
-  // Never expose the correct answers / password / pdf to students.
-  const isStaff = req.user && (req.user.role === "admin" || req.user.role === "teacher");
-  if (!isStaff) {
+  // Teacher: only the owner (admins always). Legacy exams with no owner stay
+  // visible to any teacher so nothing breaks during the transition.
+  if (isStaffUser(req.user) && !isAdminUser(req.user)) {
+    if (exam.owner && String(exam.owner) !== String(req.user._id)) {
+      res.status(403);
+      throw new Error("Bu imtahan sizə aid deyil");
+    }
+  }
+
+  // Student: must be approved-enrolled in the exam's class, OR have the exam via
+  // the existing per-user grant (purchase/assignment) so legacy access survives.
+  if (!isStaffUser(req.user)) {
+    const ownsLegacy =
+      (req.user.exams || []).some((e) => String(e) === String(id)) ||
+      (exam.users || []).some((u) => String(u) === String(req.user._id));
+    const enrolled = await studentApprovedInClass(req.user._id, exam.class);
+    if (!ownsLegacy && !enrolled) {
+      res.status(403);
+      throw new Error("Bu imtahana giriş yoxdur");
+    }
+    // Never expose the correct answers / password / pdf to students.
     return res.status(200).json(sanitizeExamForStudent(exam));
   }
+
   const obj = exam.toObject();
   if (obj.pdf?.path) obj.pdf.path = httpsify(obj.pdf.path);
   res.status(200).json(obj);
@@ -820,7 +931,11 @@ const startAttempt = asyncHandler(async (req, res) => {
   // verified user could start a paid/unassigned exam just by POSTing its id.
   const owns =
     user.exams.some((e) => e.toString() === String(examId)) ||
-    exam.users.some((u) => u.toString() === user._id.toString());
+    exam.users.some((u) => u.toString() === user._id.toString()) ||
+    // Approved enrollment grants access to the class's FREE exams. Paid exams
+    // still go through the normal purchase flow — enrollment is NOT a bypass.
+    ((!exam.price || Number(exam.price) === 0) &&
+      (await studentApprovedInClass(user._id, exam.class)));
   if (!isStaff && !owns) {
     return res.status(403).json({ reason: "not_owned" });
   }
@@ -1411,6 +1526,13 @@ const getResultsByExam = asyncHandler(async (req, res) => {
     throw new Error("No Exam Found!");
   }
 
+  // A teacher may only see results for an exam they OWN (admins any). Legacy
+  // exams with no owner stay visible to any teacher during the transition.
+  if (!isAdminUser(req.user) && exam.owner && String(exam.owner) !== String(req.user._id)) {
+    res.status(403);
+    throw new Error("Bu imtahanın nəticələri sizə aid deyil");
+  }
+
   const results = await Result.find({ examId })
     .populate("examId")
     .populate("userId");
@@ -1609,17 +1731,21 @@ const editTag = asyncHandler(async (req, res) => {
 
 const editClass = asyncHandler(async (req, res) => {
   const { classId } = req.params;
-  const { level } = req.body;
-  if (!level) {
+  const { name, level } = req.body;
+  const label = typeof name === "string" ? name.trim() : "";
+  if (!label && !level) {
     res.status(400);
-    throw new Error("Sinif xanasını doldurun");
+    throw new Error("Sinif adını daxil edin");
   }
   const classExists = await Class.findById(classId);
   if (!classExists) {
     res.status(404);
     throw new Error("Sinif tapılmadı!");
   }
-  await Class.findByIdAndUpdate(classId, { level });
+  const update = {};
+  if (typeof name === "string") update.name = label;
+  if (level !== undefined && level !== "") update.level = level;
+  await Class.findByIdAndUpdate(classId, update);
   res.status(200).json({ message: "Sinif uğurla yeniləndi" });
 });
 

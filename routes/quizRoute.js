@@ -47,6 +47,18 @@ const {
   getResultsByExam
 } = require("../controllers/quizController");
 const { extractQuestions, getAiUsage } = require("../controllers/aiController");
+const {
+  joinClass,
+  myEnrollments,
+  leaveClass,
+  teacherRequests,
+  teacherClasses,
+  classStudents,
+  assignableStudents,
+  addStudentToClass,
+  decideEnrollment,
+  setJoinSettings,
+} = require("../controllers/enrollmentController");
 const router = express.Router();
 
 const multer = require("multer");
@@ -92,15 +104,29 @@ router.post(
 router.get("/aiUsage", protect, adminOnly, getAiUsage);
 router.post("/addClass/:tagId", protect, teacherOnly, addClass);
 router.get("/server-time", serverTime);
-router.get("/getTags", getTags);
+// Scoped to the caller (teacher → own, student → enrolled, admin → all), so it
+// now requires auth.
+router.get("/getTags", protect, getTags);
 router.post("/addExam/:classId", upload.single("pdf"), protect, teacherOnly, addExam);
+
+// ---- enrollment (class membership) ----
+router.post("/enroll", protect, verifiedOnly, joinClass);
+router.get("/myEnrollments", protect, myEnrollments);
+router.delete("/leaveClass/:classId", protect, leaveClass);
+router.get("/teacher/requests", protect, teacherOnly, teacherRequests);
+router.get("/teacher/classes", protect, teacherOnly, teacherClasses);
+router.get("/class/:classId/students", protect, teacherOnly, classStudents);
+router.get("/class/:classId/assignable", protect, teacherOnly, assignableStudents);
+router.post("/class/:classId/addStudent", protect, teacherOnly, addStudentToClass);
+router.patch("/enrollment/:id", protect, teacherOnly, decideEnrollment);
+router.patch("/class/:classId/joinSettings", protect, teacherOnly, setJoinSettings);
 router.post("/addPhotoToResult/:resultId", protect, teacherOnly, addPhotoToResult);
 router.get("/getPdfByExam/:examId", protect, getPdfByExam);
 router.post("/uploadPdf", protect, teacherOnly, pdfUpload.single("file"), uploadPdf);
 router.get("/getExamTagandClass/:examId", protect, getExamTagandClass);
 router.get("/getResultsByExam/:examId", protect, teacherOnly, getResultsByExam);
 router.get("/getExamsByClass/:classId", protect, getExamsByClass);
-router.get("/getClassesByTag/:tagId", getClassesByTag);
+router.get("/getClassesByTag/:tagId", protect, getClassesByTag);
 router.post("/addQuestion/:examId", protect, teacherOnly, addQuestion);
 router.patch("/editQuestion/:questionId", protect, teacherOnly, editQuestion);
 router.delete(
@@ -111,8 +137,8 @@ router.delete(
 );
 router.get("/getQuestionsByExam/:examId", protect, teacherOnly, getQuestionsByExam);
 router.get("/getExam/:id", protect, getExam);
-router.get("/getTag/:id", getTag);
-router.get("/getClass/:id", getClass);
+router.get("/getTag/:id", protect, getTag);
+router.get("/getClass/:id", protect, getClass);
 router.patch("/editExam/:examId", protect, teacherOnly, editExam);
 router.delete("/deleteExam/:examId", protect, teacherOnly, deleteExam);
 router.delete("/deleteClass/:classId", protect, teacherOnly, deleteClass);

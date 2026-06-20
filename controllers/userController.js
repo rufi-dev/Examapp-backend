@@ -1,5 +1,7 @@
 const asyncHandler = require("express-async-handler");
 const User = require("../models/userModel");
+const Enrollment = require("../models/enrollmentModel");
+const Class = require("../models/classModel");
 const bcrypt = require("bcryptjs");
 const { generateToken, hashToken, getToken } = require("../utils/index");
 const { recordDebug } = require("../utils/debugLog");
@@ -547,16 +549,25 @@ const deleteUser = asyncHandler(async (req, res) => {
   });
 });
 
-// Get Users
+// Class ids the teacher owns (for scoping their students).
+async function ownedClassIds(userId) {
+  return Class.find({ owner: userId }).distinct("_id");
+}
+
+// Get Users — admins see everyone; teachers see only THEIR OWN students
+// (students approved-enrolled in a class they own).
 const getUsers = asyncHandler(async (req, res) => {
-  const users = await User.find().sort("-createdAt").select("-password");
-
-  if (!users) {
-    res.status(500);
-    throw new Error("Something went wrong");
+  let filter = {};
+  if (req.user.role !== "admin") {
+    const classIds = await ownedClassIds(req.user._id);
+    const studentIds = await Enrollment.find({
+      class: { $in: classIds },
+      status: "approved",
+    }).distinct("student");
+    filter = { _id: { $in: studentIds } };
   }
-
-  res.status(200).json(users);
+  const users = await User.find(filter).sort("-createdAt").select("-password");
+  res.status(200).json(users || []);
 });
 
 // Login Status
