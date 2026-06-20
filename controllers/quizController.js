@@ -35,6 +35,16 @@ function deleteLocalPdf(pdfUrl) {
 const isStaffUser = (u) => !!u && (u.role === "admin" || u.role === "teacher");
 const isAdminUser = (u) => !!u && u.role === "admin";
 
+// May this user MUTATE (edit/delete) this doc? admin → yes; otherwise only the
+// owner. Legacy docs with no owner stay editable by any teacher during the
+// ownership transition (there's no recorded creator to check against).
+function ownsOrAdmin(user, doc) {
+  if (isAdminUser(user)) return true;
+  if (!doc) return false;
+  if (!doc.owner) return true; // legacy, ownerless
+  return String(doc.owner) === String(user._id);
+}
+
 // A short, unambiguous join code (no easily-confused chars).
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function genJoinCode(len = 6) {
@@ -62,12 +72,13 @@ async function studentApprovedInClass(userId, classId) {
   return !!(await Enrollment.exists({ student: userId, class: classId, status: "approved" }));
 }
 
-// Can this user see/open a given class doc? admin → yes; teacher → only own;
-// student → only when approved-enrolled.
+// Can this user see/open a given class doc? admin → yes; otherwise the OWNER
+// (a teacher's own class) OR anyone APPROVED-enrolled (a student, or a teacher
+// who joined another teacher's class as a participant).
 async function canAccessClass(user, classDoc) {
   if (!classDoc) return false;
   if (isAdminUser(user)) return true;
-  if (isStaffUser(user)) return classDoc.owner && String(classDoc.owner) === String(user._id);
+  if (classDoc.owner && String(classDoc.owner) === String(user._id)) return true;
   return studentApprovedInClass(user._id, classDoc._id);
 }
 
@@ -146,9 +157,11 @@ const getClass = asyncHandler(async (req, res) => {
     res.status(403);
     throw new Error("Bu sinifə giriş yoxdur");
   }
-  // Hide the join code from students; staff/owner keep it (to share with students).
+  // Only the owning teacher (or admin) sees the join code.
   const obj = _class.toObject();
-  if (!isStaffUser(req.user)) delete obj.joinCode;
+  const canSeeCode =
+    isAdminUser(req.user) || (_class.owner && String(_class.owner) === String(req.user._id));
+  if (!canSeeCode) delete obj.joinCode;
   res.status(200).json(obj);
 });
 
@@ -157,14 +170,13 @@ const getTags = asyncHandler(async (req, res) => {
   let filter;
   if (isAdminUser(req.user)) {
     filter = {};
-  } else if (isStaffUser(req.user)) {
-    filter = { owner: req.user._id };
   } else {
-    // Student: only categories that contain a class they're APPROVED in.
+    // Own categories OR categories that contain a class the user is enrolled in.
+    // (Covers students AND teachers who joined another teacher's class.)
     const classIds = await approvedClassIds(req.user._id);
     const classes = await Class.find({ _id: { $in: classIds } }).select("tag").lean();
     const tagIds = [...new Set(classes.map((c) => c.tag).filter(Boolean).map(String))];
-    filter = { _id: { $in: tagIds } };
+    filter = { $or: [{ owner: req.user._id }, { _id: { $in: tagIds } }] };
   }
   // Do NOT populate exams (that would expose raw exam docs). The category list
   // only needs the tag fields themselves.
@@ -182,12 +194,9 @@ const getTag = asyncHandler(async (req, res) => {
     throw new Error("No tag found");
   }
 
-  let allowed = false;
-  if (isAdminUser(req.user)) {
-    allowed = true;
-  } else if (isStaffUser(req.user)) {
-    allowed = tag.owner && String(tag.owner) === String(req.user._id);
-  } else {
+  let allowed = isAdminUser(req.user) || (tag.owner && String(tag.owner) === String(req.user._id));
+  if (!allowed) {
+    // Not the owner: allowed if approved-enrolled in any class under this category.
     const classIdsInTag = await Class.find({ tag: id }).distinct("_id");
     allowed = !!(await Enrollment.exists({
       student: req.user._id,
@@ -612,11 +621,13 @@ const getExamsByClass = asyncHandler(async (req, res) => {
   // data, so sending populated question/option arrays per card is wasted payload.
   const exams = await Exam.find({ class: exists._id });
 
-  // Owner/admin reached here see everything (incl. drafts).
-  if (isStaffUser(req.user)) {
+  // Only the OWNER (or admin) sees drafts + full data. A participant — student
+  // OR a teacher who joined this class — gets the sanitized student view.
+  const isOwnerOrAdmin =
+    isAdminUser(req.user) || (exists.owner && String(exists.owner) === String(req.user._id));
+  if (isOwnerOrAdmin) {
     return res.status(200).json(exams || []);
   }
-  // Student: hide drafts AND strip answer keys / password / pdf from each exam.
   const visible = (exams || []).filter((e) => !e.hidden).map(sanitizeExamForStudent);
   res.status(200).json(visible);
 });
@@ -629,6 +640,10 @@ const setExamHidden = asyncHandler(async (req, res) => {
   if (!exam) {
     res.status(404);
     throw new Error("İmtahan tapılmadı");
+  }
+  if (!ownsOrAdmin(req.user, exam)) {
+    res.status(403);
+    throw new Error("Bu imtahan sizə aid deyil");
   }
   exam.hidden = hidden === true || hidden === "true";
   await exam.save();
@@ -654,19 +669,19 @@ const getClassesByTag = asyncHandler(async (req, res) => {
 
   try {
     let filter = { tag: tagId };
-    if (isAdminUser(req.user)) {
-      // all classes in this tag
-    } else if (isStaffUser(req.user)) {
-      filter.owner = req.user._id; // teacher: only their own classes
-    } else {
-      // student: only the classes in this tag they're approved in
+    if (!isAdminUser(req.user)) {
+      // Own classes OR classes in this tag the user is approved-enrolled in.
       const classIds = await approvedClassIds(req.user._id);
-      filter._id = { $in: classIds };
+      filter.$or = [{ owner: req.user._id }, { _id: { $in: classIds } }];
     }
 
     const classes = await Class.find(filter).lean();
-    // Students never receive the join code.
-    if (!isStaffUser(req.user)) classes.forEach((c) => delete c.joinCode);
+    // Only the owning teacher (or admin) keeps the join code per class.
+    if (!isAdminUser(req.user)) {
+      classes.forEach((c) => {
+        if (!c.owner || String(c.owner) !== String(req.user._id)) delete c.joinCode;
+      });
+    }
 
     res.status(200).json(classes || []);
   } catch (error) {
@@ -693,18 +708,17 @@ const getExam = asyncHandler(async (req, res) => {
     throw new Error("No exams found");
   }
 
-  // Teacher: only the owner (admins always). Legacy exams with no owner stay
-  // visible to any teacher so nothing breaks during the transition.
-  if (isStaffUser(req.user) && !isAdminUser(req.user)) {
-    if (exam.owner && String(exam.owner) !== String(req.user._id)) {
-      res.status(403);
-      throw new Error("Bu imtahan sizə aid deyil");
-    }
-  }
+  // Owner (or admin) gets the full exam (answer key included — for editing).
+  // Legacy exams with no owner stay visible to any teacher during the transition.
+  const admin = isAdminUser(req.user);
+  const owner =
+    (exam.owner && String(exam.owner) === String(req.user._id)) ||
+    (!exam.owner && isStaffUser(req.user));
 
-  // Student: must be approved-enrolled in the exam's class, OR have the exam via
-  // the existing per-user grant (purchase/assignment) so legacy access survives.
-  if (!isStaffUser(req.user)) {
+  if (!admin && !owner) {
+    // Everyone else — a student OR a teacher who joined this class — needs an
+    // approved enrollment (or the legacy per-user grant), and gets the SANITIZED
+    // view (no answer key / password / pdf).
     const ownsLegacy =
       (req.user.exams || []).some((e) => String(e) === String(id)) ||
       (exam.users || []).some((u) => String(u) === String(req.user._id));
@@ -713,7 +727,6 @@ const getExam = asyncHandler(async (req, res) => {
       res.status(403);
       throw new Error("Bu imtahana giriş yoxdur");
     }
-    // Never expose the correct answers / password / pdf to students.
     return res.status(200).json(sanitizeExamForStudent(exam));
   }
 
@@ -756,6 +769,9 @@ const addQuestion = asyncHandler(async (req, res) => {
   if (!exam) {
     res.status(404).json({ message: "Exam not found" });
     return;
+  }
+  if (!ownsOrAdmin(req.user, exam)) {
+    return res.status(403).json({ message: "Bu imtahan sizə aid deyil" });
   }
 
   // Persist the structured per-page layout (0 = show all) alongside the answer
@@ -1614,6 +1630,11 @@ const editQuestion = asyncHandler(async (req, res) => {
   const questionExists = await Question.findById(questionId);
 
   if (questionExists) {
+    const ownerExam = await Exam.findOne({ questions: questionExists._id });
+    if (!ownsOrAdmin(req.user, ownerExam)) {
+      res.status(403);
+      throw new Error("Bu sual sizə aid deyil");
+    }
     await Question.findByIdAndUpdate(questionId, {
       name,
       correctOption,
@@ -1656,6 +1677,10 @@ const editExam = asyncHandler(async (req, res) => {
     pdfPath,
   } = req.body;
   const examExists = await Exam.findById(examId);
+  if (examExists && !ownsOrAdmin(req.user, examExists)) {
+    res.status(403);
+    throw new Error("Bu imtahan sizə aid deyil");
+  }
   if (examExists) {
     // Update the exam fields
     const update = {
@@ -1717,6 +1742,10 @@ const editTag = asyncHandler(async (req, res) => {
   const { tagId } = req.params;
   const { name } = req.body;
   const tagExists = await Tag.findById(tagId);
+  if (tagExists && !ownsOrAdmin(req.user, tagExists)) {
+    res.status(403);
+    throw new Error("Bu kateqoriya sizə aid deyil");
+  }
   if (tagExists) {
     await Tag.findByIdAndUpdate(tagId, { name });
 
@@ -1742,6 +1771,10 @@ const editClass = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("Sinif tapılmadı!");
   }
+  if (!ownsOrAdmin(req.user, classExists)) {
+    res.status(403);
+    throw new Error("Bu sinif sizə aid deyil");
+  }
   const update = {};
   if (typeof name === "string") update.name = label;
   if (level !== undefined && level !== "") update.level = level;
@@ -1761,6 +1794,10 @@ const deleteQuestion = asyncHandler(async (req, res) => {
   const exam = await Exam.findOne({ questions: question._id });
 
   if (exam) {
+    if (!ownsOrAdmin(req.user, exam)) {
+      res.status(403);
+      throw new Error("Bu sual sizə aid deyil");
+    }
     exam.questions = undefined;
     await exam.save();
   } else {
@@ -1836,6 +1873,10 @@ const deleteExam = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("Exam not found!");
   }
+  if (!ownsOrAdmin(req.user, exam)) {
+    res.status(403);
+    throw new Error("Bu imtahan sizə aid deyil");
+  }
   await purgeExam(examId);
   res.status(200).json({ message: "Exam deleted succesfully" });
 });
@@ -1847,6 +1888,10 @@ const deleteClass = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("Class not found!");
   }
+  if (!ownsOrAdmin(req.user, _class)) {
+    res.status(403);
+    throw new Error("Bu sinif sizə aid deyil");
+  }
   await purgeClass(classId);
   res.status(200).json({ message: "Class deleted successfully" });
 });
@@ -1857,6 +1902,10 @@ const deleteTag = asyncHandler(async (req, res) => {
   if (!tag) {
     res.status(404);
     throw new Error("Tag not found!");
+  }
+  if (!ownsOrAdmin(req.user, tag)) {
+    res.status(403);
+    throw new Error("Bu kateqoriya sizə aid deyil");
   }
   await purgeTag(tagId);
   res.status(200).json({ message: "Tag deleted successfully" });
