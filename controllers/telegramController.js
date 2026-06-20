@@ -1,6 +1,9 @@
 const asyncHandler = require("express-async-handler");
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 const User = require("../models/userModel");
+const Exam = require("../models/examModel");
+const Class = require("../models/classModel");
 const {
   isTelegramConfigured,
   telegramDeepLink,
@@ -117,6 +120,70 @@ const testTelegram = asyncHandler(async (req, res) => {
   res.json({ sent: true });
 });
 
+// GET /api/telegram/automation — the user's notification prefs + the tree of
+// THEIR classes/exams (only owned content, since notifications fire to the
+// exam/class owner). Scope is opt-out, so the UI checks everything not excluded.
+const getAutomation = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id).select("telegramPrefs telegramChatId");
+  const prefs = user.telegramPrefs || {};
+
+  const exams = await Exam.find({ owner: req.user._id }).select("name class").lean();
+  const classIds = [...new Set(exams.filter((e) => e.class).map((e) => String(e.class)))];
+  const classes = await Class.find({ _id: { $in: classIds } }).select("name level").lean();
+
+  const byClass = {};
+  for (const c of classes) {
+    byClass[String(c._id)] = {
+      _id: String(c._id),
+      name: c.name || (c.level != null ? String(c.level) : "Sinif"),
+      exams: [],
+    };
+  }
+  const orphan = [];
+  for (const e of exams) {
+    const cid = e.class ? String(e.class) : null;
+    const row = { _id: String(e._id), name: e.name || "İmtahan" };
+    if (cid && byClass[cid]) byClass[cid].exams.push(row);
+    else orphan.push(row);
+  }
+  const tree = Object.values(byClass);
+  if (orphan.length) tree.push({ _id: "none", name: "Digər imtahanlar", exams: orphan });
+
+  res.json({
+    linked: !!user.telegramChatId,
+    prefs: {
+      onStart: prefs.onStart !== false,
+      onFinish: prefs.onFinish !== false,
+      onViolation: prefs.onViolation !== false,
+      onJoin: prefs.onJoin !== false,
+      excludedClasses: (prefs.excludedClasses || []).map(String),
+      excludedExams: (prefs.excludedExams || []).map(String),
+    },
+    classes: tree,
+  });
+});
+
+// PUT /api/telegram/automation — save notification prefs.
+const saveAutomation = asyncHandler(async (req, res) => {
+  const { onStart, onFinish, onViolation, onJoin, excludedClasses, excludedExams } = req.body || {};
+  const ids = (arr) =>
+    Array.isArray(arr) ? arr.filter((x) => mongoose.Types.ObjectId.isValid(x)) : [];
+  await User.updateOne(
+    { _id: req.user._id },
+    {
+      $set: {
+        "telegramPrefs.onStart": !!onStart,
+        "telegramPrefs.onFinish": !!onFinish,
+        "telegramPrefs.onViolation": !!onViolation,
+        "telegramPrefs.onJoin": !!onJoin,
+        "telegramPrefs.excludedClasses": ids(excludedClasses),
+        "telegramPrefs.excludedExams": ids(excludedExams),
+      },
+    }
+  );
+  res.json({ saved: true });
+});
+
 // POST /api/telegram/unlink — disconnect this user's Telegram.
 const unlinkTelegram = asyncHandler(async (req, res) => {
   await User.updateOne(
@@ -131,4 +198,6 @@ module.exports = {
   telegramWebhook,
   testTelegram,
   unlinkTelegram,
+  getAutomation,
+  saveAutomation,
 };

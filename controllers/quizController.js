@@ -8,7 +8,7 @@ const Result = require("../models/resultModel");
 const Attempt = require("../models/attemptModel");
 const User = require("../models/userModel");
 const Enrollment = require("../models/enrollmentModel");
-const { notifyExamStarted } = require("../helper/telegram");
+const { notifyExamStarted, notifyExamFinished } = require("../helper/telegram");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const fs = require("fs");
@@ -1127,11 +1127,9 @@ const startAttempt = asyncHandler(async (req, res) => {
 
   // A brand-new attempt was just created (resume/duplicate paths returned
   // above). Ping the exam owner over Telegram — fire-and-forget so a slow or
-  // failed notification never delays/blocks the student's start. Skip the
-  // owner starting their own exam (a preview), since that isn't a student.
-  if (String(exam.owner || "") !== String(user._id)) {
-    notifyExamStarted(exam, user);
-  }
+  // failed notification never delays/blocks the student's start. Gating (event
+  // flag + class/exam scope) lives in the helper / the owner's prefs.
+  notifyExamStarted(exam, user);
 
   return res.status(200).json(payload(attempt));
 });
@@ -1538,6 +1536,11 @@ const addResult = asyncHandler(async (req, res) => {
   await exam.save();
   user.results.push(newResult._id);
   await user.save();
+
+  // Telegram: tell the exam owner the student finished (or was terminated for
+  // cheating — the helper branches on result.terminated and the owner's prefs).
+  // Fire-and-forget so it never delays the student's submit response.
+  notifyExamFinished(exam, user, newResult);
 
   res.status(200).json({ message: "Result has been saved", earnPoints: earnedPoints });
 });

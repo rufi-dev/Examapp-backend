@@ -5,6 +5,8 @@ const {
   telegramWebhook,
   testTelegram,
   unlinkTelegram,
+  getAutomation,
+  saveAutomation,
 } = require("../controllers/telegramController");
 
 const router = express.Router();
@@ -16,5 +18,9 @@ router.post("/webhook", telegramWebhook);
 router.get("/status", protect, teacherOnly, getTelegramStatus);
 router.post("/test", protect, teacherOnly, testTelegram);
 router.post("/unlink", protect, teacherOnly, unlinkTelegram);
+
+// Teacher/admin: notification preferences (event types + class/exam scope).
+router.get("/automation", protect, teacherOnly, getAutomation);
+router.put("/automation", protect, teacherOnly, saveAutomation);
 
 module.exports = router;

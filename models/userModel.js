@@ -74,6 +74,18 @@ const userSchema = Schema(
         },
         telegramLinkedAt: {
             type: Date,
+        },
+        // Which Telegram notifications this teacher wants, and the scope.
+        // Event flags default ON. Scope is OPT-OUT: everything notifies unless
+        // its class or exam id is in an excluded list — so a newly created
+        // class/exam is automatically included without any action.
+        telegramPrefs: {
+            onStart: { type: Boolean, default: true },     // student starts an exam
+            onFinish: { type: Boolean, default: true },    // student finishes -> result
+            onViolation: { type: Boolean, default: true }, // exam terminated for cheating
+            onJoin: { type: Boolean, default: true },      // student joins/requests a class
+            excludedClasses: [{ type: Schema.Types.ObjectId, ref: "Class" }],
+            excludedExams: [{ type: Schema.Types.ObjectId, ref: "Exam" }],
         }
     },
     {

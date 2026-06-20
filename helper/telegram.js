@@ -50,29 +50,115 @@ const esc = (s) =>
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
-// Fire-and-forget: notify the exam's owner that a student started it. Safe to
-// call without awaiting — any failure is swallowed so it can never affect the
-// student's exam start.
+const fmtTime = () =>
+  new Date().toLocaleString("az-AZ", {
+    timeZone: "Asia/Baku",
+    hour: "2-digit",
+    minute: "2-digit",
+    day: "2-digit",
+    month: "2-digit",
+  });
+
+// Scope check (opt-out): an exam notifies unless its class or its own id is in
+// the teacher's excluded lists. Missing prefs => everything enabled.
+function examNotifyEnabled(prefs, exam) {
+  if (!prefs) return true;
+  const cls = exam?.class ? String(exam.class) : "";
+  if (cls && (prefs.excludedClasses || []).some((c) => String(c) === cls)) return false;
+  if ((prefs.excludedExams || []).some((e) => String(e) === String(exam?._id))) return false;
+  return true;
+}
+
+// A class-level event (enrollment) notifies unless the class is excluded.
+function classNotifyEnabled(prefs, classId) {
+  if (!prefs) return true;
+  return !(prefs.excludedClasses || []).some((c) => String(c) === String(classId));
+}
+
+// Load the owner of an exam/class and return { owner } only when they're linked
+// AND the given event flag isn't explicitly off. Returns null to skip.
+async function resolveOwner(ownerId, flag) {
+  if (!isTelegramConfigured() || !ownerId) return null;
+  const owner = await User.findById(ownerId).select("telegramChatId telegramPrefs");
+  if (!owner?.telegramChatId) return null;
+  const prefs = owner.telegramPrefs || {};
+  if (prefs[flag] === false) return null; // default (undefined) = on
+  return { owner, prefs };
+}
+
+// Fire-and-forget: a student started the exam. Safe to call without awaiting.
 async function notifyExamStarted(exam, student) {
   try {
-    if (!isTelegramConfigured() || !exam?.owner) return;
-    const owner = await User.findById(exam.owner).select("telegramChatId");
-    if (!owner?.telegramChatId) return;
-    const time = new Date().toLocaleString("az-AZ", {
-      timeZone: "Asia/Baku",
-      hour: "2-digit",
-      minute: "2-digit",
-      day: "2-digit",
-      month: "2-digit",
-    });
-    const text =
-      `🔔 <b>${esc(student?.name || "Şagird")}</b> imtahana başladı\n` +
-      `📝 ${esc(exam.name || "İmtahan")}\n` +
-      `🕒 ${esc(time)}`;
-    await sendTelegram(owner.telegramChatId, text);
+    if (!exam?.owner) return;
+    const r = await resolveOwner(exam.owner, "onStart");
+    if (!r || !examNotifyEnabled(r.prefs, exam)) return;
+    await sendTelegram(
+      r.owner.telegramChatId,
+      `🟢 <b>${esc(student?.name || "Şagird")}</b> imtahana başladı\n` +
+        `📝 ${esc(exam.name || "İmtahan")}\n` +
+        `🕒 ${esc(fmtTime())}`
+    );
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("[TELEGRAM] notifyExamStarted failed:", e.message);
+  }
+}
+
+// Fire-and-forget: a student finished an exam. `result` carries the score; when
+// it was terminated for cheating we send the violation message instead (gated
+// by the separate onViolation flag).
+async function notifyExamFinished(exam, student, result) {
+  try {
+    if (!exam?.owner) return;
+    const terminated = !!result?.terminated;
+    const r = await resolveOwner(exam.owner, terminated ? "onViolation" : "onFinish");
+    if (!r || !examNotifyEnabled(r.prefs, exam)) return;
+    const name = esc(student?.name || "Şagird");
+    const examName = esc(exam.name || "İmtahan");
+    if (terminated) {
+      await sendTelegram(
+        r.owner.telegramChatId,
+        `⛔️ <b>${name}</b> — imtahan pozuntuya görə dayandırıldı\n` +
+          `📝 ${examName}\n` +
+          `🚨 Pozuntu: ${Number(result?.violations || 0)}\n` +
+          `🕒 ${esc(fmtTime())}`
+      );
+      return;
+    }
+    const pts = Number(result?.earnPoints ?? 0);
+    const pass = exam.passingMarks != null ? pts >= Number(exam.passingMarks) : null;
+    const verdict = pass === null ? "" : pass ? " (keçdi ✅)" : " (keçmədi ❌)";
+    await sendTelegram(
+      r.owner.telegramChatId,
+      `🏁 <b>${name}</b> imtahanı bitirdi\n` +
+        `📝 ${examName}\n` +
+        `📊 Nəticə: ${pts}${exam.totalMarks ? "/" + Number(exam.totalMarks) : ""} bal${verdict}\n` +
+        `🕒 ${esc(fmtTime())}`
+    );
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("[TELEGRAM] notifyExamFinished failed:", e.message);
+  }
+}
+
+// Fire-and-forget: a student joined / requested to join a class. `pending` =
+// awaiting approval (vs auto-approved).
+async function notifyEnrollment(klass, student, pending) {
+  try {
+    if (!klass?.owner) return;
+    const r = await resolveOwner(klass.owner, "onJoin");
+    if (!r || !classNotifyEnabled(r.prefs, klass._id)) return;
+    await sendTelegram(
+      r.owner.telegramChatId,
+      `👥 <b>${esc(student?.name || "Şagird")}</b> ${
+        pending ? "sinfə qoşulmaq istəyir" : "sinfə qoşuldu"
+      }\n` +
+        `🏫 ${esc(klass.name || "Sinif")}\n` +
+        `🕒 ${esc(fmtTime())}`
+    );
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("[TELEGRAM] notifyEnrollment failed:", e.message);
   }
 }
 
@@ -81,6 +167,10 @@ module.exports = {
   telegramDeepLink,
   tgApi,
   sendTelegram,
+  examNotifyEnabled,
+  classNotifyEnabled,
   notifyExamStarted,
+  notifyExamFinished,
+  notifyEnrollment,
   BOT_USERNAME,
 };

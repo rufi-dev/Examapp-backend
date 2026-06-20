@@ -2,6 +2,7 @@ const asyncHandler = require("express-async-handler");
 const Enrollment = require("../models/enrollmentModel");
 const Class = require("../models/classModel");
 const User = require("../models/userModel");
+const { notifyEnrollment } = require("../helper/telegram");
 
 const isAdmin = (u) => !!u && u.role === "admin";
 
@@ -54,6 +55,9 @@ const joinClass = asyncHandler(async (req, res) => {
     teacher: cls.owner,
     status,
   });
+  // Telegram: tell the class owner a student joined / requested to join
+  // (fire-and-forget; gated by the owner's onJoin flag + class scope).
+  notifyEnrollment(cls, req.user, status === "pending");
   res.status(201).json({
     status,
     message:
