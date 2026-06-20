@@ -32,6 +32,11 @@ const resultSchema = Schema(
         answer: {
           type: Schema.Types.Mixed,
         },
+        // Optional student-uploaded photo of their worked solution for this
+        // question (only when the exam enables studentSolutionPhotos).
+        photo: {
+          type: String,
+        },
       },
     ],
     correctAnswers: [

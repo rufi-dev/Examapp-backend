@@ -233,6 +233,7 @@ const addExam = asyncHandler(async (req, res) => {
     antiCheat,
     partialCredit,
     shuffleOptions,
+    studentSolutionPhotos,
     pdf,
     mode,
   } = req.body;
@@ -285,6 +286,7 @@ const addExam = asyncHandler(async (req, res) => {
       antiCheat: antiCheat === "true" || antiCheat === true,
       partialCredit: partialCredit === "true" || partialCredit === true,
       shuffleOptions: shuffleOptions === "true" || shuffleOptions === true,
+      studentSolutionPhotos: studentSolutionPhotos === "true" || studentSolutionPhotos === true,
       videoLink,
       startDate,
       endDate,
@@ -619,16 +621,35 @@ const getExamsByClass = asyncHandler(async (req, res) => {
 
   // No questions populate: the exam-card listing doesn't render any question
   // data, so sending populated question/option arrays per card is wasted payload.
-  const exams = await Exam.find({ class: exists._id });
+  // Class IS populated (name/level) so the card can show the category chip.
+  const exams = await Exam.find({ class: exists._id }).populate("class", "name level");
+
+  // Question count per exam for the card stats — a cheap $size aggregation that
+  // does NOT load the (heavy) answer arrays.
+  const qIds = exams.map((e) => e.questions).filter(Boolean);
+  const sizeMap = {};
+  if (qIds.length) {
+    const sizes = await Question.aggregate([
+      { $match: { _id: { $in: qIds } } },
+      { $project: { n: { $size: { $ifNull: ["$correctAnswers", []] } } } },
+    ]);
+    sizes.forEach((s) => (sizeMap[String(s._id)] = s.n));
+  }
+  const withCount = (obj, exam) => ({
+    ...obj,
+    questionCount: exam.questions ? sizeMap[String(exam.questions)] || 0 : 0,
+  });
 
   // Only the OWNER (or admin) sees drafts + full data. A participant — student
   // OR a teacher who joined this class — gets the sanitized student view.
   const isOwnerOrAdmin =
     isAdminUser(req.user) || (exists.owner && String(exists.owner) === String(req.user._id));
   if (isOwnerOrAdmin) {
-    return res.status(200).json(exams || []);
+    return res.status(200).json(exams.map((e) => withCount(e.toObject(), e)));
   }
-  const visible = (exams || []).filter((e) => !e.hidden).map(sanitizeExamForStudent);
+  const visible = (exams || [])
+    .filter((e) => !e.hidden)
+    .map((e) => withCount(sanitizeExamForStudent(e), e));
   res.status(200).json(visible);
 });
 
@@ -994,6 +1015,8 @@ const startAttempt = asyncHandler(async (req, res) => {
       // Structured pagination: questions per page (0 = all on one page). The
       // runner paginates native questions; ignored for PDF exams.
       questionsPerPage: exam.questionsPerPage || 0,
+      // When on, the runner shows a per-question "upload solution photo" control.
+      studentSolutionPhotos: !!exam.studentSolutionPhotos,
       // Same sanitizer as every other student payload: display content only, the
       // answer key (`correct`/`pairs`/`answer`) is never sent to the runner. When
       // options are shuffled, reorder each Cm/Cs question's choices by THIS
@@ -1483,7 +1506,14 @@ const addResult = asyncHandler(async (req, res) => {
     // Store the selection that scoring used: strings trimmed (so review/PDF/
     // analytics agree with the score), structured indices/maps stored raw. The
     // correct side stores a renderable key (indices for choices, text otherwise).
-    selectedAnswers: sel.map((a) => ({ type: a?.type, answer: storableAnswer(a?.answer) })),
+    selectedAnswers: sel.map((a) => ({
+      type: a?.type,
+      answer: storableAnswer(a?.answer),
+      // Keep the student's worked-solution photo only when the exam allows it.
+      ...(exam.studentSolutionPhotos && typeof a?.photo === "string" && a.photo
+        ? { photo: a.photo }
+        : {}),
+    })),
     correctAnswers: correct.map((a) => ({ type: a.type, answer: renderableCorrect(a) })),
     correctAnswersByType: [
       { type: "Cm", count: counts.Cm },
@@ -1627,9 +1657,13 @@ const reviewByResult = asyncHandler(async (req, res) => {
     throw new Error("No Result Found!");
   }
 
-  const isStaff = user.role === "admin" || user.role === "teacher";
+  // The student (owner of the result), an admin, or the TEACHER WHO OWNS THE
+  // EXAM may view a review. Legacy exams with no owner stay open to any teacher.
   const isOwner = result.userId?.toString() === user._id.toString();
-  if (!isOwner && !isStaff) {
+  const examOwner = result.examId?.owner;
+  const teacherOwnsExam =
+    user.role === "teacher" && (!examOwner || String(examOwner) === String(user._id));
+  if (!isOwner && user.role !== "admin" && !teacherOwnsExam) {
     res.status(403);
     throw new Error("Bu nəticəyə icazəniz yoxdur");
   }
@@ -1689,6 +1723,7 @@ const editExam = asyncHandler(async (req, res) => {
     antiCheat,
     partialCredit,
     shuffleOptions,
+    studentSolutionPhotos,
     pdfPath,
   } = req.body;
   const examExists = await Exam.findById(examId);
@@ -1717,6 +1752,8 @@ const editExam = asyncHandler(async (req, res) => {
       antiCheat: antiCheat === true || antiCheat === "true",
       partialCredit: partialCredit === true || partialCredit === "true",
       shuffleOptions: shuffleOptions === true || shuffleOptions === "true",
+      studentSolutionPhotos:
+        studentSolutionPhotos === true || studentSolutionPhotos === "true",
     };
     // Only touch the solution images when the client sends them, so partial
     // edits don't wipe the existing list.
