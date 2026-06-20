@@ -124,12 +124,22 @@ const testTelegram = asyncHandler(async (req, res) => {
 // THEIR classes/exams (only owned content, since notifications fire to the
 // exam/class owner). Scope is opt-out, so the UI checks everything not excluded.
 const getAutomation = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user._id).select("telegramPrefs telegramChatId");
+  const user = await User.findById(req.user._id).select("telegramPrefs telegramChatId role");
   const prefs = user.telegramPrefs || {};
 
-  const exams = await Exam.find({ owner: req.user._id }).select("name class").lean();
-  const classIds = [...new Set(exams.filter((e) => e.class).map((e) => String(e.class)))];
-  const classes = await Class.find({ _id: { $in: classIds } }).select("name level").lean();
+  // Admins are "at the top": they see (and can scope) EVERY class/exam. A
+  // teacher sees only what they own.
+  const isAdmin = user.role === "admin";
+  const exams = await Exam.find(isAdmin ? {} : { owner: req.user._id })
+    .select("name class")
+    .lean();
+  const classes = isAdmin
+    ? await Class.find({}).select("name level").lean()
+    : await Class.find({
+        _id: { $in: [...new Set(exams.filter((e) => e.class).map((e) => String(e.class)))] },
+      })
+        .select("name level")
+        .lean();
 
   const byClass = {};
   for (const c of classes) {
@@ -151,11 +161,13 @@ const getAutomation = asyncHandler(async (req, res) => {
 
   res.json({
     linked: !!user.telegramChatId,
+    isAdmin,
     prefs: {
       onStart: prefs.onStart !== false,
       onFinish: prefs.onFinish !== false,
       onViolation: prefs.onViolation !== false,
       onJoin: prefs.onJoin !== false,
+      onReport: prefs.onReport !== false,
       excludedClasses: (prefs.excludedClasses || []).map(String),
       excludedExams: (prefs.excludedExams || []).map(String),
     },
@@ -165,7 +177,8 @@ const getAutomation = asyncHandler(async (req, res) => {
 
 // PUT /api/telegram/automation — save notification prefs.
 const saveAutomation = asyncHandler(async (req, res) => {
-  const { onStart, onFinish, onViolation, onJoin, excludedClasses, excludedExams } = req.body || {};
+  const { onStart, onFinish, onViolation, onJoin, onReport, excludedClasses, excludedExams } =
+    req.body || {};
   const ids = (arr) =>
     Array.isArray(arr) ? arr.filter((x) => mongoose.Types.ObjectId.isValid(x)) : [];
   await User.updateOne(
@@ -176,6 +189,7 @@ const saveAutomation = asyncHandler(async (req, res) => {
         "telegramPrefs.onFinish": !!onFinish,
         "telegramPrefs.onViolation": !!onViolation,
         "telegramPrefs.onJoin": !!onJoin,
+        "telegramPrefs.onReport": !!onReport,
         "telegramPrefs.excludedClasses": ids(excludedClasses),
         "telegramPrefs.excludedExams": ids(excludedExams),
       },

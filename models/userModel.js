@@ -84,6 +84,7 @@ const userSchema = Schema(
             onFinish: { type: Boolean, default: true },    // student finishes -> result
             onViolation: { type: Boolean, default: true }, // exam terminated for cheating
             onJoin: { type: Boolean, default: true },      // student joins/requests a class
+            onReport: { type: Boolean, default: true },    // end-of-exam PDF+Excel report
             excludedClasses: [{ type: Schema.Types.ObjectId, ref: "Class" }],
             excludedExams: [{ type: Schema.Types.ObjectId, ref: "Exam" }],
         }

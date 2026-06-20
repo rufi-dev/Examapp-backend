@@ -11,6 +11,7 @@ const stripeRoute = require('./routes/stripeRoute')
 const notificationRoute = require('./routes/notificationRoute')
 const telegramRoute = require('./routes/telegramRoute')
 const Attempt = require('./models/attemptModel')
+const { runDueExamReports } = require('./jobs/examReports')
 const errorHandler = require('./middleware/errorMiddleware')
 
 // Collapse any pre-existing duplicate ACTIVE attempts (keep the newest, mark the
@@ -97,6 +98,12 @@ mongoose
         app.listen(PORT, () => {
             console.log("Connected to DB and listening on port:", PORT)
         })
+        // End-of-exam Telegram reports: check shortly after boot, then every
+        // 10 minutes. Errors are logged, never fatal.
+        const reportTick = () =>
+            runDueExamReports().catch((e) => console.error("[REPORT] tick failed:", e.message))
+        setTimeout(reportTick, 30 * 1000)
+        setInterval(reportTick, 10 * 60 * 1000)
     })
     .catch((err) => {
         console.log(err)
