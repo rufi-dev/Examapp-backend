@@ -676,10 +676,25 @@ const getClassesByTag = asyncHandler(async (req, res) => {
     }
 
     const classes = await Class.find(filter).lean();
+    const canManage = (c) =>
+      isAdminUser(req.user) || (c.owner && String(c.owner) === String(req.user._id));
     // Only the owning teacher (or admin) keeps the join code per class.
-    if (!isAdminUser(req.user)) {
+    classes.forEach((c) => {
+      if (!canManage(c)) delete c.joinCode;
+    });
+
+    // Attach the approved-student count to classes the user manages (for the
+    // "N joined" badge on each class card).
+    const manageIds = classes.filter(canManage).map((c) => c._id);
+    if (manageIds.length) {
+      const counts = await Enrollment.aggregate([
+        { $match: { class: { $in: manageIds }, status: "approved" } },
+        { $group: { _id: "$class", n: { $sum: 1 } } },
+      ]);
+      const map = {};
+      counts.forEach((c) => (map[String(c._id)] = c.n));
       classes.forEach((c) => {
-        if (!c.owner || String(c.owner) !== String(req.user._id)) delete c.joinCode;
+        if (canManage(c)) c.students = map[String(c._id)] || 0;
       });
     }
 
