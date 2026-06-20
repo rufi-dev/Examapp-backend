@@ -9,6 +9,7 @@ const quizRoute = require('./routes/quizRoute')
 const achivementRoute = require('./routes/achivementRoute')
 const stripeRoute = require('./routes/stripeRoute')
 const notificationRoute = require('./routes/notificationRoute')
+const telegramRoute = require('./routes/telegramRoute')
 const Attempt = require('./models/attemptModel')
 const errorHandler = require('./middleware/errorMiddleware')
 
@@ -69,6 +70,7 @@ app.use("/api/quiz", quizRoute)
 app.use("/api/achivement", achivementRoute)
 app.use("/api/stripe", stripeRoute)
 app.use("/api/notifications", notificationRoute)
+app.use("/api/telegram", telegramRoute)
 app.use('/uploads', express.static('uploads'));
 
 app.get('/', (req, res) => {

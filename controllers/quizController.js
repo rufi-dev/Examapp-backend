@@ -8,6 +8,7 @@ const Result = require("../models/resultModel");
 const Attempt = require("../models/attemptModel");
 const User = require("../models/userModel");
 const Enrollment = require("../models/enrollmentModel");
+const { notifyExamStarted } = require("../helper/telegram");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const fs = require("fs");
@@ -1124,6 +1125,14 @@ const startAttempt = asyncHandler(async (req, res) => {
     throw e;
   }
 
+  // A brand-new attempt was just created (resume/duplicate paths returned
+  // above). Ping the exam owner over Telegram — fire-and-forget so a slow or
+  // failed notification never delays/blocks the student's start. Skip the
+  // owner starting their own exam (a preview), since that isn't a student.
+  if (String(exam.owner || "") !== String(user._id)) {
+    notifyExamStarted(exam, user);
+  }
+
   return res.status(200).json(payload(attempt));
 });
 
@@ -1646,12 +1655,16 @@ const reviewByResult = asyncHandler(async (req, res) => {
     throw new Error("User not found!");
   }
 
-  const result = await Result.findById(resultId).populate({
-    path: "examId",
-    populate: {
-      path: "questions",
-    },
-  });
+  const result = await Result.findById(resultId)
+    .populate({
+      path: "examId",
+      populate: {
+        path: "questions",
+      },
+    })
+    // Populate the student so the review header can show whose result it is
+    // (used by the teacher's eye-button view).
+    .populate("userId", "name email");
   if (!result) {
     res.status(404);
     throw new Error("No Result Found!");
