@@ -36,6 +36,7 @@ const {
   getResultsByUserByExam,
   addExamToUser,
   getExamsByUser,
+  getLatestExams,
   reviewByResult,
   deleteMyExam,
   addExamToUserById,
@@ -166,6 +167,7 @@ router.post(
   addExamToUserById
 );
 router.get("/getExamsByUser", protect, verifiedOnly, getExamsByUser);
+router.get("/getLatestExams", protect, verifiedOnly, getLatestExams);
 router.get("/getExams", protect, teacherOnly, getExams);
 router.get("/reviewByResult/:resultId", protect, verifiedOnly, reviewByResult);
 router.delete("/deleteMyExam/:examId", protect, verifiedOnly, deleteMyExam);

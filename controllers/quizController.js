@@ -2039,6 +2039,56 @@ const getExamsByUser = asyncHandler(async (req, res) => {
   res.status(200).json((user.exams || []).map((e) => sanitizeExamForStudent(e)));
 });
 
+// The most recently CREATED exams the user can access — a dashboard shortcut so
+// a student can jump to a just-published exam without digging through every
+// category and class. Student: exams in approved-enrolled classes (no drafts).
+// Teacher: their own classes' exams + any class they joined. Admin: everything.
+const getLatestExams = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id);
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found!");
+  }
+
+  let filter = {};
+  if (!isAdminUser(user)) {
+    const owned = isStaffUser(user) ? await Class.find({ owner: user._id }).distinct("_id") : [];
+    const enrolled = await approvedClassIds(user._id);
+    const classIds = [...owned, ...enrolled];
+    filter = { class: { $in: classIds } };
+  }
+  // Students never see drafts (hidden exams).
+  if (!isStaffUser(user)) filter.hidden = { $ne: true };
+
+  const exams = await Exam.find(filter)
+    .sort({ createdAt: -1 })
+    .limit(8)
+    .populate("class", "name level");
+
+  // Cheap question-count aggregation for the cards (no heavy answer arrays).
+  const qIds = exams.map((e) => e.questions).filter(Boolean);
+  const sizeMap = {};
+  if (qIds.length) {
+    const sizes = await Question.aggregate([
+      { $match: { _id: { $in: qIds } } },
+      { $project: { n: { $size: { $ifNull: ["$correctAnswers", []] } } } },
+    ]);
+    sizes.forEach((s) => (sizeMap[String(s._id)] = s.n));
+  }
+  const ownerOrAdmin = (e) =>
+    isAdminUser(user) || (e.owner && String(e.owner) === String(user._id));
+  const withCount = (obj, e) => ({
+    ...obj,
+    questionCount: e.questions ? sizeMap[String(e.questions)] || 0 : 0,
+  });
+
+  res.status(200).json(
+    exams.map((e) =>
+      ownerOrAdmin(e) ? withCount(e.toObject(), e) : withCount(sanitizeExamForStudent(e), e)
+    )
+  );
+});
+
 // Authoritative server clock so client countdowns (exam opening, deadline)
 // stay correct even if the device clock is wrong. Returns only the time.
 const serverTime = asyncHandler(async (req, res) => {
@@ -2079,6 +2129,7 @@ module.exports = {
   getClassesByTag,
   addExamToUser,
   getExamsByUser,
+  getLatestExams,
   getExams,
   reviewByResult,
   deleteMyExam,
