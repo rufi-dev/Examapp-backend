@@ -684,9 +684,9 @@ const setExamHidden = asyncHandler(async (req, res) => {
   }
   exam.hidden = hidden === true || hidden === "true";
   await exam.save();
-  // Publishing a previously-hidden exam → announce to students (no-op until
-  // WhatsApp is configured; idempotent + skips exams with no questions).
-  if (!exam.hidden) notifyStudentsNewExam(examId).catch(() => {});
+  // Un-hiding = re-publishing → (re)announce to students even if it was already
+  // notified before (force). No-op until WhatsApp is ready / exam has questions.
+  if (!exam.hidden) notifyStudentsNewExam(examId, { force: true }).catch(() => {});
   res.status(200).json({
     message: exam.hidden ? "İmtahan gizlədildi" : "İmtahan göstərildi",
     hidden: exam.hidden,

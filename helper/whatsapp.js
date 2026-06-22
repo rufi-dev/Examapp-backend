@@ -211,7 +211,10 @@ async function className(exam) {
 // ready, the exam is visible (not a draft) and has questions, and hasn't been
 // announced yet — then stamps studentsNotifiedAt so it never double-sends.
 // Sends are throttled to reduce the chance of a spam ban.
-async function notifyStudentsNewExam(examId) {
+// opts.force = re-send even if already notified (used when a teacher re-publishes
+// by un-hiding). The default (no force) keeps edit/re-save from re-spamming.
+async function notifyStudentsNewExam(examId, opts = {}) {
+  const force = !!opts.force;
   // Verbose skip-reason logging so a "nothing happened" is diagnosable.
   const skip = (why) => console.log(`[WHATSAPP] notify skipped (${examId}): ${why}`);
   try {
@@ -220,7 +223,7 @@ async function notifyStudentsNewExam(examId) {
     const exam = await Exam.findById(examId);
     if (!exam) return skip("exam not found");
     if (exam.hidden) return skip("exam is hidden (draft)");
-    if (exam.studentsNotifiedAt) return skip("already notified");
+    if (!force && exam.studentsNotifiedAt) return skip("already notified");
     if (!exam.questions) return skip("no questions yet");
     if (!exam.class) return skip("exam has no class");
 
