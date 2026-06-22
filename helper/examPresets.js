@@ -39,7 +39,7 @@ const PRESETS = {
 
   "blok-1": {
     id: "blok-1",
-    label: "Blok — 1-ci qrup",
+    label: "Blok 1 və 2-ci qrup",
     totalMarks: 150,
     // 30 questions: 22 closed, 4 open, 1 matching (#27), 3 open (#28-30).
     slots: [
