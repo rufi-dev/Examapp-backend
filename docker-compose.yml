@@ -9,6 +9,9 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    # tini as PID 1 reaps zombie Chromium processes and forwards signals so the
+    # browser shuts down cleanly (avoids stale profile locks on restart).
+    init: true
     # Chromium (whatsapp-web.js) needs more shared memory than the 64MB default.
     shm_size: "512mb"
     expose:

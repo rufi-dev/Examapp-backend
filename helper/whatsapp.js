@@ -10,6 +10,7 @@
 // Gated by WHATSAPP_WEB_ENABLED ("true") so it only launches where Chromium is
 // available (the Docker image sets this + PUPPETEER_EXECUTABLE_PATH). Running
 // `node server.js` locally without that env is a safe no-op.
+const fs = require("fs");
 const path = require("path");
 const QRCode = require("qrcode");
 const Exam = require("../models/examModel");
@@ -39,10 +40,25 @@ function toDigits(raw) {
   return s.length >= 8 ? s : null;
 }
 
+// Remove stale Chromium singleton locks left by an unclean shutdown (otherwise
+// the next launch fails with "profile appears to be in use ... Code: 21"). Safe
+// on boot because no Chromium is using this profile yet.
+function clearStaleLocks() {
+  const dir = path.join(process.cwd(), ".wwebjs_auth", "session");
+  for (const f of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+    try {
+      fs.rmSync(path.join(dir, f), { force: true, recursive: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 // Boot (or re-boot) the WhatsApp Web client. Safe to call repeatedly.
 function initWhatsApp() {
   if (!ENABLED || client || starting) return;
   starting = true;
+  clearStaleLocks();
   let Client, LocalAuth;
   try {
     ({ Client, LocalAuth } = require("whatsapp-web.js"));
