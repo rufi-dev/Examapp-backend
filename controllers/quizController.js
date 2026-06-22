@@ -2286,6 +2286,7 @@ const getPublicExams = asyncHandler(async (req, res) => {
     startDate: e.startDate || null,
     endDate: e.endDate || null,
     price: e.price || 0,
+    coverImage: e.coverImage || "",
     createdAt: e.createdAt,
   }));
   res.status(200).json(out);
