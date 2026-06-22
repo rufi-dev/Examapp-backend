@@ -25,6 +25,28 @@ let client = null;
 let ready = false;
 let lastQrDataUrl = null;
 let starting = false;
+let readyTimer = null;
+
+// Tear down a stuck/old client and re-initialize from scratch. Used by the
+// watchdog when "ready" never fires after authentication (a known flaky
+// whatsapp-web.js reconnect state).
+function restart() {
+  clearTimeout(readyTimer);
+  const old = client;
+  client = null;
+  ready = false;
+  starting = false;
+  lastQrDataUrl = null;
+  Promise.resolve().then(async () => {
+    try {
+      if (old) await old.destroy();
+    } catch {
+      /* ignore */
+    }
+    clearStaleLocks();
+    setTimeout(initWhatsApp, 3000);
+  });
+}
 
 // Normalize a stored phone to bare international digits ("994501234567").
 // Handles local Azerbaijani formats entered without a country code.
@@ -87,6 +109,7 @@ function initWhatsApp() {
 
   client.on("qr", async (qr) => {
     ready = false;
+    clearTimeout(readyTimer); // waiting for a human to scan — don't restart
     try {
       lastQrDataUrl = await QRCode.toDataURL(qr);
     } catch {
@@ -98,10 +121,21 @@ function initWhatsApp() {
   client.on("authenticated", () => {
     // eslint-disable-next-line no-console
     console.log("[WHATSAPP] authenticated");
+    // Linked — "ready" should follow within seconds. If it doesn't (flaky
+    // reconnect that hangs on the loading screen), restart the client.
+    clearTimeout(readyTimer);
+    readyTimer = setTimeout(() => {
+      if (!ready) {
+        // eslint-disable-next-line no-console
+        console.warn("[WHATSAPP] not ready 90s after auth — restarting client");
+        restart();
+      }
+    }, 90000);
   });
   client.on("ready", () => {
     ready = true;
     lastQrDataUrl = null;
+    clearTimeout(readyTimer);
     // eslint-disable-next-line no-console
     console.log("[WHATSAPP] client ready");
   });
@@ -115,6 +149,7 @@ function initWhatsApp() {
     ready = false;
     client = null;
     starting = false;
+    clearTimeout(readyTimer);
     setTimeout(initWhatsApp, 10000); // auto-reconnect
   });
 
