@@ -9,6 +9,7 @@ const Attempt = require("../models/attemptModel");
 const User = require("../models/userModel");
 const Enrollment = require("../models/enrollmentModel");
 const { notifyExamStarted, notifyExamFinished } = require("../helper/telegram");
+const { PRESETS } = require("../helper/examPresets");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const fs = require("fs");
@@ -232,6 +233,8 @@ const addExam = asyncHandler(async (req, res) => {
     negativeMarking,
     wrongPerPenalty,
     correctPerPenalty,
+    negMarkUntil,
+    preset,
     antiCheat,
     partialCredit,
     shuffleOptions,
@@ -285,6 +288,8 @@ const addExam = asyncHandler(async (req, res) => {
       negativeMarking: negativeMarking === "true" || negativeMarking === true,
       wrongPerPenalty: Math.max(1, Number(wrongPerPenalty) || 3),
       correctPerPenalty: Math.max(1, Number(correctPerPenalty) || 1),
+      negMarkUntil: Math.max(0, Number(negMarkUntil) || 0),
+      preset: typeof preset === "string" && PRESETS[preset] ? preset : "",
       antiCheat: antiCheat === "true" || antiCheat === true,
       partialCredit: partialCredit === "true" || partialCredit === true,
       shuffleOptions: shuffleOptions === "true" || shuffleOptions === true,
@@ -1422,7 +1427,17 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
 
   // Score on the server, against answers the client never received.
   const correct = exam.questions?.correctAnswers || [];
-  const points = questionPoints(correct.length);
+  // Per-question points come from the exam's preset (server-authoritative) and
+  // adapt to the actual question count; legacy/custom exams fall back to the
+  // original 18/55-45 split (total 100).
+  const presetCfg = exam.preset ? PRESETS[exam.preset] : null;
+  const points =
+    presetCfg && typeof presetCfg.pointsPlan === "function"
+      ? presetCfg.pointsPlan(correct.length)
+      : questionPoints(correct.length);
+  // Negative marking only penalizes wrong answers in questions 1..until
+  // (0 / unset = every question, the legacy behavior).
+  const until = exam.negMarkUntil > 0 ? Math.min(exam.negMarkUntil, correct.length) : correct.length;
   let sel = Array.isArray(selectedAnswers) ? selectedAnswers : [];
 
   // Per-student option shuffle: map the student's DISPLAY-order picks back to the
@@ -1456,14 +1471,18 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
     earnedPoints += (points[i] || 0) * frac;
     if (frac >= 1) {
       if (counts[ca.type] !== undefined) counts[ca.type]++;
-    } else if (frac <= 0) {
+    } else if (frac <= 0 && i < until) {
+      // Wrong only penalizes inside the negative-marking range; blanks never do.
       wrongCount += 1;
     }
   });
 
   if (exam.negativeMarking && (exam.wrongPerPenalty || 0) > 0) {
-    const n = correct.length || 1;
-    const avgPerQuestion = 100 / n;
+    // "One correct's worth" = the average points of a question in the penalized
+    // range (the closed section for Blok; all questions for legacy 100-pt exams).
+    let rangeSum = 0;
+    for (let i = 0; i < until; i++) rangeSum += points[i] || 0;
+    const avgPerQuestion = until > 0 ? rangeSum / until : 0;
     const units = Math.floor(wrongCount / exam.wrongPerPenalty);
     const cancelledCorrects = units * (exam.correctPerPenalty || 1);
     earnedPoints = Math.max(0, earnedPoints - cancelledCorrects * avgPerQuestion);
@@ -1870,6 +1889,7 @@ const editExam = asyncHandler(async (req, res) => {
     negativeMarking,
     wrongPerPenalty,
     correctPerPenalty,
+    negMarkUntil,
     antiCheat,
     partialCredit,
     shuffleOptions,
@@ -1899,6 +1919,7 @@ const editExam = asyncHandler(async (req, res) => {
       negativeMarking: negativeMarking === true || negativeMarking === "true",
       wrongPerPenalty: Math.max(1, Number(wrongPerPenalty) || 3),
       correctPerPenalty: Math.max(1, Number(correctPerPenalty) || 1),
+      negMarkUntil: Math.max(0, Number(negMarkUntil) || 0),
       antiCheat: antiCheat === true || antiCheat === "true",
       partialCredit: partialCredit === true || partialCredit === "true",
       shuffleOptions: shuffleOptions === true || shuffleOptions === "true",

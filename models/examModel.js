@@ -54,6 +54,13 @@ const examSchema = Schema({
     negativeMarking: { type: Boolean, default: false },
     wrongPerPenalty: { type: Number, default: 3 },
     correctPerPenalty: { type: Number, default: 1 },
+    // Negative marking only applies to questions 1..negMarkUntil (e.g. the closed
+    // section of a Blok exam). 0 = applies to every question (legacy behavior).
+    negMarkUntil: { type: Number, default: 0 },
+    // Scoring/structure preset id (see helper/examPresets.js). Empty = custom:
+    // legacy scoring (questionPoints, total 100). A preset drives the per-question
+    // points at scoring time + seeds the builder's question types.
+    preset: { type: String, default: "" },
     // When enabled, the exam runner activates anti-cheat measures.
     antiCheat: { type: Boolean, default: false },
     // Multi-select (Cs) partial credit: award proportional points
