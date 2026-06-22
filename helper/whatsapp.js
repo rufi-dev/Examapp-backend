@@ -160,18 +160,25 @@ async function className(exam) {
 // announced yet — then stamps studentsNotifiedAt so it never double-sends.
 // Sends are throttled to reduce the chance of a spam ban.
 async function notifyStudentsNewExam(examId) {
+  // Verbose skip-reason logging so a "nothing happened" is diagnosable.
+  const skip = (why) => console.log(`[WHATSAPP] notify skipped (${examId}): ${why}`);
   try {
-    if (!ENABLED || !ready) return;
+    if (!ENABLED) return skip("disabled");
+    if (!ready) return skip("client not ready/linked");
     const exam = await Exam.findById(examId);
-    if (!exam) return;
-    if (exam.hidden) return; // drafts don't notify
-    if (exam.studentsNotifiedAt) return; // already announced
-    if (!exam.questions) return; // not ready until it has questions
-    if (!exam.class) return;
+    if (!exam) return skip("exam not found");
+    if (exam.hidden) return skip("exam is hidden (draft)");
+    if (exam.studentsNotifiedAt) return skip("already notified");
+    if (!exam.questions) return skip("no questions yet");
+    if (!exam.class) return skip("exam has no class");
 
     const enrollments = await Enrollment.find({ class: exam.class, status: "approved" }).populate(
       "student",
-      "phone whatsappOptIn"
+      "phone whatsappOptIn name"
+    );
+    // eslint-disable-next-line no-console
+    console.log(
+      `[WHATSAPP] notify: class=${exam.class} approvedEnrollments=${enrollments.length}`
     );
     const cname = await className(exam);
     const link = FRONTEND_URL ? `${FRONTEND_URL}/exam/details/${exam._id}` : "";
@@ -186,9 +193,13 @@ async function notifyStudentsNewExam(examId) {
       .join("\n");
 
     let sent = 0;
+    let skipped = 0;
     for (const en of enrollments) {
       const s = en.student;
-      if (!s || s.whatsappOptIn === false || !toDigits(s.phone)) continue;
+      if (!s || s.whatsappOptIn === false || !toDigits(s.phone)) {
+        skipped += 1;
+        continue;
+      }
       if (await sendMessage(s.phone, text)) sent += 1;
       await new Promise((r) => setTimeout(r, 1500)); // throttle
     }
@@ -196,7 +207,9 @@ async function notifyStudentsNewExam(examId) {
     exam.studentsNotifiedAt = new Date();
     await exam.save();
     // eslint-disable-next-line no-console
-    console.log(`[WHATSAPP] new-exam notify: ${sent} student(s) for exam ${exam._id}`);
+    console.log(
+      `[WHATSAPP] new-exam notify: sent=${sent}, skipped(no phone / opted-out)=${skipped} for exam ${exam._id}`
+    );
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("[WHATSAPP] notifyStudentsNewExam failed:", e.message);
