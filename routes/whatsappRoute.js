@@ -11,7 +11,15 @@ const {
   listGroups,
   getNotifyGroupId,
   setNotifyGroupId,
+  getInviteLink,
+  setInviteLink,
 } = require("../helper/whatsapp");
+
+// PUBLIC: the group invite link, so a student (not a teacher) can be sent to the
+// group after entering their phone. Not sensitive — anyone with it can join.
+router.get("/invite", (req, res) => {
+  res.json({ link: getInviteLink() });
+});
 
 // Admin/teacher-only WhatsApp linking controls. The QR is how the owner links
 // the sending phone number (WhatsApp → Linked devices → Link a device).
@@ -45,12 +53,17 @@ router.post("/test", protect, teacherOnly, async (req, res) => {
 // --- notification group: list the linked account's groups, get/set the chosen
 // one (all exam alerts go to it as a single message), and send it a test. ---
 router.get("/groups", protect, teacherOnly, async (req, res) => {
-  res.json({ groups: await listGroups(), selected: getNotifyGroupId() });
+  res.json({
+    groups: await listGroups(),
+    selected: getNotifyGroupId(),
+    inviteLink: getInviteLink(),
+  });
 });
 
 router.post("/group", protect, teacherOnly, (req, res) => {
-  setNotifyGroupId(req.body?.groupId || "");
-  res.json({ ok: true, selected: getNotifyGroupId() });
+  if (req.body?.groupId !== undefined) setNotifyGroupId(req.body.groupId || "");
+  if (req.body?.inviteLink !== undefined) setInviteLink(req.body.inviteLink || "");
+  res.json({ ok: true, selected: getNotifyGroupId(), inviteLink: getInviteLink() });
 });
 
 router.post("/group/test", protect, teacherOnly, async (req, res) => {

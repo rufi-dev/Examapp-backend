@@ -208,6 +208,14 @@ function setNotifyGroupId(id) {
   cfg.groupId = id || "";
   writeConfig(cfg);
 }
+// Group INVITE link (https://chat.whatsapp.com/…) — given to students so they
+// can join the notification group after entering their phone.
+const getInviteLink = () => readConfig().inviteLink || "";
+function setInviteLink(link) {
+  const cfg = readConfig();
+  cfg.inviteLink = typeof link === "string" ? link.trim() : "";
+  writeConfig(cfg);
+}
 
 // Send plain text to any chat id (a "<digits>@c.us" contact or "<id>@g.us"
 // group). Returns true on success.
@@ -359,6 +367,8 @@ module.exports = {
   listGroups,
   getNotifyGroupId,
   setNotifyGroupId,
+  getInviteLink,
+  setInviteLink,
   notifyStudentsNewExam,
   toDigits,
 };
