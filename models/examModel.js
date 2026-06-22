@@ -82,6 +82,9 @@ const examSchema = Schema({
     // Set once the post-endDate Telegram results report (PDF + Excel) has been
     // sent, so the scheduler never sends it twice for the same exam.
     reportSentAt: { type: Date },
+    // Set once the "new exam" WhatsApp notification has gone out to the class's
+    // students, so publishing/editing never double-notifies them.
+    studentsNotifiedAt: { type: Date },
     // Hidden = a draft only staff can see; students can't list or start it.
     hidden: { type: Boolean, default: false },
     // Result visibility for students:

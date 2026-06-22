@@ -453,6 +453,7 @@ const getUser = asyncHandler(async (req, res) => {
         exams,
         isVerified,
         userAgent,
+        whatsappOptIn,
       } = user;
 
       res.status(200).json({
@@ -466,6 +467,7 @@ const getUser = asyncHandler(async (req, res) => {
         exams,
         isVerified,
         userAgent,
+        whatsappOptIn,
       });
     } else {
       res.status(404);
@@ -514,6 +516,11 @@ const updateUser = asyncHandler(async (req, res) => {
     user.name = req.body.name || name;
     user.bio = req.body.bio || bio;
     user.photo = req.body.photo || photo;
+    // WhatsApp notification opt-in (boolean). Only change it when the client
+    // actually sends the field, so other profile edits don't reset it.
+    if (typeof req.body.whatsappOptIn === "boolean") {
+      user.whatsappOptIn = req.body.whatsappOptIn;
+    }
 
     const updatedUser = await user.save();
 
@@ -526,6 +533,7 @@ const updateUser = asyncHandler(async (req, res) => {
       photo: updatedUser.photo,
       role: updatedUser.role,
       isVerified: updatedUser.isVerified,
+      whatsappOptIn: updatedUser.whatsappOptIn,
     });
   } else {
     res.status(404);

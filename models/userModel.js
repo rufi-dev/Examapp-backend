@@ -31,6 +31,12 @@ const userSchema = Schema(
             type: String,
             default: "+994",
         },
+        // Whether the student wants automatic WhatsApp notifications (e.g. when a
+        // new exam is published to their class). Default on; students can opt out.
+        whatsappOptIn: {
+            type: Boolean,
+            default: true,
+        },
         bio: {
             type: String,
             default: "bio"

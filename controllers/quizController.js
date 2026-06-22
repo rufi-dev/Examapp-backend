@@ -9,6 +9,7 @@ const Attempt = require("../models/attemptModel");
 const User = require("../models/userModel");
 const Enrollment = require("../models/enrollmentModel");
 const { notifyExamStarted, notifyExamFinished } = require("../helper/telegram");
+const { notifyStudentsNewExam } = require("../helper/whatsapp");
 const { PRESETS } = require("../helper/examPresets");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
@@ -683,6 +684,9 @@ const setExamHidden = asyncHandler(async (req, res) => {
   }
   exam.hidden = hidden === true || hidden === "true";
   await exam.save();
+  // Publishing a previously-hidden exam → announce to students (no-op until
+  // WhatsApp is configured; idempotent + skips exams with no questions).
+  if (!exam.hidden) notifyStudentsNewExam(examId).catch(() => {});
   res.status(200).json({
     message: exam.hidden ? "İmtahan gizlədildi" : "İmtahan göstərildi",
     hidden: exam.hidden,
@@ -895,6 +899,9 @@ const addQuestion = asyncHandler(async (req, res) => {
       { new: true }
     );
     if (updated) {
+      // The exam now has its answer key — announce it to students (no-op until
+      // WhatsApp is configured; idempotent + skips drafts). Fire-and-forget.
+      notifyStudentsNewExam(examId).catch(() => {});
       return res
         .status(200)
         .json({ message: "Answers updated successfully", newQuestion: updated });
@@ -910,6 +917,9 @@ const addQuestion = asyncHandler(async (req, res) => {
 
   exam.questions = newQuestion._id;
   await exam.save();
+
+  // Exam is now ready (has questions) — announce to students. Fire-and-forget.
+  notifyStudentsNewExam(examId).catch(() => {});
 
   res.status(200).json({ message: "Answers added successfully", newQuestion });
 });
