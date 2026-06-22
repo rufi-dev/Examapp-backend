@@ -231,7 +231,9 @@ async function notifyStudentsNewExam(examId) {
     const isPublic = classDoc && classDoc.requireCode === false;
     let students;
     if (isPublic) {
-      students = await User.find({ role: "student", whatsappOptIn: { $ne: false } }).select(
+      // Open class → concerns everyone with a number (students, teachers, admins
+      // alike), not just role="student".
+      students = await User.find({ whatsappOptIn: { $ne: false } }).select(
         "phone whatsappOptIn"
       );
     } else {
