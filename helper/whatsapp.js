@@ -16,6 +16,7 @@ const QRCode = require("qrcode");
 const Exam = require("../models/examModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
+const User = require("../models/userModel");
 
 const ENABLED = process.env.WHATSAPP_WEB_ENABLED === "true";
 const FRONTEND_URL = (process.env.FRONTEND_URL || "").replace(/\/+$/, "");
@@ -188,13 +189,28 @@ async function notifyStudentsNewExam(examId) {
     if (!exam.questions) return skip("no questions yet");
     if (!exam.class) return skip("exam has no class");
 
-    const enrollments = await Enrollment.find({ class: exam.class, status: "approved" }).populate(
-      "student",
-      "phone whatsappOptIn name"
-    );
+    // A PUBLIC class (requireCode === false) is open to every student and has no
+    // roster, so a new exam there concerns ALL students → notify all of them.
+    // A code-based class only notifies its approved (enrolled) students.
+    const classDoc = await Class.findById(exam.class).select("requireCode").lean();
+    const isPublic = classDoc && classDoc.requireCode === false;
+    let students;
+    if (isPublic) {
+      students = await User.find({ role: "student", whatsappOptIn: { $ne: false } }).select(
+        "phone whatsappOptIn"
+      );
+    } else {
+      const enrollments = await Enrollment.find({
+        class: exam.class,
+        status: "approved",
+      }).populate("student", "phone whatsappOptIn");
+      students = enrollments.map((e) => e.student).filter(Boolean);
+    }
     // eslint-disable-next-line no-console
     console.log(
-      `[WHATSAPP] notify: class=${exam.class} approvedEnrollments=${enrollments.length}`
+      `[WHATSAPP] notify: class=${exam.class} scope=${
+        isPublic ? "public(all students)" : "enrolled"
+      } candidates=${students.length}`
     );
     const cname = await className(exam);
     const link = FRONTEND_URL ? `${FRONTEND_URL}/exam/details/${exam._id}` : "";
@@ -210,14 +226,13 @@ async function notifyStudentsNewExam(examId) {
 
     let sent = 0;
     let skipped = 0;
-    for (const en of enrollments) {
-      const s = en.student;
+    for (const s of students) {
       if (!s || s.whatsappOptIn === false || !toDigits(s.phone)) {
         skipped += 1;
         continue;
       }
       if (await sendMessage(s.phone, text)) sent += 1;
-      await new Promise((r) => setTimeout(r, 1500)); // throttle
+      await new Promise((r) => setTimeout(r, 1500)); // throttle (reduce ban risk)
     }
 
     exam.studentsNotifiedAt = new Date();
