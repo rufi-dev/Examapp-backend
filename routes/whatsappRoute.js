@@ -1,7 +1,17 @@
 const express = require("express");
 const router = express.Router();
 const { protect, teacherOnly } = require("../middleware/authMiddleware");
-const { getStatus, getQrDataUrl, logout, initWhatsApp, sendMessage } = require("../helper/whatsapp");
+const {
+  getStatus,
+  getQrDataUrl,
+  logout,
+  initWhatsApp,
+  sendMessage,
+  sendToChat,
+  listGroups,
+  getNotifyGroupId,
+  setNotifyGroupId,
+} = require("../helper/whatsapp");
 
 // Admin/teacher-only WhatsApp linking controls. The QR is how the owner links
 // the sending phone number (WhatsApp → Linked devices → Link a device).
@@ -30,6 +40,27 @@ router.post("/test", protect, teacherOnly, async (req, res) => {
     "✅ BunkerMath WhatsApp testi — bağlantı işləyir. Yeni imtahanlar bura gələcək."
   );
   res.json({ ok, phone });
+});
+
+// --- notification group: list the linked account's groups, get/set the chosen
+// one (all exam alerts go to it as a single message), and send it a test. ---
+router.get("/groups", protect, teacherOnly, async (req, res) => {
+  res.json({ groups: await listGroups(), selected: getNotifyGroupId() });
+});
+
+router.post("/group", protect, teacherOnly, (req, res) => {
+  setNotifyGroupId(req.body?.groupId || "");
+  res.json({ ok: true, selected: getNotifyGroupId() });
+});
+
+router.post("/group/test", protect, teacherOnly, async (req, res) => {
+  const groupId = getNotifyGroupId();
+  if (!groupId) return res.status(400).json({ ok: false, message: "Qrup seçilməyib" });
+  const ok = await sendToChat(
+    groupId,
+    "✅ BunkerMath bildiriş qrupu qoşuldu. Yeni imtahanlar bura göndəriləcək."
+  );
+  res.json({ ok });
 });
 
 module.exports = router;

@@ -180,18 +180,68 @@ async function logout() {
   setTimeout(initWhatsApp, 2000);
 }
 
-// Send one plain-text WhatsApp message. Returns true on success.
-async function sendMessage(phone, text) {
-  if (!ready || !client) return false;
-  const digits = toDigits(phone);
-  if (!digits) return false;
+// ---- notification target config (persisted in the session volume) ----------
+// A teacher can pick ONE WhatsApp GROUP to receive all exam alerts. Posting one
+// message to a group (instead of N individual chats) avoids cluttering the
+// sender's chat list and is far safer against spam bans. Persisted as a file in
+// the wa_auth volume so it survives redeploys.
+const CONFIG_PATH = path.join(process.cwd(), ".wwebjs_auth", "notify-config.json");
+function readConfig() {
   try {
-    await client.sendMessage(`${digits}@c.us`, text);
+    return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function writeConfig(cfg) {
+  try {
+    fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg));
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("[WHATSAPP] writeConfig failed:", e.message);
+  }
+}
+const getNotifyGroupId = () => readConfig().groupId || "";
+function setNotifyGroupId(id) {
+  const cfg = readConfig();
+  cfg.groupId = id || "";
+  writeConfig(cfg);
+}
+
+// Send plain text to any chat id (a "<digits>@c.us" contact or "<id>@g.us"
+// group). Returns true on success.
+async function sendToChat(chatId, text) {
+  if (!ready || !client || !chatId) return false;
+  try {
+    await client.sendMessage(chatId, text);
     return true;
   } catch (e) {
     // eslint-disable-next-line no-console
-    console.error("[WHATSAPP] sendMessage failed:", e.message);
+    console.error("[WHATSAPP] send failed:", e.message);
     return false;
+  }
+}
+
+// Send one plain-text WhatsApp message to a phone number. Returns true on success.
+async function sendMessage(phone, text) {
+  const digits = toDigits(phone);
+  if (!digits) return false;
+  return sendToChat(`${digits}@c.us`, text);
+}
+
+// List the linked account's groups so the teacher can pick a notification group.
+async function listGroups() {
+  if (!ready || !client) return [];
+  try {
+    const chats = await client.getChats();
+    return chats
+      .filter((c) => c.isGroup)
+      .map((c) => ({ id: c.id._serialized, name: c.name || "(qrup)" }));
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("[WHATSAPP] listGroups failed:", e.message);
+    return [];
   }
 }
 
@@ -227,15 +277,38 @@ async function notifyStudentsNewExam(examId, opts = {}) {
     if (!exam.questions) return skip("no questions yet");
     if (!exam.class) return skip("exam has no class");
 
-    // A PUBLIC class (requireCode === false) is open to every student and has no
-    // roster, so a new exam there concerns ALL students → notify all of them.
-    // A code-based class only notifies its approved (enrolled) students.
+    const cname = await className(exam);
+    const link = FRONTEND_URL ? `${FRONTEND_URL}/exam/details/${exam._id}` : "";
+    const text = [
+      "📚 Yeni imtahan əlavə olundu",
+      "",
+      `📝 ${exam.name || "İmtahan"}`,
+      cname ? `🏫 ${cname}` : null,
+      link ? `🔗 ${link}` : null,
+    ]
+      .filter((l) => l !== null)
+      .join("\n");
+
+    // GROUP MODE: if a notification group is set, post ONE message there and stop
+    // (one chat, one send — no per-student blast, minimal ban risk). Students
+    // just need to be in the group; phone numbers don't matter here.
+    const groupId = getNotifyGroupId();
+    if (groupId) {
+      const ok = await sendToChat(groupId, text);
+      exam.studentsNotifiedAt = new Date();
+      await exam.save();
+      // eslint-disable-next-line no-console
+      console.log(`[WHATSAPP] new-exam notify -> group ${groupId}: ok=${ok} (exam ${exam._id})`);
+      return;
+    }
+
+    // PER-STUDENT MODE (no group configured). A PUBLIC class (requireCode=false)
+    // is open to everyone → notify all opted-in users; a code-based class only
+    // notifies its approved (enrolled) students.
     const classDoc = await Class.findById(exam.class).select("requireCode").lean();
     const isPublic = classDoc && classDoc.requireCode === false;
     let students;
     if (isPublic) {
-      // Open class → concerns everyone with a number (students, teachers, admins
-      // alike), not just role="student".
       students = await User.find({ whatsappOptIn: { $ne: false } }).select(
         "phone whatsappOptIn"
       );
@@ -252,17 +325,6 @@ async function notifyStudentsNewExam(examId, opts = {}) {
         isPublic ? "public(all students)" : "enrolled"
       } candidates=${students.length}`
     );
-    const cname = await className(exam);
-    const link = FRONTEND_URL ? `${FRONTEND_URL}/exam/details/${exam._id}` : "";
-    const text = [
-      "📚 Yeni imtahan əlavə olundu",
-      "",
-      `📝 ${exam.name || "İmtahan"}`,
-      cname ? `🏫 ${cname}` : null,
-      link ? `🔗 ${link}` : null,
-    ]
-      .filter((l) => l !== null)
-      .join("\n");
 
     let sent = 0;
     let skipped = 0;
@@ -293,6 +355,10 @@ module.exports = {
   getQrDataUrl,
   logout,
   sendMessage,
+  sendToChat,
+  listGroups,
+  getNotifyGroupId,
+  setNotifyGroupId,
   notifyStudentsNewExam,
   toDigits,
 };
