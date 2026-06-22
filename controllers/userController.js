@@ -24,12 +24,12 @@ const client = new OAuth2Client(
 // Register User
 const registerUser = asyncHandler(async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password, phone, grade } = req.body;
 
-    // Validation
-    if (!name || !email || !password) {
+    // Validation — phone + grade (Sinif) are mandatory at sign-up.
+    if (!name || !email || !password || !phone || !grade) {
       res.status(400);
-      throw new Error("Zəhmət olmasa bütün xanaları doldurun");
+      throw new Error("Zəhmət olmasa bütün xanaları doldurun (ad, email, şifrə, sinif, telefon)");
     }
 
     if (password.length < 6) {
@@ -54,6 +54,8 @@ const registerUser = asyncHandler(async (req, res) => {
       name,
       email,
       password,
+      phone,
+      grade,
       userAgent,
     });
 
@@ -80,6 +82,7 @@ const registerUser = asyncHandler(async (req, res) => {
         role,
         isVerified,
         userAgent,
+        grade,
       } = user;
       res.status(201).json({
         _id,
@@ -91,6 +94,7 @@ const registerUser = asyncHandler(async (req, res) => {
         role,
         isVerified,
         userAgent,
+        grade,
         token,
       });
     } else {
@@ -454,6 +458,7 @@ const getUser = asyncHandler(async (req, res) => {
         isVerified,
         userAgent,
         whatsappOptIn,
+        grade,
       } = user;
 
       res.status(200).json({
@@ -468,6 +473,7 @@ const getUser = asyncHandler(async (req, res) => {
         isVerified,
         userAgent,
         whatsappOptIn,
+        grade,
       });
     } else {
       res.status(404);
@@ -521,6 +527,10 @@ const updateUser = asyncHandler(async (req, res) => {
     if (typeof req.body.whatsappOptIn === "boolean") {
       user.whatsappOptIn = req.body.whatsappOptIn;
     }
+    // Grade ("Sinif") — only when the client sends a non-empty value.
+    if (typeof req.body.grade === "string" && req.body.grade.trim()) {
+      user.grade = req.body.grade.trim();
+    }
 
     const updatedUser = await user.save();
 
@@ -534,6 +544,7 @@ const updateUser = asyncHandler(async (req, res) => {
       role: updatedUser.role,
       isVerified: updatedUser.isVerified,
       whatsappOptIn: updatedUser.whatsappOptIn,
+      grade: updatedUser.grade,
     });
   } else {
     res.status(404);

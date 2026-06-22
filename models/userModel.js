@@ -37,6 +37,12 @@ const userSchema = Schema(
             type: Boolean,
             default: true,
         },
+        // Student's grade/year ("Sinif"), e.g. "9", "11", "Məzun". Collected at
+        // sign-up (and enforced via the profile-completion gate for students).
+        grade: {
+            type: String,
+            default: "",
+        },
         bio: {
             type: String,
             default: "bio"
