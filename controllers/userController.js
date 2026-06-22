@@ -49,7 +49,8 @@ const registerUser = asyncHandler(async (req, res) => {
     const ua = parser(req.headers["user-agent"]);
     const userAgent = ua.ua;
 
-    // Create a new user
+    // Create a new user. Auto-verified: email verification is intentionally
+    // skipped (students aren't tech-savvy), so no one is gated by isVerified.
     const user = await User.create({
       name,
       email,
@@ -57,6 +58,7 @@ const registerUser = asyncHandler(async (req, res) => {
       phone,
       grade,
       userAgent,
+      isVerified: true,
     });
 
     // Generate token
@@ -247,10 +249,10 @@ const sendLoginCode = asyncHandler(async (req, res) => {
   const decryptedLoginCode = cryptr.decrypt(loginCode);
 
   //Send Login Code Email
-  const subject = "Login Access Code - MATH";
+  const subject = "BunkerMath — Giriş kodu";
   const send_to = email;
   const sent_from = process.env.EMAIL_USER;
-  const reply_to = "noreply@rufi.com";
+  const reply_to = process.env.EMAIL_USER || "bunkermath@gmail.com";
   const template = "loginCode";
   const name = user.name;
   const link = decryptedLoginCode;
@@ -375,10 +377,10 @@ const sendVerificationEmail = asyncHandler(async (req, res) => {
   //Construct Verification URL
   const verificationUrl = `${process.env.FRONTEND_URL}/verify/${verificationToken}`;
   //Send Verification Email
-  const subject = "Verify Your Account - MATH";
+  const subject = "BunkerMath — Hesabı təsdiqlə";
   const send_to = user.email;
   const sent_from = process.env.EMAIL_USER;
-  const reply_to = "noreply@rufi.com";
+  const reply_to = process.env.EMAIL_USER || "bunkermath@gmail.com";
   const template = "verifyEmail";
   const name = user.name;
   const link = verificationUrl;
@@ -701,10 +703,10 @@ const forgotPasswordEmail = asyncHandler(async (req, res) => {
   const resetUrl = `${process.env.FRONTEND_URL}/resetPassword/${resetToken}`;
 
   //Send Reset Password Email
-  const subject = "Reset Your Password - MATH";
+  const subject = "BunkerMath — Şifrə bərpası";
   const send_to = user.email;
   const sent_from = process.env.EMAIL_USER;
-  const reply_to = "noreply@rufi.com";
+  const reply_to = process.env.EMAIL_USER || "bunkermath@gmail.com";
   const template = "forgotPassword";
   const name = user.name;
   const link = resetUrl;
