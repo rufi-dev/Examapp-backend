@@ -73,6 +73,17 @@ async function studentApprovedInClass(userId, classId) {
   return !!(await Enrollment.exists({ student: userId, class: classId, status: "approved" }));
 }
 
+// Is this class PUBLIC (open to every signed-in user, no code/enrollment)?
+// Strict `=== false` on purpose: a class is public ONLY when it explicitly
+// carries requireCode:false. Existing classes (field absent / undefined) and
+// code-only classes (true) are NOT public.
+const classIsPublic = (c) => !!c && c.requireCode === false;
+
+// Public class ids (cheap id-only query) — used to widen student visibility.
+async function publicClassIds() {
+  return Class.find({ requireCode: false }).distinct("_id");
+}
+
 // Can this user see/open a given class doc? admin → yes; otherwise the OWNER
 // (a teacher's own class) OR anyone APPROVED-enrolled (a student, or a teacher
 // who joined another teacher's class as a participant).
@@ -80,6 +91,8 @@ async function canAccessClass(user, classDoc) {
   if (!classDoc) return false;
   if (isAdminUser(user)) return true;
   if (classDoc.owner && String(classDoc.owner) === String(user._id)) return true;
+  // Public classes are open to every signed-in user — no enrollment needed.
+  if (classIsPublic(classDoc)) return true;
   return studentApprovedInClass(user._id, classDoc._id);
 }
 
@@ -106,8 +119,7 @@ const addTag = asyncHandler(async (req, res) => {
 
 // Add Class
 const addClass = asyncHandler(async (req, res) => {
-  const { name, level } = req.body;
-  const { tagId } = req.params;
+  const { name, level, requireCode } = req.body;
 
   try {
     // A class needs a label: a text name (preferred) or the legacy numeric level.
@@ -117,27 +129,16 @@ const addClass = asyncHandler(async (req, res) => {
       return;
     }
 
-    const tag = await Tag.findById(tagId);
-
-    if (!tag) {
-      res.status(404).json({ error: "No Tag found" });
-      return;
-    }
-    // A teacher can only add a class under a category they own (admins anywhere).
-    if (!isAdminUser(req.user) && tag.owner && String(tag.owner) !== String(req.user._id)) {
-      res.status(403).json({ error: "Bu kateqoriya sizə aid deyil" });
-      return;
-    }
-
+    // Categories were removed — classes are now top-level (no tag).
+    // Default OFF (public): a new class is open to everyone unless the teacher
+    // turns on code-only access. Always written as a strict boolean.
     const newClass = await Class.create({
       name: label || undefined,
       level: level !== undefined && level !== "" ? level : undefined,
-      tag: tagId,
       owner: req.user._id,
       joinCode: await uniqueJoinCode(),
+      requireCode: requireCode === true || requireCode === "true",
     });
-    tag.classes.push(newClass._id);
-    await tag.save();
 
     res.status(201).json({ message: "Class has been saved", newClass });
   } catch (e) {
@@ -727,6 +728,44 @@ const getClassesByTag = asyncHandler(async (req, res) => {
   }
 });
 
+// Top-level class listing — the category layer is removed, so classes are
+// browsed directly. Admin → all; otherwise the user's OWN classes plus any
+// class they are approved-enrolled in. Mirrors getClassesByTag minus the tag.
+const getAllClasses = asyncHandler(async (req, res) => {
+  let filter = {};
+  if (!isAdminUser(req.user)) {
+    const classIds = await approvedClassIds(req.user._id);
+    // Owned, approved-enrolled, OR public (requireCode:false) classes.
+    filter = {
+      $or: [
+        { owner: req.user._id },
+        { _id: { $in: classIds } },
+        { requireCode: false },
+      ],
+    };
+  }
+  const classes = await Class.find(filter).sort({ createdAt: -1 }).lean();
+  const canManage = (c) =>
+    isAdminUser(req.user) || (c.owner && String(c.owner) === String(req.user._id));
+  // Only the owning teacher (or admin) keeps the join code per class.
+  classes.forEach((c) => {
+    if (!canManage(c)) delete c.joinCode;
+  });
+  const manageIds = classes.filter(canManage).map((c) => c._id);
+  if (manageIds.length) {
+    const counts = await Enrollment.aggregate([
+      { $match: { class: { $in: manageIds }, status: "approved" } },
+      { $group: { _id: "$class", n: { $sum: 1 } } },
+    ]);
+    const map = {};
+    counts.forEach((c) => (map[String(c._id)] = c.n));
+    classes.forEach((c) => {
+      if (canManage(c)) c.students = map[String(c._id)] || 0;
+    });
+  }
+  res.status(200).json(classes || []);
+});
+
 // Used by the teacher "İmtahan nəticələri" list — scoped so a teacher sees only
 // their OWN exams (admins see all).
 const getExams = asyncHandler(async (req, res) => {
@@ -760,7 +799,11 @@ const getExam = asyncHandler(async (req, res) => {
       (req.user.exams || []).some((e) => String(e) === String(id)) ||
       (exam.users || []).some((u) => String(u) === String(req.user._id));
     const enrolled = await studentApprovedInClass(req.user._id, exam.class);
-    if (!ownsLegacy && !enrolled) {
+    // Public class → any signed-in user may view the (sanitized) exam.
+    const classDoc = exam.class
+      ? await Class.findById(exam.class).select("requireCode").lean()
+      : null;
+    if (!ownsLegacy && !enrolled && !classIsPublic(classDoc)) {
       res.status(403);
       throw new Error("Bu imtahana giriş yoxdur");
     }
@@ -864,11 +907,9 @@ const getExamTagandClass = asyncHandler(async (req, res) => {
     return;
   }
 
-  const tag = await Tag.findById(_class.tag);
-  if (!tag) {
-    res.status(404).json({ message: "Qrup tapilmadi" });
-    return;
-  }
+  // Categories removed — a class may have no tag. Return it as null instead of
+  // failing, so review/builders that fetch this context still work.
+  const tag = _class.tag ? await Tag.findById(_class.tag) : null;
   res.status(200).json({ tag, _class });
 });
 
@@ -982,13 +1023,23 @@ const startAttempt = asyncHandler(async (req, res) => {
   // Ownership gate: a student must have ACQUIRED the exam (free add, paid
   // purchase, or teacher assignment) before starting it. Without this, any
   // verified user could start a paid/unassigned exam just by POSTing its id.
+  // A FREE exam is accessible to a student who is approved-enrolled OR whose
+  // class is PUBLIC. Paid exams still go through the purchase flow either way —
+  // neither enrollment nor a public class is a payment bypass.
+  const isFree = !exam.price || Number(exam.price) === 0;
+  let classFreeAccess = false;
+  if (isFree && exam.class) {
+    if (await studentApprovedInClass(user._id, exam.class)) {
+      classFreeAccess = true;
+    } else {
+      const classDoc = await Class.findById(exam.class).select("requireCode").lean();
+      classFreeAccess = classIsPublic(classDoc);
+    }
+  }
   const owns =
     user.exams.some((e) => e.toString() === String(examId)) ||
     exam.users.some((u) => u.toString() === user._id.toString()) ||
-    // Approved enrollment grants access to the class's FREE exams. Paid exams
-    // still go through the normal purchase flow — enrollment is NOT a bypass.
-    ((!exam.price || Number(exam.price) === 0) &&
-      (await studentApprovedInClass(user._id, exam.class)));
+    classFreeAccess;
   if (!isStaff && !owns) {
     return res.status(403).json({ reason: "not_owned" });
   }
@@ -1361,6 +1412,103 @@ function renderableCorrect(ca) {
   return norm(ca.answer);
 }
 
+// Score a (already-claimed) attempt's selections and persist the Result. Shared
+// by the live client submit (addResult) AND the server-side finalizer, so an
+// auto-submitted exam is scored EXACTLY like a hand-submitted one. The caller
+// must have atomically claimed the attempt (submitted:false -> true) first.
+async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts = {}) {
+  const { violations, terminated } = opts;
+  const examId = exam._id;
+
+  // Score on the server, against answers the client never received.
+  const correct = exam.questions?.correctAnswers || [];
+  const points = questionPoints(correct.length);
+  let sel = Array.isArray(selectedAnswers) ? selectedAnswers : [];
+
+  // Per-student option shuffle: map the student's DISPLAY-order picks back to the
+  // ORIGINAL choice indices (using this attempt's stored permutation), so scoring
+  // and the stored result are always in canonical, unshuffled index space.
+  if (attempt.optionOrder) {
+    const order = attempt.optionOrder;
+    sel = sel.map((a, i) => {
+      const perm = order[i];
+      if (!a || !Array.isArray(perm)) return a;
+      const ca = correct[i];
+      if (!ca || (ca.type !== "Cm" && ca.type !== "Cs")) return a;
+      if (!Array.isArray(ca.choices) || ca.choices.length !== perm.length) return a;
+      const back = (d) => {
+        const n = Number(d);
+        return Number.isInteger(n) && n >= 0 && n < perm.length ? perm[n] : n;
+      };
+      if (Array.isArray(a.answer)) return { ...a, answer: a.answer.map(back) };
+      if (a.answer === "" || a.answer == null) return a;
+      return { ...a, answer: back(a.answer) };
+    });
+  }
+
+  const counts = { Cm: 0, Cs: 0, Co: 0, Cd: 0, Cma: 0 };
+  let earnedPoints = 0;
+  let wrongCount = 0;
+  correct.forEach((ca, i) => {
+    const s = sel[i];
+    if (!isAnswered(s)) return;
+    const frac = answerScore(ca, s, exam.partialCredit);
+    earnedPoints += (points[i] || 0) * frac;
+    if (frac >= 1) {
+      if (counts[ca.type] !== undefined) counts[ca.type]++;
+    } else if (frac <= 0) {
+      wrongCount += 1;
+    }
+  });
+
+  if (exam.negativeMarking && (exam.wrongPerPenalty || 0) > 0) {
+    const n = correct.length || 1;
+    const avgPerQuestion = 100 / n;
+    const units = Math.floor(wrongCount / exam.wrongPerPenalty);
+    const cancelledCorrects = units * (exam.correctPerPenalty || 1);
+    earnedPoints = Math.max(0, earnedPoints - cancelledCorrects * avgPerQuestion);
+  }
+  earnedPoints = Math.round(earnedPoints * 100) / 100;
+
+  const isTerminated =
+    !!attempt.terminated || terminated === true || terminated === "true";
+  if (isTerminated) earnedPoints = 0;
+
+  const newResult = await Result.create({
+    userId: user._id,
+    examId,
+    attempts: sel.filter(isAnswered).length,
+    earnPoints: earnedPoints,
+    violations: Math.max(attempt.violations || 0, Number(violations) || 0),
+    terminated: isTerminated,
+    selectedAnswers: sel.map((a) => ({
+      type: a?.type,
+      answer: storableAnswer(a?.answer),
+      ...(exam.studentSolutionPhotos && typeof a?.photo === "string" && a.photo
+        ? { photo: a.photo }
+        : {}),
+    })),
+    correctAnswers: correct.map((a) => ({ type: a.type, answer: renderableCorrect(a) })),
+    correctAnswersByType: [
+      { type: "Cm", count: counts.Cm },
+      { type: "Cs", count: counts.Cs },
+      { type: "Co", count: counts.Co },
+      { type: "Cd", count: counts.Cd },
+      { type: "Cma", count: counts.Cma },
+    ],
+  });
+
+  exam.results.push(newResult._id);
+  await exam.save();
+  user.results.push(newResult._id);
+  await user.save();
+
+  // Telegram: tell the exam owner the student finished (or was terminated).
+  notifyExamFinished(exam, user, newResult);
+
+  return earnedPoints;
+}
+
 const addResult = asyncHandler(async (req, res) => {
   const { examId } = req.params;
   const { selectedAnswers, violations, terminated, attemptId } = req.body;
@@ -1383,10 +1531,23 @@ const addResult = asyncHandler(async (req, res) => {
 
   // Ownership backstop (defense in depth — a result can't exist without an
   // attempt, which already requires ownership, but enforce it here too).
+  // Mirrors startAttempt so anything a user could START they can also SUBMIT:
+  // a FREE exam is owned implicitly when the class is enrolled OR public.
   const isStaff = user.role === "admin" || user.role === "teacher";
+  const isFree = !exam.price || Number(exam.price) === 0;
+  let classFreeAccess = false;
+  if (isFree && exam.class) {
+    if (await studentApprovedInClass(user._id, exam.class)) {
+      classFreeAccess = true;
+    } else {
+      const classDoc = await Class.findById(exam.class).select("requireCode").lean();
+      classFreeAccess = classIsPublic(classDoc);
+    }
+  }
   const owns =
     user.exams.some((e) => e.toString() === String(examId)) ||
-    exam.users.some((u) => u.toString() === user._id.toString());
+    exam.users.some((u) => u.toString() === user._id.toString()) ||
+    classFreeAccess;
   if (!isStaff && !owns) {
     res.status(403);
     throw new Error("Bu imtahana giriş yoxdur");
@@ -1435,115 +1596,88 @@ const addResult = asyncHandler(async (req, res) => {
     }
   }
 
-  // Score on the server, against answers the client never received.
-  const correct = exam.questions?.correctAnswers || [];
-  const points = questionPoints(correct.length);
-  let sel = Array.isArray(selectedAnswers) ? selectedAnswers : [];
-
-  // Per-student option shuffle: map the student's DISPLAY-order picks back to the
-  // ORIGINAL choice indices (using this attempt's stored permutation), so scoring
-  // and the stored result are always in canonical, unshuffled index space.
-  if (attempt.optionOrder) {
-    const order = attempt.optionOrder;
-    sel = sel.map((a, i) => {
-      const perm = order[i];
-      if (!a || !Array.isArray(perm)) return a;
-      const ca = correct[i];
-      if (!ca || (ca.type !== "Cm" && ca.type !== "Cs")) return a;
-      // Question edited since the attempt started (choice count changed): the
-      // stored perm no longer aligns, so score this question canonically rather
-      // than mapping picks to stale original indices.
-      if (!Array.isArray(ca.choices) || ca.choices.length !== perm.length) return a;
-      const back = (d) => {
-        const n = Number(d);
-        return Number.isInteger(n) && n >= 0 && n < perm.length ? perm[n] : n;
-      };
-      if (Array.isArray(a.answer)) return { ...a, answer: a.answer.map(back) };
-      if (a.answer === "" || a.answer == null) return a;
-      return { ...a, answer: back(a.answer) };
-    });
-  }
-
-  const counts = { Cm: 0, Cs: 0, Co: 0, Cd: 0, Cma: 0 };
-  let earnedPoints = 0;
-  let wrongCount = 0;
-  correct.forEach((ca, i) => {
-    const s = sel[i];
-    // Blank (no selection / whitespace-only) counts as unanswered: no points,
-    // no penalty. `isAnswered` is index-0-safe and shape-agnostic.
-    if (!isAnswered(s)) return;
-    // Fractional: 1 = fully correct; 0<frac<1 only for Cs when partial credit is
-    // on. Fully-wrong (frac 0) feeds negative marking; partials are not penalised.
-    const frac = answerScore(ca, s, exam.partialCredit);
-    earnedPoints += (points[i] || 0) * frac;
-    if (frac >= 1) {
-      if (counts[ca.type] !== undefined) counts[ca.type]++;
-    } else if (frac <= 0) {
-      wrongCount += 1;
-    }
+  // Score + persist (shared with the server-side finalizer so auto-submit and
+  // hand-submit are scored identically). The attempt was already claimed above.
+  const earnPoints = await scoreAndCreateResult(exam, user, attempt, selectedAnswers, {
+    violations,
+    terminated,
   });
 
-  // Negative marking: every `wrongPerPenalty` wrong answers cancel
-  // `correctPerPenalty` questions' worth of points (using the average value,
-  // since total is always 100). Score never goes below 0.
-  if (exam.negativeMarking && (exam.wrongPerPenalty || 0) > 0) {
-    const n = correct.length || 1;
-    const avgPerQuestion = 100 / n;
-    const units = Math.floor(wrongCount / exam.wrongPerPenalty);
-    const cancelledCorrects = units * (exam.correctPerPenalty || 1);
-    earnedPoints = Math.max(0, earnedPoints - cancelledCorrects * avgPerQuestion);
-  }
-  earnedPoints = Math.round(earnedPoints * 100) / 100;
-
-  // A terminated (anti-cheat) attempt scores ZERO and is server-decided: a
-  // modified client can't keep working past termination and still bank points.
-  const isTerminated =
-    !!attempt.terminated || terminated === true || terminated === "true";
-  if (isTerminated) earnedPoints = 0;
-
-  const newResult = await Result.create({
-    userId: user._id,
-    examId,
-    attempts: sel.filter(isAnswered).length,
-    earnPoints: earnedPoints,
-    // Server-authoritative: the attempt's recorded count is the floor, so a
-    // tampered client body can never lower the violations on the final result.
-    violations: Math.max(attempt.violations || 0, Number(violations) || 0),
-    terminated: isTerminated,
-    // Store the selection that scoring used: strings trimmed (so review/PDF/
-    // analytics agree with the score), structured indices/maps stored raw. The
-    // correct side stores a renderable key (indices for choices, text otherwise).
-    selectedAnswers: sel.map((a) => ({
-      type: a?.type,
-      answer: storableAnswer(a?.answer),
-      // Keep the student's worked-solution photo only when the exam allows it.
-      ...(exam.studentSolutionPhotos && typeof a?.photo === "string" && a.photo
-        ? { photo: a.photo }
-        : {}),
-    })),
-    correctAnswers: correct.map((a) => ({ type: a.type, answer: renderableCorrect(a) })),
-    correctAnswersByType: [
-      { type: "Cm", count: counts.Cm },
-      { type: "Cs", count: counts.Cs },
-      { type: "Co", count: counts.Co },
-      { type: "Cd", count: counts.Cd },
-      { type: "Cma", count: counts.Cma },
-    ],
-  });
-
-  // (The attempt was already claimed as submitted above, atomically.)
-  exam.results.push(newResult._id);
-  await exam.save();
-  user.results.push(newResult._id);
-  await user.save();
-
-  // Telegram: tell the exam owner the student finished (or was terminated for
-  // cheating — the helper branches on result.terminated and the owner's prefs).
-  // Fire-and-forget so it never delays the student's submit response.
-  notifyExamFinished(exam, user, newResult);
-
-  res.status(200).json({ message: "Result has been saved", earnPoints: earnedPoints });
+  res.status(200).json({ message: "Result has been saved", earnPoints });
 });
+
+// Periodic autosave of the in-progress selections onto the active attempt, so
+// the server can finalize the exam even if the student never submits. Cheap:
+// stores the draft only (no scoring). Touches only the owner's OWN live attempt.
+const autosaveAttempt = asyncHandler(async (req, res) => {
+  const { examId } = req.params;
+  const { selectedAnswers, attemptId } = req.body;
+  if (!Array.isArray(selectedAnswers)) {
+    return res.status(200).json({ ok: false });
+  }
+  const filter = { userId: req.user._id, examId, submitted: false };
+  if (attemptId && mongoose.Types.ObjectId.isValid(attemptId)) filter._id = attemptId;
+  const answers = selectedAnswers.slice(0, 500).map((a) => ({
+    type: a?.type,
+    answer: a?.answer,
+    ...(typeof a?.photo === "string" && a.photo ? { photo: a.photo } : {}),
+  }));
+  await Attempt.updateOne(filter, { $set: { answers } });
+  res.status(200).json({ ok: true });
+});
+
+// ── Server-side safety net ──────────────────────────────────────────────────
+// Once an exam is started it WILL be scored. When an attempt's timer runs out
+// and the student never submitted (closed the tab, lost connection, abandoned
+// it), the server auto-submits the LAST autosaved answers and creates the
+// result — so the student/teacher can see it later. Runs on an interval from
+// server.js. A grace window lets a live client submit first; the atomic claim
+// guarantees no double result if the client and the job race.
+const FINALIZE_GRACE_MS = 60 * 1000;
+async function finalizeExpiredAttempts() {
+  let finalized = 0;
+  try {
+    const now = Date.now();
+    const cutoff = new Date(now - FINALIZE_GRACE_MS);
+    // Floor: ignore very old orphan attempts so the FIRST run after deploy
+    // doesn't resurrect months of history in one burst. Going forward the job
+    // runs every minute, so nothing legitimate ever ages past this window.
+    const floor = new Date(now - 7 * 24 * 60 * 60 * 1000);
+    const due = await Attempt.find({
+      submitted: false,
+      expiresAt: { $lt: cutoff, $gt: floor },
+    })
+      .sort({ expiresAt: 1 })
+      .limit(100)
+      .lean();
+    for (const row of due) {
+      try {
+        // Atomically claim so a racing client submit can't double-create.
+        const claimed = await Attempt.findOneAndUpdate(
+          { _id: row._id, submitted: false },
+          { $set: { submitted: true } },
+          { new: false }
+        );
+        if (!claimed) continue; // a live submit beat us to it
+        const exam = await Exam.findById(claimed.examId).populate("questions");
+        if (!exam) continue;
+        const user = await User.findById(claimed.userId);
+        if (!user) continue;
+        await scoreAndCreateResult(exam, user, claimed, claimed.answers || [], {
+          violations: claimed.violations,
+          terminated: claimed.terminated,
+        });
+        finalized += 1;
+      } catch (e) {
+        console.error("[FINALIZE] attempt", String(row._id), "failed:", e.message);
+      }
+    }
+    if (finalized) console.log(`[FINALIZE] auto-submitted ${finalized} expired attempt(s)`);
+  } catch (e) {
+    console.error("[FINALIZE] sweep failed:", e.message);
+  }
+  return finalized;
+}
 
 const addPhotoToResult = asyncHandler(async (req, res) => {
   const { resultId } = req.params;
@@ -1828,7 +1962,7 @@ const editTag = asyncHandler(async (req, res) => {
 
 const editClass = asyncHandler(async (req, res) => {
   const { classId } = req.params;
-  const { name, level } = req.body;
+  const { name, level, requireCode, regenerateCode } = req.body;
   const label = typeof name === "string" ? name.trim() : "";
   if (!label && !level) {
     res.status(400);
@@ -1846,6 +1980,14 @@ const editClass = asyncHandler(async (req, res) => {
   const update = {};
   if (typeof name === "string") update.name = label;
   if (level !== undefined && level !== "") update.level = level;
+  // Visibility toggle — written as a strict boolean (public when false).
+  if (requireCode !== undefined) {
+    update.requireCode = requireCode === true || requireCode === "true";
+  }
+  // Let the teacher rotate the join code (invalidates the previously shared one).
+  if (regenerateCode === true || regenerateCode === "true") {
+    update.joinCode = await uniqueJoinCode();
+  }
   await Class.findByIdAndUpdate(classId, update);
   res.status(200).json({ message: "Sinif uğurla yeniləndi" });
 });
@@ -2043,6 +2185,41 @@ const getExamsByUser = asyncHandler(async (req, res) => {
 // a student can jump to a just-published exam without digging through every
 // category and class. Student: exams in approved-enrolled classes (no drafts).
 // Teacher: their own classes' exams + any class they joined. Admin: everything.
+// PUBLIC landing feed (no auth): the newest exams that live in OPEN (public)
+// classes, so visitors see real content on the home page. Sanitized — only
+// display fields (no answer key / password / pdf path).
+const getPublicExams = asyncHandler(async (req, res) => {
+  const publicIds = await Class.find({ requireCode: false }).distinct("_id");
+  if (!publicIds.length) return res.status(200).json([]);
+  const exams = await Exam.find({ class: { $in: publicIds }, hidden: { $ne: true } })
+    .sort({ createdAt: -1 })
+    .limit(8)
+    .populate("class", "name level")
+    .lean();
+  const qIds = exams.map((e) => e.questions).filter(Boolean);
+  const sizeMap = {};
+  if (qIds.length) {
+    const sizes = await Question.aggregate([
+      { $match: { _id: { $in: qIds } } },
+      { $project: { n: { $size: { $ifNull: ["$correctAnswers", []] } } } },
+    ]);
+    sizes.forEach((s) => (sizeMap[String(s._id)] = s.n));
+  }
+  const out = exams.map((e) => ({
+    _id: e._id,
+    name: e.name,
+    class: e.class ? { name: e.class.name, level: e.class.level } : null,
+    duration: e.duration || 0,
+    totalMarks: e.totalMarks || 0,
+    questionCount: e.questions ? sizeMap[String(e.questions)] || 0 : 0,
+    startDate: e.startDate || null,
+    endDate: e.endDate || null,
+    price: e.price || 0,
+    createdAt: e.createdAt,
+  }));
+  res.status(200).json(out);
+});
+
 const getLatestExams = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id);
   if (!user) {
@@ -2054,7 +2231,9 @@ const getLatestExams = asyncHandler(async (req, res) => {
   if (!isAdminUser(user)) {
     const owned = isStaffUser(user) ? await Class.find({ owner: user._id }).distinct("_id") : [];
     const enrolled = await approvedClassIds(user._id);
-    const classIds = [...owned, ...enrolled];
+    const publicIds = await publicClassIds();
+    // Dedupe (a public class the teacher owns would otherwise appear twice).
+    const classIds = [...new Set([...owned, ...enrolled, ...publicIds].map(String))];
     filter = { class: { $in: classIds } };
   }
   // Students never see drafts (hidden exams).
@@ -2112,12 +2291,15 @@ module.exports = {
   getClassesByTag,
   deleteExam,
   deleteClass,
+  getAllClasses,
   deleteTag,
   editTag,
   editClass,
   setExamHidden,
   addPhotoToResult,
   addResult,
+  autosaveAttempt,
+  finalizeExpiredAttempts,
   startAttempt,
   attemptStatus,
   reportViolation,
@@ -2130,6 +2312,7 @@ module.exports = {
   addExamToUser,
   getExamsByUser,
   getLatestExams,
+  getPublicExams,
   getExams,
   reviewByResult,
   deleteMyExam,

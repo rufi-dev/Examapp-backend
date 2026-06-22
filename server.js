@@ -12,6 +12,7 @@ const notificationRoute = require('./routes/notificationRoute')
 const telegramRoute = require('./routes/telegramRoute')
 const Attempt = require('./models/attemptModel')
 const { runDueExamReports } = require('./jobs/examReports')
+const { finalizeExpiredAttempts } = require('./controllers/quizController')
 const errorHandler = require('./middleware/errorMiddleware')
 
 // Collapse any pre-existing duplicate ACTIVE attempts (keep the newest, mark the
@@ -104,6 +105,14 @@ mongoose
             runDueExamReports().catch((e) => console.error("[REPORT] tick failed:", e.message))
         setTimeout(reportTick, 30 * 1000)
         setInterval(reportTick, 10 * 60 * 1000)
+
+        // Server-side safety net: auto-submit attempts whose timer ran out but
+        // were never submitted (student abandoned/closed the exam). Runs every
+        // minute so a finished result appears within ~1-2 min of the deadline.
+        const finalizeTick = () =>
+            finalizeExpiredAttempts().catch((e) => console.error("[FINALIZE] tick failed:", e.message))
+        setTimeout(finalizeTick, 20 * 1000)
+        setInterval(finalizeTick, 60 * 1000)
     })
     .catch((err) => {
         console.log(err)

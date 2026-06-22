@@ -20,6 +20,12 @@ const attemptSchema = new Schema(
     // Generated once at start, reused on resume (stable order), and used at submit
     // to map the student's display-order picks back to original indices.
     optionOrder: { type: Schema.Types.Mixed, default: undefined },
+    // Latest autosaved DISPLAY-order selections (same shape the client would
+    // submit). The browser pushes these periodically so that, if the student
+    // never submits, the server-side finalizer can auto-submit THESE answers
+    // when the timer runs out. The student can never escape an attempt without a
+    // scored result.
+    answers: { type: Schema.Types.Mixed, default: undefined },
   },
   // Indexes are built explicitly at startup (after a one-time dedup) so the
   // unique partial index below can't fail to build on legacy duplicate data.

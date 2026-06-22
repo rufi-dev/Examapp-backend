@@ -27,6 +27,7 @@ const {
   editClass,
   setExamHidden,
   addResult,
+  autosaveAttempt,
   startAttempt,
   attemptStatus,
   reportViolation,
@@ -37,11 +38,13 @@ const {
   addExamToUser,
   getExamsByUser,
   getLatestExams,
+  getPublicExams,
   reviewByResult,
   deleteMyExam,
   addExamToUserById,
   getExams,
   getClassesByTag,
+  getAllClasses,
   addClass,
   getClass,
   getExamTagandClass,
@@ -103,7 +106,7 @@ router.post(
 );
 // Admin-only AI spend dashboard data.
 router.get("/aiUsage", protect, adminOnly, getAiUsage);
-router.post("/addClass/:tagId", protect, teacherOnly, addClass);
+router.post("/addClass", protect, teacherOnly, addClass);
 router.get("/server-time", serverTime);
 // Scoped to the caller (teacher → own, student → enrolled, admin → all), so it
 // now requires auth.
@@ -128,6 +131,7 @@ router.get("/getExamTagandClass/:examId", protect, getExamTagandClass);
 router.get("/getResultsByExam/:examId", protect, teacherOnly, getResultsByExam);
 router.get("/getExamsByClass/:classId", protect, getExamsByClass);
 router.get("/getClassesByTag/:tagId", protect, getClassesByTag);
+router.get("/getClasses", protect, getAllClasses);
 router.post("/addQuestion/:examId", protect, teacherOnly, addQuestion);
 router.patch("/editQuestion/:questionId", protect, teacherOnly, editQuestion);
 router.delete(
@@ -148,6 +152,7 @@ router.patch("/editTag/:tagId", protect, teacherOnly, editTag);
 router.patch("/editClass/:classId", protect, teacherOnly, editClass);
 router.patch("/setExamHidden/:examId", protect, teacherOnly, setExamHidden);
 router.post("/exam/:examId/start", protect, startAttempt);
+router.post("/exam/:examId/autosave", protect, autosaveAttempt);
 router.get("/exam/:examId/attemptStatus", protect, attemptStatus);
 router.post("/exam/:examId/violation", protect, reportViolation);
 router.get("/exam/:examId/rank", protect, getExamRank);
@@ -168,6 +173,8 @@ router.post(
 );
 router.get("/getExamsByUser", protect, verifiedOnly, getExamsByUser);
 router.get("/getLatestExams", protect, verifiedOnly, getLatestExams);
+// Public landing feed — newest exams from open classes (no auth).
+router.get("/publicExams", getPublicExams);
 router.get("/getExams", protect, teacherOnly, getExams);
 router.get("/reviewByResult/:resultId", protect, verifiedOnly, reviewByResult);
 router.delete("/deleteMyExam/:examId", protect, verifiedOnly, deleteMyExam);
