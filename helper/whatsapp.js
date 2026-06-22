@@ -1,95 +1,146 @@
-// WhatsApp Cloud API helper (Meta WhatsApp Business Platform). DORMANT until
-// WHATSAPP_TOKEN + WHATSAPP_PHONE_NUMBER_ID are set in the environment — every
-// entry point no-ops when unconfigured, so it is safe to ship before onboarding
-// with Meta is finished. Uses Node 18+ global fetch (no extra dependency).
+// UNOFFICIAL WhatsApp integration via whatsapp-web.js (drives WhatsApp Web with
+// a headless Chromium session) — NOT the Meta Cloud API. It sends plain-text
+// messages from a linked phone number, so no Business verification / templates
+// are needed. The teacher links the number once by scanning a QR (admin page).
 //
-// IMPORTANT — business-initiated messages (like "a new exam was added") can only
-// be sent as a PRE-APPROVED message TEMPLATE, not free text. Create a utility
-// template in WhatsApp Manager whose body has THREE placeholders, e.g.:
-//   "Yeni imtahan əlavə olundu: {{1}} ({{2}}). Başlamaq üçün: {{3}}"
-// then set its name in WHATSAPP_TEMPLATE_NEW_EXAM (default "new_exam_alert").
+// ⚠️ Automated/bulk sending is against WhatsApp's Terms of Service and can get
+// the number BANNED. Keep it low-volume + opt-in (we throttle sends and only
+// message a class's enrolled, opted-in students).
 //
-// Required env:
-//   WHATSAPP_TOKEN            - permanent (system-user) access token
-//   WHATSAPP_PHONE_NUMBER_ID  - the sender's Phone Number ID
-// Optional env:
-//   WHATSAPP_GRAPH_VERSION    - Graph API version (default "v21.0")
-//   WHATSAPP_TEMPLATE_NEW_EXAM- template name (default "new_exam_alert")
-//   WHATSAPP_TEMPLATE_LANG    - template language code (default "az")
-//   FRONTEND_URL              - used to build the exam link in the message
+// Gated by WHATSAPP_WEB_ENABLED ("true") so it only launches where Chromium is
+// available (the Docker image sets this + PUPPETEER_EXECUTABLE_PATH). Running
+// `node server.js` locally without that env is a safe no-op.
+const path = require("path");
+const QRCode = require("qrcode");
 const Exam = require("../models/examModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 
-const TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
-const GRAPH_VERSION = process.env.WHATSAPP_GRAPH_VERSION || "v21.0";
-const TEMPLATE_NEW_EXAM = process.env.WHATSAPP_TEMPLATE_NEW_EXAM || "new_exam_alert";
-const TEMPLATE_LANG = process.env.WHATSAPP_TEMPLATE_LANG || "az";
+const ENABLED = process.env.WHATSAPP_WEB_ENABLED === "true";
 const FRONTEND_URL = (process.env.FRONTEND_URL || "").replace(/\/+$/, "");
 
-const isWhatsAppConfigured = () => !!(TOKEN && PHONE_NUMBER_ID);
+let client = null;
+let ready = false;
+let lastQrDataUrl = null;
+let starting = false;
 
-// Normalize a stored phone to E.164 ("+994501234567"). Handles local Azerbaijani
-// formats entered without a country code. Returns null if it can't be trusted.
-function toE164(raw) {
+// Normalize a stored phone to bare international digits ("994501234567").
+// Handles local Azerbaijani formats entered without a country code.
+function toDigits(raw) {
   let s = String(raw || "").trim();
-  if (!s) return null;
   const hadPlus = s.startsWith("+");
   s = s.replace(/\D/g, "");
   if (!s) return null;
   if (!hadPlus) {
-    if (s.startsWith("00")) s = s.slice(2); // 00994... -> 994...
-    else if (s.startsWith("0")) s = "994" + s.slice(1); // 0XXXXXXXXX -> 994XXXXXXXXX
-    else if (s.length === 9) s = "994" + s; // bare 9-digit subscriber -> +994
+    if (s.startsWith("00")) s = s.slice(2);
+    else if (s.startsWith("0")) s = "994" + s.slice(1);
+    else if (s.length === 9) s = "994" + s;
   }
-  if (s.length < 8) return null; // "+994" placeholder / junk
-  return "+" + s;
+  return s.length >= 8 ? s : null;
 }
 
-// Low-level Graph API POST. Never throws.
-async function waApi(path, body) {
-  if (!isWhatsAppConfigured()) return null;
+// Boot (or re-boot) the WhatsApp Web client. Safe to call repeatedly.
+function initWhatsApp() {
+  if (!ENABLED || client || starting) return;
+  starting = true;
+  let Client, LocalAuth;
   try {
-    const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${path}`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body || {}),
-    });
-    const json = await res.json();
-    if (json && json.error) {
-      // eslint-disable-next-line no-console
-      console.error("[WHATSAPP] API error:", json.error?.message || json.error);
-    }
-    return json;
+    ({ Client, LocalAuth } = require("whatsapp-web.js"));
   } catch (e) {
     // eslint-disable-next-line no-console
-    console.error("[WHATSAPP] request failed:", e.message);
-    return null;
+    console.error("[WHATSAPP] whatsapp-web.js unavailable:", e.message);
+    starting = false;
+    return;
   }
-}
 
-// Send a pre-approved template message with positional body parameters.
-async function sendTemplate(toPhone, templateName, params = []) {
-  const to = toE164(toPhone);
-  if (!to) return null;
-  return waApi(`${PHONE_NUMBER_ID}/messages`, {
-    messaging_product: "whatsapp",
-    to,
-    type: "template",
-    template: {
-      name: templateName,
-      language: { code: TEMPLATE_LANG },
-      components: params.length
-        ? [
-            {
-              type: "body",
-              parameters: params.map((t) => ({ type: "text", text: String(t ?? "-") })),
-            },
-          ]
-        : [],
+  client = new Client({
+    authStrategy: new LocalAuth({ dataPath: path.join(process.cwd(), ".wwebjs_auth") }),
+    puppeteer: {
+      headless: true,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-zygote",
+      ],
     },
   });
+
+  client.on("qr", async (qr) => {
+    ready = false;
+    try {
+      lastQrDataUrl = await QRCode.toDataURL(qr);
+    } catch {
+      lastQrDataUrl = null;
+    }
+    // eslint-disable-next-line no-console
+    console.log("[WHATSAPP] QR ready — open the admin WhatsApp page to scan.");
+  });
+  client.on("authenticated", () => {
+    // eslint-disable-next-line no-console
+    console.log("[WHATSAPP] authenticated");
+  });
+  client.on("ready", () => {
+    ready = true;
+    lastQrDataUrl = null;
+    // eslint-disable-next-line no-console
+    console.log("[WHATSAPP] client ready");
+  });
+  client.on("auth_failure", (m) => {
+    // eslint-disable-next-line no-console
+    console.error("[WHATSAPP] auth failure:", m);
+  });
+  client.on("disconnected", (reason) => {
+    // eslint-disable-next-line no-console
+    console.error("[WHATSAPP] disconnected:", reason);
+    ready = false;
+    client = null;
+    starting = false;
+    setTimeout(initWhatsApp, 10000); // auto-reconnect
+  });
+
+  client.initialize().catch((e) => {
+    // eslint-disable-next-line no-console
+    console.error("[WHATSAPP] initialize failed:", e.message);
+    ready = false;
+    client = null;
+    starting = false;
+  });
+}
+
+const getStatus = () => ({ enabled: ENABLED, ready, hasQr: !!lastQrDataUrl });
+const getQrDataUrl = () => lastQrDataUrl;
+
+// Unlink the current number (forces a fresh QR on next init).
+async function logout() {
+  if (!client) return;
+  try {
+    await client.logout();
+  } catch {
+    /* ignore */
+  }
+  ready = false;
+  lastQrDataUrl = null;
+  client = null;
+  starting = false;
+  setTimeout(initWhatsApp, 2000);
+}
+
+// Send one plain-text WhatsApp message. Returns true on success.
+async function sendMessage(phone, text) {
+  if (!ready || !client) return false;
+  const digits = toDigits(phone);
+  if (!digits) return false;
+  try {
+    await client.sendMessage(`${digits}@c.us`, text);
+    return true;
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("[WHATSAPP] sendMessage failed:", e.message);
+    return false;
+  }
 }
 
 async function className(exam) {
@@ -104,13 +155,13 @@ async function className(exam) {
 }
 
 // Notify the approved students of an exam's class that a new exam is available.
-// Idempotent + lazy: re-reads the exam fresh, only fires when WhatsApp is
-// configured, the exam is visible (not a draft), has questions, and hasn't been
+// Idempotent + lazy: re-reads the exam fresh, only fires when the client is
+// ready, the exam is visible (not a draft) and has questions, and hasn't been
 // announced yet — then stamps studentsNotifiedAt so it never double-sends.
-// Safe to call fire-and-forget from any controller.
+// Sends are throttled to reduce the chance of a spam ban.
 async function notifyStudentsNewExam(examId) {
   try {
-    if (!isWhatsAppConfigured()) return;
+    if (!ENABLED || !ready) return;
     const exam = await Exam.findById(examId);
     if (!exam) return;
     if (exam.hidden) return; // drafts don't notify
@@ -123,19 +174,23 @@ async function notifyStudentsNewExam(examId) {
       "phone whatsappOptIn"
     );
     const cname = await className(exam);
-    const link = FRONTEND_URL ? `${FRONTEND_URL}/exam/details/${exam._id}` : "-";
+    const link = FRONTEND_URL ? `${FRONTEND_URL}/exam/details/${exam._id}` : "";
+    const text = [
+      "📚 Yeni imtahan əlavə olundu",
+      "",
+      `📝 ${exam.name || "İmtahan"}`,
+      cname ? `🏫 ${cname}` : null,
+      link ? `🔗 ${link}` : null,
+    ]
+      .filter((l) => l !== null)
+      .join("\n");
 
     let sent = 0;
     for (const en of enrollments) {
       const s = en.student;
-      if (!s || s.whatsappOptIn === false) continue;
-      if (!toE164(s.phone)) continue;
-      const r = await sendTemplate(s.phone, TEMPLATE_NEW_EXAM, [
-        exam.name || "İmtahan",
-        cname || "-",
-        link,
-      ]);
-      if (r && !r.error) sent += 1;
+      if (!s || s.whatsappOptIn === false || !toDigits(s.phone)) continue;
+      if (await sendMessage(s.phone, text)) sent += 1;
+      await new Promise((r) => setTimeout(r, 1500)); // throttle
     }
 
     exam.studentsNotifiedAt = new Date();
@@ -149,8 +204,11 @@ async function notifyStudentsNewExam(examId) {
 }
 
 module.exports = {
-  isWhatsAppConfigured,
-  toE164,
-  sendTemplate,
+  initWhatsApp,
+  getStatus,
+  getQrDataUrl,
+  logout,
+  sendMessage,
   notifyStudentsNewExam,
+  toDigits,
 };

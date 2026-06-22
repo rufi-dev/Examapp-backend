@@ -10,6 +10,8 @@ const achivementRoute = require('./routes/achivementRoute')
 const stripeRoute = require('./routes/stripeRoute')
 const notificationRoute = require('./routes/notificationRoute')
 const telegramRoute = require('./routes/telegramRoute')
+const whatsappRoute = require('./routes/whatsappRoute')
+const { initWhatsApp } = require('./helper/whatsapp')
 const Attempt = require('./models/attemptModel')
 const { runDueExamReports } = require('./jobs/examReports')
 const { finalizeExpiredAttempts } = require('./controllers/quizController')
@@ -73,6 +75,7 @@ app.use("/api/achivement", achivementRoute)
 app.use("/api/stripe", stripeRoute)
 app.use("/api/notifications", notificationRoute)
 app.use("/api/telegram", telegramRoute)
+app.use("/api/whatsapp", whatsappRoute)
 app.use('/uploads', express.static('uploads'));
 
 app.get('/', (req, res) => {
@@ -99,6 +102,15 @@ mongoose
         app.listen(PORT, () => {
             console.log("Connected to DB and listening on port:", PORT)
         })
+
+        // Unofficial WhatsApp Web client (whatsapp-web.js). No-op unless
+        // WHATSAPP_WEB_ENABLED=true (set in the Docker image, where Chromium
+        // exists). Boots the session so the owner can link via the QR page.
+        try {
+            initWhatsApp()
+        } catch (e) {
+            console.error("[WHATSAPP] init error:", e.message)
+        }
         // End-of-exam Telegram reports: check shortly after boot, then every
         // 10 minutes. Errors are logged, never fatal.
         const reportTick = () =>

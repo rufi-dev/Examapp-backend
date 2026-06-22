@@ -9,10 +9,13 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    # Chromium (whatsapp-web.js) needs more shared memory than the 64MB default.
+    shm_size: "512mb"
     expose:
       - "5000" # internal only; Caddy is the public entrypoint
     volumes:
       - uploads:/app/uploads # persist uploaded PDFs across rebuilds
+      - wa_auth:/app/.wwebjs_auth # persist the linked WhatsApp session
     networks:
       - web
 
@@ -39,5 +42,6 @@ networks:
 
 volumes:
   uploads:
+  wa_auth:
   caddy_data:
   caddy_config:
