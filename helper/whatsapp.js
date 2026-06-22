@@ -20,13 +20,6 @@ const User = require("../models/userModel");
 
 const ENABLED = process.env.WHATSAPP_WEB_ENABLED === "true";
 const FRONTEND_URL = (process.env.FRONTEND_URL || "").replace(/\/+$/, "");
-// Public backend base — used for the /exam-share link so WhatsApp's preview can
-// read the exam's cover image (og:image). Falls back to the SPA URL.
-const SHARE_BASE = process.env.PUBLIC_BACKEND_URL
-  ? process.env.PUBLIC_BACKEND_URL.replace(/\/+$/, "")
-  : process.env.SITE_ADDRESS
-  ? `https://${String(process.env.SITE_ADDRESS).replace(/^https?:\/\//, "").replace(/\/+$/, "")}`
-  : "";
 
 let client = null;
 let ready = false;
@@ -285,13 +278,7 @@ async function notifyStudentsNewExam(examId, opts = {}) {
     if (!exam.class) return skip("exam has no class");
 
     const cname = await className(exam);
-    // Prefer the backend share link (serves og:image = the exam cover so the
-    // WhatsApp preview shows it); fall back to the direct SPA link.
-    const link = SHARE_BASE
-      ? `${SHARE_BASE}/exam-share/${exam._id}`
-      : FRONTEND_URL
-      ? `${FRONTEND_URL}/exam/details/${exam._id}`
-      : "";
+    const link = FRONTEND_URL ? `${FRONTEND_URL}/exam/details/${exam._id}` : "";
     const text = [
       "📚 Yeni imtahan əlavə olundu",
       "",

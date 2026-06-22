@@ -78,45 +78,6 @@ app.use("/api/telegram", telegramRoute)
 app.use("/api/whatsapp", whatsappRoute)
 app.use('/uploads', express.static('uploads'));
 
-// Public share page for exam links sent over WhatsApp/social. Serves Open Graph
-// tags (so the cover image shows in the link preview) then redirects to the SPA
-// exam page. No auth + only non-sensitive fields (name + cover).
-const ExamModel = require('./models/examModel')
-app.get('/exam-share/:examId', async (req, res) => {
-    const front = (process.env.FRONTEND_URL || 'https://sinaqriyaziyyat.vercel.app').replace(/\/+$/, '')
-    const target = `${front}/exam/details/${req.params.examId}`
-    const esc = (s) =>
-        String(s ?? '')
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-    try {
-        const exam = await ExamModel.findById(req.params.examId).select('name coverImage hidden').lean()
-        const title = exam && !exam.hidden && exam.name ? exam.name : 'BunkerMath — İmtahan'
-        const image = exam && exam.coverImage ? exam.coverImage : ''
-        res
-            .set('Content-Type', 'text/html; charset=utf-8')
-            .set('Cache-Control', 'public, max-age=300')
-            .send(`<!doctype html><html lang="az"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta property="og:type" content="website">
-<meta property="og:title" content="${esc(title)}">
-<meta property="og:description" content="Yeni imtahan — başlamaq üçün toxun.">
-${image ? `<meta property="og:image" content="${esc(image)}">` : ''}
-<meta name="twitter:card" content="${image ? 'summary_large_image' : 'summary'}">
-<meta http-equiv="refresh" content="0; url=${esc(target)}">
-<title>${esc(title)}</title>
-</head><body style="font-family:sans-serif;text-align:center;padding:40px">
-<p>Yönləndirilir… <a href="${esc(target)}">İmtahana keç</a></p>
-<script>location.replace(${JSON.stringify(target)})</script>
-</body></html>`)
-    } catch {
-        res.redirect(target)
-    }
-})
-
 app.get('/', (req, res) => {
     res.send('Home page')
 })
