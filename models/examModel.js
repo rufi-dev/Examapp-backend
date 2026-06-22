@@ -33,6 +33,12 @@ const examSchema = Schema({
         type: String,
         required: false
     },
+    // Optional cover/banner image (Cloudinary URL) shown at the top of the exam
+    // card. Display-only, so it is safe to expose in student payloads.
+    coverImage: {
+        type: String,
+        default: ""
+    },
     // Shared written solution images (added once per exam by the teacher,
     // shown to every student in their review alongside the video solution).
     solutionPhotos: [{

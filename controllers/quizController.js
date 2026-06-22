@@ -239,6 +239,7 @@ const addExam = asyncHandler(async (req, res) => {
     partialCredit,
     shuffleOptions,
     studentSolutionPhotos,
+    coverImage,
     pdf,
     mode,
   } = req.body;
@@ -294,6 +295,7 @@ const addExam = asyncHandler(async (req, res) => {
       partialCredit: partialCredit === "true" || partialCredit === true,
       shuffleOptions: shuffleOptions === "true" || shuffleOptions === true,
       studentSolutionPhotos: studentSolutionPhotos === "true" || studentSolutionPhotos === true,
+      coverImage: typeof coverImage === "string" ? coverImage : "",
       videoLink,
       startDate,
       endDate,
@@ -579,7 +581,13 @@ function sanitizeQuestionItem(q) {
       q.pairs.map((p) => ({ text: p.right, latex: p.rightLatex, image: p.rightImage }))
     );
   }
-  // NOTE: q.correct, q.pairs and q.answer are intentionally omitted.
+  if (q.type === "Cmu") {
+    // Correspondence: only the grid SIZES are shown (numbers + letters live in
+    // the PDF). The correct mapping (q.key) is NEVER sent.
+    out.leftCount = q.leftCount;
+    out.rightCount = q.rightCount;
+  }
+  // NOTE: q.correct, q.pairs, q.key and q.answer are intentionally omitted.
   return out;
 }
 
@@ -846,6 +854,15 @@ const addQuestion = asyncHandler(async (req, res) => {
     } else if (ca.type === "Cma" && Array.isArray(ca.pairs)) {
       if (ca.pairs.length < 2) {
         return res.status(400).json({ message: "Uyğunlaşdırma sualı ən azı 2 cüt tələb edir" });
+      }
+    } else if (ca.type === "Cmu") {
+      const N = Number(ca.leftCount) || 0;
+      const M = Number(ca.rightCount) || 0;
+      if (N < 2 || M < 2) {
+        return res.status(400).json({ message: "Uyğunluq sualı ən azı 2 nömrə və 2 hərf tələb edir" });
+      }
+      if (!Array.isArray(ca.key) || ca.key.length !== N) {
+        return res.status(400).json({ message: "Uyğunluq sualının cavab açarı tam deyil" });
       }
     }
   }
@@ -1363,6 +1380,22 @@ function isCorrectAnswer(ca, sel) {
       if (!pairs.length || typeof a !== "object" || Array.isArray(a)) return false;
       return pairs.every((p, k) => norm(a[k]) === norm(p.right));
     }
+    case "Cmu": {
+      // Correspondence (numbers -> letters, one-to-many): for EVERY number k the
+      // chosen set of letter indices must equal the correct set exactly (no
+      // missing/extra, order irrelevant). Letters are reusable, so each number is
+      // judged independently. All-or-nothing.
+      const key = Array.isArray(ca.key) ? ca.key : [];
+      if (!key.length || typeof a !== "object" || Array.isArray(a)) return false;
+      const setEq = (x, y) => {
+        const xs = (Array.isArray(x) ? x : []).map(Number);
+        const ys = (Array.isArray(y) ? y : []).map(Number);
+        if (xs.length !== ys.length) return false;
+        const s = new Set(xs);
+        return ys.every((v) => s.has(v));
+      };
+      return key.every((correctArr, k) => setEq(a[k], correctArr));
+    }
     case "Co":
     case "Cd":
     default:
@@ -1414,6 +1447,9 @@ function renderableCorrect(ca) {
   if (ca.type === "Cma" && Array.isArray(ca.pairs)) {
     return ca.pairs.map((p) => p.right);
   }
+  if (ca.type === "Cmu" && Array.isArray(ca.key)) {
+    return ca.key; // [[idx,…], …] — correct letter indices per number
+  }
   return norm(ca.answer);
 }
 
@@ -1461,7 +1497,7 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
     });
   }
 
-  const counts = { Cm: 0, Cs: 0, Co: 0, Cd: 0, Cma: 0 };
+  const counts = { Cm: 0, Cs: 0, Co: 0, Cd: 0, Cma: 0, Cmu: 0 };
   let earnedPoints = 0;
   let wrongCount = 0;
   correct.forEach((ca, i) => {
@@ -1514,6 +1550,7 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
       { type: "Co", count: counts.Co },
       { type: "Cd", count: counts.Cd },
       { type: "Cma", count: counts.Cma },
+      { type: "Cmu", count: counts.Cmu },
     ],
   });
 
@@ -1894,6 +1931,7 @@ const editExam = asyncHandler(async (req, res) => {
     partialCredit,
     shuffleOptions,
     studentSolutionPhotos,
+    coverImage,
     pdfPath,
   } = req.body;
   const examExists = await Exam.findById(examId);
@@ -1929,6 +1967,8 @@ const editExam = asyncHandler(async (req, res) => {
     // Only touch the solution images when the client sends them, so partial
     // edits don't wipe the existing list.
     if (Array.isArray(solutionPhotos)) update.solutionPhotos = solutionPhotos;
+    // Cover image: a string (incl. "") sets it; undefined leaves it unchanged.
+    if (typeof coverImage === "string") update.coverImage = coverImage;
     // Empty string disables the password; undefined leaves it unchanged.
     if (typeof password === "string") update.password = password;
     await Exam.findByIdAndUpdate(examId, update);

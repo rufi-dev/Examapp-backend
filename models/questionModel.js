@@ -36,9 +36,10 @@ const questionSchema = Schema(
           type: String,
         },
         type: {
-          // Cm = single-choice, Cs = multi-select, Co/Cd = open, Cma = matching.
+          // Cm = single-choice, Cs = multi-select, Co/Cd = open, Cma = matching
+          // (text pairs), Cmu = correspondence (numbers -> letters, one-to-many).
           type: String,
-          enum: ["Cm", "Cs", "Co", "Cd", "Cma"],
+          enum: ["Cm", "Cs", "Co", "Cd", "Cma", "Cmu"],
           required: true,
         },
         // Legacy PDF letters (a/b/c/d) for Cm in pdf mode.
@@ -64,6 +65,15 @@ const questionSchema = Schema(
         // matching (Cma): correct mapping is implicit pairs[k].left <-> pairs[k].right
         // (SERVER-ONLY).
         pairs: { type: [pairSchema], default: undefined },
+
+        // correspondence (Cmu): the question's numbers/letters live in the PDF;
+        // the answer key only stores the sizes + the correct letter indices per
+        // number. `leftCount` numbers (1..N), `rightCount` letters (a..M), and
+        // `key[i]` = the array of correct letter indices for number i+1
+        // (SERVER-ONLY — only leftCount/rightCount are sent to students).
+        leftCount: { type: Number, default: undefined },
+        rightCount: { type: Number, default: undefined },
+        key: { type: Schema.Types.Mixed, default: undefined },
       },
     ],
     exam: {
