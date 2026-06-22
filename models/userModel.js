@@ -70,10 +70,6 @@ const userSchema = Schema(
             type: Schema.Types.ObjectId,
             ref: "Result"
         }],
-        // Last time this user opened the notifications bell (drives unread count).
-        notificationsSeenAt: {
-            type: Date,
-        },
         // Telegram notifications (teachers): when linked, the user gets a bot
         // message whenever a student starts one of their exams.
         // telegramChatId = the linked Telegram chat (set via the bot webhook).
