@@ -95,10 +95,11 @@ Rules:
   - "$\\\\begin{cases}x^{2}y-xy^{2}=12\\\\\\\\xy=6\\\\end{cases}$ tənliklər sistemindən $x^{2}+y^{2}$-nın cəmini tapın."
   - "$\\\\sqrt{3}=a$ və $\\\\sqrt{5}=b$ olarsa, $\\\\sqrt{540}$ ədədini $a$ və $b$ ilə əvəz edin."
   Use $$...$$ only for a big standalone display formula. Write a literal dollar sign as \\\\$.
+- PRESERVE LINE BREAKS inside "text": keep the document's line structure. Put each line that is on its own line in the PDF on its own line using a real newline (\\n). In particular, put each numbered item (1., 2., 3., …) and each lettered option (a., b., c., …) on a SEPARATE line, and keep a blank line between distinct groups (e.g. between the numbered list and the lettered list). NEVER collapse a multi-line question into a single line.
 - "latex": ALWAYS return an empty string "". All math now lives inline inside the text fields, never in a separate field.
 - "choices": for Cm/Cs, one object per option in the order shown (drop the A/B/C labels — they are implicit by position). Put each option's text in "text" with any math inline via $...$ (e.g. "$9ab$", "2500"). Set the choice "latex" to "". For Co/Cma, use an empty array.
 - "correct": indices (0-based) into "choices" of the correct option(s) — ONLY if the PDF itself marks/states the correct answer (e.g. an answer key, a highlighted option, or a stated solution). If the correct answer is NOT given in the PDF, return an EMPTY array. NEVER guess or solve the question to fill this — leave it empty for the teacher to mark.
-- "pairs": for Cma, one object per correct left<->right pair. Put math inline in "left"/"right" via $...$ and set "leftLatex"/"rightLatex" to "". Empty array otherwise. Right values must be distinct.
+- "pairs": for Cma, one object per correct left<->right pair. Put math inline in "left"/"right" via $...$ and set "leftLatex"/"rightLatex" to "". Empty array otherwise. Right values must be distinct. If ONE left item corresponds to MULTIPLE right options, list them comma-separated in a single right value (e.g. "a, d").
 - "openAnswer": for Co, the correct answer text (math inline via $...$) ONLY if the PDF states it; otherwise "".
 - "hasFigure": true if the question depends on a diagram, graph, geometric figure, or image that cannot be represented as text/LaTeX (the teacher will add the image). Still extract the surrounding text.
 - "explanation": a worked solution/explanation (math inline via $...$) ONLY if the PDF provides one; otherwise "".
