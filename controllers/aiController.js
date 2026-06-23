@@ -138,8 +138,10 @@ function computeCost(u) {
 // ---- Gemini (Google) provider: a cheaper alternative to Claude. Same prompt,
 // same output shape. Uses the REST generateContent API (no extra dependency). ---
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
-// Stable fallback tried if the primary model stays overloaded (503).
-const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-2.0-flash";
+// Stable fallback tried if the primary model stays overloaded (503). NOTE: keep
+// this a model the key actually has quota for — gemini-2.0-flash returns 429
+// "limit: 0" on free-tier keys, which is useless. gemini-2.5-flash has quota.
+const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash";
 // Approx USD per 1M tokens for the chosen Gemini model (env-overridable). Gemini
 // Flash is dramatically cheaper than Claude Opus (5 / 25).
 const GEMINI_PRICE = {
@@ -212,10 +214,11 @@ function computeGeminiCost(u, model) {
 }
 
 // Build an error carrying an HTTP status + Azerbaijani user message.
-function aiError(status, userMessage) {
+function aiError(status, userMessage, fallback = false) {
   const e = new Error(userMessage);
   e.aiStatus = status;
   e.userMessage = userMessage;
+  e.aiFallback = fallback; // true → caller may retry with another provider (Claude)
   return e;
 }
 
@@ -299,7 +302,10 @@ async function extractWithGemini(base64) {
   );
   let lastStatus = 0;
   for (const model of models) {
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // Keep this short: the teacher is waiting and a long retry storm overruns the
+    // reverse-proxy timeout (surfaces as a 502). 2 quick tries per model, then
+    // we bail and let the caller fall back to Claude.
+    for (let attempt = 0; attempt < 2; attempt++) {
       let r, data;
       try {
         r = await fetch(
@@ -341,14 +347,20 @@ async function extractWithGemini(base64) {
       console.error("AI extract (gemini) error:", model, lastStatus, data?.error?.message);
       // Only overload / rate-limit / server errors are worth retrying.
       if (![429, 500, 503].includes(lastStatus)) break; // non-retryable → next model
-      await sleep(1500 * (attempt + 1));
+      await sleep(700 * (attempt + 1));
     }
   }
+  // Busy / quota / server errors are fallback-eligible: the caller can retry the
+  // whole extraction on Claude so the teacher still gets their questions.
+  const fallbackable = [429, 500, 502, 503].includes(lastStatus) || lastStatus === 0;
   throw aiError(
-    502,
+    503,
     lastStatus === 503
-      ? "AI modeli hazırda məşğuldur. Bir neçə dəqiqədən sonra yenidən cəhd edin və ya Claude seçin."
-      : "AI emalı alınmadı. Bir az sonra yenidən cəhd edin."
+      ? "Gemini hazırda məşğuldur. Claude ilə yenidən cəhd edilir…"
+      : lastStatus === 429
+      ? "Gemini kvotası bitib. Claude ilə yenidən cəhd edilir…"
+      : "Gemini emalı alınmadı. Claude ilə yenidən cəhd edilir…",
+    fallbackable
   );
 }
 
@@ -372,12 +384,28 @@ const extractQuestions = asyncHandler(async (req, res) => {
   let questions = [];
   let usage = null;
   let cost = null;
+  let usedProvider = provider;
+  let fellBack = false;
   try {
     ({ questions, usage, cost } =
       provider === "gemini" ? await extractWithGemini(base64) : await extractWithClaude(base64));
   } catch (e) {
-    res.status(e.aiStatus || 502);
-    throw new Error(e.userMessage || "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
+    // If Gemini is busy / out of quota, automatically retry on Claude so the
+    // teacher isn't dead-ended — they still get their questions (slightly pricier).
+    if (provider === "gemini" && e.aiFallback) {
+      try {
+        ({ questions, usage, cost } = await extractWithClaude(base64));
+        usedProvider = "claude";
+        fellBack = true;
+        console.warn("AI extract: Gemini unavailable, fell back to Claude.");
+      } catch (e2) {
+        res.status(e2.aiStatus || 503);
+        throw new Error(e2.userMessage || "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
+      }
+    } else {
+      res.status(e.aiStatus || 503);
+      throw new Error(e.userMessage || "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
+    }
   }
 
   // Persist the usage so admins can see per-teacher spend (best-effort: a logging
@@ -401,7 +429,7 @@ const extractQuestions = asyncHandler(async (req, res) => {
     }
   }
 
-  res.status(200).json({ success: true, questions, usage, cost, provider });
+  res.status(200).json({ success: true, questions, usage, cost, provider: usedProvider, fellBack });
 });
 
 // Admin-only: AI spend per admin/teacher (+ grand totals + recent activity).
