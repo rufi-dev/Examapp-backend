@@ -102,6 +102,9 @@ const examSchema = Schema({
     // Structured exam pagination: how many questions a student sees per page
     // (0 = show all on one page). Set from the structured builder.
     questionsPerPage: { type: Number, default: 0 },
+    // When true the student can only move FORWARD — once they advance a page they
+    // can't go back to earlier questions (linear exam).
+    forwardOnly: { type: Boolean, default: false },
     questions: {
         type: Schema.Types.ObjectId,
         ref: 'Question'

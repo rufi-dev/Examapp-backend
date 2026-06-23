@@ -834,7 +834,7 @@ const getExam = asyncHandler(async (req, res) => {
 
 const addQuestion = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const { correctAnswers, questionsPerPage } = req.body;
+  const { correctAnswers, questionsPerPage, forwardOnly } = req.body;
 
   if (!correctAnswers || !examId) {
     res.status(400).json({ message: "All fields are required" });
@@ -882,12 +882,14 @@ const addQuestion = asyncHandler(async (req, res) => {
 
   // Persist the structured per-page layout (0 = show all) alongside the answer
   // key, so saving questions also saves this setting in one round-trip.
-  if (questionsPerPage !== undefined) {
-    const qpp = Math.max(0, Math.min(50, Number(questionsPerPage) || 0));
-    if (exam.questionsPerPage !== qpp) {
-      exam.questionsPerPage = qpp;
-      await exam.save();
+  if (questionsPerPage !== undefined || forwardOnly !== undefined) {
+    if (questionsPerPage !== undefined) {
+      exam.questionsPerPage = Math.max(0, Math.min(50, Number(questionsPerPage) || 0));
     }
+    if (forwardOnly !== undefined) {
+      exam.forwardOnly = forwardOnly === true || forwardOnly === "true";
+    }
+    await exam.save();
   }
 
   // If this exam already has a question set, replace its answers instead of
@@ -1099,6 +1101,8 @@ const startAttempt = asyncHandler(async (req, res) => {
       // Structured pagination: questions per page (0 = all on one page). The
       // runner paginates native questions; ignored for PDF exams.
       questionsPerPage: exam.questionsPerPage || 0,
+      // Linear mode: the runner hides "back" navigation — student only goes next.
+      forwardOnly: !!exam.forwardOnly,
       // When on, the runner shows a per-question "upload solution photo" control.
       studentSolutionPhotos: !!exam.studentSolutionPhotos,
       // Same sanitizer as every other student payload: display content only, the
