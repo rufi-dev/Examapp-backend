@@ -137,6 +137,8 @@ function computeCost(u) {
 // ---- Gemini (Google) provider: a cheaper alternative to Claude. Same prompt,
 // same output shape. Uses the REST generateContent API (no extra dependency). ---
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
+// Stable fallback tried if the primary model stays overloaded (503).
+const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-2.0-flash";
 // Approx USD per 1M tokens for the chosen Gemini model (env-overridable). Gemini
 // Flash is dramatically cheaper than Claude Opus (5 / 25).
 const GEMINI_PRICE = {
@@ -266,62 +268,87 @@ async function extractWithClaude(base64) {
   };
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function extractWithGemini(base64) {
   if (!process.env.GEMINI_API_KEY) throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (GEMINI_API_KEY)");
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-  let data;
-  try {
-    const r = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-goog-api-key": process.env.GEMINI_API_KEY,
-      },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: [
-          {
-            role: "user",
-            parts: [
-              { inline_data: { mime_type: "application/pdf", data: base64 } },
-              { text: "Bu PDF-dəki bütün sualları çıxar." },
-            ],
-          },
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { inline_data: { mime_type: "application/pdf", data: base64 } },
+          { text: "Bu PDF-dəki bütün sualları çıxar." },
         ],
-        generationConfig: {
-          responseMimeType: "application/json",
-          responseSchema: GEMINI_SCHEMA,
-          maxOutputTokens: 32000,
-          temperature: 0.2,
-        },
-      }),
-    });
-    data = await r.json();
-    if (!r.ok || data?.error) {
-      console.error("AI extract (gemini) error:", r.status, data?.error?.message);
-      throw aiError(502, "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
+      },
+    ],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: GEMINI_SCHEMA,
+      maxOutputTokens: 32000,
+      temperature: 0.2,
+    },
+  });
+
+  // Try the primary model with backoff; if it stays overloaded (429/500/503),
+  // fall back to a stable model. "high demand" 503s are transient.
+  const models = [GEMINI_MODEL, GEMINI_FALLBACK_MODEL].filter(
+    (m, i, a) => m && a.indexOf(m) === i
+  );
+  let lastStatus = 0;
+  for (const model of models) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let r, data;
+      try {
+        r = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-goog-api-key": process.env.GEMINI_API_KEY,
+            },
+            body,
+          }
+        );
+        data = await r.json();
+      } catch (e) {
+        console.error("AI extract (gemini) request failed:", e?.message);
+        await sleep(1200 * (attempt + 1));
+        continue;
+      }
+      if (r.ok && !data?.error) {
+        const text =
+          (data.candidates?.[0]?.content?.parts || [])
+            .map((p) => p.text)
+            .filter(Boolean)
+            .join("") || "{}";
+        let parsed;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          throw aiError(502, "AI cavabı oxunmadı. Yenidən cəhd edin.");
+        }
+        return {
+          questions: Array.isArray(parsed.questions) ? parsed.questions : [],
+          usage: data.usageMetadata,
+          cost: computeGeminiCost(data.usageMetadata, model),
+        };
+      }
+      lastStatus = Number(data?.error?.code || r.status);
+      console.error("AI extract (gemini) error:", model, lastStatus, data?.error?.message);
+      // Only overload / rate-limit / server errors are worth retrying.
+      if (![429, 500, 503].includes(lastStatus)) break; // non-retryable → next model
+      await sleep(1500 * (attempt + 1));
     }
-  } catch (e) {
-    if (e.aiStatus) throw e;
-    console.error("AI extract (gemini) request failed:", e?.message);
-    throw aiError(502, "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
   }
-  const text =
-    (data.candidates?.[0]?.content?.parts || [])
-      .map((p) => p.text)
-      .filter(Boolean)
-      .join("") || "{}";
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw aiError(502, "AI cavabı oxunmadı. Yenidən cəhd edin.");
-  }
-  return {
-    questions: Array.isArray(parsed.questions) ? parsed.questions : [],
-    usage: data.usageMetadata,
-    cost: computeGeminiCost(data.usageMetadata, GEMINI_MODEL),
-  };
+  throw aiError(
+    502,
+    lastStatus === 503
+      ? "AI modeli hazırda məşğuldur. Bir neçə dəqiqədən sonra yenidən cəhd edin və ya Claude seçin."
+      : "AI emalı alınmadı. Bir az sonra yenidən cəhd edin."
+  );
 }
 
 // Extract structured questions from an uploaded PDF. Teacher-only. Provider is
