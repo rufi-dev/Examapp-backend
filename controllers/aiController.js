@@ -134,26 +134,91 @@ function computeCost(u) {
   };
 }
 
-// Extract structured questions from an uploaded PDF using Claude. Teacher-only.
-// Returns { questions: [...] } in the builder's shape for review (never saved
-// automatically — the teacher reviews, fixes, marks answers, and saves).
-const extractQuestions = asyncHandler(async (req, res) => {
+// ---- Gemini (Google) provider: a cheaper alternative to Claude. Same prompt,
+// same output shape. Uses the REST generateContent API (no extra dependency). ---
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
+// Approx USD per 1M tokens for the chosen Gemini model (env-overridable). Gemini
+// Flash is dramatically cheaper than Claude Opus (5 / 25).
+const GEMINI_PRICE = {
+  input: Number(process.env.GEMINI_PRICE_IN || 0.3),
+  output: Number(process.env.GEMINI_PRICE_OUT || 2.5),
+};
+
+// Gemini responseSchema (OpenAPI subset: UPPERCASE types, no additionalProperties)
+// mirroring EXTRACTION_SCHEMA so the output drops into the same builder shape.
+const GEMINI_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    questions: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          type: { type: "STRING", enum: ["Cm", "Cs", "Co", "Cma"] },
+          text: { type: "STRING" },
+          latex: { type: "STRING" },
+          choices: {
+            type: "ARRAY",
+            items: {
+              type: "OBJECT",
+              properties: { text: { type: "STRING" }, latex: { type: "STRING" } },
+              required: ["text", "latex"],
+            },
+          },
+          correct: { type: "ARRAY", items: { type: "INTEGER" } },
+          pairs: {
+            type: "ARRAY",
+            items: {
+              type: "OBJECT",
+              properties: {
+                left: { type: "STRING" },
+                leftLatex: { type: "STRING" },
+                right: { type: "STRING" },
+                rightLatex: { type: "STRING" },
+              },
+              required: ["left", "leftLatex", "right", "rightLatex"],
+            },
+          },
+          hasFigure: { type: "BOOLEAN" },
+          openAnswer: { type: "STRING" },
+          explanation: { type: "STRING" },
+        },
+        required: [
+          "type", "text", "latex", "choices", "correct",
+          "pairs", "hasFigure", "openAnswer", "explanation",
+        ],
+      },
+    },
+  },
+  required: ["questions"],
+};
+
+function computeGeminiCost(u, model) {
+  const input = u?.promptTokenCount || 0;
+  const output = u?.candidatesTokenCount || 0;
+  const usd = (input * GEMINI_PRICE.input + output * GEMINI_PRICE.output) / 1e6;
+  return {
+    model,
+    inputTokens: input,
+    outputTokens: output,
+    cacheWriteTokens: 0,
+    cacheReadTokens: 0,
+    totalTokens: u?.totalTokenCount || input + output,
+    usd: Number(usd.toFixed(4)),
+  };
+}
+
+// Build an error carrying an HTTP status + Azerbaijani user message.
+function aiError(status, userMessage) {
+  const e = new Error(userMessage);
+  e.aiStatus = status;
+  e.userMessage = userMessage;
+  return e;
+}
+
+async function extractWithClaude(base64) {
   const client = getClient();
-  if (!client) {
-    res.status(503);
-    throw new Error("AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)");
-  }
-  if (!req.file || !req.file.buffer || !req.file.buffer.length) {
-    res.status(400);
-    throw new Error("PDF fayl lazımdır");
-  }
-  if (req.file.mimetype && req.file.mimetype !== "application/pdf") {
-    res.status(400);
-    throw new Error("Yalnız PDF fayl dəstəklənir");
-  }
-
-  const base64 = req.file.buffer.toString("base64");
-
+  if (!client) throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)");
   let message;
   try {
     message = await client.messages
@@ -183,27 +248,109 @@ const extractQuestions = asyncHandler(async (req, res) => {
       })
       .finalMessage();
   } catch (e) {
-    console.error("AI extract error:", e?.status, e?.message);
-    res.status(502);
-    throw new Error("AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
+    console.error("AI extract (claude) error:", e?.status, e?.message);
+    throw aiError(502, "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
   }
-
-  if (message.stop_reason === "refusal") {
-    res.status(422);
-    throw new Error("AI bu sənədi emal edə bilmədi.");
-  }
-
+  if (message.stop_reason === "refusal") throw aiError(422, "AI bu sənədi emal edə bilmədi.");
   const textBlock = message.content.find((b) => b.type === "text");
   let parsed;
   try {
     parsed = JSON.parse(textBlock?.text || "{}");
   } catch {
-    res.status(502);
-    throw new Error("AI cavabı oxunmadı. Yenidən cəhd edin.");
+    throw aiError(502, "AI cavabı oxunmadı. Yenidən cəhd edin.");
+  }
+  return {
+    questions: Array.isArray(parsed.questions) ? parsed.questions : [],
+    usage: message.usage,
+    cost: computeCost(message.usage),
+  };
+}
+
+async function extractWithGemini(base64) {
+  if (!process.env.GEMINI_API_KEY) throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (GEMINI_API_KEY)");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+  let data;
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-goog-api-key": process.env.GEMINI_API_KEY,
+      },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { inline_data: { mime_type: "application/pdf", data: base64 } },
+              { text: "Bu PDF-dəki bütün sualları çıxar." },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: GEMINI_SCHEMA,
+          maxOutputTokens: 32000,
+          temperature: 0.2,
+        },
+      }),
+    });
+    data = await r.json();
+    if (!r.ok || data?.error) {
+      console.error("AI extract (gemini) error:", r.status, data?.error?.message);
+      throw aiError(502, "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
+    }
+  } catch (e) {
+    if (e.aiStatus) throw e;
+    console.error("AI extract (gemini) request failed:", e?.message);
+    throw aiError(502, "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
+  }
+  const text =
+    (data.candidates?.[0]?.content?.parts || [])
+      .map((p) => p.text)
+      .filter(Boolean)
+      .join("") || "{}";
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw aiError(502, "AI cavabı oxunmadı. Yenidən cəhd edin.");
+  }
+  return {
+    questions: Array.isArray(parsed.questions) ? parsed.questions : [],
+    usage: data.usageMetadata,
+    cost: computeGeminiCost(data.usageMetadata, GEMINI_MODEL),
+  };
+}
+
+// Extract structured questions from an uploaded PDF. Teacher-only. Provider is
+// "claude" (default, higher quality, expensive) or "gemini" (cheaper). Returns
+// { questions: [...] } in the builder's shape for review (never auto-saved).
+const extractQuestions = asyncHandler(async (req, res) => {
+  if (!req.file || !req.file.buffer || !req.file.buffer.length) {
+    res.status(400);
+    throw new Error("PDF fayl lazımdır");
+  }
+  if (req.file.mimetype && req.file.mimetype !== "application/pdf") {
+    res.status(400);
+    throw new Error("Yalnız PDF fayl dəstəklənir");
   }
 
-  const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
-  const cost = computeCost(message.usage);
+  const base64 = req.file.buffer.toString("base64");
+  const provider =
+    String(req.body?.provider || "").toLowerCase() === "gemini" ? "gemini" : "claude";
+
+  let questions = [];
+  let usage = null;
+  let cost = null;
+  try {
+    ({ questions, usage, cost } =
+      provider === "gemini" ? await extractWithGemini(base64) : await extractWithClaude(base64));
+  } catch (e) {
+    res.status(e.aiStatus || 502);
+    throw new Error(e.userMessage || "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
+  }
 
   // Persist the usage so admins can see per-teacher spend (best-effort: a logging
   // failure must never break the extraction the teacher is waiting on).
@@ -226,7 +373,7 @@ const extractQuestions = asyncHandler(async (req, res) => {
     }
   }
 
-  res.status(200).json({ success: true, questions, usage: message.usage, cost });
+  res.status(200).json({ success: true, questions, usage, cost, provider });
 });
 
 // Admin-only: AI spend per admin/teacher (+ grand totals + recent activity).
