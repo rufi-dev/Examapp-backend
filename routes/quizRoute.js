@@ -50,7 +50,7 @@ const {
   getExamTagandClass,
   getResultsByExam
 } = require("../controllers/quizController");
-const { extractQuestions, getAiUsage } = require("../controllers/aiController");
+const { extractQuestions, extractQuestionsStream, getAiUsage } = require("../controllers/aiController");
 const {
   joinClass,
   myEnrollments,
@@ -103,6 +103,14 @@ router.post(
   teacherOnly,
   memUpload.single("pdf"),
   extractQuestions
+);
+// Same extraction, streamed over SSE so the teacher watches questions appear.
+router.post(
+  "/extractQuestionsStream/:examId",
+  protect,
+  teacherOnly,
+  memUpload.single("pdf"),
+  extractQuestionsStream
 );
 // Admin-only AI spend dashboard data.
 router.get("/aiUsage", protect, adminOnly, getAiUsage);
