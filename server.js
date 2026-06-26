@@ -45,14 +45,28 @@ app.use(express.json())
 app.use(express.urlencoded({ extended: false }))
 app.use(cookieParser())
 app.use(bodyParser.json())
+// Allowed browser origins. The new domain (bunkermath.az + www) plus the old
+// Vercel URL during the migration, plus anything in ALLOWED_ORIGINS (comma-
+// separated env) so future domains can be added without a code change.
+const ALLOWED_ORIGINS = new Set(
+    [
+        "https://bunkermath.az",
+        "https://www.bunkermath.az",
+        "https://sinaqriyaziyyat.vercel.app",
+        ...(process.env.ALLOWED_ORIGINS || "")
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean),
+    ]
+)
 app.use(
     cors({
         origin: function (origin, callback) {
-            // Allow no-origin requests (curl/postman), the production site,
+            // Allow no-origin requests (curl/postman), the allow-listed sites,
             // and any localhost port in dev (Vite may fall back to 5174, 5175, ...)
             if (
                 !origin ||
-                origin === "https://sinaqriyaziyyat.vercel.app" ||
+                ALLOWED_ORIGINS.has(origin) ||
                 /^http:\/\/localhost:\d+$/.test(origin)
             ) {
                 callback(null, true)
