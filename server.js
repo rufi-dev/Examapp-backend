@@ -52,7 +52,6 @@ const ALLOWED_ORIGINS = new Set(
     [
         "https://bunkermath.az",
         "https://www.bunkermath.az",
-        "https://sinaqriyaziyyat.vercel.app",
         ...(process.env.ALLOWED_ORIGINS || "")
             .split(",")
             .map((s) => s.trim())
