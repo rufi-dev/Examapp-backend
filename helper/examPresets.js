@@ -79,23 +79,43 @@ const PRESETS = {
   "az-buraxilis-9": {
     id: "az-buraxilis-9",
     label: "Buraxılış — Azərbaycan dili (9)",
-    // Scored out of 100 (DİM nisbi bal): 20 qapalı × 2.5 + 10 açıq × 5 = 100 —
-    // open weighted 2x. All correct = 100; the score equals the official bal.
+    // Scored out of 100 (DİM nisbi bal): 26 qapalı + 4 açıq, açıq 2x ağır →
+    // qapalı ≈ 2.94, açıq ≈ 5.88, cəmi 100.
     totalMarks: 100,
-    // 30 tapşırıq: 10 dil qaydası (qapalı) + 2 oxu mətni × (5 qapalı + 5 açıq).
-    // Oxu mətnləri (reading) məzmun blokudur, qiymətləndirilmir. Bu BAŞLANĞIC
-    // şablondur — müəllim sualların tipini/sırasını dəyişə bilər; bal TİPƏ görə
-    // hesablanır, ona görə yer/sıra vacib deyil.
+    // 30 tapşırıq: 10 dil qaydası (qapalı) + 2 oxu mətni × (8 qapalı + 2 açıq).
+    // Adətən UYĞUNLAŞDIRMA (matching) OLMUR — yalnız tək seçim və açıq.
+    // Oxu mətnləri (reading) məzmun blokudur, qiymətləndirilmir.
     slots: [
       { type: "Cm", count: 10 },     // dil qaydaları (qapalı)
       { type: "reading", count: 1 }, // Mətn 1
+      { type: "Cm", count: 8 },      // mətn-1 qapalı
+      { type: "Co", count: 2 },      // mətn-1 açıq (yazılı)
+      { type: "reading", count: 1 }, // Mətn 2
+      { type: "Cm", count: 8 },      // mətn-2 qapalı
+      { type: "Co", count: 2 },      // mətn-2 açıq (yazılı)
+    ],
+    // Açıq sual qapalıdan 2x ağırdır; cəmi maksimal bal 100 (DİM nisbi balı).
+    pointsPlan: azWrittenPlan,
+    negativeMarking: null,
+  },
+
+  "az-buraxilis-11": {
+    id: "az-buraxilis-11",
+    label: "Buraxılış — Azərbaycan dili (11)",
+    // Scored out of 100 (DİM nisbi bal): 20 qapalı × 2.5 + 10 açıq × 5 = 100,
+    // açıq 2x ağır.
+    totalMarks: 100,
+    // 30 tapşırıq: 10 dil qaydası (qapalı) + 2 oxu mətni (bədii + publisistik),
+    // hər mətndə 5 qapalı + 5 açıq. Adətən uyğunlaşdırma olmur.
+    slots: [
+      { type: "Cm", count: 10 },     // dil qaydaları (qapalı)
+      { type: "reading", count: 1 }, // Mətn 1 (bədii)
       { type: "Cm", count: 5 },      // mətn-1 qapalı
       { type: "Co", count: 5 },      // mətn-1 açıq (yazılı)
-      { type: "reading", count: 1 }, // Mətn 2
+      { type: "reading", count: 1 }, // Mətn 2 (publisistik)
       { type: "Cm", count: 5 },      // mətn-2 qapalı
       { type: "Co", count: 5 },      // mətn-2 açıq (yazılı)
     ],
-    // Açıq sual qapalıdan 2x ağırdır; cəmi maksimal bal 100 (DİM nisbi balı).
     pointsPlan: azWrittenPlan,
     negativeMarking: null,
   },
