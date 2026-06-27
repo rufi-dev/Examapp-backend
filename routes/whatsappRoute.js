@@ -3,89 +3,77 @@ const router = express.Router();
 const { protect, teacherOnly } = require("../middleware/authMiddleware");
 const User = require("../models/userModel");
 const {
-  getStatus,
-  getQrDataUrl,
-  logout,
-  initWhatsApp,
-  sendMessage,
-  sendToChat,
-  listGroups,
-  getNotifyGroupId,
-  setNotifyGroupId,
-  getInviteLink,
-  setInviteLink,
-  isInNotifyGroup,
+  getStatusFor,
+  getQrFor,
+  logoutFor,
+  initFor,
+  sendMessageFor,
+  sendForOwner,
+  listGroupsFor,
 } = require("../helper/whatsapp");
 
-// PUBLIC: the group invite link, so a student (not a teacher) can be sent to the
-// group after entering their phone. Not sensitive — anyone with it can join.
-router.get("/invite", (req, res) => {
-  res.json({ link: getInviteLink() });
-});
+// Every endpoint is scoped to the LOGGED-IN teacher's own session. A teacher
+// links their own WhatsApp number and picks their own notify group; nobody
+// else's session is touched.
+const oid = (req) => String(req.user._id);
 
-// Verify the logged-in user is actually in the notify group (by their registered
-// phone). On success, remember it on the account so the gate stops prompting.
-router.get("/check-join", protect, async (req, res) => {
-  const result = await isInNotifyGroup(req.user?.phone);
-  if (result.joined && req.user && !req.user.whatsappGroupJoined) {
-    try {
-      await User.findByIdAndUpdate(req.user._id, { whatsappGroupJoined: true });
-    } catch (e) {
-      console.error("[WHATSAPP] mark joined failed:", e.message);
-    }
-  }
-  res.json(result);
-});
-
-// Admin/teacher-only WhatsApp linking controls. The QR is how the owner links
-// the sending phone number (WhatsApp → Linked devices → Link a device).
 router.get("/status", protect, teacherOnly, (req, res) => {
-  res.json(getStatus());
+  res.json(getStatusFor(oid(req)));
 });
 
 router.get("/qr", protect, teacherOnly, (req, res) => {
-  // Make sure the client is booting (in case it crashed/disconnected).
-  initWhatsApp();
-  res.json({ ...getStatus(), qr: getQrDataUrl() });
+  initFor(oid(req)); // lazily boot this teacher's session if not running
+  res.json({ ...getStatusFor(oid(req)), qr: getQrFor(oid(req)) });
 });
 
 router.post("/logout", protect, teacherOnly, async (req, res) => {
-  await logout();
+  await logoutFor(oid(req));
   res.json({ ok: true });
 });
 
-// Send a test message (to the given phone, or the caller's own phone) to confirm
-// the linked number actually sends — independent of the exam targeting logic.
+// Send a test message (to the given phone, or the caller's own) from this
+// teacher's linked number.
 router.post("/test", protect, teacherOnly, async (req, res) => {
   const phone = req.body?.phone || req.user?.phone;
   if (!phone) return res.status(400).json({ ok: false, message: "Telefon nömrəsi yoxdur" });
-  const ok = await sendMessage(
+  const ok = await sendMessageFor(
+    oid(req),
     phone,
     "✅ Examopia WhatsApp testi — bağlantı işləyir. Yeni imtahanlar bura gələcək."
   );
   res.json({ ok, phone });
 });
 
-// --- notification group: list the linked account's groups, get/set the chosen
-// one (all exam alerts go to it as a single message), and send it a test. ---
+// Notification group for THIS teacher: list their groups, get/set the chosen one
+// (+ optional invite link), and send it a test. The choice lives on the user.
 router.get("/groups", protect, teacherOnly, async (req, res) => {
+  const me = await User.findById(req.user._id).select("whatsappGroupId whatsappInviteLink").lean();
   res.json({
-    groups: await listGroups(),
-    selected: getNotifyGroupId(),
-    inviteLink: getInviteLink(),
+    groups: await listGroupsFor(oid(req)),
+    selected: me?.whatsappGroupId || "",
+    inviteLink: me?.whatsappInviteLink || "",
   });
 });
 
-router.post("/group", protect, teacherOnly, (req, res) => {
-  if (req.body?.groupId !== undefined) setNotifyGroupId(req.body.groupId || "");
-  if (req.body?.inviteLink !== undefined) setInviteLink(req.body.inviteLink || "");
-  res.json({ ok: true, selected: getNotifyGroupId(), inviteLink: getInviteLink() });
+router.post("/group", protect, teacherOnly, async (req, res) => {
+  const update = {};
+  if (req.body?.groupId !== undefined) update.whatsappGroupId = req.body.groupId || "";
+  if (req.body?.inviteLink !== undefined) {
+    update.whatsappInviteLink =
+      typeof req.body.inviteLink === "string" ? req.body.inviteLink.trim() : "";
+  }
+  const me = await User.findByIdAndUpdate(req.user._id, update, { new: true }).select(
+    "whatsappGroupId whatsappInviteLink"
+  );
+  res.json({ ok: true, selected: me?.whatsappGroupId || "", inviteLink: me?.whatsappInviteLink || "" });
 });
 
 router.post("/group/test", protect, teacherOnly, async (req, res) => {
-  const groupId = getNotifyGroupId();
+  const me = await User.findById(req.user._id).select("whatsappGroupId").lean();
+  const groupId = me?.whatsappGroupId || "";
   if (!groupId) return res.status(400).json({ ok: false, message: "Qrup seçilməyib" });
-  const ok = await sendToChat(
+  const ok = await sendForOwner(
+    oid(req),
     groupId,
     "✅ Examopia bildiriş qrupu qoşuldu. Yeni imtahanlar bura göndəriləcək."
   );

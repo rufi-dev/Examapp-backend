@@ -43,6 +43,16 @@ const userSchema = Schema(
             type: Boolean,
             default: false,
         },
+        // PER-TEACHER WhatsApp notify config (teachers): the group this teacher's
+        // exam alerts post to, and an optional invite link to share with students.
+        whatsappGroupId: {
+            type: String,
+            default: "",
+        },
+        whatsappInviteLink: {
+            type: String,
+            default: "",
+        },
         // Student's grade/year ("Sinif"), e.g. "9", "11", "Məzun". Collected at
         // sign-up (and enforced via the profile-completion gate for students).
         grade: {

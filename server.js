@@ -10,7 +10,7 @@ const achivementRoute = require('./routes/achivementRoute')
 const stripeRoute = require('./routes/stripeRoute')
 const telegramRoute = require('./routes/telegramRoute')
 const whatsappRoute = require('./routes/whatsappRoute')
-const { initWhatsApp } = require('./helper/whatsapp')
+const { initPersistedSessions } = require('./helper/whatsapp')
 const Attempt = require('./models/attemptModel')
 const Class = require('./models/classModel')
 const { runDueExamReports } = require('./jobs/examReports')
@@ -123,11 +123,12 @@ mongoose
             console.log("Connected to DB and listening on port:", PORT)
         })
 
-        // Unofficial WhatsApp Web client (whatsapp-web.js). No-op unless
-        // WHATSAPP_WEB_ENABLED=true (set in the Docker image, where Chromium
-        // exists). Boots the session so the owner can link via the QR page.
+        // Per-teacher WhatsApp Web sessions. No-op unless WHATSAPP_WEB_ENABLED=true
+        // (set in the Docker image, where Chromium exists). Re-links teachers who
+        // already linked a number so their alerts keep working after a restart;
+        // unlinked teachers' sessions start lazily when they open the QR page.
         try {
-            initWhatsApp()
+            initPersistedSessions()
         } catch (e) {
             console.error("[WHATSAPP] init error:", e.message)
         }
