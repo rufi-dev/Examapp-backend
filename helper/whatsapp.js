@@ -79,6 +79,7 @@ function initFor(ownerId) {
     return;
   }
   s.starting = true;
+  s.qrLogged = false; // log the next QR once
   clearStaleLocks(id);
 
   let Client, LocalAuth;
@@ -92,6 +93,9 @@ function initFor(ownerId) {
 
   s.client = new Client({
     authStrategy: new LocalAuth({ clientId: id, dataPath: AUTH_ROOT }),
+    // Stop endlessly re-issuing a QR for a session nobody scans (~6 × 20s ≈ 2
+    // min); after that the client gives up (we won't auto-reconnect it below).
+    qrMaxRetries: Number(process.env.WHATSAPP_QR_MAX_RETRIES || 6),
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
@@ -113,9 +117,16 @@ function initFor(ownerId) {
     } catch {
       s.lastQrDataUrl = null;
     }
-    console.log(`[WHATSAPP] QR ready for teacher ${id} — scan it in the dashboard.`);
+    // Log only the FIRST QR per session — whatsapp-web.js re-emits a fresh QR
+    // every ~20s while waiting, which otherwise floods the logs.
+    if (!s.qrLogged) {
+      console.log(`[WHATSAPP] QR ready for teacher ${id} — scan it in the dashboard.`);
+      s.qrLogged = true;
+    }
   });
   s.client.on("authenticated", () => {
+    s.everAuthed = true;
+    s.qrLogged = false;
     console.log(`[WHATSAPP] ${id} authenticated`);
     clearTimeout(s.readyTimer);
     s.readyTimer = setTimeout(() => {
@@ -134,11 +145,18 @@ function initFor(ownerId) {
   s.client.on("auth_failure", (m) => console.error(`[WHATSAPP] ${id} auth failure:`, m));
   s.client.on("disconnected", (reason) => {
     console.error(`[WHATSAPP] ${id} disconnected:`, reason);
+    const wasLinked = s.everAuthed;
     s.ready = false;
     s.client = null;
     s.starting = false;
+    s.qrLogged = false;
     clearTimeout(s.readyTimer);
-    setTimeout(() => initFor(id), 10000); // auto-reconnect (auth persists)
+    // Only auto-reconnect a session that was actually LINKED (survive network
+    // blips). A never-scanned session that ran out of QR retries is left
+    // stopped — the teacher re-links on demand from the dashboard — so we don't
+    // loop a headless browser + QR forever.
+    if (wasLinked) setTimeout(() => initFor(id), 10000);
+    else console.log(`[WHATSAPP] ${id} not linked — stopped (re-link from dashboard).`);
   });
 
   s.client.initialize().catch((e) => {
