@@ -50,6 +50,9 @@ const questionSchema = Schema(
         },
         // Reading passage heading (only for type "reading").
         title: { type: String },
+        // Optional Venn/Euler diagram: { leftLabel, rightLabel, leftItems[],
+        // overlapItems[], rightItems[] }. Display content (safe for students).
+        venn: { type: Schema.Types.Mixed, default: undefined },
         // Legacy PDF letters (a/b/c/d) for Cm in pdf mode.
         options: {
           type: [String],

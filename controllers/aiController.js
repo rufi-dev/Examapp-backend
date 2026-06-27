@@ -66,6 +66,20 @@ const EXTRACTION_SCHEMA = {
           hasFigure: { type: "boolean" },
           openAnswer: { type: "string" },
           explanation: { type: "string" },
+          // Venn / Euler diagram (optional): the two circle captions + the items
+          // in the left-only, middle (both), and right-only regions.
+          venn: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              leftLabel: { type: "string" },
+              rightLabel: { type: "string" },
+              leftItems: { type: "array", items: { type: "string" } },
+              overlapItems: { type: "array", items: { type: "string" } },
+              rightItems: { type: "array", items: { type: "string" } },
+            },
+            required: ["leftLabel", "rightLabel", "leftItems", "overlapItems", "rightItems"],
+          },
         },
         required: [
           "type",
@@ -109,6 +123,7 @@ Rules:
   Apply everywhere the PDF italicises/bolds/underlines or uses a superscript; leave normal text unmarked. Do NOT use $...$ for these.
 - PRESERVE LINE BREAKS inside "text": keep the document's line structure for the question STATEMENT. Put each numbered statement item that is PART OF THE QUESTION (e.g. 1., 2., 3., … or I., II., III. sub-statements) on its own line using a real newline (\\n), and keep a blank line between distinct statement groups. NEVER collapse a multi-line question into a single line. Do NOT put the answer options (the A/B/C/D/E choices) in "text" at all — they belong ONLY in "choices".
 - TABLES: if a question contains a TABLE (e.g. an "uyğunluğu / uyğunsuzluğu müəyyən edin" grid such as Səbəb/Nəticə, or any two-column list of statements), reproduce it in "text" as a GitHub-flavored Markdown table: a header row "| Col1 | Col2 |", then a separator row "| --- | --- |", then one "| cell | cell |" row per line. Keep every cell's text/number EXACTLY (use "..." for blanks the student fills). The table is PART of the question, so it stays in "text" — never in "choices".
+- VENN / EULER DIAGRAM ("Eyler – Venn diaqramı"): the question itself is usually CLOSED (type "Cm" with A–E variants). Capture the diagram in the "venn" object: leftLabel/rightLabel = the two circle captions; leftItems = items ONLY in the left circle; rightItems = items ONLY in the right circle; overlapItems = items in the MIDDLE overlap (belong to both). Copy each item EXACTLY, keeping its leading number. Keep the A–E variants in "choices" and type "Cm". Do NOT turn a Venn diagram into a markdown table and do NOT set hasFigure for it (the app draws the diagram from "venn"). Omit "venn" entirely for non-Venn questions.
 - COMPLETE-THE-TABLE questions ("Cədvəli tamamlayın", "cədvəli tamamlayan fikirlər yazın", "müqayisə cədvəlini tamamlayan…"): these are OPEN — set type "Co" and openAnswer "". Build the markdown table with the GIVEN cells exactly as printed, and leave EVERY cell the student must fill EMPTY ("|  |") — NEVER guess or invent the missing contents, and do NOT put placeholder numbers (1. / 2.) inside a fill cell; just leave it empty. The app turns empty cells into input boxes the student fills. The table stays in "text".
 - "title": ONLY for a "reading" item — its real heading/name if the passage has one (e.g. a story title like "Yeni ada"). Do NOT use a section label such as "Mətn (37–46-cı suallar üçün)" or "Mətn 1" as the title — those are labels, not titles; if there is only such a label and no real title, return "". For every normal (non-reading) question return "". For a "reading" item, put the FULL passage body in "text" and SEPARATE EACH PARAGRAPH WITH A BLANK LINE (two newlines \\n\\n) so paragraph spacing is preserved; use a single \\n only for a forced line break. Keep Roman-numeral paragraph labels (I, II, III …) and any ▲/● markers at the start of the lines where they appear. Do NOT write the HTML tag <br>. Set choices=[], correct=[], pairs=[], hasFigure=false, openAnswer="", explanation="". Then the questions about that passage follow as their own items.
 - "latex": ALWAYS return an empty string "". All math now lives inline inside the text fields, never in a separate field.
@@ -234,6 +249,16 @@ const GEMINI_SCHEMA = {
           hasFigure: { type: "BOOLEAN" },
           openAnswer: { type: "STRING" },
           explanation: { type: "STRING" },
+          venn: {
+            type: "OBJECT",
+            properties: {
+              leftLabel: { type: "STRING" },
+              rightLabel: { type: "STRING" },
+              leftItems: { type: "ARRAY", items: { type: "STRING" } },
+              overlapItems: { type: "ARRAY", items: { type: "STRING" } },
+              rightItems: { type: "ARRAY", items: { type: "STRING" } },
+            },
+          },
         },
         required: [
           "type", "text", "title", "latex", "choices", "correct",
