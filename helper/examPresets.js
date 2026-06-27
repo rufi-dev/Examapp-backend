@@ -20,6 +20,16 @@ function tailEqualPlan(count, totalMarks, tail, tailEach) {
   return pts;
 }
 
+// 9th-grade Azerbaijani-language buraxılış scoring (DİM): closed = 1 pt, open
+// (written) = 2 pts. The open questions sit at Q19-20 and Q29-30 in the
+// canonical 30-question layout; raw total = 26·1 + 4·2 = 34, so the percentage
+// equals DİM's 100-point relative bal: (2·correct_open + correct_closed)/34·100.
+function azWrittenPlan(count) {
+  const n = Number(count) || 0;
+  const openIdx = new Set([18, 19, 28, 29]); // 0-based Q19, Q20, Q29, Q30
+  return Array.from({ length: n }, (_, i) => (openIdx.has(i) ? 2 : 1));
+}
+
 const PRESETS = {
   buraxilis: {
     id: "buraxilis",
@@ -59,6 +69,26 @@ const PRESETS = {
       correctPerPenalty: 1,
       untilQuestion: 22,
     },
+  },
+
+  "az-buraxilis-9": {
+    id: "az-buraxilis-9",
+    label: "Buraxılış — Azərbaycan dili (9)",
+    // Raw DİM points: closed = 1, open (written) = 2; max = 26·1 + 4·2 = 34.
+    // The exam's percentage then equals DİM's 100-point relative bal.
+    totalMarks: 34,
+    // 30 tapşırıq: 10 dil qaydası (qapalı) + 2 mətn (bədii, publisistik), hər
+    // mətndə 8 qapalı + 2 açıq (yazılı) = 26 qapalı + 4 açıq. Açıq suallar
+    // Q19-20 və Q29-30 mövqelərindədir (mətnlərin sonunda).
+    slots: [
+      { type: "Cm", count: 18 }, // Q1-10 qaydalar + Q11-18 mətn-1 (qapalı)
+      { type: "Co", count: 2 },  // Q19-20 mətn-1 (açıq, yazılı)
+      { type: "Cm", count: 8 },  // Q21-28 mətn-2 (qapalı)
+      { type: "Co", count: 2 },  // Q29-30 mətn-2 (açıq, yazılı)
+    ],
+    // Açıq = 2 bal (markerlər 0…2 aralığında qiymətləndirir), qapalı = 1 bal.
+    pointsPlan: azWrittenPlan,
+    negativeMarking: null,
   },
 };
 
