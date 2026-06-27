@@ -323,12 +323,15 @@ async function notifyStudentsNewExam(examId, opts = {}) {
     if (!exam.class) return skip("exam has no class");
 
     const cname = await className(exam);
+    const cls = exam.class ? await Class.findById(exam.class).select("joinCode").lean() : null;
+    const code = cls && cls.joinCode ? cls.joinCode : "";
     const link = FRONTEND_URL ? `${FRONTEND_URL}/exam/details/${exam._id}` : "";
     const text = [
       "📚 Yeni imtahan əlavə olundu",
       "",
       `📝 ${exam.name || "İmtahan"}`,
       cname ? `🏫 ${cname}` : null,
+      code ? `🔑 Sinif kodu: ${code}` : null,
       link ? `🔗 ${link}` : null,
     ]
       .filter((l) => l !== null)

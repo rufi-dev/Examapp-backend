@@ -184,8 +184,7 @@ router.post(
 );
 router.get("/getExamsByUser", protect, verifiedOnly, getExamsByUser);
 router.get("/getLatestExams", protect, verifiedOnly, getLatestExams);
-// Public landing feed — newest exams from open classes (no auth).
-router.get("/publicExams", getPublicExams);
+// Public landing feed removed — all classes are code-only now.
 router.get("/getExams", protect, teacherOnly, getExams);
 router.get("/reviewByResult/:resultId", protect, verifiedOnly, reviewByResult);
 router.delete("/deleteMyExam/:examId", protect, verifiedOnly, deleteMyExam);

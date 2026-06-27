@@ -75,11 +75,9 @@ async function studentApprovedInClass(userId, classId) {
   return !!(await Enrollment.exists({ student: userId, class: classId, status: "approved" }));
 }
 
-// Is this class PUBLIC (open to every signed-in user, no code/enrollment)?
-// Strict `=== false` on purpose: a class is public ONLY when it explicitly
-// carries requireCode:false. Existing classes (field absent / undefined) and
-// code-only classes (true) are NOT public.
-const classIsPublic = (c) => !!c && c.requireCode === false;
+// Public/open classes were removed — every class is code-only now. Kept as a
+// constant-false helper so all former "public" branches simply never fire.
+const classIsPublic = () => false;
 
 // Public class ids (cheap id-only query) — used to widen student visibility.
 async function publicClassIds() {
@@ -121,7 +119,7 @@ const addTag = asyncHandler(async (req, res) => {
 
 // Add Class
 const addClass = asyncHandler(async (req, res) => {
-  const { name, level, requireCode } = req.body;
+  const { name, level } = req.body;
 
   try {
     // A class needs a label: a text name (preferred) or the legacy numeric level.
@@ -132,14 +130,14 @@ const addClass = asyncHandler(async (req, res) => {
     }
 
     // Categories were removed — classes are now top-level (no tag).
-    // Default OFF (public): a new class is open to everyone unless the teacher
-    // turns on code-only access. Always written as a strict boolean.
+    // All classes are CODE-ONLY: a student must enter the joinCode to access.
+    // (Public/open classes were removed.)
     const newClass = await Class.create({
       name: label || undefined,
       level: level !== undefined && level !== "" ? level : undefined,
       owner: req.user._id,
       joinCode: await uniqueJoinCode(),
-      requireCode: requireCode === true || requireCode === "true",
+      requireCode: true,
     });
 
     res.status(201).json({ message: "Class has been saved", newClass });
@@ -2118,7 +2116,7 @@ const editTag = asyncHandler(async (req, res) => {
 
 const editClass = asyncHandler(async (req, res) => {
   const { classId } = req.params;
-  const { name, level, requireCode, regenerateCode } = req.body;
+  const { name, level, regenerateCode } = req.body;
   const label = typeof name === "string" ? name.trim() : "";
   if (!label && !level) {
     res.status(400);
@@ -2136,10 +2134,8 @@ const editClass = asyncHandler(async (req, res) => {
   const update = {};
   if (typeof name === "string") update.name = label;
   if (level !== undefined && level !== "") update.level = level;
-  // Visibility toggle — written as a strict boolean (public when false).
-  if (requireCode !== undefined) {
-    update.requireCode = requireCode === true || requireCode === "true";
-  }
+  // Classes are always code-only (public was removed); keep it enforced.
+  update.requireCode = true;
   // Let the teacher rotate the join code (invalidates the previously shared one).
   if (regenerateCode === true || regenerateCode === "true") {
     update.joinCode = await uniqueJoinCode();

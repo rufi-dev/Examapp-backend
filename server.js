@@ -12,6 +12,7 @@ const telegramRoute = require('./routes/telegramRoute')
 const whatsappRoute = require('./routes/whatsappRoute')
 const { initWhatsApp } = require('./helper/whatsapp')
 const Attempt = require('./models/attemptModel')
+const Class = require('./models/classModel')
 const { runDueExamReports } = require('./jobs/examReports')
 const { finalizeExpiredAttempts } = require('./controllers/quizController')
 const errorHandler = require('./middleware/errorMiddleware')
@@ -109,6 +110,14 @@ mongoose
             // a missing uniqueness index silently disables the single-active-
             // attempt guarantee.
             console.error("[ATTEMPT INDEX] prep FAILED — single-active-attempt uniqueness NOT enforced:", e.message)
+        }
+        // Public/open classes were removed — convert any legacy public class to
+        // code-only so nothing stays openly accessible (idempotent).
+        try {
+            const r = await Class.updateMany({ requireCode: false }, { $set: { requireCode: true } })
+            if (r.modifiedCount) console.log(`[MIGRATION] ${r.modifiedCount} public class(es) -> code-only`)
+        } catch (e) {
+            console.error("[MIGRATION] public->code-only failed:", e.message)
         }
         app.listen(PORT, () => {
             console.log("Connected to DB and listening on port:", PORT)
