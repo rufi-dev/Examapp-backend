@@ -1694,9 +1694,23 @@ const autosaveAttempt = asyncHandler(async (req, res) => {
   }));
   // Live-watch heartbeat: store where the student is + last-seen time so the
   // teacher's live view can show who's writing which question right now.
-  const set = { answers, lastSeenAt: new Date() };
+  // answeredCount is computed SERVER-SIDE from the answers, so progress shows
+  // even for older clients that don't send a count; currentQuestion needs the
+  // newer client (the answers don't reveal which page is on screen).
+  const hasAns = (a) => {
+    const v = a?.answer;
+    if (v == null) return false;
+    if (typeof v === "string") return v.trim() !== "";
+    if (Array.isArray(v)) return v.length > 0;
+    if (typeof v === "object") return Object.keys(v).length > 0;
+    return true;
+  };
+  const set = {
+    answers,
+    lastSeenAt: new Date(),
+    answeredCount: answers.filter(hasAns).length,
+  };
   if (Number.isFinite(currentQuestion)) set.currentQuestion = Math.max(0, Math.floor(currentQuestion));
-  if (Number.isFinite(answeredCount)) set.answeredCount = Math.max(0, Math.floor(answeredCount));
   await Attempt.updateOne(filter, { $set: set });
   res.status(200).json({ ok: true });
 });
