@@ -67,6 +67,11 @@ const examSchema = Schema({
     // legacy scoring (questionPoints, total 100). A preset drives the per-question
     // points at scoring time + seeds the builder's question types.
     preset: { type: String, default: "" },
+    // Optional MANUAL per-type points override, e.g. { Cm: 1.56, Cmu: 4, Co: 5 }.
+    // When a type is present here, every question of that type is worth that many
+    // points (overriding the preset's auto value); types absent here keep the
+    // preset. Edited in the builder's scoring panel; used by scoreAndCreateResult.
+    typePoints: { type: Schema.Types.Mixed, default: undefined },
     // When enabled, the exam runner activates anti-cheat measures.
     antiCheat: { type: Boolean, default: false },
     // Multi-select (Cs) partial credit: award proportional points

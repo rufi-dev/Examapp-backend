@@ -834,7 +834,7 @@ const getExam = asyncHandler(async (req, res) => {
 
 const addQuestion = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const { correctAnswers, questionsPerPage, forwardOnly } = req.body;
+  const { correctAnswers, questionsPerPage, forwardOnly, typePoints } = req.body;
 
   if (!correctAnswers || !examId) {
     res.status(400).json({ message: "All fields are required" });
@@ -882,12 +882,26 @@ const addQuestion = asyncHandler(async (req, res) => {
 
   // Persist the structured per-page layout (0 = show all) alongside the answer
   // key, so saving questions also saves this setting in one round-trip.
-  if (questionsPerPage !== undefined || forwardOnly !== undefined) {
+  if (questionsPerPage !== undefined || forwardOnly !== undefined || typePoints !== undefined) {
     if (questionsPerPage !== undefined) {
       exam.questionsPerPage = Math.max(0, Math.min(50, Number(questionsPerPage) || 0));
     }
     if (forwardOnly !== undefined) {
       exam.forwardOnly = forwardOnly === true || forwardOnly === "true";
+    }
+    // Manual per-type points override ({Cm:1.56,...}); empty/null clears it back
+    // to the preset's automatic scoring.
+    if (typePoints !== undefined) {
+      const tp =
+        typePoints && typeof typePoints === "object" && Object.keys(typePoints).length
+          ? Object.fromEntries(
+              Object.entries(typePoints)
+                .filter(([, v]) => v !== "" && v !== null && !Number.isNaN(Number(v)))
+                .map(([k, v]) => [k, Number(v)])
+            )
+          : undefined;
+      exam.typePoints = tp && Object.keys(tp).length ? tp : undefined;
+      exam.markModified("typePoints");
     }
     await exam.save();
   }
@@ -1481,10 +1495,19 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
   // adapt to the actual question count; legacy/custom exams fall back to the
   // original 18/55-45 split (total 100).
   const presetCfg = exam.preset ? PRESETS[exam.preset] : null;
-  const points =
+  const autoPoints =
     presetCfg && typeof presetCfg.pointsPlan === "function"
-      ? presetCfg.pointsPlan(correct.length)
+      ? presetCfg.pointsPlan(correct.length, correct.map((c) => c && c.type))
       : questionPoints(correct.length);
+  // Manual per-type override (builder scoring panel) wins for the types it sets;
+  // other types keep the preset's auto points.
+  const tp = exam.typePoints && typeof exam.typePoints === "object" ? exam.typePoints : null;
+  const points = tp
+    ? correct.map((c, i) => {
+        const v = c && c.type != null ? tp[c.type] : undefined;
+        return v === undefined || v === null || Number.isNaN(Number(v)) ? autoPoints[i] || 0 : Number(v);
+      })
+    : autoPoints;
   // Negative marking only penalizes wrong answers in questions 1..until
   // (0 / unset = every question, the legacy behavior).
   const until = exam.negMarkUntil > 0 ? Math.min(exam.negMarkUntil, correct.length) : correct.length;
