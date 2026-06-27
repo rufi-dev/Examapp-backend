@@ -551,6 +551,13 @@ const updateUser = asyncHandler(async (req, res) => {
     if (typeof req.body.grade === "string" && req.body.grade.trim()) {
       user.grade = req.body.grade.trim();
     }
+    // One-time role choice at onboarding: a user may set their OWN role to
+    // teacher or student exactly once. After that it's locked (admins use the
+    // upgradeUser endpoint) — prevents a student self-promoting to teacher later.
+    if (!user.onboarded && (req.body.role === "teacher" || req.body.role === "student")) {
+      user.role = req.body.role;
+      user.onboarded = true;
+    }
 
     const updatedUser = await user.save();
 

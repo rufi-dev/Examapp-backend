@@ -69,6 +69,13 @@ const userSchema = Schema(
             required: true
             //student, teacher, admin (suspended)
         },
+        // True once the user made their one-time role choice (teacher/student)
+        // at onboarding. After this the role is locked (only admins change it,
+        // via upgradeUser) — stops a student self-promoting to teacher later.
+        onboarded: {
+            type: Boolean,
+            default: false,
+        },
         isVerified: {
             type: Boolean,
             default: true
