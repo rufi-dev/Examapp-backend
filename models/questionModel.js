@@ -35,6 +35,9 @@ const questionSchema = Schema(
         answer: {
           type: String,
         },
+        // Open (Co/Cd): additional accepted answers. A typed answer matching ANY
+        // of these (case-insensitive) is correct. `answer` stays the primary.
+        answers: { type: [String], default: undefined },
         type: {
           // Cm = single-choice, Cs = multi-select, Co/Cd = open, Cma = matching
           // (text pairs), Cmu = correspondence (numbers -> letters, one-to-many),
