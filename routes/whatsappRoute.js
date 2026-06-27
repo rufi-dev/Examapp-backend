@@ -25,6 +25,8 @@ router.get("/invite", (req, res) => {
 
 // Verify the logged-in user is actually in the notify group (by their registered
 // phone). On success, remember it on the account so the gate stops prompting.
+// Kept for reference/admin use; the gate no longer relies on it (membership
+// verification was unreliable for many students — see /mark-joined).
 router.get("/check-join", protect, async (req, res) => {
   const result = await isInNotifyGroup(req.user?.phone);
   if (result.joined && req.user && !req.user.whatsappGroupJoined) {
@@ -35,6 +37,19 @@ router.get("/check-join", protect, async (req, res) => {
     }
   }
   res.json(result);
+});
+
+// Trust-based join: the student tapped "Qrupa qoşul", so mark the account as
+// joined without verifying membership (the real check trapped too many students
+// — e.g. WhatsApp's @lid privacy hides numbers). The gate stops prompting after.
+router.post("/mark-joined", protect, async (req, res) => {
+  try {
+    await User.findByIdAndUpdate(req.user._id, { whatsappGroupJoined: true });
+    res.json({ joined: true });
+  } catch (e) {
+    console.error("[WHATSAPP] mark-joined failed:", e.message);
+    res.status(500).json({ joined: false, message: "Alınmadı" });
+  }
 });
 
 // Admin/teacher-only WhatsApp linking controls. The QR is how the owner links
