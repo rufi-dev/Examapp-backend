@@ -164,16 +164,34 @@ function computeCost(u) {
 
 // ---- Gemini (Google) provider: a cheaper alternative to Claude. Same prompt,
 // same output shape. Uses the REST generateContent API (no extra dependency). ---
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
+// Primary = the most capable model (2.5 Pro) with thinking ON — best fidelity on
+// dense papers (tables, italics, faithful transcription). Falls back to fast/cheap
+// flash if Pro is overloaded.
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-pro";
 // Stable fallback tried if the primary model stays overloaded (503). NOTE: keep
 // this a model the key actually has quota for — gemini-2.0-flash returns 429
 // "limit: 0" on free-tier keys, which is useless. gemini-2.5-flash has quota.
 const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash";
-// Approx USD per 1M tokens for the chosen Gemini model (env-overridable). Gemini
-// Flash is dramatically cheaper than Claude Opus (5 / 25).
-const GEMINI_PRICE = {
-  input: Number(process.env.GEMINI_PRICE_IN || 0.3),
-  output: Number(process.env.GEMINI_PRICE_OUT || 2.5),
+// Approx USD per 1M tokens, by model tier (env-overridable). 2.5 Pro is pricier
+// than Flash but far more faithful; both are well under Claude Opus (5 / 25).
+const GEMINI_PRICES = {
+  pro: { input: Number(process.env.GEMINI_PRICE_IN || 1.25), output: Number(process.env.GEMINI_PRICE_OUT || 10) },
+  flash: { input: 0.3, output: 2.5 },
+};
+const geminiPriceFor = (model) =>
+  String(model || "").includes("pro") ? GEMINI_PRICES.pro : GEMINI_PRICES.flash;
+// Per-model generation config: Pro thinks (dynamic budget) with a big output
+// budget so the JSON still has room; Flash keeps thinking OFF (it otherwise
+// burned the budget and returned empty) with the standard budget.
+const geminiGenConfig = (model) => {
+  const isPro = String(model || "").includes("pro");
+  return {
+    responseMimeType: "application/json",
+    responseSchema: GEMINI_SCHEMA,
+    maxOutputTokens: isPro ? 64000 : 32000,
+    temperature: 0.2,
+    thinkingConfig: { thinkingBudget: isPro ? -1 : 0 },
+  };
 };
 
 // Gemini responseSchema (OpenAPI subset: UPPERCASE types, no additionalProperties)
@@ -229,7 +247,8 @@ const GEMINI_SCHEMA = {
 function computeGeminiCost(u, model) {
   const input = u?.promptTokenCount || 0;
   const output = u?.candidatesTokenCount || 0;
-  const usd = (input * GEMINI_PRICE.input + output * GEMINI_PRICE.output) / 1e6;
+  const price = geminiPriceFor(model);
+  const usd = (input * price.input + output * price.output) / 1e6;
   return {
     model,
     inputTokens: input,
@@ -308,28 +327,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function extractWithGemini(base64, instructions = "") {
   if (!process.env.GEMINI_API_KEY) throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (GEMINI_API_KEY)");
   const instr = clampInstr(instructions);
-  const body = JSON.stringify({
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT + instructionBlock(instr) }] },
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { inline_data: { mime_type: "application/pdf", data: base64 } },
-          { text: "Bu PDF-dəki bütün sualları çıxar." },
-        ],
-      },
-    ],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: GEMINI_SCHEMA,
-      maxOutputTokens: 32000,
-      temperature: 0.2,
-      // gemini-flash-latest / 2.5-flash "think" by default, which burns the
-      // output budget (and emits thought parts) so the JSON can come back empty
-      // or truncated. Disable it — extraction is a transcription task.
-      thinkingConfig: { thinkingBudget: 0 },
-    },
-  });
+  const buildBody = (model) =>
+    JSON.stringify({
+      systemInstruction: { parts: [{ text: SYSTEM_PROMPT + instructionBlock(instr) }] },
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { inline_data: { mime_type: "application/pdf", data: base64 } },
+            { text: "Bu PDF-dəki bütün sualları çıxar." },
+          ],
+        },
+      ],
+      generationConfig: geminiGenConfig(model),
+    });
 
   // Try the primary model with backoff; if it stays overloaded (429/500/503),
   // fall back to a stable model. "high demand" 503s are transient.
@@ -352,7 +363,7 @@ async function extractWithGemini(base64, instructions = "") {
               "Content-Type": "application/json",
               "X-goog-api-key": process.env.GEMINI_API_KEY,
             },
-            body,
+            body: buildBody(model),
           }
         );
         data = await r.json();
@@ -530,28 +541,22 @@ async function streamGemini(base64, instructions, onText) {
   if (!process.env.GEMINI_API_KEY)
     throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (GEMINI_API_KEY)", true);
   const instr = clampInstr(instructions);
-  const body = JSON.stringify({
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT + instructionBlock(instr) }] },
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { inline_data: { mime_type: "application/pdf", data: base64 } },
-          { text: "Bu PDF-dəki bütün sualları çıxar." },
-        ],
-      },
-    ],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: GEMINI_SCHEMA,
-      maxOutputTokens: 32000,
-      temperature: 0.2,
-      // gemini-flash-latest / 2.5-flash "think" by default, which burns the
-      // output budget (and emits thought parts) so the JSON can come back empty
-      // or truncated. Disable it — extraction is a transcription task.
-      thinkingConfig: { thinkingBudget: 0 },
-    },
-  });
+  // Body is per-model: Pro thinks with a big output budget; Flash has thinking
+  // off with the standard budget (see geminiGenConfig).
+  const buildBody = (model) =>
+    JSON.stringify({
+      systemInstruction: { parts: [{ text: SYSTEM_PROMPT + instructionBlock(instr) }] },
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { inline_data: { mime_type: "application/pdf", data: base64 } },
+            { text: "Bu PDF-dəki bütün sualları çıxar." },
+          ],
+        },
+      ],
+      generationConfig: geminiGenConfig(model),
+    });
   const models = [GEMINI_MODEL, GEMINI_FALLBACK_MODEL].filter((m, i, a) => m && a.indexOf(m) === i);
   let lastStatus = 0;
   for (const model of models) {
@@ -565,7 +570,7 @@ async function streamGemini(base64, instructions, onText) {
             "Content-Type": "application/json",
             "X-goog-api-key": process.env.GEMINI_API_KEY,
           },
-          body,
+          body: buildBody(model),
         }
       );
     } catch (e) {
