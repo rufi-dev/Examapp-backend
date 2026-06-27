@@ -66,20 +66,6 @@ const EXTRACTION_SCHEMA = {
           hasFigure: { type: "boolean" },
           openAnswer: { type: "string" },
           explanation: { type: "string" },
-          // Venn / Euler diagram (optional): the two circle captions + the items
-          // in the left-only, middle (both), and right-only regions.
-          venn: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              leftLabel: { type: "string" },
-              rightLabel: { type: "string" },
-              leftItems: { type: "array", items: { type: "string" } },
-              overlapItems: { type: "array", items: { type: "string" } },
-              rightItems: { type: "array", items: { type: "string" } },
-            },
-            required: ["leftLabel", "rightLabel", "leftItems", "overlapItems", "rightItems"],
-          },
         },
         required: [
           "type",
@@ -122,9 +108,7 @@ Rules:
     • superscript/footnote number → <sup>2</sup>  (e.g. parçalamağa<sup>2</sup>, yaralı<sup>1</sup>)
   Apply everywhere the PDF italicises/bolds/underlines or uses a superscript; leave normal text unmarked. Do NOT use $...$ for these.
 - PRESERVE LINE BREAKS inside "text": keep the document's line structure for the question STATEMENT. Put each numbered statement item that is PART OF THE QUESTION (e.g. 1., 2., 3., … or I., II., III. sub-statements) on its own line using a real newline (\\n), and keep a blank line between distinct statement groups. NEVER collapse a multi-line question into a single line. Do NOT put the answer options (the A/B/C/D/E choices) in "text" at all — they belong ONLY in "choices".
-- TABLES: if a question contains a TABLE (e.g. an "uyğunluğu / uyğunsuzluğu müəyyən edin" grid such as Səbəb/Nəticə, or any two-column list of statements), reproduce it in "text" as a GitHub-flavored Markdown table: a header row "| Col1 | Col2 |", then a separator row "| --- | --- |", then one "| cell | cell |" row per line. Keep every cell's text/number EXACTLY (use "..." for blanks the student fills). The table is PART of the question, so it stays in "text" — never in "choices". MERGED CELLS: if a cell spans several COLUMNS, put "<" in each extra cell to its right; if it spans several ROWS, put "^" in the cell directly BELOW it (repeat per extra row). Example — a label spanning 2 rows: the first row has the text in that column and the next row has "^" in the same column. The app renders these as real merged cells.
-- VENN / EULER DIAGRAM ("Eyler – Venn diaqramı"): the question itself is usually CLOSED (type "Cm" with A–E variants). Capture the diagram in the "venn" object: leftLabel/rightLabel = the two circle captions; leftItems = items ONLY in the left circle; rightItems = items ONLY in the right circle; overlapItems = items in the MIDDLE overlap (belong to both). Copy each item EXACTLY, keeping its leading number. Keep the A–E variants in "choices" and type "Cm". Do NOT turn a Venn diagram into a markdown table and do NOT set hasFigure for it (the app draws the diagram from "venn"). Omit "venn" entirely for non-Venn questions.
-- COMPLETE-THE-TABLE questions ("Cədvəli tamamlayın", "cədvəli tamamlayan fikirlər yazın", "müqayisə cədvəlini tamamlayan…"): these are OPEN — set type "Co" and openAnswer "". Build the markdown table with the GIVEN cells exactly as printed, and leave EVERY cell the student must fill EMPTY ("|  |") — NEVER guess or invent the missing contents, and do NOT put placeholder numbers (1. / 2.) inside a fill cell; just leave it empty. The app turns empty cells into input boxes the student fills. The table stays in "text".
+- TABLES & DIAGRAMS → PHOTO (do NOT reproduce them): if a question contains a TABLE/grid (Doğrudur/Yanlışdır, Səbəb/Nəticə, Müddəa/Faktlar, "cədvəli tamamlayın", müqayisə cədvəli, any column grid), a Venn/Euler diagram, a chart/graph, or a syntactic-analysis scheme, set "hasFigure": true and DO NOT try to rebuild it as text or markdown — the teacher will add a photo of it from the PDF. Still extract the question's instruction text (and the A–E "choices" if the question has them). This keeps extraction simple and accurate.
 - "title": ONLY for a "reading" item — its real heading/name if the passage has one (e.g. a story title like "Yeni ada"). Do NOT use a section label such as "Mətn (37–46-cı suallar üçün)" or "Mətn 1" as the title — those are labels, not titles; if there is only such a label and no real title, return "". For every normal (non-reading) question return "". For a "reading" item, put the FULL passage body in "text" and SEPARATE EACH PARAGRAPH WITH A BLANK LINE (two newlines \\n\\n) so paragraph spacing is preserved; use a single \\n only for a forced line break. Keep Roman-numeral paragraph labels (I, II, III …) and any ▲/● markers at the start of the lines where they appear. Do NOT write the HTML tag <br>. Set choices=[], correct=[], pairs=[], hasFigure=false, openAnswer="", explanation="". Then the questions about that passage follow as their own items.
 - "latex": ALWAYS return an empty string "". All math now lives inline inside the text fields, never in a separate field.
 - "choices": for Cm/Cs, one object per option in the order shown (drop the A/B/C labels — they are implicit by position). Put each option's text in "text" with any math inline via $...$ (e.g. "$9ab$", "2500"). Set the choice "latex" to "". The options live ONLY here — never repeat them inside the question "text". For Co/Cma, use an empty array.
@@ -132,7 +116,7 @@ Rules:
 - MATCHING WITH ANSWER VARIANTS → CLOSED, NOT Cma: a question may say "Uyğunluğu müəyyən(ləşdir)in" yet PROVIDE lettered answer variants A–E that each encode a pairing (e.g. "A) 1 – a, b; 2 – d"  "B) 1 – a, c; 2 – b, e"). That is a CLOSED single-choice question: use type "Cm". Put the items being matched (the 1., 2., … list AND the a., b., c., … list) in "text", and put each A–E variant as a "choices" entry with its exact text (e.g. "1 – a, b; 2 – d"). Do NOT output "Cma"/pairs for these. Use "Cma" ONLY when the question gives NO answer variants and the student must build the pairing themselves. (The lowercase a., b., c. items belong in "text" — they are content to match, NOT the answer choices; only the uppercase A–E variants are choices.)
 - "pairs": for Cma matching, one object per LEFT item (e.g. one per number 1, 2, 3 …) in order. Put math inline in "left"/"right" via $...$ and set "leftLatex"/"rightLatex" to "". Empty array otherwise. For a numbers→letters correspondence, "left" is the number/item and "right" is its correct letter(s): if ONE left matches SEVERAL letters, list them comma-separated in that one right value (e.g. "a, d"). A letter may repeat across different lefts. The app turns this into a grid where each letter is selected individually.
 - "openAnswer": for Co, the correct answer text (math inline via $...$) ONLY if the PDF states it; otherwise "".
-- "hasFigure": true if the question depends on something that CANNOT be faithfully written as text/LaTeX/markdown — e.g. a geometric figure, a graph/chart, a **Venn / Euler diagram** (overlapping circles with items in regions), or a **syntactic-analysis scheme** (the underline/line patterns under a sentence). Set hasFigure=true and still extract the surrounding text + the A–E choices; the teacher will crop the figure from the PDF. A **Venn / Euler diagram is ALWAYS a figure — NEVER turn it into a markdown table** (its overlapping middle region cannot be expressed as table columns; converting it loses meaning). A plain rectangular TABLE is NOT a figure — reproduce tables as markdown (see TABLES rule), do not flag them.
+- "hasFigure": true whenever the question relies on anything that is not plain text — a geometric figure, graph/chart, image, ANY table/grid, a Venn/Euler diagram, or a syntactic-analysis scheme. Set hasFigure=true and still extract the instruction text (+ A–E choices if any); the teacher crops the figure/table from the PDF.
 - "explanation": a worked solution/explanation (math inline via $...$) ONLY if the PDF provides one; otherwise "".
 - NEVER repeat the answer options inside "text". The A/B/C/D/E choices a student selects belong ONLY in "choices" (for Cm/Cs) — never in "text". "text" holds the question statement plus any items that are PART of it (e.g. the numbered 1-5 statements being asked about, or the a-e items of a matching list), but NOT the final lettered answer choices.
 - AZƏRBAYCAN DİLİ BURAXILIŞ context (when the PDF is an Az-dili graduation paper): questions are almost always single-choice (Cm) or open/written (Co) — genuine pair-building matching (Cma) is RARE, so prefer Cm/Co. The paper is typically a grammar section (~10 single-choice) plus 1–2 reading passages with their questions. (9th grade ≈ 26 closed + 4 open; 11th grade ≈ 20 closed + 10 open — but always follow what the PDF actually shows; never invent or pad to hit a count.)
@@ -249,16 +233,6 @@ const GEMINI_SCHEMA = {
           hasFigure: { type: "BOOLEAN" },
           openAnswer: { type: "STRING" },
           explanation: { type: "STRING" },
-          venn: {
-            type: "OBJECT",
-            properties: {
-              leftLabel: { type: "STRING" },
-              rightLabel: { type: "STRING" },
-              leftItems: { type: "ARRAY", items: { type: "STRING" } },
-              overlapItems: { type: "ARRAY", items: { type: "STRING" } },
-              rightItems: { type: "ARRAY", items: { type: "STRING" } },
-            },
-          },
         },
         required: [
           "type", "text", "title", "latex", "choices", "correct",

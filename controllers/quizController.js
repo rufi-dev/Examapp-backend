@@ -561,7 +561,6 @@ function sanitizeQuestionItem(q) {
   // Structured question content (absent on PDF exams).
   if (q.text !== undefined) out.text = q.text;
   if (q.title !== undefined) out.title = q.title; // reading passage heading
-  if (q.venn !== undefined) out.venn = q.venn; // Venn diagram (display content)
   if (q.image !== undefined) out.image = q.image;
   if (q.images !== undefined) out.images = q.images;
   if (q.latex !== undefined) out.latex = q.latex;
