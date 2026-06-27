@@ -1710,7 +1710,16 @@ const autosaveAttempt = asyncHandler(async (req, res) => {
     lastSeenAt: new Date(),
     answeredCount: answers.filter(hasAns).length,
   };
-  if (Number.isFinite(currentQuestion)) set.currentQuestion = Math.max(0, Math.floor(currentQuestion));
+  if (Number.isFinite(currentQuestion) && currentQuestion > 0) {
+    // Newer client reports the exact page being viewed.
+    set.currentQuestion = Math.floor(currentQuestion);
+  } else {
+    // Older client (no position): approximate with the furthest answered
+    // question, so the live view still shows roughly where they are.
+    let furthest = 0;
+    for (let i = 0; i < answers.length; i++) if (hasAns(answers[i])) furthest = i + 1;
+    set.currentQuestion = furthest;
+  }
   await Attempt.updateOne(filter, { $set: set });
   res.status(200).json({ ok: true });
 });
