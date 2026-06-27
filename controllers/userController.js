@@ -460,6 +460,7 @@ const getUser = asyncHandler(async (req, res) => {
         isVerified,
         userAgent,
         whatsappOptIn,
+        whatsappGroupJoined,
         grade,
       } = user;
 
@@ -475,6 +476,7 @@ const getUser = asyncHandler(async (req, res) => {
         isVerified,
         userAgent,
         whatsappOptIn,
+        whatsappGroupJoined,
         grade,
       });
     } else {

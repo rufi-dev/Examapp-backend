@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const { protect, teacherOnly } = require("../middleware/authMiddleware");
+const User = require("../models/userModel");
 const {
   getStatus,
   getQrDataUrl,
@@ -13,12 +14,27 @@ const {
   setNotifyGroupId,
   getInviteLink,
   setInviteLink,
+  isInNotifyGroup,
 } = require("../helper/whatsapp");
 
 // PUBLIC: the group invite link, so a student (not a teacher) can be sent to the
 // group after entering their phone. Not sensitive — anyone with it can join.
 router.get("/invite", (req, res) => {
   res.json({ link: getInviteLink() });
+});
+
+// Verify the logged-in user is actually in the notify group (by their registered
+// phone). On success, remember it on the account so the gate stops prompting.
+router.get("/check-join", protect, async (req, res) => {
+  const result = await isInNotifyGroup(req.user?.phone);
+  if (result.joined && req.user && !req.user.whatsappGroupJoined) {
+    try {
+      await User.findByIdAndUpdate(req.user._id, { whatsappGroupJoined: true });
+    } catch (e) {
+      console.error("[WHATSAPP] mark joined failed:", e.message);
+    }
+  }
+  res.json(result);
 });
 
 // Admin/teacher-only WhatsApp linking controls. The QR is how the owner links

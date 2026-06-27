@@ -253,6 +253,43 @@ async function listGroups() {
   }
 }
 
+// Verify whether a phone number is a member of the configured notify group.
+// Used to enforce "join the WhatsApp group" before a student can continue.
+// Returns { configured, ready, joined }. `configured && ready` means the check
+// is trustworthy; if either is false the caller should NOT lock the student out.
+async function isInNotifyGroup(phone) {
+  // DEV-ONLY override so the join flow can be tested locally WITHOUT a connected
+  // WhatsApp client. Set WHATSAPP_FAKE_JOIN=yes (or no) in your LOCAL .env only —
+  // NEVER on the server. Off by default → real verification runs.
+  if (process.env.WHATSAPP_FAKE_JOIN) {
+    const joined = /^(1|t|true|y|yes|always|join)/i.test(process.env.WHATSAPP_FAKE_JOIN);
+    return { configured: true, ready: true, joined, fake: true };
+  }
+  const groupId = getNotifyGroupId();
+  if (!groupId) return { configured: false, ready, joined: false };
+  if (!ready || !client) return { configured: true, ready: false, joined: false };
+  const digits = toDigits(phone);
+  if (!digits) return { configured: true, ready: true, joined: false };
+  try {
+    const chat = await client.getChatById(groupId);
+    if (!chat || !chat.isGroup) return { configured: true, ready: true, joined: false };
+    const participants = chat.participants || chat.groupMetadata?.participants || [];
+    // Match by the LAST 6 DIGITS — robust to country-code / leading-zero
+    // formatting differences between the registered number and WhatsApp's id.
+    const want = digits.slice(-6);
+    const joined = participants.some((p) => {
+      const raw = p?.id?._serialized || p?.id?.user || p?.id || "";
+      const pd = String(raw).replace(/@.*/, "").replace(/\D/g, "");
+      return pd.length >= 6 && pd.slice(-6) === want;
+    });
+    return { configured: true, ready: true, joined };
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("[WHATSAPP] isInNotifyGroup failed:", e.message);
+    return { configured: true, ready: true, joined: false };
+  }
+}
+
 async function className(exam) {
   try {
     if (!exam?.class) return "";
@@ -369,6 +406,7 @@ module.exports = {
   setNotifyGroupId,
   getInviteLink,
   setInviteLink,
+  isInNotifyGroup,
   notifyStudentsNewExam,
   toDigits,
 };
