@@ -495,6 +495,22 @@ const getUser = asyncHandler(async (req, res) => {
 const getUserById = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
+  // Teachers may only view their OWN students — someone approved-enrolled in a
+  // class they own. Admin can view anyone. Stops one teacher from opening
+  // another teacher's student (and their results) by guessing the id.
+  if (req.user.role !== "admin") {
+    const classIds = await ownedClassIds(req.user._id);
+    const mine = await Enrollment.exists({
+      class: { $in: classIds },
+      student: id,
+      status: "approved",
+    });
+    if (!mine) {
+      res.status(403);
+      throw new Error("Bu istifadəçiyə giriş yoxdur");
+    }
+  }
+
   const user = await User.findById(id)
     .populate("exams")
     .populate({
