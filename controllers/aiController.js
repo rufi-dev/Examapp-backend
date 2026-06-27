@@ -103,6 +103,8 @@ Rules:
 - "openAnswer": for Co, the correct answer text (math inline via $...$) ONLY if the PDF states it; otherwise "".
 - "hasFigure": true if the question depends on a diagram, graph, geometric figure, or image that cannot be represented as text/LaTeX (the teacher will add the image). Still extract the surrounding text.
 - "explanation": a worked solution/explanation (math inline via $...$) ONLY if the PDF provides one; otherwise "".
+- NEVER repeat the answer options inside "text". The A/B/C/D/E choices a student selects belong ONLY in "choices" (for Cm/Cs) — never in "text". "text" holds the question statement plus any items that are PART of it (e.g. the numbered 1-5 statements being asked about, or the a-e items of a matching list), but NOT the final lettered answer choices.
+- SCOPE: if the teacher's extra instructions name a specific subject or section (e.g. "yalnız Azərbaycan dili" / "only the Azerbaijani-language part"), extract ONLY questions from that section and SKIP every other subject in the PDF, even though they appear in document order.
 
 Transcribe faithfully. Do not invent questions, options, or answers. If the PDF is a question bank with no answer key, every "correct" array is empty and that is correct.`;
 
