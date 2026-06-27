@@ -1681,7 +1681,7 @@ const addResult = asyncHandler(async (req, res) => {
 // stores the draft only (no scoring). Touches only the owner's OWN live attempt.
 const autosaveAttempt = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const { selectedAnswers, attemptId } = req.body;
+  const { selectedAnswers, attemptId, currentQuestion, answeredCount } = req.body;
   if (!Array.isArray(selectedAnswers)) {
     return res.status(200).json({ ok: false });
   }
@@ -1692,8 +1692,66 @@ const autosaveAttempt = asyncHandler(async (req, res) => {
     answer: a?.answer,
     ...(typeof a?.photo === "string" && a.photo ? { photo: a.photo } : {}),
   }));
-  await Attempt.updateOne(filter, { $set: { answers } });
+  // Live-watch heartbeat: store where the student is + last-seen time so the
+  // teacher's live view can show who's writing which question right now.
+  const set = { answers, lastSeenAt: new Date() };
+  if (Number.isFinite(currentQuestion)) set.currentQuestion = Math.max(0, Math.floor(currentQuestion));
+  if (Number.isFinite(answeredCount)) set.answeredCount = Math.max(0, Math.floor(answeredCount));
+  await Attempt.updateOne(filter, { $set: set });
   res.status(200).json({ ok: true });
+});
+
+// Live exam watch (owner/admin only): who is currently writing this exam, which
+// question they're on, progress, time, and live violations. The runner pushes a
+// heartbeat via autosave; this reads the active attempts.
+const LIVE_ACTIVE_MS = 30 * 1000; // heartbeat within 30s → "active"
+const getLiveAttempts = asyncHandler(async (req, res) => {
+  const { examId } = req.params;
+  const exam = await Exam.findById(examId).populate("questions");
+  if (!exam) {
+    res.status(404);
+    throw new Error("Exam not found");
+  }
+  if (!ownsOrAdmin(req.user, exam)) {
+    return res.status(403).json({ message: "Bu imtahan sizə aid deyil" });
+  }
+  const total = (exam.questions?.correctAnswers || []).length;
+  const now = Date.now();
+  // Live attempts only: unsubmitted and not long-expired (the finalizer clears
+  // dead ones within a minute, but exclude clearly-past ones from the view).
+  const attempts = await Attempt.find({
+    examId,
+    submitted: false,
+    expiresAt: { $gt: new Date(now - 2 * 60 * 1000) },
+  })
+    .populate("userId", "name email grade")
+    .sort({ lastSeenAt: -1, startedAt: -1 })
+    .lean();
+  const students = attempts.map((a) => {
+    const seen = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
+    return {
+      attemptId: a._id,
+      name: a.userId?.name || "—",
+      email: a.userId?.email || "",
+      grade: a.userId?.grade || "",
+      currentQuestion: a.currentQuestion || 0,
+      answeredCount: a.answeredCount || 0,
+      total,
+      violations: a.violations || 0,
+      terminated: !!a.terminated,
+      startedAt: a.startedAt,
+      expiresAt: a.expiresAt,
+      lastSeenAt: a.lastSeenAt || null,
+      active: !!seen && now - seen < LIVE_ACTIVE_MS,
+    };
+  });
+  res.status(200).json({
+    examName: exam.name,
+    total,
+    activeCount: students.filter((s) => s.active).length,
+    serverNow: new Date(now),
+    students,
+  });
 });
 
 // ── Server-side safety net ──────────────────────────────────────────────────
@@ -2375,6 +2433,7 @@ module.exports = {
   addPhotoToResult,
   addResult,
   autosaveAttempt,
+  getLiveAttempts,
   finalizeExpiredAttempts,
   startAttempt,
   attemptStatus,

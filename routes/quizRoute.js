@@ -28,6 +28,7 @@ const {
   setExamHidden,
   addResult,
   autosaveAttempt,
+  getLiveAttempts,
   startAttempt,
   attemptStatus,
   reportViolation,
@@ -162,6 +163,8 @@ router.patch("/setExamHidden/:examId", protect, teacherOnly, setExamHidden);
 router.post("/exam/:examId/start", protect, startAttempt);
 router.post("/exam/:examId/autosave", protect, autosaveAttempt);
 router.get("/exam/:examId/attemptStatus", protect, attemptStatus);
+// Live exam watch — owner/admin sees who is currently writing + their progress.
+router.get("/exam/:examId/live", protect, getLiveAttempts);
 router.post("/exam/:examId/violation", protect, reportViolation);
 router.get("/exam/:examId/rank", protect, getExamRank);
 router.post("/addResult/:examId", protect, verifiedOnly, addResult);
