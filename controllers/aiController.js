@@ -28,9 +28,12 @@ const EXTRACTION_SCHEMA = {
         type: "object",
         additionalProperties: false,
         properties: {
-          // Cm = single-choice, Cs = multi-select, Co = open, Cma = matching.
-          type: { type: "string", enum: ["Cm", "Cs", "Co", "Cma"] },
+          // Cm = single-choice, Cs = multi-select, Co = open, Cma = matching,
+          // reading = a passage block (not a question) shown before its questions.
+          type: { type: "string", enum: ["Cm", "Cs", "Co", "Cma", "reading"] },
           text: { type: "string" },
+          // Reading passage heading (e.g. "Mətn 1"); "" for normal questions.
+          title: { type: "string" },
           latex: { type: "string" },
           choices: {
             type: "array",
@@ -67,6 +70,7 @@ const EXTRACTION_SCHEMA = {
         required: [
           "type",
           "text",
+          "title",
           "latex",
           "choices",
           "correct",
@@ -88,16 +92,18 @@ Output one item per question, in document order, using these types:
 - "Cs": multiple correct answers among options (only when the question clearly allows more than one).
 - "Co": open / free-text answer (no options).
 - "Cma": matching (left column items paired with right column items).
+- "reading": a reading-comprehension PASSAGE (a "mətn" / text the student must read), NOT a question. When the PDF contains a passage that several following questions refer to, emit it as ONE separate "reading" item placed IMMEDIATELY BEFORE those questions, then continue with the questions as normal types. Never inline the passage into each question and never duplicate it.
 
 Rules:
-- "text": the FULL question statement, with every mathematical formula written INLINE, at the EXACT position it appears, as LaTeX wrapped in single dollar signs ($...$). Keep the math in the same order and place as the document — do NOT move formulas to the end. Examples:
+- "text": the question STATEMENT ONLY — do NOT include the multiple-choice answer options (the A/B/C/D/E choices) here; those go in "choices". Write every mathematical formula INLINE, at the EXACT position it appears, as LaTeX wrapped in single dollar signs ($...$). Keep the math in the same order and place as the document — do NOT move formulas to the end. Examples:
   - "3500-ün $\\\\frac{5}{7}$ hissəsini tapın."
   - "$\\\\begin{cases}x^{2}y-xy^{2}=12\\\\\\\\xy=6\\\\end{cases}$ tənliklər sistemindən $x^{2}+y^{2}$-nın cəmini tapın."
   - "$\\\\sqrt{3}=a$ və $\\\\sqrt{5}=b$ olarsa, $\\\\sqrt{540}$ ədədini $a$ və $b$ ilə əvəz edin."
   Use $$...$$ only for a big standalone display formula. Write a literal dollar sign as \\\\$.
-- PRESERVE LINE BREAKS inside "text": keep the document's line structure. Put each line that is on its own line in the PDF on its own line using a real newline (\\n). In particular, put each numbered item (1., 2., 3., …) and each lettered option (a., b., c., …) on a SEPARATE line, and keep a blank line between distinct groups (e.g. between the numbered list and the lettered list). NEVER collapse a multi-line question into a single line.
+- PRESERVE LINE BREAKS inside "text": keep the document's line structure for the question STATEMENT. Put each numbered statement item that is PART OF THE QUESTION (e.g. 1., 2., 3., … or I., II., III. sub-statements) on its own line using a real newline (\\n), and keep a blank line between distinct statement groups. NEVER collapse a multi-line question into a single line. Do NOT put the answer options (the A/B/C/D/E choices) in "text" at all — they belong ONLY in "choices".
+- "title": for a "reading" item, an optional short heading (e.g. "Mətn 1"); for every normal question return "". For a "reading" item, put the FULL passage body in "text" (preserve its paragraphs/line breaks with real newlines \\n), set choices=[] , correct=[], pairs=[], hasFigure=false, openAnswer="", explanation="". Then the questions about that passage follow as their own items.
 - "latex": ALWAYS return an empty string "". All math now lives inline inside the text fields, never in a separate field.
-- "choices": for Cm/Cs, one object per option in the order shown (drop the A/B/C labels — they are implicit by position). Put each option's text in "text" with any math inline via $...$ (e.g. "$9ab$", "2500"). Set the choice "latex" to "". For Co/Cma, use an empty array.
+- "choices": for Cm/Cs, one object per option in the order shown (drop the A/B/C labels — they are implicit by position). Put each option's text in "text" with any math inline via $...$ (e.g. "$9ab$", "2500"). Set the choice "latex" to "". The options live ONLY here — never repeat them inside the question "text". For Co/Cma, use an empty array.
 - "correct": indices (0-based) into "choices" of the correct option(s) — ONLY if the PDF itself marks/states the correct answer (e.g. an answer key, a highlighted option, or a stated solution). If the correct answer is NOT given in the PDF, return an EMPTY array. NEVER guess or solve the question to fill this — leave it empty for the teacher to mark.
 - "pairs": for Cma matching, one object per LEFT item (e.g. one per number 1, 2, 3 …) in order. Put math inline in "left"/"right" via $...$ and set "leftLatex"/"rightLatex" to "". Empty array otherwise. For a numbers→letters correspondence, "left" is the number/item and "right" is its correct letter(s): if ONE left matches SEVERAL letters, list them comma-separated in that one right value (e.g. "a, d"). A letter may repeat across different lefts. The app turns this into a grid where each letter is selected individually.
 - "openAnswer": for Co, the correct answer text (math inline via $...$) ONLY if the PDF states it; otherwise "".

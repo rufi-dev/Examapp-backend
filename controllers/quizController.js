@@ -560,6 +560,7 @@ function sanitizeQuestionItem(q) {
   if (q.options !== undefined) out.options = q.options;
   // Structured question content (absent on PDF exams).
   if (q.text !== undefined) out.text = q.text;
+  if (q.title !== undefined) out.title = q.title; // reading passage heading
   if (q.image !== undefined) out.image = q.image;
   if (q.images !== undefined) out.images = q.images;
   if (q.latex !== undefined) out.latex = q.latex;
@@ -1493,10 +1494,17 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
   // adapt to the actual question count; legacy/custom exams fall back to the
   // original 18/55-45 split (total 100).
   const presetCfg = exam.preset ? PRESETS[exam.preset] : null;
-  const autoPoints =
+  // Reading passages aren't scored: build the points plan over QUESTIONS ONLY,
+  // then scatter the values back into a full-length array (0 at passage slots),
+  // so the totals stay exactly 100 even when passages sit between questions.
+  const isRead = (c) => c && c.type === "reading";
+  const qTypes = correct.filter((c) => !isRead(c)).map((c) => c && c.type);
+  const planQ =
     presetCfg && typeof presetCfg.pointsPlan === "function"
-      ? presetCfg.pointsPlan(correct.length, correct.map((c) => c && c.type))
-      : questionPoints(correct.length);
+      ? presetCfg.pointsPlan(qTypes.length, qTypes)
+      : questionPoints(qTypes.length);
+  let _qp = 0;
+  const autoPoints = correct.map((c) => (isRead(c) ? 0 : planQ[_qp++] || 0));
   // Manual per-type override (builder scoring panel) wins for the types it sets;
   // other types keep the preset's auto points.
   const tp = exam.typePoints && typeof exam.typePoints === "object" ? exam.typePoints : null;

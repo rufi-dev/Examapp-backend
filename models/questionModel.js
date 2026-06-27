@@ -37,11 +37,16 @@ const questionSchema = Schema(
         },
         type: {
           // Cm = single-choice, Cs = multi-select, Co/Cd = open, Cma = matching
-          // (text pairs), Cmu = correspondence (numbers -> letters, one-to-many).
+          // (text pairs), Cmu = correspondence (numbers -> letters, one-to-many),
+          // reading = a passage block (not a question; never scored, shown on its
+          // own page before the related questions; `text` holds the passage body
+          // and `title` an optional heading).
           type: String,
-          enum: ["Cm", "Cs", "Co", "Cd", "Cma", "Cmu"],
+          enum: ["Cm", "Cs", "Co", "Cd", "Cma", "Cmu", "reading"],
           required: true,
         },
+        // Reading passage heading (only for type "reading").
+        title: { type: String },
         // Legacy PDF letters (a/b/c/d) for Cm in pdf mode.
         options: {
           type: [String],
