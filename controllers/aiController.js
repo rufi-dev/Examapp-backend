@@ -164,10 +164,10 @@ function computeCost(u) {
 
 // ---- Gemini (Google) provider: a cheaper alternative to Claude. Same prompt,
 // same output shape. Uses the REST generateContent API (no extra dependency). ---
-// Primary = the most capable model (2.5 Pro) with thinking ON — best fidelity on
-// dense papers (tables, italics, faithful transcription). Falls back to fast/cheap
-// flash if Pro is overloaded.
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-pro";
+// Primary = the cheap, fast flash model (thinking off — see geminiGenConfig). It
+// does the job for normal extraction; set GEMINI_MODEL=gemini-2.5-pro to switch
+// to the higher-fidelity Pro model for dense papers.
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
 // Stable fallback tried if the primary model stays overloaded (503). NOTE: keep
 // this a model the key actually has quota for — gemini-2.0-flash returns 429
 // "limit: 0" on free-tier keys, which is useless. gemini-2.5-flash has quota.
