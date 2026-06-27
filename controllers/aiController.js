@@ -176,8 +176,9 @@ const GEMINI_SCHEMA = {
       items: {
         type: "OBJECT",
         properties: {
-          type: { type: "STRING", enum: ["Cm", "Cs", "Co", "Cma"] },
+          type: { type: "STRING", enum: ["Cm", "Cs", "Co", "Cma", "reading"] },
           text: { type: "STRING" },
+          title: { type: "STRING" },
           latex: { type: "STRING" },
           choices: {
             type: "ARRAY",
@@ -206,7 +207,7 @@ const GEMINI_SCHEMA = {
           explanation: { type: "STRING" },
         },
         required: [
-          "type", "text", "latex", "choices", "correct",
+          "type", "text", "title", "latex", "choices", "correct",
           "pairs", "hasFigure", "openAnswer", "explanation",
         ],
       },
@@ -313,6 +314,10 @@ async function extractWithGemini(base64, instructions = "") {
       responseSchema: GEMINI_SCHEMA,
       maxOutputTokens: 32000,
       temperature: 0.2,
+      // gemini-flash-latest / 2.5-flash "think" by default, which burns the
+      // output budget (and emits thought parts) so the JSON can come back empty
+      // or truncated. Disable it — extraction is a transcription task.
+      thinkingConfig: { thinkingBudget: 0 },
     },
   });
 
@@ -531,6 +536,10 @@ async function streamGemini(base64, instructions, onText) {
       responseSchema: GEMINI_SCHEMA,
       maxOutputTokens: 32000,
       temperature: 0.2,
+      // gemini-flash-latest / 2.5-flash "think" by default, which burns the
+      // output budget (and emits thought parts) so the JSON can come back empty
+      // or truncated. Disable it — extraction is a transcription task.
+      thinkingConfig: { thinkingBudget: 0 },
     },
   });
   const models = [GEMINI_MODEL, GEMINI_FALLBACK_MODEL].filter((m, i, a) => m && a.indexOf(m) === i);
@@ -590,7 +599,8 @@ async function streamGemini(base64, instructions, onText) {
         const parts = chunk.candidates?.[0]?.content?.parts || [];
         let grew = false;
         for (const p of parts)
-          if (p.text) {
+          if (p.text && !p.thought) {
+            // skip any "thought" parts so they can't corrupt the JSON
             full += p.text;
             grew = true;
           }
@@ -693,6 +703,7 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
         ? await streamGemini(base64, instructions, mkOnText())
         : await streamClaude(base64, instructions, mkOnText());
   } catch (e) {
+    console.error(`AI extract (${provider}) failed:`, e?.status, e?.message);
     if (provider === "gemini" && e.aiFallback) {
       sse("status", { message: "Gemini əlçatan deyil — Claude ilə davam edilir…" });
       try {
@@ -700,6 +711,7 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
         usedProvider = "claude";
         fellBack = true;
       } catch (e2) {
+        console.error("AI extract (claude fallback) failed:", e2?.status, e2?.message);
         clearInterval(hb);
         sse("error", { message: e2.userMessage || "AI emalı alınmadı. Bir az sonra yenidən cəhd edin." });
         return res.end();
@@ -715,11 +727,21 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
   let parsed;
   try {
     parsed = JSON.parse(result.full || "{}");
-  } catch {
+  } catch (e) {
+    console.error(
+      `AI extract (${usedProvider}) JSON parse failed; full length=${(result.full || "").length}, head=`,
+      (result.full || "").slice(0, 200)
+    );
     sse("error", { message: "AI cavabı oxunmadı. Yenidən cəhd edin." });
     return res.end();
   }
   const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+  if (!questions.length) {
+    console.warn(
+      `AI extract (${usedProvider}) returned 0 questions; full length=${(result.full || "").length}, head=`,
+      (result.full || "").slice(0, 200)
+    );
+  }
   const cost =
     usedProvider === "gemini"
       ? computeGeminiCost(result.usage, result.model)
