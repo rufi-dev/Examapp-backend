@@ -60,7 +60,7 @@ const PRESETS = {
     slots: [
       { type: "Cm", count: 22 },
       { type: "Co", count: 4 },
-      { type: "Cma", count: 1 },
+      { type: "Cmu", count: 1 },
       { type: "Cd", count: 3 },
     ],
     // Last 3 questions = 9 pts each (27 total); the remaining questions split
