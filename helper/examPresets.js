@@ -79,18 +79,21 @@ const PRESETS = {
   "az-buraxilis-9": {
     id: "az-buraxilis-9",
     label: "Buraxılış — Azərbaycan dili (9)",
-    // Scored out of 100 (DİM nisbi bal): closed = 100/34, open (written) = 200/34
-    // — open weighted 2x. All correct = 100; the score equals the official bal.
+    // Scored out of 100 (DİM nisbi bal): 20 qapalı × 2.5 + 10 açıq × 5 = 100 —
+    // open weighted 2x. All correct = 100; the score equals the official bal.
     totalMarks: 100,
-    // 30 tapşırıq: 10 dil qaydası + 2 mətn × 10 = 26 qapalı + 4 açıq. Bu yalnız
-    // BAŞLANĞIC şablondur — müəllim hər variantda sualın tipini (tək seçim /
-    // uyğunluq / açıq) dəyişə bilər. Bal sualın TİPİNƏ görə hesablanır, ona görə
-    // açıq və ya uyğunluq suallarının sırası/yeri fərqli ola bilər — vacib deyil.
+    // 30 tapşırıq: 10 dil qaydası (qapalı) + 2 oxu mətni × (5 qapalı + 5 açıq).
+    // Oxu mətnləri (reading) məzmun blokudur, qiymətləndirilmir. Bu BAŞLANĞIC
+    // şablondur — müəllim sualların tipini/sırasını dəyişə bilər; bal TİPƏ görə
+    // hesablanır, ona görə yer/sıra vacib deyil.
     slots: [
-      { type: "Cm", count: 18 }, // qapalı (qaydalar + mətn-1)
-      { type: "Co", count: 2 },  // açıq (mətn-1)
-      { type: "Cm", count: 8 },  // qapalı (mətn-2)
-      { type: "Co", count: 2 },  // açıq (mətn-2)
+      { type: "Cm", count: 10 },     // dil qaydaları (qapalı)
+      { type: "reading", count: 1 }, // Mətn 1
+      { type: "Cm", count: 5 },      // mətn-1 qapalı
+      { type: "Co", count: 5 },      // mətn-1 açıq (yazılı)
+      { type: "reading", count: 1 }, // Mətn 2
+      { type: "Cm", count: 5 },      // mətn-2 qapalı
+      { type: "Co", count: 5 },      // mətn-2 açıq (yazılı)
     ],
     // Açıq sual qapalıdan 2x ağırdır; cəmi maksimal bal 100 (DİM nisbi balı).
     pointsPlan: azWrittenPlan,
