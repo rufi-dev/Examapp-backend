@@ -1481,7 +1481,7 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
   const presetCfg = exam.preset ? PRESETS[exam.preset] : null;
   const points =
     presetCfg && typeof presetCfg.pointsPlan === "function"
-      ? presetCfg.pointsPlan(correct.length)
+      ? presetCfg.pointsPlan(correct.length, correct.map((c) => c && c.type))
       : questionPoints(correct.length);
   // Negative marking only penalizes wrong answers in questions 1..until
   // (0 / unset = every question, the legacy behavior).
