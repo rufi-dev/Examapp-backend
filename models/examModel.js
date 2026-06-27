@@ -33,6 +33,12 @@ const examSchema = Schema({
         type: String,
         required: false
     },
+    // Optional cover/banner image (Cloudinary URL) shown at the top of the exam
+    // card. Display-only, so it is safe to expose in student payloads.
+    coverImage: {
+        type: String,
+        default: ""
+    },
     // Shared written solution images (added once per exam by the teacher,
     // shown to every student in their review alongside the video solution).
     solutionPhotos: [{
@@ -54,6 +60,13 @@ const examSchema = Schema({
     negativeMarking: { type: Boolean, default: false },
     wrongPerPenalty: { type: Number, default: 3 },
     correctPerPenalty: { type: Number, default: 1 },
+    // Negative marking only applies to questions 1..negMarkUntil (e.g. the closed
+    // section of a Blok exam). 0 = applies to every question (legacy behavior).
+    negMarkUntil: { type: Number, default: 0 },
+    // Scoring/structure preset id (see helper/examPresets.js). Empty = custom:
+    // legacy scoring (questionPoints, total 100). A preset drives the per-question
+    // points at scoring time + seeds the builder's question types.
+    preset: { type: String, default: "" },
     // When enabled, the exam runner activates anti-cheat measures.
     antiCheat: { type: Boolean, default: false },
     // Multi-select (Cs) partial credit: award proportional points
@@ -69,6 +82,9 @@ const examSchema = Schema({
     // Set once the post-endDate Telegram results report (PDF + Excel) has been
     // sent, so the scheduler never sends it twice for the same exam.
     reportSentAt: { type: Date },
+    // Set once the "new exam" WhatsApp notification has gone out to the class's
+    // students, so publishing/editing never double-notifies them.
+    studentsNotifiedAt: { type: Date },
     // Hidden = a draft only staff can see; students can't list or start it.
     hidden: { type: Boolean, default: false },
     // Result visibility for students:
@@ -86,6 +102,9 @@ const examSchema = Schema({
     // Structured exam pagination: how many questions a student sees per page
     // (0 = show all on one page). Set from the structured builder.
     questionsPerPage: { type: Number, default: 0 },
+    // When true the student can only move FORWARD — once they advance a page they
+    // can't go back to earlier questions (linear exam).
+    forwardOnly: { type: Boolean, default: false },
     questions: {
         type: Schema.Types.ObjectId,
         ref: 'Question'

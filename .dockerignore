@@ -3,6 +3,8 @@ npm-debug.log
 .env
 .env.*
 *.log
+.wwebjs_auth
+.wwebjs_cache
 .git
 .gitignore
 .dockerignore

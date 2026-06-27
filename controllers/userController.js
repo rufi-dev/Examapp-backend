@@ -24,12 +24,12 @@ const client = new OAuth2Client(
 // Register User
 const registerUser = asyncHandler(async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password, phone, grade } = req.body;
 
-    // Validation
-    if (!name || !email || !password) {
+    // Validation — phone + grade (Sinif) are mandatory at sign-up.
+    if (!name || !email || !password || !phone || !grade) {
       res.status(400);
-      throw new Error("Zəhmət olmasa bütün xanaları doldurun");
+      throw new Error("Zəhmət olmasa bütün xanaları doldurun (ad, email, şifrə, sinif, telefon)");
     }
 
     if (password.length < 6) {
@@ -49,12 +49,16 @@ const registerUser = asyncHandler(async (req, res) => {
     const ua = parser(req.headers["user-agent"]);
     const userAgent = ua.ua;
 
-    // Create a new user
+    // Create a new user. Auto-verified: email verification is intentionally
+    // skipped (students aren't tech-savvy), so no one is gated by isVerified.
     const user = await User.create({
       name,
       email,
       password,
+      phone,
+      grade,
       userAgent,
+      isVerified: true,
     });
 
     // Generate token
@@ -80,6 +84,7 @@ const registerUser = asyncHandler(async (req, res) => {
         role,
         isVerified,
         userAgent,
+        grade,
       } = user;
       res.status(201).json({
         _id,
@@ -91,6 +96,7 @@ const registerUser = asyncHandler(async (req, res) => {
         role,
         isVerified,
         userAgent,
+        grade,
         token,
       });
     } else {
@@ -243,10 +249,10 @@ const sendLoginCode = asyncHandler(async (req, res) => {
   const decryptedLoginCode = cryptr.decrypt(loginCode);
 
   //Send Login Code Email
-  const subject = "Login Access Code - MATH";
+  const subject = "Examopia — Giriş kodu";
   const send_to = email;
   const sent_from = process.env.EMAIL_USER;
-  const reply_to = "noreply@rufi.com";
+  const reply_to = process.env.EMAIL_USER || "examopia@gmail.com";
   const template = "loginCode";
   const name = user.name;
   const link = decryptedLoginCode;
@@ -371,10 +377,10 @@ const sendVerificationEmail = asyncHandler(async (req, res) => {
   //Construct Verification URL
   const verificationUrl = `${process.env.FRONTEND_URL}/verify/${verificationToken}`;
   //Send Verification Email
-  const subject = "Verify Your Account - MATH";
+  const subject = "Examopia — Hesabı təsdiqlə";
   const send_to = user.email;
   const sent_from = process.env.EMAIL_USER;
-  const reply_to = "noreply@rufi.com";
+  const reply_to = process.env.EMAIL_USER || "examopia@gmail.com";
   const template = "verifyEmail";
   const name = user.name;
   const link = verificationUrl;
@@ -453,6 +459,9 @@ const getUser = asyncHandler(async (req, res) => {
         exams,
         isVerified,
         userAgent,
+        whatsappOptIn,
+        whatsappGroupJoined,
+        grade,
       } = user;
 
       res.status(200).json({
@@ -466,6 +475,9 @@ const getUser = asyncHandler(async (req, res) => {
         exams,
         isVerified,
         userAgent,
+        whatsappOptIn,
+        whatsappGroupJoined,
+        grade,
       });
     } else {
       res.status(404);
@@ -514,6 +526,15 @@ const updateUser = asyncHandler(async (req, res) => {
     user.name = req.body.name || name;
     user.bio = req.body.bio || bio;
     user.photo = req.body.photo || photo;
+    // WhatsApp notification opt-in (boolean). Only change it when the client
+    // actually sends the field, so other profile edits don't reset it.
+    if (typeof req.body.whatsappOptIn === "boolean") {
+      user.whatsappOptIn = req.body.whatsappOptIn;
+    }
+    // Grade ("Sinif") — only when the client sends a non-empty value.
+    if (typeof req.body.grade === "string" && req.body.grade.trim()) {
+      user.grade = req.body.grade.trim();
+    }
 
     const updatedUser = await user.save();
 
@@ -526,6 +547,8 @@ const updateUser = asyncHandler(async (req, res) => {
       photo: updatedUser.photo,
       role: updatedUser.role,
       isVerified: updatedUser.isVerified,
+      whatsappOptIn: updatedUser.whatsappOptIn,
+      grade: updatedUser.grade,
     });
   } else {
     res.status(404);
@@ -682,10 +705,10 @@ const forgotPasswordEmail = asyncHandler(async (req, res) => {
   const resetUrl = `${process.env.FRONTEND_URL}/resetPassword/${resetToken}`;
 
   //Send Reset Password Email
-  const subject = "Reset Your Password - MATH";
+  const subject = "Examopia — Şifrə bərpası";
   const send_to = user.email;
   const sent_from = process.env.EMAIL_USER;
-  const reply_to = "noreply@rufi.com";
+  const reply_to = process.env.EMAIL_USER || "examopia@gmail.com";
   const template = "forgotPassword";
   const name = user.name;
   const link = resetUrl;

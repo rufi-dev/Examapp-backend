@@ -40,10 +40,12 @@
     "nodemon": "^3.0.1",
     "path": "^0.12.7",
     "pdfkit": "^0.19.1",
+    "qrcode": "^1.5.4",
     "react-cookie": "^7.1.4",
     "react-cookie-consent": "^9.0.0",
     "stripe": "^13.1.0",
-    "ua-parser-js": "^1.0.35"
+    "ua-parser-js": "^1.0.35",
+    "whatsapp-web.js": "^1.26.0"
   },
   "devDependencies": {
     "mongodb-memory-server": "^11.2.0"

@@ -31,6 +31,24 @@ const userSchema = Schema(
             type: String,
             default: "+994",
         },
+        // Whether the student wants automatic WhatsApp notifications (e.g. when a
+        // new exam is published to their class). Default on; students can opt out.
+        whatsappOptIn: {
+            type: Boolean,
+            default: true,
+        },
+        // Set true once the student is verified to be in the WhatsApp notify
+        // group (checked against the group's participants). Gate stops prompting.
+        whatsappGroupJoined: {
+            type: Boolean,
+            default: false,
+        },
+        // Student's grade/year ("Sinif"), e.g. "9", "11", "Məzun". Collected at
+        // sign-up (and enforced via the profile-completion gate for students).
+        grade: {
+            type: String,
+            default: "",
+        },
         bio: {
             type: String,
             default: "bio"
@@ -58,10 +76,6 @@ const userSchema = Schema(
             type: Schema.Types.ObjectId,
             ref: "Result"
         }],
-        // Last time this user opened the notifications bell (drives unread count).
-        notificationsSeenAt: {
-            type: Date,
-        },
         // Telegram notifications (teachers): when linked, the user gets a bot
         // message whenever a student starts one of their exams.
         // telegramChatId = the linked Telegram chat (set via the bot webhook).

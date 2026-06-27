@@ -2,7 +2,7 @@
 
 Architecture:
 
-- **Frontend** → Vercel (`https://examopia.com`), auto-built from the `Examopia-frontend` repo.
+- **Frontend** → Vercel (`https://sinaqriyaziyyat.vercel.app`), auto-built from the `Examapp-frontend` repo.
 - **Backend** → Hetzner Cloud VPS, running in Docker behind Caddy (automatic HTTPS).
 - **Database** → MongoDB Atlas.
 
@@ -41,7 +41,7 @@ nano .env        # fill in real values (see below)
 Key values in `.env`:
 - `MONGO_URI` — your Atlas connection string.
 - `SITE_ADDRESS` — `<SERVER_IP>.sslip.io`, e.g. `5.75.1.2.sslip.io` (no `https://`).
-- `FRONTEND_URL` — `https://examopia.com`.
+- `FRONTEND_URL` — `https://sinaqriyaziyyat.vercel.app`.
 - `JWT_SECRET`, `CRYPTR_KEY` — long random strings (`openssl rand -hex 32`).
 - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, email SMTP vars, `STRIPE_KEY`.
 
@@ -75,7 +75,7 @@ less strict). Otherwise the backend can't connect to the database.
 4. Deploy. `vercel.json` rewrites all paths to `index.html` so client-side routes
    (refresh / deep links) work.
 
-The CORS allowlist in `server.js` already permits `https://examopia.com` and `https://www.examopia.com`.
+The CORS allowlist in `server.js` already permits `https://sinaqriyaziyyat.vercel.app`.
 If you add a custom domain on Vercel, add it to that allowlist too.
 
 ---
@@ -83,7 +83,7 @@ If you add a custom domain on Vercel, add it to that allowlist too.
 ## 3. Google OAuth
 
 In Google Cloud Console → Credentials → your OAuth client:
-- **Authorized JavaScript origins**: add `https://examopia.com`.
+- **Authorized JavaScript origins**: add `https://sinaqriyaziyyat.vercel.app`.
 
 ---
 

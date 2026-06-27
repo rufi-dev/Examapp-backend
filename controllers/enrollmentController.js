@@ -23,8 +23,8 @@ async function uniqueJoinCode() {
 
 // ---- student side -----------------------------------------------------------
 
-// Join a class by its code. Auto-approve classes enroll immediately; otherwise
-// the enrollment is a PENDING request the teacher approves.
+// Join a class by its code. Having the code IS the permission — the student is
+// enrolled (approved) immediately. There is no pending/approval step anymore.
 const joinClass = asyncHandler(async (req, res) => {
   const code = String(req.body.code || "").trim().toUpperCase();
   if (!code) {
@@ -39,38 +39,33 @@ const joinClass = asyncHandler(async (req, res) => {
 
   const existing = await Enrollment.findOne({ student: req.user._id, class: cls._id });
   if (existing) {
+    // Upgrade any legacy pending request to approved — the code is enough.
+    if (existing.status !== "approved") {
+      existing.status = "approved";
+      await existing.save();
+    }
     return res.status(200).json({
-      status: existing.status,
-      message:
-        existing.status === "approved"
-          ? "Siz artıq bu sinifə qoşulmusunuz"
-          : "Sorğunuz təsdiq gözləyir",
+      status: "approved",
+      message: "Siz artıq bu sinifə qoşulmusunuz",
     });
   }
 
-  const status = cls.autoApprove ? "approved" : "pending";
   await Enrollment.create({
     student: req.user._id,
     class: cls._id,
     teacher: cls.owner,
-    status,
+    status: "approved",
   });
-  // Telegram: tell the class owner a student joined / requested to join
-  // (fire-and-forget; gated by the owner's onJoin flag + class scope).
-  notifyEnrollment(cls, req.user, status === "pending");
-  res.status(201).json({
-    status,
-    message:
-      status === "approved"
-        ? "Sinifə qoşuldunuz"
-        : "Sorğu göndərildi — müəllimin təsdiqini gözləyin",
-  });
+  // Telegram: tell the class owner a student joined (fire-and-forget; gated by
+  // the owner's onJoin flag + class scope).
+  notifyEnrollment(cls, req.user, false);
+  res.status(201).json({ status: "approved", message: "Sinifə qoşuldunuz" });
 });
 
-// The student's own enrollments (any status), with class + category info.
+// The student's own enrollments (any status), with class info.
 const myEnrollments = asyncHandler(async (req, res) => {
   const rows = await Enrollment.find({ student: req.user._id })
-    .populate({ path: "class", select: "level tag", populate: { path: "tag", select: "name" } })
+    .populate({ path: "class", select: "name level" })
     .sort({ createdAt: -1 })
     .lean();
   res.status(200).json(rows || []);
@@ -91,16 +86,16 @@ const teacherRequests = asyncHandler(async (req, res) => {
   const classIds = await Class.find(filter).distinct("_id");
   const rows = await Enrollment.find({ class: { $in: classIds }, status: "pending" })
     .populate("student", "name email photo")
-    .populate({ path: "class", select: "level tag", populate: { path: "tag", select: "name" } })
+    .populate({ path: "class", select: "name level" })
     .sort({ createdAt: 1 })
     .lean();
   res.status(200).json(rows || []);
 });
 
-// The teacher's classes with their join code, category, and member counts.
+// The teacher's classes with their join code and member counts.
 const teacherClasses = asyncHandler(async (req, res) => {
   const filter = isAdmin(req.user) ? {} : { owner: req.user._id };
-  const classes = await Class.find(filter).populate("tag", "name").sort({ createdAt: -1 }).lean();
+  const classes = await Class.find(filter).sort({ createdAt: -1 }).lean();
 
   const ids = classes.map((c) => c._id);
   const counts = await Enrollment.aggregate([
@@ -272,9 +267,16 @@ const setJoinSettings = asyncHandler(async (req, res) => {
     throw new Error("İcazə yoxdur");
   }
   if (typeof req.body.autoApprove === "boolean") cls.autoApprove = req.body.autoApprove;
+  // Visibility: false = public (open to everyone), true = code-only. Stored as a
+  // strict boolean so the class becomes explicitly public/private.
+  if (typeof req.body.requireCode === "boolean") cls.requireCode = req.body.requireCode;
   if (req.body.regenerate || !cls.joinCode) cls.joinCode = await uniqueJoinCode();
   await cls.save();
-  res.status(200).json({ joinCode: cls.joinCode, autoApprove: cls.autoApprove });
+  res.status(200).json({
+    joinCode: cls.joinCode,
+    autoApprove: cls.autoApprove,
+    requireCode: cls.requireCode,
+  });
 });
 
 module.exports = {
