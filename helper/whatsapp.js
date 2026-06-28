@@ -158,12 +158,22 @@ function initFor(ownerId) {
       }
     }, 90000);
   });
-  s.client.on("ready", () => {
+  s.client.on("ready", async () => {
     s.ready = true;
     s.lastQrDataUrl = null;
     clearTimeout(s.readyTimer);
-    console.log(`[WHATSAPP] ${id} client ready`);
+    console.log(`[WHATSAPP] ${id} client ready (pin=${WWEB_VERSION || "none"})`);
+    try {
+      const v = await s.client.getWWebVersion();
+      console.log(`[WHATSAPP][DEBUG] ${id} loaded WWeb version=${v}; me=${s.client.info?.wid?._serialized || "?"}`);
+    } catch (e) {
+      console.warn(`[WHATSAPP][DEBUG] ${id} getWWebVersion failed:`, e.message);
+    }
   });
+  s.client.on("loading_screen", (pct, msg) =>
+    console.log(`[WHATSAPP][DEBUG] ${id} loading ${pct}% ${msg || ""}`)
+  );
+  s.client.on("change_state", (st) => console.log(`[WHATSAPP][DEBUG] ${id} state=${st}`));
   s.client.on("auth_failure", (m) => console.error(`[WHATSAPP] ${id} auth failure:`, m));
   s.client.on("disconnected", (reason) => {
     console.error(`[WHATSAPP] ${id} disconnected:`, reason);
@@ -236,12 +246,17 @@ async function logoutFor(ownerId) {
 // "<id>@g.us"). Returns true on success.
 async function sendForOwner(ownerId, chatId, text) {
   const s = getSession(ownerId);
+  console.log(
+    `[WHATSAPP][DEBUG] sendForOwner ${ownerId} chatId=${chatId} ready=${s.ready} hasClient=${!!s.client}`
+  );
   if (!s.ready || !s.client || !chatId) return false;
   try {
     await s.client.sendMessage(chatId, text);
+    console.log(`[WHATSAPP][DEBUG] sendForOwner ${ownerId} -> OK to ${chatId}`);
     return true;
   } catch (e) {
-    console.error(`[WHATSAPP] ${ownerId} send failed:`, e.message);
+    console.error(`[WHATSAPP] ${ownerId} send failed to ${chatId}:`, e.message);
+    console.error(e.stack);
     return false;
   }
 }
@@ -255,9 +270,11 @@ async function sendMessageFor(ownerId, phone, text) {
   if (!digits) return false;
   const s = getSession(ownerId);
   let chatId = `${digits}@c.us`;
+  console.log(`[WHATSAPP][DEBUG] sendMessageFor ${ownerId} phone=${phone} digits=${digits} ready=${s.ready}`);
   try {
     if (s.ready && s.client && typeof s.client.getNumberId === "function") {
       const wid = await s.client.getNumberId(digits);
+      console.log(`[WHATSAPP][DEBUG] getNumberId(${digits}) ->`, wid && wid._serialized ? wid._serialized : wid);
       if (wid && wid._serialized) chatId = wid._serialized;
       else console.warn(`[WHATSAPP] ${ownerId} ${digits} is not on WhatsApp`);
     }
@@ -270,14 +287,16 @@ async function sendMessageFor(ownerId, phone, text) {
 // List a teacher's WhatsApp groups so they can pick a notify group.
 async function listGroupsFor(ownerId) {
   const s = getSession(ownerId);
+  console.log(`[WHATSAPP][DEBUG] listGroups ${ownerId} ready=${s.ready} hasClient=${!!s.client}`);
   if (!s.ready || !s.client) return [];
   try {
     const chats = await s.client.getChats();
-    return chats
-      .filter((c) => c.isGroup)
-      .map((c) => ({ id: c.id._serialized, name: c.name || "(qrup)" }));
+    const groups = chats.filter((c) => c.isGroup);
+    console.log(`[WHATSAPP][DEBUG] listGroups ${ownerId} chats=${chats.length} groups=${groups.length}`);
+    return groups.map((c) => ({ id: c.id._serialized, name: c.name || "(qrup)" }));
   } catch (e) {
     console.error(`[WHATSAPP] ${ownerId} listGroups failed:`, e.message);
+    console.error(e.stack);
     return [];
   }
 }
