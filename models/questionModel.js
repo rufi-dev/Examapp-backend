@@ -54,6 +54,9 @@ const questionSchema = Schema(
         // a "complete the table" question with a photo + N blanks). 1 / unset =
         // a single answer. Graded manually when > 1.
         blanks: { type: Number, default: undefined },
+        // Open multi-blank: accepted answers per blank ([[...],[...]]). SERVER-
+        // ONLY (the answer key — never sent to students).
+        blankAnswers: { type: Schema.Types.Mixed, default: undefined },
         // Legacy PDF letters (a/b/c/d) for Cm in pdf mode.
         options: {
           type: [String],

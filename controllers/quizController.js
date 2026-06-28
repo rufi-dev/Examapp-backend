@@ -1386,6 +1386,28 @@ function isAnswered(sel) {
 
 // Per-type correctness. The single source of scoring truth, run server-side
 // against the answer key the client never received.
+// Multi-blank open question: the student's answer is a map { "0": "...", ... }
+// and ca.blankAnswers[k] is the list of accepted answers for blank k. Returns
+// { graded, correct } over blanks that HAVE a key (blanks with no key are
+// ungraded/manual and excluded).
+const isMultiBlank = (ca) => (Number(ca.blanks) || 0) > 1 && Array.isArray(ca.blankAnswers);
+function blankScore(ca, sel) {
+  const n = Number(ca.blanks) || 0;
+  const a = sel && sel.answer;
+  const m = a && typeof a === "object" && !Array.isArray(a) ? a : {};
+  const keys = Array.isArray(ca.blankAnswers) ? ca.blankAnswers : [];
+  let graded = 0;
+  let correct = 0;
+  for (let k = 0; k < n; k++) {
+    const acc = (Array.isArray(keys[k]) ? keys[k] : []).map(openNorm).filter(Boolean);
+    if (!acc.length) continue;
+    graded += 1;
+    const got = openNorm(m[k]);
+    if (got && acc.includes(got)) correct += 1;
+  }
+  return { graded, correct };
+}
+
 function isCorrectAnswer(ca, sel) {
   if (!isAnswered(sel)) return false;
   const a = sel.answer;
@@ -1430,6 +1452,11 @@ function isCorrectAnswer(ca, sel) {
     case "Co":
     case "Cd":
     default: {
+      // Multi-blank: ALL graded blanks must be correct (all-or-nothing).
+      if (isMultiBlank(ca)) {
+        const { graded, correct } = blankScore(ca, { answer: a });
+        return graded > 0 && correct === graded;
+      }
       // Open/typed: correct if the student's answer matches ANY accepted answer
       // (teachers can list several), compared case-insensitively with collapsed
       // whitespace. Falls back to the single `answer` for legacy questions.
@@ -1487,6 +1514,8 @@ function renderableCorrect(ca) {
   if (ca.type === "Cmu" && Array.isArray(ca.key)) {
     return ca.key; // [[idx,…], …] — correct letter indices per number
   }
+  // Multi-blank: the accepted answers per blank ([[...], [...]]).
+  if (isMultiBlank(ca)) return ca.blankAnswers;
   // Open: show every accepted answer (teacher may list several).
   if (Array.isArray(ca.answers) && ca.answers.length) {
     return ca.answers.map(norm).filter(Boolean).join(" / ");
