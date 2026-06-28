@@ -82,9 +82,6 @@ const questionSchema = Schema(
         image: { type: String },
         images: { type: [String], default: undefined },
         latex: { type: String },
-        // Optional teacher note shown to the student in their review (only after
-        // answers are revealable). SERVER-ONLY in any pre-reveal payload.
-        explanation: { type: String },
 
         // single (Cm) / multi (Cs): the choices shown + the correct index/indices
         // (SERVER-ONLY; stripped before sending to students).
