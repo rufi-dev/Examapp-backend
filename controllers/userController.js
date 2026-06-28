@@ -25,11 +25,19 @@ const client = new OAuth2Client(
 const registerUser = asyncHandler(async (req, res) => {
   try {
     const { name, email, password, phone, grade } = req.body;
+    // Role is chosen at sign-up (teacher/student). Anything else falls back to
+    // student, so a bad/absent value can never silently create a teacher.
+    const role = req.body.role === "teacher" ? "teacher" : "student";
 
-    // Validation — phone + grade (Sinif) are mandatory at sign-up.
-    if (!name || !email || !password || !phone || !grade) {
+    // Validation — name/email/password/phone always required; grade (Sinif) only
+    // for students (teachers don't have a grade).
+    if (!name || !email || !password || !phone || (role === "student" && !grade)) {
       res.status(400);
-      throw new Error("Zəhmət olmasa bütün xanaları doldurun (ad, email, şifrə, sinif, telefon)");
+      throw new Error(
+        role === "student"
+          ? "Zəhmət olmasa bütün xanaları doldurun (ad, email, şifrə, sinif, telefon)"
+          : "Zəhmət olmasa bütün xanaları doldurun (ad, email, şifrə, telefon)"
+      );
     }
 
     if (password.length < 6) {
@@ -56,7 +64,9 @@ const registerUser = asyncHandler(async (req, res) => {
       email,
       password,
       phone,
-      grade,
+      role,
+      grade: role === "student" ? grade : undefined,
+      onboarded: true, // role + profile chosen at sign-up, so don't re-prompt
       userAgent,
       isVerified: true,
     });
