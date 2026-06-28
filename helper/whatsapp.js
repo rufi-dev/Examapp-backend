@@ -21,6 +21,18 @@ const FRONTEND_URL = (process.env.FRONTEND_URL || "").replace(/\/+$/, "");
 const AUTH_ROOT = path.join(process.cwd(), ".wwebjs_auth");
 // Cap concurrent headless Chromium sessions to protect a small server.
 const MAX_SESSIONS = Number(process.env.WHATSAPP_MAX_SESSIONS || 5);
+// Pin the WhatsApp Web build whatsapp-web.js loads. Left unpinned, the library
+// follows WhatsApp's LATEST build, so WhatsApp can hot-swap the page version
+// mid-session — which crashes getChats() ("Target closed" / "context
+// destroyed") and breaks sends. Pinning to a FIXED, currently-valid build (from
+// the wppconnect wa-version mirror) stops the mid-session reloads.
+//
+// Driven by env (no hardcoded default) on purpose: a hardcoded version would
+// 404 once the mirror prunes it and then break WhatsApp entirely. Set
+// WHATSAPP_WEB_VERSION to a version that exists at
+// https://github.com/wppconnect-team/wa-version/tree/main/html ; clear it to
+// fall back to the library default.
+const WWEB_VERSION = (process.env.WHATSAPP_WEB_VERSION || "").trim();
 
 // ownerId(string) -> { client, ready, lastQrDataUrl, starting, readyTimer }
 const sessions = new Map();
@@ -96,6 +108,16 @@ function initFor(ownerId) {
     // Stop endlessly re-issuing a QR for a session nobody scans (~6 × 20s ≈ 2
     // min); after that the client gives up (we won't auto-reconnect it below).
     qrMaxRetries: Number(process.env.WHATSAPP_QR_MAX_RETRIES || 6),
+    // Pin a known-good WhatsApp Web build (see WWEB_VERSION above).
+    ...(WWEB_VERSION
+      ? {
+          webVersion: WWEB_VERSION,
+          webVersionCache: {
+            type: "remote",
+            remotePath: `https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/${WWEB_VERSION}.html`,
+          },
+        }
+      : {}),
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
@@ -224,11 +246,25 @@ async function sendForOwner(ownerId, chatId, text) {
   }
 }
 
-// Send one message from a teacher's session to a phone number.
+// Send one message from a teacher's session to a phone number. Resolve the
+// canonical WhatsApp id first (getNumberId) — sending to a raw "<digits>@c.us"
+// is what triggers "No LID for user" on the current WhatsApp Web; the resolved
+// id avoids it (and also confirms the number is actually on WhatsApp).
 async function sendMessageFor(ownerId, phone, text) {
   const digits = toDigits(phone);
   if (!digits) return false;
-  return sendForOwner(ownerId, `${digits}@c.us`, text);
+  const s = getSession(ownerId);
+  let chatId = `${digits}@c.us`;
+  try {
+    if (s.ready && s.client && typeof s.client.getNumberId === "function") {
+      const wid = await s.client.getNumberId(digits);
+      if (wid && wid._serialized) chatId = wid._serialized;
+      else console.warn(`[WHATSAPP] ${ownerId} ${digits} is not on WhatsApp`);
+    }
+  } catch (e) {
+    console.warn(`[WHATSAPP] ${ownerId} getNumberId failed (${digits}):`, e.message);
+  }
+  return sendForOwner(ownerId, chatId, text);
 }
 
 // List a teacher's WhatsApp groups so they can pick a notify group.
