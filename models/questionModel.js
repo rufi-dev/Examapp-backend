@@ -50,6 +50,10 @@ const questionSchema = Schema(
         },
         // Reading passage heading (only for type "reading").
         title: { type: String },
+        // Open (Co/Cd): number of separate answer boxes the student fills (e.g.
+        // a "complete the table" question with a photo + N blanks). 1 / unset =
+        // a single answer. Graded manually when > 1.
+        blanks: { type: Number, default: undefined },
         // Legacy PDF letters (a/b/c/d) for Cm in pdf mode.
         options: {
           type: [String],
