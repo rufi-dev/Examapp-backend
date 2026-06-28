@@ -561,6 +561,9 @@ function sanitizeQuestionItem(q) {
   // Structured question content (absent on PDF exams).
   if (q.text !== undefined) out.text = q.text;
   if (q.title !== undefined) out.title = q.title; // reading passage heading
+  if (q.kind !== undefined) out.kind = q.kind; // section block kind (reading/listening)
+  if (q.audio !== undefined) out.audio = q.audio; // listening-section audio
+  if (q.covers !== undefined) out.covers = q.covers; // questions this block governs
   if (q.blanks !== undefined) out.blanks = q.blanks; // open: number of answer boxes
   if (Array.isArray(q.table)) {
     // "Complete the table": send the grid layout + static cell text, but STRIP

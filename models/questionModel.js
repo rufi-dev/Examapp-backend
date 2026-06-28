@@ -50,6 +50,14 @@ const questionSchema = Schema(
         },
         // Reading passage heading (only for type "reading").
         title: { type: String },
+        // Section block (type "reading") kind: "reading" (text passage) or
+        // "listening" (audio). Both are non-scored section blocks.
+        kind: { type: String },
+        // Section block: optional listening audio (Cloudinary URL) and `covers` =
+        // how many following questions belong to this section (0/unset = until the
+        // next block). Display content; sent to students.
+        audio: { type: String },
+        covers: { type: Number },
         // Open (Co/Cd): number of separate answer boxes the student fills (e.g.
         // a "complete the table" question with a photo + N blanks). 1 / unset =
         // a single answer. Graded manually when > 1.
