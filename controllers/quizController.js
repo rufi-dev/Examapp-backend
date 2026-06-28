@@ -562,6 +562,18 @@ function sanitizeQuestionItem(q) {
   if (q.text !== undefined) out.text = q.text;
   if (q.title !== undefined) out.title = q.title; // reading passage heading
   if (q.blanks !== undefined) out.blanks = q.blanks; // open: number of answer boxes
+  if (Array.isArray(q.table)) {
+    // "Complete the table": send the grid layout + static cell text, but STRIP
+    // every cell's answer key (it lives in blankAnswers, which is never sent).
+    out.table = q.table.map((row) =>
+      (Array.isArray(row) ? row : []).map((c) => ({
+        text: c.text || "",
+        blank: !!c.blank,
+        colspan: c.colspan || 1,
+        rowspan: c.rowspan || 1,
+      }))
+    );
+  }
   if (q.image !== undefined) out.image = q.image;
   if (q.images !== undefined) out.images = q.images;
   if (q.latex !== undefined) out.latex = q.latex;

@@ -57,6 +57,12 @@ const questionSchema = Schema(
         // Open multi-blank: accepted answers per blank ([[...],[...]]). SERVER-
         // ONLY (the answer key — never sent to students).
         blankAnswers: { type: Schema.Types.Mixed, default: undefined },
+        // Open "complete the table": an editable grid the student fills in place.
+        // 2D array of cells { text, blank, colspan, rowspan, answers? }. Blank
+        // cells (row-major) map 1:1 to `blanks`/`blankAnswers`, so scoring reuses
+        // the multi-blank all-or-nothing path. Cell `answers` are SERVER-ONLY and
+        // stripped before the grid is sent to students.
+        table: { type: Schema.Types.Mixed, default: undefined },
         // Legacy PDF letters (a/b/c/d) for Cm in pdf mode.
         options: {
           type: [String],
