@@ -119,6 +119,43 @@ const PRESETS = {
     pointsPlan: azWrittenPlan,
     negativeMarking: null,
   },
+
+  // English (İngilis dili) buraxılış — DİM blueprint, out of 100. 30 questions:
+  // 23 closed + 7 open, open weighted 2× closed (closed ≈ 2.70, open ≈ 5.41) via
+  // azWrittenPlan. Sections: Listening 6 (4 closed + 2 open) + Grammar/Vocab 16
+  // (closed) + Reading 8 (1 passage + 3 closed + 5 open). Listening audio (mp3)
+  // is attached to the exam itself. 9th & 11th share the same structure.
+  "en-buraxilis-9": {
+    id: "en-buraxilis-9",
+    label: "Buraxılış — İngilis dili (9)",
+    totalMarks: 100,
+    slots: [
+      { type: "Cm", count: 4 },      // Listening (Dinləmə) — qapalı
+      { type: "Co", count: 2 },      // Listening — açıq
+      { type: "Cm", count: 16 },     // Grammar & Vocabulary — qapalı
+      { type: "reading", count: 1 }, // Reading passage (Oxu mətni)
+      { type: "Cm", count: 3 },      // Reading — qapalı
+      { type: "Co", count: 5 },      // Reading — açıq
+    ],
+    pointsPlan: azWrittenPlan,
+    negativeMarking: null,
+  },
+
+  "en-buraxilis-11": {
+    id: "en-buraxilis-11",
+    label: "Buraxılış — İngilis dili (11)",
+    totalMarks: 100,
+    slots: [
+      { type: "Cm", count: 4 },      // Listening (Dinləmə) — qapalı
+      { type: "Co", count: 2 },      // Listening — açıq
+      { type: "Cm", count: 16 },     // Grammar & Vocabulary — qapalı
+      { type: "reading", count: 1 }, // Reading passage (Oxu mətni)
+      { type: "Cm", count: 3 },      // Reading — qapalı
+      { type: "Co", count: 5 },      // Reading — açıq
+    ],
+    pointsPlan: azWrittenPlan,
+    negativeMarking: null,
+  },
 };
 
 // Total number of seeded questions in a preset's structure.

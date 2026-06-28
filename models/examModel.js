@@ -39,6 +39,13 @@ const examSchema = Schema({
         type: String,
         default: ""
     },
+    // Optional listening-section audio (Cloudinary URL, e.g. an mp3). Shown as a
+    // player at the top of the exam (English buraxılış has a Dinləmə section).
+    // Display content, so it is sent to students.
+    listeningAudio: {
+        type: String,
+        default: ""
+    },
     // Shared written solution images (added once per exam by the teacher,
     // shown to every student in their review alongside the video solution).
     solutionPhotos: [{

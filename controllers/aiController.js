@@ -135,6 +135,24 @@ const instructionBlock = (instr) =>
     ? `\n\n--- MÜƏLLİMİN ƏLAVƏ TƏLİMATLARI (bunlara əməl et, amma yuxarıdakı JSON sxemini və qaydaları POZMA) ---\n${instr}`
     : "";
 
+// Subject/structure hint derived from the exam's preset, so the AI knows what
+// kind of exam it's reading (e.g. an English DİM exam with Listening/Grammar/
+// Reading). Prepended to the teacher's instructions before extraction.
+const presetHint = (presetId) => {
+  const p = String(presetId || "");
+  if (p === "en-buraxilis-9" || p === "en-buraxilis-11") {
+    return "SUBJECT: This is an ENGLISH (İngilis dili) DİM buraxılış exam — the question and answer text is in ENGLISH, so KEEP it in English (do not translate to Azerbaijani). Expected structure: a LISTENING (Dinləmə) section (~6 questions; the audio is uploaded separately, so just extract each question's text + its A–E choices), a GRAMMAR & VOCABULARY section (~16 multiple-choice), and a READING (Oxu) section — one passage extracted as a reading block, followed by closed (A–E) questions and OPEN-ENDED questions (extract those as open questions, not multiple-choice).";
+  }
+  if (p === "az-buraxilis-9" || p === "az-buraxilis-11") {
+    return "SUBJECT: This is an Azerbaijani-language (Azərbaycan dili) DİM buraxılış exam: language-rule multiple-choice questions, then reading passages (Mətn) each extracted as a reading block and followed by closed and OPEN (written) questions.";
+  }
+  return "";
+};
+
+// Combine the preset subject hint with the teacher's typed instructions.
+const buildInstructions = (presetId, typed) =>
+  clampInstr([presetHint(presetId), clampInstr(typed)].filter(Boolean).join("\n\n"));
+
 // Claude Opus 4.8 pricing (USD per 1M tokens). Cache write (5-min ephemeral) is
 // 1.25x base input; cache read is 0.1x base input. Output includes thinking.
 const PRICE_PER_MTOK = { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 };
@@ -429,7 +447,7 @@ const extractQuestions = asyncHandler(async (req, res) => {
   const base64 = req.file.buffer.toString("base64");
   const provider =
     String(req.body?.provider || "").toLowerCase() === "gemini" ? "gemini" : "claude";
-  const instructions = clampInstr(req.body?.instructions);
+  const instructions = buildInstructions(req.body?.preset, req.body?.instructions);
 
   let questions = [];
   let usage = null;
@@ -680,7 +698,7 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
   const base64 = req.file.buffer.toString("base64");
   const provider =
     String(req.body?.provider || "").toLowerCase() === "gemini" ? "gemini" : "claude";
-  const instructions = clampInstr(req.body?.instructions);
+  const instructions = buildInstructions(req.body?.preset, req.body?.instructions);
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",

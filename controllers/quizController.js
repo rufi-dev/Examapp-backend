@@ -846,7 +846,7 @@ const getExam = asyncHandler(async (req, res) => {
 
 const addQuestion = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const { correctAnswers, questionsPerPage, forwardOnly, typePoints } = req.body;
+  const { correctAnswers, questionsPerPage, forwardOnly, typePoints, listeningAudio } = req.body;
 
   if (!correctAnswers || !examId) {
     res.status(400).json({ message: "All fields are required" });
@@ -890,6 +890,13 @@ const addQuestion = asyncHandler(async (req, res) => {
   }
   if (!ownsOrAdmin(req.user, exam)) {
     return res.status(403).json({ message: "Bu imtahan sizə aid deyil" });
+  }
+
+  // Listening-section audio (Cloudinary URL) — saved with the questions so the
+  // builder/PDF page can attach it after the exam is created. "" clears it.
+  if (listeningAudio !== undefined) {
+    exam.listeningAudio = typeof listeningAudio === "string" ? listeningAudio.trim() : "";
+    await exam.save();
   }
 
   // Persist the structured per-page layout (0 = show all) alongside the answer
@@ -1131,6 +1138,8 @@ const startAttempt = asyncHandler(async (req, res) => {
       forwardOnly: !!exam.forwardOnly,
       // When on, the runner shows a per-question "upload solution photo" control.
       studentSolutionPhotos: !!exam.studentSolutionPhotos,
+      // Listening-section audio (mp3 URL) — runner shows a player at the top.
+      listeningAudio: exam.listeningAudio || "",
       // Same sanitizer as every other student payload: display content only, the
       // answer key (`correct`/`pairs`/`answer`) is never sent to the runner. When
       // options are shuffled, reorder each Cm/Cs question's choices by THIS
