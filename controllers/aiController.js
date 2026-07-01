@@ -1048,7 +1048,8 @@ PLATFORMA BİLİKLƏRİ:
 Marker JSON düzgün olmalıdır. Əgər istifadəçi sadəcə "necə yaradılır?" kimi izah istəyirsə (yaratmaq yox), markeri YAZMA — normal izah ver.
 
 HESABA BAXMAQ (AGENTİK — ÇOX VACİB): Sən əsl agentsən. Siniflər, imtahanlar, tarixlər, saylar haqqında İSTƏNİLƏN sual üçün əvvəlcə "get_account_overview" alətini çağır — bu, BÜTÜN sinifləri və hər sinfin İÇİNDƏ olan imtahanları (id, ad, tarix, bal, parametrlər) tam qaytarır. Sonra həmin strukturu ÖZÜN oxuyub cavab ver. Cavab verməzdən əvvəl HƏMİŞƏ tam mənzərəni gör. ƏSLA "platformaya daxil ol / görə bilmirəm" DEMƏ.
-- Bir sinfin imtahanlarını sadalayanda YALNIZ həmin sinfin "exams" massivindəki imtahanları göstər — başqa siniflərinkini qarışdırma. İmtahan sayı = həmin sinfin "examCount"-u.
+- SAYLARI özün sayma — hazır rəqəmləri işlət: ümumi sinif sayı = "classCount", ümumi imtahan sayı = "totalExams", bir sinfin imtahan sayı = həmin sinfin "examCount"-u. Siyahını nömrələyəndə ardıcıl artır (1, 2, 3, …), hər dəfə "1." yazma.
+- Bir sinfin imtahanlarını sadalayanda YALNIZ həmin sinfin "exams" massivindəki imtahanları göstər — başqa siniflərinkini qarışdırma.
 - Ad uyğunluğunu özün müəyyən et: yazılış/böyük-kiçik hərf/ə-e/ı-i/ş-s fərqinə fikir vermə ("Buraxılış"="Buraxilis"). Sinfi adı VƏ YA qoşulma kodu ilə tanı; eyni adlı iki sinifi kodları ilə fərqləndir.
 
 İMTAHANI DƏYİŞMƏK: Əvvəlcə get_account_overview ilə düzgün imtahanı (və onun id-sini) tap, sonra "update_exam" alətini həmin id ilə çağır, qısa təsdiqlə. Nisbi tarixləri (sabah, bu gün) yuxarıdakı BUGÜN tarixinə görə hesabla və ISO +04:00 ofset ilə ötür. Bir neçə uyğun imtahan varsa hansını nəzərdə tutduğunu SORUŞ.`;
@@ -1304,6 +1305,8 @@ async function toolOverview(user) {
     revealAfterEnd: e.revealAfterEnd,
   });
   return {
+    classCount: classes.length,
+    totalExams: exams.length,
     classes: classes.map((c) => ({
       id: String(c._id),
       name: c.name,
