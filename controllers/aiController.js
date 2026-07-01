@@ -5,6 +5,8 @@ const Anthropic = AnthropicPkg.default || AnthropicPkg;
 const AiUsage = require("../models/aiUsageModel");
 const User = require("../models/userModel");
 const Exam = require("../models/examModel");
+const Class = require("../models/classModel");
+const Enrollment = require("../models/enrollmentModel");
 
 // Lazy client so the server still boots without the key (the feature just
 // returns a clear error until ANTHROPIC_API_KEY is set in the env).
@@ -1044,7 +1046,9 @@ PLATFORMA BİLİKLƏRİ:
 <<CREATE_EXAM>>{"description":"<istifadəçi hansı mövzu/sualları istəyirsə qısa yaz; detal deməyibsə boş string>"}
 Marker JSON düzgün olmalıdır. Əgər istifadəçi sadəcə "necə yaradılır?" kimi izah istəyirsə (yaratmaq yox), markeri YAZMA — normal izah ver.
 
-MÖVCUD İMTAHANI DƏYİŞMƏK: Əgər istifadəçi HAZIRKI imtahanı dəyişmək istəyirsə (tarix, müddət, bal, keçid balı, parol aç/bağla, neqativ qiymətləndirmə aç/bağla, anti-cheat aç/bağla, cəhd limiti, nəticə görünüşü və s.), sənin ALƏTLƏRİN var: əvvəlcə "find_exams" ilə imtahanı adına görə tap. Bir neçə uyğun imtahan varsa, hansını nəzərdə tutduğunu SORUŞ. Sonra "update_exam" ilə dəyişikliyi tətbiq et və nəticəni qısa təsdiqlə (məs: "✅ 'Test 2' imtahanının müddəti 90 dəqiqəyə dəyişdirildi."). Tarixləri Azərbaycan vaxtı (UTC+4) kimi anla və ISO formatda +04:00 ofset ilə ötür (məs: 2026-07-05T14:00:00+04:00). Yalnız istifadəçinin sahib olduğu imtahanları dəyişə bilərsən.`;
+HESABI GÖRMƏK (ÇOX VACİB): Sənin bu müəllimin ÖZ hesabına baxmaq üçün alətlərin var. İstifadəçi öz sinifləri, imtahanları, şagird sayı və ya imtahan sayı haqqında soruşanda ("Azərbaycan dili sinfində neçə imtahan var?", "neçə sinfim var?", "hansı imtahanlarım var?") ƏSLA "platformaya daxil ol / mən görə bilmirəm" DEMƏ. Bunun əvəzinə "list_classes" və ya "find_exams" alətini çağır və CAVABI birbaşa, dəqiq rəqəmlərlə ver (məs: "Azərbaycan dili sinfində 3 imtahanın var.").
+
+MÖVCUD İMTAHANI DƏYİŞMƏK: İstifadəçi imtahanı dəyişmək istəyirsə (tarix, müddət, bal, keçid balı, parol aç/bağla, neqativ qiymətləndirmə, anti-cheat, cəhd limiti, nəticə görünüşü), "find_exams" ilə tap (lazım olsa className ilə filtrlə). Bir neçə uyğun varsa hansını nəzərdə tutduğunu SORUŞ. Sonra "update_exam" ilə tətbiq et və qısa təsdiqlə. Tarixləri Azərbaycan vaxtı (UTC+4) kimi anla və ISO +04:00 ofset ilə ötür (məs: 2026-07-05T14:00:00+04:00). Yalnız istifadəçinin sahib olduğu sinif/imtahanları görə və dəyişə bilərsən.`;
 
 // Sanitise the client-sent history: keep only user/assistant text turns, cap it.
 function cleanChatMessages(raw) {
@@ -1209,12 +1213,24 @@ const EXAM_TOOLS = [
   {
     type: "function",
     function: {
+      name: "list_classes",
+      description:
+        "List the current teacher's OWN classes with their join code, number of students, and how many exams each class has. Use this to answer questions about classes, exam counts per class, or student counts.",
+      parameters: { type: "object", properties: {}, required: [] },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "find_exams",
       description:
-        "Find the current teacher's exams by (partial) name to get their id and current settings. Call with an empty query to list recent exams.",
+        "Find the current teacher's exams by (partial) name and/or class name, returning each exam's id, class, and current settings. Empty query + empty className = recent exams.",
       parameters: {
         type: "object",
-        properties: { query: { type: "string", description: "part of the exam name, or empty" } },
+        properties: {
+          query: { type: "string", description: "part of the exam name, or empty" },
+          className: { type: "string", description: "part of a class name to filter by, or empty" },
+        },
         required: ["query"],
       },
     },
@@ -1248,13 +1264,54 @@ const EXAM_TOOLS = [
   },
 ];
 
-async function toolFindExams(query, userId) {
+async function toolListClasses(userId) {
+  const classes = await Class.find({ owner: userId }).sort({ createdAt: -1 }).lean();
+  if (!classes.length) return { classes: [] };
+  const ids = classes.map((c) => c._id);
+  const examCounts = await Exam.aggregate([
+    { $match: { owner: userId } },
+    { $group: { _id: "$class", n: { $sum: 1 } } },
+  ]);
+  const examMap = {};
+  examCounts.forEach((c) => (examMap[String(c._id)] = c.n));
+  const enr = await Enrollment.aggregate([
+    { $match: { class: { $in: ids }, status: "approved" } },
+    { $group: { _id: "$class", n: { $sum: 1 } } },
+  ]);
+  const stuMap = {};
+  enr.forEach((e) => (stuMap[String(e._id)] = e.n));
+  return {
+    classes: classes.map((c) => ({
+      id: String(c._id),
+      name: c.name,
+      joinCode: c.joinCode,
+      students: stuMap[String(c._id)] || 0,
+      exams: examMap[String(c._id)] || 0,
+    })),
+  };
+}
+
+async function toolFindExams(query, userId, className) {
   const filter = { owner: userId };
   if (query && query.trim()) filter.name = new RegExp(escapeRegex(query.trim()), "i");
-  const exams = await Exam.find(filter).sort({ createdAt: -1 }).limit(8).lean();
+  if (className && className.trim()) {
+    const cls = await Class.find({
+      owner: userId,
+      name: new RegExp(escapeRegex(className.trim()), "i"),
+    })
+      .select("_id")
+      .lean();
+    filter.class = { $in: cls.map((c) => c._id) };
+  }
+  const exams = await Exam.find(filter)
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .populate("class", "name")
+    .lean();
   return exams.map((e) => ({
     id: String(e._id),
     name: e.name,
+    className: e.class?.name || null,
     mode: e.mode,
     startDate: e.startDate,
     endDate: e.endDate,
@@ -1299,7 +1356,8 @@ async function toolUpdateExam(args, userId) {
 
 async function execTool(name, args, userId) {
   try {
-    if (name === "find_exams") return await toolFindExams(args.query, userId);
+    if (name === "list_classes") return await toolListClasses(userId);
+    if (name === "find_exams") return await toolFindExams(args.query, userId, args.className);
     if (name === "update_exam") return await toolUpdateExam(args, userId);
   } catch (e) {
     return { error: e.message || "Əməliyyat alınmadı" };
