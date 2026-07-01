@@ -1052,7 +1052,7 @@ HESABA BAXMAQ (AGENTİK — ÇOX VACİB): Sən əsl agentsən. Siniflər, imtaha
 - Bir sinfin imtahanlarını sadalayanda YALNIZ həmin sinfin "exams" massivindəki imtahanları göstər — başqa siniflərinkini qarışdırma.
 - Ad uyğunluğunu özün müəyyən et: yazılış/böyük-kiçik hərf/ə-e/ı-i/ş-s fərqinə fikir vermə ("Buraxılış"="Buraxilis"). Sinfi adı VƏ YA qoşulma kodu ilə tanı; eyni adlı iki sinifi kodları ilə fərqləndir.
 
-İMTAHANI DƏYİŞMƏK: Əvvəlcə get_account_overview ilə düzgün imtahanı (və onun id-sini) tap, sonra "update_exam" alətini həmin id ilə çağır, qısa təsdiqlə. Nisbi tarixləri (sabah, bu gün) yuxarıdakı BUGÜN tarixinə görə hesabla və ISO +04:00 ofset ilə ötür. Bir neçə uyğun imtahan varsa hansını nəzərdə tutduğunu SORUŞ.`;
+İMTAHANI DƏYİŞMƏK: Əvvəlcə get_account_overview ilə düzgün imtahanı (və onun id-sini) tap, sonra "update_exam" alətini həmin id ilə çağır, qısa təsdiqlə. Nisbi tarixləri (sabah, bu gün) yuxarıdakı BUGÜN sətrinə görə hesabla və tarixləri həmin sətirdəki UTC ofseti ilə ISO formatda ver. Bir neçə uyğun imtahan varsa hansını nəzərdə tutduğunu SORUŞ.`;
 
 // Sanitise the client-sent history: keep only user/assistant text turns, cap it.
 function cleanChatMessages(raw) {
@@ -1213,15 +1213,33 @@ async function runChat(messages) {
 // ---- Tool-calling agent: lets the assistant find + edit the teacher's exams ----
 const escapeRegex = (s) => String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-// Current Azerbaijan (UTC+4) date/time hint so the model can resolve "sabah" etc.
-function azDateHint() {
+// UTC offset (e.g. "+04:00") of a timezone at a given moment — DST-aware.
+function tzOffset(tz, date = new Date()) {
   try {
+    const local = new Date(date.toLocaleString("en-US", { timeZone: tz }));
+    const utc = new Date(date.toLocaleString("en-US", { timeZone: "UTC" }));
+    const mins = Math.round((local - utc) / 60000);
+    const sign = mins >= 0 ? "+" : "-";
+    const a = Math.abs(mins);
+    return `${sign}${String(Math.floor(a / 60)).padStart(2, "0")}:${String(a % 60).padStart(2, "0")}`;
+  } catch {
+    return "+00:00";
+  }
+}
+
+// Current date/time hint in the USER's timezone so the model resolves "tomorrow"
+// / "today" correctly wherever they are. Falls back to Asia/Baku.
+function azDateHint(tz) {
+  const zone = tz || "Asia/Baku";
+  try {
+    const now = new Date();
     const s = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Baku",
+      timeZone: zone,
       year: "numeric", month: "2-digit", day: "2-digit",
       hour: "2-digit", minute: "2-digit", hour12: false,
-    }).format(new Date());
-    return `BUGÜN (Azərbaycan vaxtı, UTC+4): ${s}. "Sabah" = bir gün sonra, "bu gün" = həmin gün. Tarixləri ISO +04:00 ofset ilə ver.`;
+    }).format(now);
+    const off = tzOffset(zone, now);
+    return `BUGÜN (istifadəçinin saat qurşağı: ${zone}, UTC${off}): ${s}. "Sabah" = bir gün sonra, "bu gün" = həmin gün. Nisbi tarixləri bu vaxta görə hesabla və tarixləri ISO formatda ${off} ofseti ilə ver.`;
   } catch {
     return "";
   }
@@ -1242,13 +1260,13 @@ const EXAM_TOOLS = [
     function: {
       name: "update_exam",
       description:
-        "Update settings of ONE exam the teacher owns. Only include the fields to change. Dates must be ISO with the +04:00 (Azerbaijan) offset. Send password:'' to remove a password.",
+        "Update settings of ONE exam the teacher owns. Only include the fields to change. Dates must be ISO with the user's UTC offset (from the BUGÜN line in the system prompt). Send password:'' to remove a password.",
       parameters: {
         type: "object",
         properties: {
           examId: { type: "string" },
-          startDate: { type: "string", description: "ISO datetime with +04:00, or '' to clear" },
-          endDate: { type: "string", description: "ISO datetime with +04:00, or '' to clear" },
+          startDate: { type: "string", description: "ISO datetime with the user's offset, or '' to clear" },
+          endDate: { type: "string", description: "ISO datetime with the user's offset, or '' to clear" },
           durationMinutes: { type: "number" },
           totalMarks: { type: "number" },
           passingMarks: { type: "number" },
@@ -1359,9 +1377,9 @@ async function execTool(name, args, user) {
 // OpenAI chat WITH tools — runs the tool loop so the assistant can act (edit
 // exams). Returns the final text + accumulated cost. `changed` flags whether any
 // exam was mutated (so the client can refresh).
-async function runChatAgent(messages, user) {
+async function runChatAgent(messages, user, tz) {
   const model = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
-  const convo = [{ role: "system", content: `${CHAT_SYSTEM_PROMPT}\n\n${azDateHint()}` }, ...messages];
+  const convo = [{ role: "system", content: `${CHAT_SYSTEM_PROMPT}\n\n${azDateHint(tz)}` }, ...messages];
   let inTok = 0;
   let outTok = 0;
   let changed = false;
@@ -1428,8 +1446,9 @@ const chatAssistant = asyncHandler(async (req, res) => {
   try {
     // With OpenAI, use the tool-calling agent (can find + edit exams). Otherwise
     // fall back to the plain multi-provider chat.
+    const tz = typeof req.body?.timezone === "string" ? req.body.timezone : undefined;
     out = process.env.OPENAI_API_KEY
-      ? await runChatAgent(messages, req.user)
+      ? await runChatAgent(messages, req.user, tz)
       : await runChat(messages);
   } catch (e) {
     if (e.aiFallback) {
