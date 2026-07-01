@@ -865,4 +865,157 @@ const getAiUsage = asyncHandler(async (req, res) => {
   res.status(200).json({ rows, totals, recent });
 });
 
-module.exports = { extractQuestions, extractQuestionsStream, getAiUsage };
+// ============================ Teacher chat assistant ============================
+// A lightweight in-dashboard helper for TEACHERS: answers "how do I do X in
+// Examopia" in Azerbaijani. Uses Gemini Flash (cheap) with a Claude fallback.
+// The knowledge base is baked into the system prompt for now (RAG can come later).
+
+const CHAT_SYSTEM_PROMPT = `Sən "Examopia" platformasının köməkçisisən. Examopia müəllimlər üçün onlayn imtahan/sınaq platformasıdır (riyaziyyat, Azərbaycan dili, İngilis dili — DİM formatı).
+
+QAYDALAR:
+- Cavabları HƏMİŞƏ Azərbaycan dilində, qısa, aydın və mümkünsə addım-addım ver.
+- Yalnız Examopia və müəllim işləri ilə bağlı suallara kömək et. Mövzudan kənar suallarda nəzakətlə platformaya yönləndir.
+- Dəqiq bilmədiyin funksiyanı UYDURMA — düzgün bölməyə yönləndir və ya dəstəklə əlaqə saxlamağı təklif et.
+
+PLATFORMA BİLİKLƏRİ:
+- Sinif: "Siniflər" bölməsindən yeni sinif yaradılır. Hər sinifin qoşulma kodu (join code) olur; şagirdlər həmin kodla qoşulur.
+- İmtahan yaratmaq: sinifin içində "İmtahan əlavə et". İki yol var: (1) "PDF yüklə" — hazır PDF-dən suallar; (2) "Özüm yazım / AI ilə" — struktur builder-də əl ilə və ya AI ilə PDF-dən avtomatik çıxarış.
+- Preset: imtahanın balını və sual strukturunu avtomatik qurur — Riyaziyyat (Buraxılış, Blok 1 və 2-ci qrup), Azərbaycan dili (9, 11), İngilis dili (9, 11), və ya "Fərdi (sıfırdan)" — heç bir hazır struktur olmadan sıfırdan.
+- Müddət DƏQİQƏ ilə təyin olunur; başlanma və bitmə tarixini seçmək olar. "Ümumi bal" və "Keçid balı" ayrıca yazılır.
+- "Ətraflı parametrlər": video həll, ödənişli imtahan, cəhd limiti, parol, neqativ qiymətləndirmə, anti-cheat, həll şəkilləri və nəticə görünüşü buradadır.
+- Nəticə görünüşü: balın və düzgün cavabların şagirdə nə vaxt (dərhal / imtahandan sonra) göstərilməsini idarə etmək olar.
+- İngilis dili imtahanlarına dinləmə (mp3) faylı əlavə etmək olar.
+- WhatsApp: müəllim öz nömrəsini bağlayıb yeni imtahan bildirişini öz qrupuna göndərə bilər (qoşulma kodu ilə birlikdə).
+- Nəticələr: "Nəticələr" bölməsində şagird nəticələri görünür.`;
+
+// Sanitise the client-sent history: keep only user/assistant text turns, cap it.
+function cleanChatMessages(raw) {
+  return (Array.isArray(raw) ? raw : [])
+    .filter(
+      (m) =>
+        m &&
+        (m.role === "user" || m.role === "assistant") &&
+        typeof m.content === "string" &&
+        m.content.trim()
+    )
+    .slice(-12)
+    .map((m) => ({ role: m.role, content: m.content.trim().slice(0, 4000) }));
+}
+
+async function chatWithGemini(messages) {
+  if (!process.env.GEMINI_API_KEY)
+    throw aiError(503, "AI köməkçisi konfiqurasiya olunmayıb (GEMINI_API_KEY)", true);
+  const model = process.env.GEMINI_CHAT_MODEL || GEMINI_MODEL;
+  const body = {
+    systemInstruction: { parts: [{ text: CHAT_SYSTEM_PROMPT }] },
+    contents: messages.map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    })),
+    generationConfig: {
+      temperature: 0.4,
+      maxOutputTokens: 1024,
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+  };
+  let r, data;
+  try {
+    r = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-goog-api-key": process.env.GEMINI_API_KEY },
+        body: JSON.stringify(body),
+      }
+    );
+    data = await r.json();
+  } catch (e) {
+    throw aiError(502, "AI köməkçisi cavab vermədi, bir azdan yenidən cəhd edin", true);
+  }
+  if (!r.ok || data?.error) {
+    throw aiError(r.status || 502, "AI köməkçisi hazırda əlçatan deyil", true);
+  }
+  const text =
+    (data.candidates?.[0]?.content?.parts || [])
+      .map((p) => p.text)
+      .filter(Boolean)
+      .join("") || "";
+  return { text, cost: computeGeminiCost(data.usageMetadata, model) };
+}
+
+async function chatWithClaude(messages) {
+  const client = getClient();
+  if (!client) throw aiError(503, "AI köməkçisi konfiqurasiya olunmayıb");
+  const model = process.env.CLAUDE_CHAT_MODEL || "claude-haiku-4-5-20251001";
+  const msg = await client.messages.create({
+    model,
+    max_tokens: 1024,
+    system: CHAT_SYSTEM_PROMPT,
+    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+  });
+  const text = (msg.content || [])
+    .map((b) => b.text)
+    .filter(Boolean)
+    .join("");
+  const u = msg.usage || {};
+  const input = u.input_tokens || 0;
+  const output = u.output_tokens || 0;
+  // Haiku pricing (approx USD / 1M): far cheaper than Opus extraction.
+  const usd = (input * 1 + output * 5) / 1e6;
+  return {
+    text,
+    cost: {
+      model,
+      inputTokens: input,
+      outputTokens: output,
+      cacheWriteTokens: u.cache_creation_input_tokens || 0,
+      cacheReadTokens: u.cache_read_input_tokens || 0,
+      totalTokens: input + output,
+      usd: Number(usd.toFixed(4)),
+    },
+  };
+}
+
+// POST /api/quiz/chat  (teacher-only) — { messages:[{role,content}] } -> { reply, cost }
+const chatAssistant = asyncHandler(async (req, res) => {
+  const messages = cleanChatMessages(req.body?.messages);
+  if (!messages.length) {
+    res.status(400);
+    throw new Error("Mesaj boşdur");
+  }
+
+  let out;
+  try {
+    out = process.env.GEMINI_API_KEY ? await chatWithGemini(messages) : await chatWithClaude(messages);
+  } catch (e) {
+    // Gemini down/unconfigured → fall back to Claude if available.
+    if (e.aiFallback && getClient()) {
+      out = await chatWithClaude(messages);
+    } else {
+      res.status(e.aiStatus || 502);
+      throw new Error(e.userMessage || "AI köməkçisi cavab vermədi");
+    }
+  }
+
+  // Log spend so it shows in the admin AI usage dashboard (best-effort).
+  try {
+    const c = out.cost || {};
+    await AiUsage.create({
+      user: req.user._id,
+      model: c.model,
+      inputTokens: c.inputTokens || 0,
+      outputTokens: c.outputTokens || 0,
+      cacheWriteTokens: c.cacheWriteTokens || 0,
+      cacheReadTokens: c.cacheReadTokens || 0,
+      totalTokens: c.totalTokens || 0,
+      usd: c.usd || 0,
+      questions: 0,
+    });
+  } catch (e) {
+    console.error("chat usage log failed:", e?.message);
+  }
+
+  res.json({ reply: out.text, cost: out.cost });
+});
+
+module.exports = { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant };

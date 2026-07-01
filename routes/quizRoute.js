@@ -51,7 +51,7 @@ const {
   getExamTagandClass,
   getResultsByExam
 } = require("../controllers/quizController");
-const { extractQuestions, extractQuestionsStream, getAiUsage } = require("../controllers/aiController");
+const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant } = require("../controllers/aiController");
 const {
   joinClass,
   myEnrollments,
@@ -115,6 +115,8 @@ router.post(
 );
 // Admin-only AI spend dashboard data.
 router.get("/aiUsage", protect, adminOnly, getAiUsage);
+// AI chat assistant for teachers (in-dashboard floating helper).
+router.post("/chat", protect, teacherOnly, chatAssistant);
 router.post("/addClass", protect, teacherOnly, addClass);
 router.get("/server-time", serverTime);
 // Scoped to the caller (teacher → own, student → enrolled, admin → all), so it
