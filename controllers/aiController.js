@@ -1049,7 +1049,8 @@ Marker JSON düzgün olmalıdır. Əgər istifadəçi sadəcə "necə yaradılı
 
 HESABI GÖRMƏK (ÇOX VACİB): Hesaba baxmaq üçün alətlərin var. Siniflər/imtahanlar haqqında soruşulanda ƏSLA "platformaya daxil ol / görə bilmirəm" DEMƏ.
 - Server AD üzrə axtarış ETMİR. Sən "list_classes" və "find_exams" çağırırsan, onlar SİYAHINI qaytarır, sən isə həmin siyahını ÖZÜN oxuyub istifadəçinin dediyi sinfi/imtahanı tapırsan — yazılış, böyük/kiçik hərf, ə/e, ı/i, ş/s fərqinə əhəmiyyət vermə (məs. "Buraxılış" = "Buraxilis"). Sinfi adına VƏ YA qoşulma koduna görə tanı.
-- Müəyyən sinfin imtahanları üçün: "list_classes" → o siniflərdən uyğununu seç → "find_exams" alətini həmin classId ilə çağır → qaytarılan imtahan adlarını oxu və cavab ver. Əgər siyahıda uyğun imtahan yoxdursa, yalnız o zaman "yoxdur" de.
+- Müəyyən sinfin imtahanları üçün: "list_classes" → o siniflərdən uyğununu seç → "find_exams" alətini MÜTLƏQ həmin sinfin classId-si ilə çağır. classId ötürməsən BÜTÜN siniflərin imtahanları gəlir və SƏHV olar. find_exams(classId) qaytardığı imtahanlar YALNIZ o sinfə aiddir — başqa siniflərin imtahanlarını (məs. "İngilis dili", "Bərabərsizliklər") həmin cavaba QARIŞDIRMA. Əgər siyahı boşdursa, yalnız o zaman "yoxdur" de.
+- İmtahan sayı soruşulanda list_classes-dəki "exams" rəqəmini işlət.
 
 İMTAHANI DƏYİŞMƏK: Dəyişiklik üçün əvvəlcə find_exams ilə imtahanı tap (siyahıdan özün seç), sonra onun id-si ilə "update_exam" çağır və qısa təsdiqlə. Nisbi tarixləri (sabah, bu gün) yuxarıdakı BUGÜN tarixinə görə hesabla və ISO +04:00 ofset ilə ötür. Bir neçə uyğun imtahan varsa hansını nəzərdə tutduğunu SORUŞ.`;
 
