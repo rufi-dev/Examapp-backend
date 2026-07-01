@@ -137,6 +137,9 @@ const instructionBlock = (instr) =>
 // Reading). Prepended to the teacher's instructions before extraction.
 const presetHint = (presetId) => {
   const p = String(presetId || "");
+  if (p === "custom") {
+    return "STRUCTURE: This is a CUSTOM exam with NO fixed blueprint — do NOT assume any preset structure or question count. Detect the ACTUAL number of questions from the document, and for EACH question decide its type from the content: if it has answer choices (A–E / A–D) it is a CLOSED multiple-choice question; if it asks for a written answer with no choices it is an OPEN question; a match-the-columns task is a MATCHING question. Extract any reading passages as reading blocks. Preserve the document's original question count, order, and language.";
+  }
   if (p === "en-buraxilis-9" || p === "en-buraxilis-11") {
     return "SUBJECT: This is an ENGLISH (İngilis dili) DİM buraxılış exam — the question and answer text is in ENGLISH, so KEEP it in English (do not translate to Azerbaijani). Expected structure: a LISTENING (Dinləmə) section (~6 questions; the audio is uploaded separately, so just extract each question's text + its A–E choices), a GRAMMAR & VOCABULARY section (~16 multiple-choice), and a READING (Oxu) section — one passage extracted as a reading block, followed by closed (A–E) questions and OPEN-ENDED questions (extract those as open questions, not multiple-choice).";
   }

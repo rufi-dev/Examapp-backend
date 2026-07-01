@@ -36,6 +36,18 @@ function azWrittenPlan(count, types) {
 }
 
 const PRESETS = {
+  // Custom — no fixed blueprint. The teacher builds from scratch; for PDF+AI the
+  // model auto-detects the actual question count and open/closed types. Scoring
+  // falls back to legacy per-question points (pointsPlan null).
+  custom: {
+    id: "custom",
+    label: "Fərdi (sıfırdan)",
+    totalMarks: 100,
+    slots: [],
+    pointsPlan: null,
+    negativeMarking: null,
+  },
+
   buraxilis: {
     id: "buraxilis",
     label: "Buraxılış",
