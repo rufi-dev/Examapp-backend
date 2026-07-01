@@ -1264,12 +1264,15 @@ const EXAM_TOOLS = [
   },
 ];
 
-async function toolListClasses(userId) {
-  const classes = await Class.find({ owner: userId }).sort({ createdAt: -1 }).lean();
+async function toolListClasses(user) {
+  const isAdmin = user.role === "admin";
+  const classes = await Class.find(isAdmin ? {} : { owner: user._id })
+    .sort({ createdAt: -1 })
+    .lean();
   if (!classes.length) return { classes: [] };
   const ids = classes.map((c) => c._id);
   const examCounts = await Exam.aggregate([
-    { $match: { owner: userId } },
+    { $match: isAdmin ? {} : { owner: user._id } },
     { $group: { _id: "$class", n: { $sum: 1 } } },
   ]);
   const examMap = {};
@@ -1291,12 +1294,13 @@ async function toolListClasses(userId) {
   };
 }
 
-async function toolFindExams(query, userId, className) {
-  const filter = { owner: userId };
+async function toolFindExams(query, user, className) {
+  const isAdmin = user.role === "admin";
+  const filter = isAdmin ? {} : { owner: user._id };
   if (query && query.trim()) filter.name = new RegExp(escapeRegex(query.trim()), "i");
   if (className && className.trim()) {
     const cls = await Class.find({
-      owner: userId,
+      ...(isAdmin ? {} : { owner: user._id }),
       name: new RegExp(escapeRegex(className.trim()), "i"),
     })
       .select("_id")
@@ -1328,10 +1332,11 @@ async function toolFindExams(query, userId, className) {
   }));
 }
 
-async function toolUpdateExam(args, userId) {
+async function toolUpdateExam(args, user) {
   const exam = await Exam.findById(args.examId);
   if (!exam) return { error: "İmtahan tapılmadı" };
-  if (String(exam.owner) !== String(userId)) return { error: "Bu imtahanı dəyişməyə icazən yoxdur" };
+  if (user.role !== "admin" && String(exam.owner) !== String(user._id))
+    return { error: "Bu imtahanı dəyişməyə icazən yoxdur" };
   const applied = {};
   const set = (k, v) => {
     exam[k] = v;
@@ -1354,11 +1359,11 @@ async function toolUpdateExam(args, userId) {
   return { ok: true, examId: String(exam._id), name: exam.name, applied };
 }
 
-async function execTool(name, args, userId) {
+async function execTool(name, args, user) {
   try {
-    if (name === "list_classes") return await toolListClasses(userId);
-    if (name === "find_exams") return await toolFindExams(args.query, userId, args.className);
-    if (name === "update_exam") return await toolUpdateExam(args, userId);
+    if (name === "list_classes") return await toolListClasses(user);
+    if (name === "find_exams") return await toolFindExams(args.query, user, args.className);
+    if (name === "update_exam") return await toolUpdateExam(args, user);
   } catch (e) {
     return { error: e.message || "Əməliyyat alınmadı" };
   }
@@ -1368,7 +1373,7 @@ async function execTool(name, args, userId) {
 // OpenAI chat WITH tools — runs the tool loop so the assistant can act (edit
 // exams). Returns the final text + accumulated cost. `changed` flags whether any
 // exam was mutated (so the client can refresh).
-async function runChatAgent(messages, userId) {
+async function runChatAgent(messages, user) {
   const model = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
   const convo = [{ role: "system", content: CHAT_SYSTEM_PROMPT }, ...messages];
   let inTok = 0;
@@ -1400,7 +1405,7 @@ async function runChatAgent(messages, userId) {
         } catch {
           /* bad args */
         }
-        const result = await execTool(tc.function.name, a, userId);
+        const result = await execTool(tc.function.name, a, user);
         if (tc.function.name === "update_exam" && result?.ok) changed = true;
         convo.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
       }
@@ -1438,7 +1443,7 @@ const chatAssistant = asyncHandler(async (req, res) => {
     // With OpenAI, use the tool-calling agent (can find + edit exams). Otherwise
     // fall back to the plain multi-provider chat.
     out = process.env.OPENAI_API_KEY
-      ? await runChatAgent(messages, req.user._id)
+      ? await runChatAgent(messages, req.user)
       : await runChat(messages);
   } catch (e) {
     if (e.aiFallback) {
