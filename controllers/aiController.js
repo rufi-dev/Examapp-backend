@@ -976,6 +976,74 @@ async function chatWithClaude(messages) {
   };
 }
 
+function computeOpenAiCost(u, model) {
+  const input = u?.prompt_tokens || 0;
+  const output = u?.completion_tokens || 0;
+  // gpt-4o-mini default pricing (USD / 1M): 0.15 in / 0.60 out. Env-overridable.
+  const inP = Number(process.env.OPENAI_PRICE_IN || 0.15);
+  const outP = Number(process.env.OPENAI_PRICE_OUT || 0.6);
+  return {
+    model,
+    inputTokens: input,
+    outputTokens: output,
+    cacheWriteTokens: 0,
+    cacheReadTokens: u?.prompt_tokens_details?.cached_tokens || 0,
+    totalTokens: u?.total_tokens || input + output,
+    usd: Number(((input * inP + output * outP) / 1e6).toFixed(4)),
+  };
+}
+
+async function chatWithOpenAI(messages) {
+  if (!process.env.OPENAI_API_KEY)
+    throw aiError(503, "AI köməkçisi konfiqurasiya olunmayıb (OPENAI_API_KEY)", true);
+  const model = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
+  let r, data;
+  try {
+    r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "system", content: CHAT_SYSTEM_PROMPT }, ...messages],
+        max_tokens: 1024,
+        temperature: 0.4,
+      }),
+    });
+    data = await r.json();
+  } catch (e) {
+    throw aiError(502, "AI köməkçisi cavab vermədi, bir azdan yenidən cəhd et", true);
+  }
+  if (!r.ok || data?.error) {
+    throw aiError(r.status || 502, "AI köməkçisi hazırda əlçatan deyil", true);
+  }
+  const text = data.choices?.[0]?.message?.content || "";
+  return { text, cost: computeOpenAiCost(data.usage, model) };
+}
+
+// Provider dispatch for the chat assistant. Order = AI_CHAT_PROVIDER first (if
+// set), then the rest as fallbacks. Unconfigured providers are skipped; a
+// transient error (aiFallback) rolls on to the next provider.
+async function runChat(messages) {
+  const order = [];
+  if (process.env.AI_CHAT_PROVIDER) order.push(process.env.AI_CHAT_PROVIDER);
+  ["openai", "gemini", "claude"].forEach((p) => order.includes(p) || order.push(p));
+  let lastErr;
+  for (const p of order) {
+    try {
+      if (p === "openai" && process.env.OPENAI_API_KEY) return await chatWithOpenAI(messages);
+      if (p === "gemini" && process.env.GEMINI_API_KEY) return await chatWithGemini(messages);
+      if (p === "claude" && getClient()) return await chatWithClaude(messages);
+    } catch (e) {
+      lastErr = e;
+      if (!e.aiFallback) throw e; // hard error → stop
+    }
+  }
+  throw lastErr || aiError(503, "AI köməkçisi konfiqurasiya olunmayıb");
+}
+
 // POST /api/quiz/chat  (teacher-only) — { messages:[{role,content}] } -> { reply, cost }
 const chatAssistant = asyncHandler(async (req, res) => {
   const messages = cleanChatMessages(req.body?.messages);
@@ -986,15 +1054,10 @@ const chatAssistant = asyncHandler(async (req, res) => {
 
   let out;
   try {
-    out = process.env.GEMINI_API_KEY ? await chatWithGemini(messages) : await chatWithClaude(messages);
+    out = await runChat(messages);
   } catch (e) {
-    // Gemini down/unconfigured → fall back to Claude if available.
-    if (e.aiFallback && getClient()) {
-      out = await chatWithClaude(messages);
-    } else {
-      res.status(e.aiStatus || 502);
-      throw new Error(e.userMessage || "AI köməkçisi cavab vermədi");
-    }
+    res.status(e.aiStatus || 502);
+    throw new Error(e.userMessage || "AI köməkçisi cavab vermədi");
   }
 
   // Log spend so it shows in the admin AI usage dashboard (best-effort).
