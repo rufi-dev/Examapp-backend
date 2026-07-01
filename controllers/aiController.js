@@ -4,6 +4,7 @@ const AnthropicPkg = require("@anthropic-ai/sdk");
 const Anthropic = AnthropicPkg.default || AnthropicPkg;
 const AiUsage = require("../models/aiUsageModel");
 const User = require("../models/userModel");
+const Exam = require("../models/examModel");
 
 // Lazy client so the server still boots without the key (the feature just
 // returns a clear error until ANTHROPIC_API_KEY is set in the env).
@@ -1039,9 +1040,11 @@ PLATFORMA BİLİKLƏRİ:
 - WhatsApp: müəllim öz nömrəsini bağlayıb yeni imtahan bildirişini öz qrupuna göndərə bilər (qoşulma kodu ilə birlikdə).
 - Nəticələr: "Nəticələr" bölməsində şagird nəticələri görünür.
 
-İMTAHAN YARATMA NİYYƏTİ: Əgər istifadəçi imtahan və ya sınaq YARATMAQ/açmaq/hazırlamaq istəyirsə (yazılış səhv olsa belə, məs. "imtnana yaratmaq isteyirem"), UZUN addım-addım izahat VERMƏ. Bunun əvəzinə YALNIZ qısa bir cümlə yaz (məs: "Əla, imtahan formasını açıram 👇") və cavabın ƏN SONUNDA ayrıca sətirdə tam olaraq bu markeri əlavə et:
+İMTAHAN YARATMA NİYYƏTİ: Əgər istifadəçi YENİ imtahan və ya sınaq YARATMAQ/açmaq/hazırlamaq istəyirsə (yazılış səhv olsa belə, məs. "imtnana yaratmaq isteyirem"), UZUN addım-addım izahat VERMƏ. Bunun əvəzinə YALNIZ qısa bir cümlə yaz (məs: "Əla, imtahan formasını açıram 👇") və cavabın ƏN SONUNDA ayrıca sətirdə tam olaraq bu markeri əlavə et:
 <<CREATE_EXAM>>{"description":"<istifadəçi hansı mövzu/sualları istəyirsə qısa yaz; detal deməyibsə boş string>"}
-Marker JSON düzgün olmalıdır. Əgər istifadəçi sadəcə "necə yaradılır?" kimi izah istəyirsə (yaratmaq yox), markeri YAZMA — normal izah ver.`;
+Marker JSON düzgün olmalıdır. Əgər istifadəçi sadəcə "necə yaradılır?" kimi izah istəyirsə (yaratmaq yox), markeri YAZMA — normal izah ver.
+
+MÖVCUD İMTAHANI DƏYİŞMƏK: Əgər istifadəçi HAZIRKI imtahanı dəyişmək istəyirsə (tarix, müddət, bal, keçid balı, parol aç/bağla, neqativ qiymətləndirmə aç/bağla, anti-cheat aç/bağla, cəhd limiti, nəticə görünüşü və s.), sənin ALƏTLƏRİN var: əvvəlcə "find_exams" ilə imtahanı adına görə tap. Bir neçə uyğun imtahan varsa, hansını nəzərdə tutduğunu SORUŞ. Sonra "update_exam" ilə dəyişikliyi tətbiq et və nəticəni qısa təsdiqlə (məs: "✅ 'Test 2' imtahanının müddəti 90 dəqiqəyə dəyişdirildi."). Tarixləri Azərbaycan vaxtı (UTC+4) kimi anla və ISO formatda +04:00 ofset ilə ötür (məs: 2026-07-05T14:00:00+04:00). Yalnız istifadəçinin sahib olduğu imtahanları dəyişə bilərsən.`;
 
 // Sanitise the client-sent history: keep only user/assistant text turns, cap it.
 function cleanChatMessages(raw) {
@@ -1199,6 +1202,171 @@ async function runChat(messages) {
   throw lastErr || aiError(503, "AI köməkçisi konfiqurasiya olunmayıb");
 }
 
+// ---- Tool-calling agent: lets the assistant find + edit the teacher's exams ----
+const escapeRegex = (s) => String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const EXAM_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "find_exams",
+      description:
+        "Find the current teacher's exams by (partial) name to get their id and current settings. Call with an empty query to list recent exams.",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string", description: "part of the exam name, or empty" } },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_exam",
+      description:
+        "Update settings of ONE exam the teacher owns. Only include the fields to change. Dates must be ISO with the +04:00 (Azerbaijan) offset. Send password:'' to remove a password.",
+      parameters: {
+        type: "object",
+        properties: {
+          examId: { type: "string" },
+          startDate: { type: "string", description: "ISO datetime with +04:00, or '' to clear" },
+          endDate: { type: "string", description: "ISO datetime with +04:00, or '' to clear" },
+          durationMinutes: { type: "number" },
+          totalMarks: { type: "number" },
+          passingMarks: { type: "number" },
+          negativeMarking: { type: "boolean" },
+          antiCheat: { type: "boolean" },
+          password: { type: "string" },
+          maxTry: { type: "number", description: "0 = unlimited" },
+          showScore: { type: "boolean" },
+          showCorrectAnswers: { type: "boolean" },
+          revealAfterEnd: { type: "boolean", description: "true = show answers only after end date" },
+        },
+        required: ["examId"],
+      },
+    },
+  },
+];
+
+async function toolFindExams(query, userId) {
+  const filter = { owner: userId };
+  if (query && query.trim()) filter.name = new RegExp(escapeRegex(query.trim()), "i");
+  const exams = await Exam.find(filter).sort({ createdAt: -1 }).limit(8).lean();
+  return exams.map((e) => ({
+    id: String(e._id),
+    name: e.name,
+    mode: e.mode,
+    startDate: e.startDate,
+    endDate: e.endDate,
+    durationMinutes: Math.round((e.duration || 0) / 60),
+    totalMarks: e.totalMarks,
+    passingMarks: e.passingMarks,
+    negativeMarking: !!e.negativeMarking,
+    antiCheat: !!e.antiCheat,
+    hasPassword: !!e.password,
+    maxTry: e.maxTry,
+    showScore: e.showScore,
+    showCorrectAnswers: e.showCorrectAnswers,
+    revealAfterEnd: e.revealAfterEnd,
+  }));
+}
+
+async function toolUpdateExam(args, userId) {
+  const exam = await Exam.findById(args.examId);
+  if (!exam) return { error: "İmtahan tapılmadı" };
+  if (String(exam.owner) !== String(userId)) return { error: "Bu imtahanı dəyişməyə icazən yoxdur" };
+  const applied = {};
+  const set = (k, v) => {
+    exam[k] = v;
+    applied[k] = v;
+  };
+  if (args.durationMinutes != null) set("duration", Math.max(0, Math.round(Number(args.durationMinutes) || 0)) * 60);
+  if (args.startDate !== undefined) set("startDate", args.startDate ? new Date(args.startDate) : null);
+  if (args.endDate !== undefined) set("endDate", args.endDate ? new Date(args.endDate) : null);
+  if (args.totalMarks != null) set("totalMarks", Number(args.totalMarks));
+  if (args.passingMarks != null) set("passingMarks", Number(args.passingMarks));
+  if (args.negativeMarking != null) set("negativeMarking", !!args.negativeMarking);
+  if (args.antiCheat != null) set("antiCheat", !!args.antiCheat);
+  if (args.password !== undefined) set("password", String(args.password || ""));
+  if (args.maxTry != null) set("maxTry", Math.max(0, Number(args.maxTry) || 0));
+  if (args.showScore != null) set("showScore", !!args.showScore);
+  if (args.showCorrectAnswers != null) set("showCorrectAnswers", !!args.showCorrectAnswers);
+  if (args.revealAfterEnd != null) set("revealAfterEnd", !!args.revealAfterEnd);
+  if (!Object.keys(applied).length) return { error: "Dəyişiləcək sahə göstərilmədi" };
+  await exam.save();
+  return { ok: true, examId: String(exam._id), name: exam.name, applied };
+}
+
+async function execTool(name, args, userId) {
+  try {
+    if (name === "find_exams") return await toolFindExams(args.query, userId);
+    if (name === "update_exam") return await toolUpdateExam(args, userId);
+  } catch (e) {
+    return { error: e.message || "Əməliyyat alınmadı" };
+  }
+  return { error: "unknown tool" };
+}
+
+// OpenAI chat WITH tools — runs the tool loop so the assistant can act (edit
+// exams). Returns the final text + accumulated cost. `changed` flags whether any
+// exam was mutated (so the client can refresh).
+async function runChatAgent(messages, userId) {
+  const model = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
+  const convo = [{ role: "system", content: CHAT_SYSTEM_PROMPT }, ...messages];
+  let inTok = 0;
+  let outTok = 0;
+  let changed = false;
+  for (let step = 0; step < 6; step++) {
+    let r, data;
+    try {
+      r = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+        body: JSON.stringify({ model, messages: convo, tools: EXAM_TOOLS, tool_choice: "auto", temperature: 0.3, max_tokens: 1024 }),
+      });
+      data = await r.json();
+    } catch (e) {
+      throw aiError(502, "AI köməkçisi cavab vermədi", true);
+    }
+    if (!r.ok || data?.error) throw aiError(r.status || 502, data?.error?.message || "AI köməkçisi əlçatan deyil", true);
+    const u = data.usage || {};
+    inTok += u.prompt_tokens || 0;
+    outTok += u.completion_tokens || 0;
+    const msg = data.choices?.[0]?.message;
+    convo.push(msg);
+    if (msg?.tool_calls?.length) {
+      for (const tc of msg.tool_calls) {
+        let a = {};
+        try {
+          a = JSON.parse(tc.function.arguments || "{}");
+        } catch {
+          /* bad args */
+        }
+        const result = await execTool(tc.function.name, a, userId);
+        if (tc.function.name === "update_exam" && result?.ok) changed = true;
+        convo.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
+      }
+      continue;
+    }
+    const inP = Number(process.env.OPENAI_PRICE_IN || 0.15);
+    const outP = Number(process.env.OPENAI_PRICE_OUT || 0.6);
+    return {
+      text: msg?.content || "",
+      changed,
+      cost: {
+        model,
+        inputTokens: inTok,
+        outputTokens: outTok,
+        cacheWriteTokens: 0,
+        cacheReadTokens: 0,
+        totalTokens: inTok + outTok,
+        usd: Number(((inTok * inP + outTok * outP) / 1e6).toFixed(4)),
+      },
+    };
+  }
+  return { text: "Bağışla, əməliyyatı tamamlaya bilmədim — yenidən cəhd et.", changed, cost: { model } };
+}
+
 // POST /api/quiz/chat  (teacher-only) — { messages:[{role,content}] } -> { reply, cost }
 const chatAssistant = asyncHandler(async (req, res) => {
   const messages = cleanChatMessages(req.body?.messages);
@@ -1209,10 +1377,23 @@ const chatAssistant = asyncHandler(async (req, res) => {
 
   let out;
   try {
-    out = await runChat(messages);
+    // With OpenAI, use the tool-calling agent (can find + edit exams). Otherwise
+    // fall back to the plain multi-provider chat.
+    out = process.env.OPENAI_API_KEY
+      ? await runChatAgent(messages, req.user._id)
+      : await runChat(messages);
   } catch (e) {
-    res.status(e.aiStatus || 502);
-    throw new Error(e.userMessage || "AI köməkçisi cavab vermədi");
+    if (e.aiFallback) {
+      try {
+        out = await runChat(messages);
+      } catch (e2) {
+        res.status(e2.aiStatus || 502);
+        throw new Error(e2.userMessage || "AI köməkçisi cavab vermədi");
+      }
+    } else {
+      res.status(e.aiStatus || 502);
+      throw new Error(e.userMessage || "AI köməkçisi cavab vermədi");
+    }
   }
 
   // Log spend so it shows in the admin AI usage dashboard (best-effort).
@@ -1233,7 +1414,7 @@ const chatAssistant = asyncHandler(async (req, res) => {
     console.error("chat usage log failed:", e?.message);
   }
 
-  res.json({ reply: out.text, cost: out.cost });
+  res.json({ reply: out.text, cost: out.cost, changed: !!out.changed });
 });
 
 // POST /api/quiz/transcribe (teacher) — audio file -> { text }. OpenAI Whisper
