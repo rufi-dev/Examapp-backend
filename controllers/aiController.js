@@ -1047,7 +1047,9 @@ PLATFORMA BİLİKLƏRİ:
 <<CREATE_EXAM>>{"description":"<istifadəçi hansı mövzu/sualları istəyirsə qısa yaz; detal deməyibsə boş string>"}
 Marker JSON düzgün olmalıdır. Əgər istifadəçi sadəcə "necə yaradılır?" kimi izah istəyirsə (yaratmaq yox), markeri YAZMA — normal izah ver.
 
-HESABI GÖRMƏK (ÇOX VACİB): Sənin bu müəllimin ÖZ hesabına baxmaq üçün alətlərin var. İstifadəçi öz sinifləri, imtahanları, şagird sayı və ya imtahan sayı haqqında soruşanda ("Azərbaycan dili sinfində neçə imtahan var?", "neçə sinfim var?", "hansı imtahanlarım var?") ƏSLA "platformaya daxil ol / mən görə bilmirəm" DEMƏ. Bunun əvəzinə "list_classes" və ya "find_exams" alətini çağır və CAVABI birbaşa, dəqiq rəqəmlərlə ver (məs: "Azərbaycan dili sinfində 3 imtahanın var.").
+HESABI GÖRMƏK (ÇOX VACİB): Hesaba baxmaq üçün alətlərin var. Siniflər, imtahanlar, şagird/imtahan sayı haqqında soruşulanda ƏSLA "platformaya daxil ol / görə bilmirəm" DEMƏ — alətləri çağır və dəqiq cavab ver.
+- Müəyyən bir sinfin imtahanlarını (adları/sayı) görmək üçün DÜZGÜN YOL: əvvəlcə "list_classes" çağır → istifadəçinin dediyi sinfi ADINA və ya QOŞULMA KODUNA görə həmin siyahıdan tap → həmin sinfin "id"-sini götür → "find_exams" alətini classId ilə çağır. Beləcə imtahan adlarını dəqiq alarsan.
+- Sinif adını yazılışına görə tapa bilməsən (məs. "Azərbaycan"/"Azerbaycan"), list_classes nəticəsindən uyğun sinfi özün seç və onun id-si ilə davam et. Eyni adlı iki sinif varsa, kodları ilə fərqləndir.
 
 MÖVCUD İMTAHANI DƏYİŞMƏK: İstifadəçi imtahanı dəyişmək istəyirsə (tarix, müddət, bal, keçid balı, parol aç/bağla, neqativ qiymətləndirmə, anti-cheat, cəhd limiti, nəticə görünüşü), "find_exams" ilə tap (lazım olsa className ilə filtrlə). Bir neçə uyğun varsa hansını nəzərdə tutduğunu SORUŞ. Sonra "update_exam" ilə tətbiq et və qısa təsdiqlə. Tarixləri Azərbaycan vaxtı (UTC+4) kimi anla və ISO +04:00 ofset ilə ötür (məs: 2026-07-05T14:00:00+04:00). Yalnız istifadəçinin sahib olduğu sinif/imtahanları görə və dəyişə bilərsən.`;
 
@@ -1225,12 +1227,13 @@ const EXAM_TOOLS = [
     function: {
       name: "find_exams",
       description:
-        "Find the current teacher's exams by (partial) name and/or class name, returning each exam's id, class, and current settings. Empty query + empty className = recent exams.",
+        "Find exams, returning each exam's id, class and settings. Filter by exam name (query), by classId (PREFERRED — get it from list_classes), or by class name. To list a specific class's exams, first call list_classes, take that class's id, then call find_exams with classId.",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string", description: "part of the exam name, or empty" },
-          className: { type: "string", description: "part of a class name to filter by, or empty" },
+          classId: { type: "string", description: "exact class id from list_classes (preferred), or empty" },
+          className: { type: "string", description: "part of a class name, or empty" },
         },
         required: ["query"],
       },
@@ -1295,18 +1298,21 @@ async function toolListClasses(user) {
   };
 }
 
-async function toolFindExams(query, user, className) {
+async function toolFindExams(query, user, className, classId) {
   const isAdmin = user.role === "admin";
   const filter = isAdmin ? {} : { owner: user._id };
   if (query && query.trim()) filter.name = new RegExp(escapeRegex(query.trim()), "i");
-  if (className && className.trim()) {
-    const cls = await Class.find({
-      ...(isAdmin ? {} : { owner: user._id }),
-      name: new RegExp(escapeRegex(className.trim()), "i"),
-    })
-      .select("_id")
-      .lean();
-    filter.class = { $in: cls.map((c) => c._id) };
+  // Prefer an exact class id (reliable — no character/spelling mismatch).
+  if (classId && /^[a-f0-9]{24}$/i.test(String(classId).trim())) {
+    filter.class = String(classId).trim();
+  } else if (className && className.trim()) {
+    // Accent-insensitive class-name match (ə≈e, ı≈i, ş≈s, ç≈c, ğ≈g, ö≈o, ü≈u).
+    const fold = (s) =>
+      String(s).toLowerCase().replace(/ə/g, "e").replace(/ı/g, "i").replace(/ş/g, "s").replace(/ç/g, "c").replace(/ğ/g, "g").replace(/ö/g, "o").replace(/ü/g, "u");
+    const q = fold(className.trim());
+    const all = await Class.find(isAdmin ? {} : { owner: user._id }).select("_id name").lean();
+    const ids = all.filter((c) => fold(c.name).includes(q)).map((c) => c._id);
+    filter.class = { $in: ids };
   }
   const exams = await Exam.find(filter)
     .sort({ createdAt: -1 })
@@ -1363,7 +1369,7 @@ async function toolUpdateExam(args, user) {
 async function execTool(name, args, user) {
   try {
     if (name === "list_classes") return await toolListClasses(user);
-    if (name === "find_exams") return await toolFindExams(args.query, user, args.className);
+    if (name === "find_exams") return await toolFindExams(args.query, user, args.className, args.classId);
     if (name === "update_exam") return await toolUpdateExam(args, user);
   } catch (e) {
     return { error: e.message || "Əməliyyat alınmadı" };
