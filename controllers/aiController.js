@@ -65,6 +65,9 @@ const EXTRACTION_SCHEMA = {
           // upload manually (Claude can read a figure but can't hand back an image).
           hasFigure: { type: "boolean" },
           openAnswer: { type: "string" },
+          // Open (Co): EVERY acceptable answer as its own array item (synonyms /
+          // variants). Empty for non-open questions.
+          openAnswers: { type: "array", items: { type: "string" } },
         },
         required: [
           "type",
@@ -76,6 +79,7 @@ const EXTRACTION_SCHEMA = {
           "pairs",
           "hasFigure",
           "openAnswer",
+          "openAnswers",
         ],
       },
     },
@@ -252,10 +256,11 @@ const GEMINI_SCHEMA = {
           },
           hasFigure: { type: "BOOLEAN" },
           openAnswer: { type: "STRING" },
+          openAnswers: { type: "ARRAY", items: { type: "STRING" } },
         },
         required: [
           "type", "text", "title", "latex", "choices", "correct",
-          "pairs", "hasFigure", "openAnswer",
+          "pairs", "hasFigure", "openAnswer", "openAnswers",
         ],
       },
     },
@@ -876,7 +881,7 @@ QAYDALAR:
 - Müəllimin istədiyi SAY və NÖV sualları yarat (məs. "10 qapalı riyaziyyat sualı").
 - Dil: mövzuya uyğun — İngilis dili mövzusu deyilsə, suallar Azərbaycan dilində olsun.
 - Qapalı sual (Cm/Cs): "choices" massivində A–E variantları ver və düzgün variant(lar)ın indeksini "correct" massivinə yaz.
-- Açıq sual (Co): "choices" boş. Düzgün cavabı "openAnswer" sahəsinə yaz. ƏGƏR birdən çox məqbul cavab (sinonim/variant) varsa, onları YALNIZ "|" işarəsi ilə ayır — məs: "yaş|quru|dolu". NÖMRƏ (1. 2. 3.), "və", vergül və ya nöqtəli vergüldən istifadə ETMƏ; hər variant tam müstəqil məqbul cavabdır (şagird onlardan birini yazsa kifayətdir).
+- Açıq sual (Co): "choices" boş. BÜTÜN məqbul cavabları "openAnswers" MASSİVİNƏ yaz — HƏR məqbul cavab (sinonim/variant) AYRICA element olsun (məs: ["yaş","quru","dolu"]). Nömrələmə, "və ya", "/", mötərizə İSTİFADƏ ETMƏ — bir sətirdə bir neçə cavab birləşdirmə. "openAnswer" sahəsinə isə birinci cavabı yaz. Qapalı suallarda "openAnswers" boş massiv [] olsun.
 - Riyazi ifadələr üçün "latex" sahəsindən istifadə et.
 - Şəkil/qrafik tələb edən sual YARATMA (hasFigure həmişə false). Mümkün qədər mətnlə həll olunan suallar yarat.
 - Xahiş olunmayıbsa oxu mətni (reading) əlavə etmə.
