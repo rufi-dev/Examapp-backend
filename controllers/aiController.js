@@ -1236,10 +1236,51 @@ const chatAssistant = asyncHandler(async (req, res) => {
   res.json({ reply: out.text, cost: out.cost });
 });
 
+// POST /api/quiz/transcribe (teacher) — audio file -> { text }. OpenAI Whisper
+// with language=az so Azerbaijani speech is transcribed correctly.
+const transcribeAudio = asyncHandler(async (req, res) => {
+  if (!process.env.OPENAI_API_KEY) {
+    res.status(503);
+    throw new Error("Səs tanıma konfiqurasiya olunmayıb (OPENAI_API_KEY)");
+  }
+  if (!req.file || !req.file.buffer?.length) {
+    res.status(400);
+    throw new Error("Səs faylı yoxdur");
+  }
+  const model = process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1";
+  const fd = new FormData();
+  fd.append(
+    "file",
+    new Blob([req.file.buffer], { type: req.file.mimetype || "audio/webm" }),
+    req.file.originalname || "audio.webm"
+  );
+  fd.append("model", model);
+  fd.append("language", "az"); // Azerbaijani
+
+  let r, data;
+  try {
+    r = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+      body: fd,
+    });
+    data = await r.json();
+  } catch (e) {
+    res.status(502);
+    throw new Error("Səs tanınmadı, yenidən cəhd et");
+  }
+  if (!r.ok || data?.error) {
+    res.status(r.status || 502);
+    throw new Error(data?.error?.message || "Səs tanınmadı");
+  }
+  res.json({ text: data.text || "" });
+});
+
 module.exports = {
   extractQuestions,
   extractQuestionsStream,
   getAiUsage,
   chatAssistant,
   generateQuestions,
+  transcribeAudio,
 };
