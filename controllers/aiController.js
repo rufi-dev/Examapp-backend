@@ -1276,6 +1276,45 @@ const transcribeAudio = asyncHandler(async (req, res) => {
   res.json({ text: data.text || "" });
 });
 
+// POST /api/quiz/realtime-token (teacher) — mints a short-lived ephemeral token
+// for an OpenAI Realtime TRANSCRIPTION session (Azerbaijian, gpt-4o-transcribe),
+// so the browser can stream mic audio directly to OpenAI and get live captions.
+const realtimeToken = asyncHandler(async (req, res) => {
+  if (!process.env.OPENAI_API_KEY) {
+    res.status(503);
+    throw new Error("Realtime konfiqurasiya olunmayıb (OPENAI_API_KEY)");
+  }
+  const model = process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-transcribe";
+  let r, data;
+  try {
+    r = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session: {
+          type: "transcription",
+          audio: {
+            input: {
+              format: { type: "audio/pcm", rate: 24000 },
+              transcription: { model, language: "az" },
+              turn_detection: { type: "server_vad" },
+            },
+          },
+        },
+      }),
+    });
+    data = await r.json();
+  } catch (e) {
+    res.status(502);
+    throw new Error("Realtime sessiya yaradıla bilmədi");
+  }
+  if (!r.ok || data?.error) {
+    res.status(r.status || 502);
+    throw new Error(data?.error?.message || "Realtime sessiya alınmadı");
+  }
+  res.json({ token: data?.value, expires_at: data?.expires_at });
+});
+
 module.exports = {
   extractQuestions,
   extractQuestionsStream,
@@ -1283,4 +1322,5 @@ module.exports = {
   chatAssistant,
   generateQuestions,
   transcribeAudio,
+  realtimeToken,
 };

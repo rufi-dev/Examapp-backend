@@ -51,7 +51,7 @@ const {
   getExamTagandClass,
   getResultsByExam
 } = require("../controllers/quizController");
-const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions, transcribeAudio } = require("../controllers/aiController");
+const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions, transcribeAudio, realtimeToken } = require("../controllers/aiController");
 const {
   joinClass,
   myEnrollments,
@@ -121,6 +121,8 @@ router.post("/chat", protect, teacherOnly, chatAssistant);
 router.post("/generateQuestions/:examId", protect, teacherOnly, generateQuestions);
 // Voice → text (Azerbaijani) for the chat assistant.
 router.post("/transcribe", protect, teacherOnly, memUpload.single("audio"), transcribeAudio);
+// Ephemeral token for OpenAI Realtime live transcription (browser → OpenAI direct).
+router.post("/realtime-token", protect, teacherOnly, realtimeToken);
 router.post("/addClass", protect, teacherOnly, addClass);
 router.get("/server-time", serverTime);
 // Scoped to the caller (teacher → own, student → enrolled, admin → all), so it
