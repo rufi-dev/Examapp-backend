@@ -51,7 +51,7 @@ const {
   getExamTagandClass,
   getResultsByExam
 } = require("../controllers/quizController");
-const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant } = require("../controllers/aiController");
+const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions } = require("../controllers/aiController");
 const {
   joinClass,
   myEnrollments,
@@ -117,6 +117,8 @@ router.post(
 router.get("/aiUsage", protect, adminOnly, getAiUsage);
 // AI chat assistant for teachers (in-dashboard floating helper).
 router.post("/chat", protect, teacherOnly, chatAssistant);
+// AI: generate questions from a text description (for the in-chat exam wizard).
+router.post("/generateQuestions/:examId", protect, teacherOnly, generateQuestions);
 router.post("/addClass", protect, teacherOnly, addClass);
 router.get("/server-time", serverTime);
 // Scoped to the caller (teacher → own, student → enrolled, admin → all), so it

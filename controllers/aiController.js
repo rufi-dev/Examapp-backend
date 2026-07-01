@@ -865,6 +865,152 @@ const getAiUsage = asyncHandler(async (req, res) => {
   res.status(200).json({ rows, totals, recent });
 });
 
+// ============================ AI question GENERATION ============================
+// Generate exam questions from a TEXT description (no PDF). Same output shape as
+// extraction, so results drop into the structured builder for review. Unlike
+// extraction, generation MAY fill in the correct answers.
+
+const GEN_SYSTEM_PROMPT = `Sən imtahan sualları YARADAN AI köməkçisisən. Müəllimin təsvirinə əsasən suallar yarat və NƏTİCƏNİ YALNIZ verilən JSON sxemi ilə qaytar.
+
+QAYDALAR:
+- Müəllimin istədiyi SAY və NÖV sualları yarat (məs. "10 qapalı riyaziyyat sualı").
+- Dil: mövzuya uyğun — İngilis dili mövzusu deyilsə, suallar Azərbaycan dilində olsun.
+- Qapalı sual (Cm/Cs): "choices" massivində A–E variantları ver və düzgün variant(lar)ın indeksini "correct" massivinə yaz.
+- Açıq sual (Co): "choices" boş, düzgün cavabı "openAnswer" sahəsinə yaz.
+- Riyazi ifadələr üçün "latex" sahəsindən istifadə et.
+- Şəkil/qrafik tələb edən sual YARATMA (hasFigure həmişə false). Mümkün qədər mətnlə həll olunan suallar yarat.
+- Xahiş olunmayıbsa oxu mətni (reading) əlavə etmə.
+- Suallar aydın, düzgün və imtahan səviyyəsinə uyğun olsun.`;
+
+async function generateWithGemini(prompt, presetId) {
+  if (!process.env.GEMINI_API_KEY)
+    throw aiError(503, "AI konfiqurasiya olunmayıb (GEMINI_API_KEY)", true);
+  const sys = GEN_SYSTEM_PROMPT + (presetHint(presetId) ? "\n\n" + presetHint(presetId) : "");
+  const models = [GEMINI_MODEL, GEMINI_FALLBACK_MODEL].filter((m, i, a) => m && a.indexOf(m) === i);
+  const buildBody = (model) =>
+    JSON.stringify({
+      systemInstruction: { parts: [{ text: sys }] },
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: GEMINI_SCHEMA,
+        maxOutputTokens: String(model).includes("pro") ? 64000 : 32000,
+        temperature: 0.6,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    });
+  for (const model of models) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let r, data;
+      try {
+        r = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-goog-api-key": process.env.GEMINI_API_KEY },
+            body: buildBody(model),
+          }
+        );
+        data = await r.json();
+      } catch (e) {
+        await sleep(1000 * (attempt + 1));
+        continue;
+      }
+      if (r.ok && !data?.error) {
+        const text =
+          (data.candidates?.[0]?.content?.parts || []).map((p) => p.text).filter(Boolean).join("") || "{}";
+        let parsed;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          continue;
+        }
+        return {
+          questions: Array.isArray(parsed.questions) ? parsed.questions : [],
+          cost: computeGeminiCost(data.usageMetadata, model),
+        };
+      }
+      if (r.status && ![429, 500, 503].includes(r.status)) break;
+      await sleep(1000 * (attempt + 1));
+    }
+  }
+  throw aiError(502, "AI suallar yarada bilmədi, yenidən cəhd et", true);
+}
+
+async function generateWithClaude(prompt, presetId) {
+  const client = getClient();
+  if (!client) throw aiError(503, "AI konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)");
+  const sys = [
+    { type: "text", text: GEN_SYSTEM_PROMPT + (presetHint(presetId) ? "\n\n" + presetHint(presetId) : "") },
+  ];
+  let message;
+  try {
+    message = await client.messages
+      .stream({
+        model: "claude-opus-4-8",
+        max_tokens: 32000,
+        thinking: { type: "adaptive" },
+        system: sys,
+        output_config: { effort: "high", format: { type: "json_schema", schema: EXTRACTION_SCHEMA } },
+        messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+      })
+      .finalMessage();
+  } catch (e) {
+    throw aiError(502, "AI suallar yarada bilmədi. Yenidən cəhd et.");
+  }
+  const textBlock = message.content.find((b) => b.type === "text");
+  let parsed;
+  try {
+    parsed = JSON.parse(textBlock?.text || "{}");
+  } catch {
+    throw aiError(502, "AI cavabı oxunmadı. Yenidən cəhd et.");
+  }
+  return {
+    questions: Array.isArray(parsed.questions) ? parsed.questions : [],
+    cost: computeCost(message.usage),
+  };
+}
+
+// POST /api/quiz/generateQuestions/:examId (teacher) — { prompt, preset } -> { questions, cost }
+const generateQuestions = asyncHandler(async (req, res) => {
+  const prompt = String(req.body?.prompt || "").trim().slice(0, 4000);
+  const preset = req.body?.preset;
+  if (!prompt) {
+    res.status(400);
+    throw new Error("İmtahan təsviri boşdur");
+  }
+  let out;
+  try {
+    out = process.env.GEMINI_API_KEY
+      ? await generateWithGemini(prompt, preset)
+      : await generateWithClaude(prompt, preset);
+  } catch (e) {
+    if (e.aiFallback && getClient()) out = await generateWithClaude(prompt, preset);
+    else {
+      res.status(e.aiStatus || 502);
+      throw new Error(e.userMessage || "AI suallar yarada bilmədi");
+    }
+  }
+  try {
+    const c = out.cost || {};
+    await AiUsage.create({
+      user: req.user._id,
+      exam: req.params.examId,
+      model: c.model,
+      inputTokens: c.inputTokens || 0,
+      outputTokens: c.outputTokens || 0,
+      cacheWriteTokens: c.cacheWriteTokens || 0,
+      cacheReadTokens: c.cacheReadTokens || 0,
+      totalTokens: c.totalTokens || 0,
+      usd: c.usd || 0,
+      questions: (out.questions || []).length,
+    });
+  } catch (e) {
+    console.error("generate usage log failed:", e?.message);
+  }
+  res.json({ questions: out.questions || [], cost: out.cost });
+});
+
 // ============================ Teacher chat assistant ============================
 // A lightweight in-dashboard helper for TEACHERS: answers "how do I do X in
 // Examopia" in Azerbaijani. Uses Gemini Flash (cheap) with a Claude fallback.
@@ -1081,4 +1227,10 @@ const chatAssistant = asyncHandler(async (req, res) => {
   res.json({ reply: out.text, cost: out.cost });
 });
 
-module.exports = { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant };
+module.exports = {
+  extractQuestions,
+  extractQuestionsStream,
+  getAiUsage,
+  chatAssistant,
+  generateQuestions,
+};
