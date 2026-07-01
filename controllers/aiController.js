@@ -1047,11 +1047,11 @@ PLATFORMA BİLİKLƏRİ:
 <<CREATE_EXAM>>{"description":"<istifadəçi hansı mövzu/sualları istəyirsə qısa yaz; detal deməyibsə boş string>"}
 Marker JSON düzgün olmalıdır. Əgər istifadəçi sadəcə "necə yaradılır?" kimi izah istəyirsə (yaratmaq yox), markeri YAZMA — normal izah ver.
 
-HESABI GÖRMƏK (ÇOX VACİB): Hesaba baxmaq üçün alətlərin var. Siniflər, imtahanlar, şagird/imtahan sayı haqqında soruşulanda ƏSLA "platformaya daxil ol / görə bilmirəm" DEMƏ — alətləri çağır və dəqiq cavab ver.
-- Müəyyən bir sinfin imtahanlarını (adları/sayı) görmək üçün DÜZGÜN YOL: əvvəlcə "list_classes" çağır → istifadəçinin dediyi sinfi ADINA və ya QOŞULMA KODUNA görə həmin siyahıdan tap → həmin sinfin "id"-sini götür → "find_exams" alətini classId ilə çağır. Beləcə imtahan adlarını dəqiq alarsan.
-- Sinif adını yazılışına görə tapa bilməsən (məs. "Azərbaycan"/"Azerbaycan"), list_classes nəticəsindən uyğun sinfi özün seç və onun id-si ilə davam et. Eyni adlı iki sinif varsa, kodları ilə fərqləndir.
+HESABI GÖRMƏK (ÇOX VACİB): Hesaba baxmaq üçün alətlərin var. Siniflər/imtahanlar haqqında soruşulanda ƏSLA "platformaya daxil ol / görə bilmirəm" DEMƏ.
+- Server AD üzrə axtarış ETMİR. Sən "list_classes" və "find_exams" çağırırsan, onlar SİYAHINI qaytarır, sən isə həmin siyahını ÖZÜN oxuyub istifadəçinin dediyi sinfi/imtahanı tapırsan — yazılış, böyük/kiçik hərf, ə/e, ı/i, ş/s fərqinə əhəmiyyət vermə (məs. "Buraxılış" = "Buraxilis"). Sinfi adına VƏ YA qoşulma koduna görə tanı.
+- Müəyyən sinfin imtahanları üçün: "list_classes" → o siniflərdən uyğununu seç → "find_exams" alətini həmin classId ilə çağır → qaytarılan imtahan adlarını oxu və cavab ver. Əgər siyahıda uyğun imtahan yoxdursa, yalnız o zaman "yoxdur" de.
 
-MÖVCUD İMTAHANI DƏYİŞMƏK: İstifadəçi imtahanı dəyişmək istəyirsə (tarix, müddət, bal, keçid balı, parol aç/bağla, neqativ qiymətləndirmə, anti-cheat, cəhd limiti, nəticə görünüşü), "find_exams" ilə tap (lazım olsa className ilə filtrlə). Bir neçə uyğun varsa hansını nəzərdə tutduğunu SORUŞ. Sonra "update_exam" ilə tətbiq et və qısa təsdiqlə. Tarixləri Azərbaycan vaxtı (UTC+4) kimi anla və ISO +04:00 ofset ilə ötür (məs: 2026-07-05T14:00:00+04:00). Yalnız istifadəçinin sahib olduğu sinif/imtahanları görə və dəyişə bilərsən.`;
+İMTAHANI DƏYİŞMƏK: Dəyişiklik üçün əvvəlcə find_exams ilə imtahanı tap (siyahıdan özün seç), sonra onun id-si ilə "update_exam" çağır və qısa təsdiqlə. Nisbi tarixləri (sabah, bu gün) yuxarıdakı BUGÜN tarixinə görə hesabla və ISO +04:00 ofset ilə ötür. Bir neçə uyğun imtahan varsa hansını nəzərdə tutduğunu SORUŞ.`;
 
 // Sanitise the client-sent history: keep only user/assistant text turns, cap it.
 function cleanChatMessages(raw) {
@@ -1212,6 +1212,20 @@ async function runChat(messages) {
 // ---- Tool-calling agent: lets the assistant find + edit the teacher's exams ----
 const escapeRegex = (s) => String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+// Current Azerbaijan (UTC+4) date/time hint so the model can resolve "sabah" etc.
+function azDateHint() {
+  try {
+    const s = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Baku",
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    }).format(new Date());
+    return `BUGÜN (Azərbaycan vaxtı, UTC+4): ${s}. "Sabah" = bir gün sonra, "bu gün" = həmin gün. Tarixləri ISO +04:00 ofset ilə ver.`;
+  } catch {
+    return "";
+  }
+}
+
 const EXAM_TOOLS = [
   {
     type: "function",
@@ -1227,15 +1241,13 @@ const EXAM_TOOLS = [
     function: {
       name: "find_exams",
       description:
-        "Find exams, returning each exam's id, class and settings. Filter by exam name (query), by classId (PREFERRED — get it from list_classes), or by class name. To list a specific class's exams, first call list_classes, take that class's id, then call find_exams with classId.",
+        "List the teacher's exams (all recent, or only within one class if classId is given), returning each exam's id, name, class and current settings. It does NOT search/filter by name — YOU read the returned names and pick the exam the user means (ignoring spelling/accent differences).",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "part of the exam name, or empty" },
-          classId: { type: "string", description: "exact class id from list_classes (preferred), or empty" },
-          className: { type: "string", description: "part of a class name, or empty" },
+          classId: { type: "string", description: "optional exact class id from list_classes to limit to one class" },
         },
-        required: ["query"],
+        required: [],
       },
     },
   },
@@ -1298,27 +1310,11 @@ async function toolListClasses(user) {
   };
 }
 
-async function toolFindExams(query, user, className, classId) {
+async function toolFindExams(user, classId) {
   const isAdmin = user.role === "admin";
   const filter = isAdmin ? {} : { owner: user._id };
-  if (query && query.trim()) filter.name = new RegExp(escapeRegex(query.trim()), "i");
-  // Prefer an exact class id (reliable — no character/spelling mismatch).
-  if (classId && /^[a-f0-9]{24}$/i.test(String(classId).trim())) {
-    filter.class = String(classId).trim();
-  } else if (className && className.trim()) {
-    // Accent-insensitive class-name match (ə≈e, ı≈i, ş≈s, ç≈c, ğ≈g, ö≈o, ü≈u).
-    const fold = (s) =>
-      String(s).toLowerCase().replace(/ə/g, "e").replace(/ı/g, "i").replace(/ş/g, "s").replace(/ç/g, "c").replace(/ğ/g, "g").replace(/ö/g, "o").replace(/ü/g, "u");
-    const q = fold(className.trim());
-    const all = await Class.find(isAdmin ? {} : { owner: user._id }).select("_id name").lean();
-    const ids = all.filter((c) => fold(c.name).includes(q)).map((c) => c._id);
-    filter.class = { $in: ids };
-  }
-  const exams = await Exam.find(filter)
-    .sort({ createdAt: -1 })
-    .limit(20)
-    .populate("class", "name")
-    .lean();
+  if (classId && /^[a-f0-9]{24}$/i.test(String(classId).trim())) filter.class = String(classId).trim();
+  const exams = await Exam.find(filter).sort({ createdAt: -1 }).limit(40).populate("class", "name").lean();
   return exams.map((e) => ({
     id: String(e._id),
     name: e.name,
@@ -1369,7 +1365,7 @@ async function toolUpdateExam(args, user) {
 async function execTool(name, args, user) {
   try {
     if (name === "list_classes") return await toolListClasses(user);
-    if (name === "find_exams") return await toolFindExams(args.query, user, args.className, args.classId);
+    if (name === "find_exams") return await toolFindExams(user, args.classId);
     if (name === "update_exam") return await toolUpdateExam(args, user);
   } catch (e) {
     return { error: e.message || "Əməliyyat alınmadı" };
@@ -1382,7 +1378,7 @@ async function execTool(name, args, user) {
 // exam was mutated (so the client can refresh).
 async function runChatAgent(messages, user) {
   const model = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
-  const convo = [{ role: "system", content: CHAT_SYSTEM_PROMPT }, ...messages];
+  const convo = [{ role: "system", content: `${CHAT_SYSTEM_PROMPT}\n\n${azDateHint()}` }, ...messages];
   let inTok = 0;
   let outTok = 0;
   let changed = false;
