@@ -1047,12 +1047,11 @@ PLATFORMA BİLİKLƏRİ:
 <<CREATE_EXAM>>{"description":"<istifadəçi hansı mövzu/sualları istəyirsə qısa yaz; detal deməyibsə boş string>"}
 Marker JSON düzgün olmalıdır. Əgər istifadəçi sadəcə "necə yaradılır?" kimi izah istəyirsə (yaratmaq yox), markeri YAZMA — normal izah ver.
 
-HESABI GÖRMƏK (ÇOX VACİB): Hesaba baxmaq üçün alətlərin var. Siniflər/imtahanlar haqqında soruşulanda ƏSLA "platformaya daxil ol / görə bilmirəm" DEMƏ.
-- Server AD üzrə axtarış ETMİR. Sən "list_classes" və "find_exams" çağırırsan, onlar SİYAHINI qaytarır, sən isə həmin siyahını ÖZÜN oxuyub istifadəçinin dediyi sinfi/imtahanı tapırsan — yazılış, böyük/kiçik hərf, ə/e, ı/i, ş/s fərqinə əhəmiyyət vermə (məs. "Buraxılış" = "Buraxilis"). Sinfi adına VƏ YA qoşulma koduna görə tanı.
-- Müəyyən sinfin imtahanları üçün: "list_classes" → o siniflərdən uyğununu seç → "find_exams" alətini MÜTLƏQ həmin sinfin classId-si ilə çağır. classId ötürməsən BÜTÜN siniflərin imtahanları gəlir və SƏHV olar. find_exams(classId) qaytardığı imtahanlar YALNIZ o sinfə aiddir — başqa siniflərin imtahanlarını (məs. "İngilis dili", "Bərabərsizliklər") həmin cavaba QARIŞDIRMA. Əgər siyahı boşdursa, yalnız o zaman "yoxdur" de.
-- İmtahan sayı soruşulanda list_classes-dəki "exams" rəqəmini işlət.
+HESABA BAXMAQ (AGENTİK — ÇOX VACİB): Sən əsl agentsən. Siniflər, imtahanlar, tarixlər, saylar haqqında İSTƏNİLƏN sual üçün əvvəlcə "get_account_overview" alətini çağır — bu, BÜTÜN sinifləri və hər sinfin İÇİNDƏ olan imtahanları (id, ad, tarix, bal, parametrlər) tam qaytarır. Sonra həmin strukturu ÖZÜN oxuyub cavab ver. Cavab verməzdən əvvəl HƏMİŞƏ tam mənzərəni gör. ƏSLA "platformaya daxil ol / görə bilmirəm" DEMƏ.
+- Bir sinfin imtahanlarını sadalayanda YALNIZ həmin sinfin "exams" massivindəki imtahanları göstər — başqa siniflərinkini qarışdırma. İmtahan sayı = həmin sinfin "examCount"-u.
+- Ad uyğunluğunu özün müəyyən et: yazılış/böyük-kiçik hərf/ə-e/ı-i/ş-s fərqinə fikir vermə ("Buraxılış"="Buraxilis"). Sinfi adı VƏ YA qoşulma kodu ilə tanı; eyni adlı iki sinifi kodları ilə fərqləndir.
 
-İMTAHANI DƏYİŞMƏK: Dəyişiklik üçün əvvəlcə find_exams ilə imtahanı tap (siyahıdan özün seç), sonra onun id-si ilə "update_exam" çağır və qısa təsdiqlə. Nisbi tarixləri (sabah, bu gün) yuxarıdakı BUGÜN tarixinə görə hesabla və ISO +04:00 ofset ilə ötür. Bir neçə uyğun imtahan varsa hansını nəzərdə tutduğunu SORUŞ.`;
+İMTAHANI DƏYİŞMƏK: Əvvəlcə get_account_overview ilə düzgün imtahanı (və onun id-sini) tap, sonra "update_exam" alətini həmin id ilə çağır, qısa təsdiqlə. Nisbi tarixləri (sabah, bu gün) yuxarıdakı BUGÜN tarixinə görə hesabla və ISO +04:00 ofset ilə ötür. Bir neçə uyğun imtahan varsa hansını nəzərdə tutduğunu SORUŞ.`;
 
 // Sanitise the client-sent history: keep only user/assistant text turns, cap it.
 function cleanChatMessages(raw) {
@@ -1231,25 +1230,10 @@ const EXAM_TOOLS = [
   {
     type: "function",
     function: {
-      name: "list_classes",
+      name: "get_account_overview",
       description:
-        "List the current teacher's OWN classes with their join code, number of students, and how many exams each class has. Use this to answer questions about classes, exam counts per class, or student counts.",
+        "Returns the FULL picture of the account: every class the user can see (id, name, join code, student count) with ITS exams nested inside (each exam's id, name, dates, duration, marks, and all settings). Call this FIRST for ANY question about classes, exams, counts, dates, or before editing. You then read this structure and answer/act — no name searching needed.",
       parameters: { type: "object", properties: {}, required: [] },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "find_exams",
-      description:
-        "List the teacher's exams (all recent, or only within one class if classId is given), returning each exam's id, name, class and current settings. It does NOT search/filter by name — YOU read the returned names and pick the exam the user means (ignoring spelling/accent differences).",
-      parameters: {
-        type: "object",
-        properties: {
-          classId: { type: "string", description: "optional exact class id from list_classes to limit to one class" },
-        },
-        required: [],
-      },
     },
   },
   {
@@ -1281,45 +1265,30 @@ const EXAM_TOOLS = [
   },
 ];
 
-async function toolListClasses(user) {
+async function toolOverview(user) {
   const isAdmin = user.role === "admin";
-  const classes = await Class.find(isAdmin ? {} : { owner: user._id })
-    .sort({ createdAt: -1 })
-    .lean();
-  if (!classes.length) return { classes: [] };
+  const scope = isAdmin ? {} : { owner: user._id };
+  const [classes, exams] = await Promise.all([
+    Class.find(scope).sort({ createdAt: -1 }).lean(),
+    Exam.find(scope).sort({ createdAt: -1 }).lean(),
+  ]);
   const ids = classes.map((c) => c._id);
-  const examCounts = await Exam.aggregate([
-    { $match: isAdmin ? {} : { owner: user._id } },
-    { $group: { _id: "$class", n: { $sum: 1 } } },
-  ]);
-  const examMap = {};
-  examCounts.forEach((c) => (examMap[String(c._id)] = c.n));
-  const enr = await Enrollment.aggregate([
-    { $match: { class: { $in: ids }, status: "approved" } },
-    { $group: { _id: "$class", n: { $sum: 1 } } },
-  ]);
-  const stuMap = {};
-  enr.forEach((e) => (stuMap[String(e._id)] = e.n));
-  return {
-    classes: classes.map((c) => ({
-      id: String(c._id),
-      name: c.name,
-      joinCode: c.joinCode,
-      students: stuMap[String(c._id)] || 0,
-      exams: examMap[String(c._id)] || 0,
-    })),
-  };
-}
-
-async function toolFindExams(user, classId) {
-  const isAdmin = user.role === "admin";
-  const filter = isAdmin ? {} : { owner: user._id };
-  if (classId && /^[a-f0-9]{24}$/i.test(String(classId).trim())) filter.class = String(classId).trim();
-  const exams = await Exam.find(filter).sort({ createdAt: -1 }).limit(40).populate("class", "name").lean();
-  return exams.map((e) => ({
+  const enr = ids.length
+    ? await Enrollment.aggregate([
+        { $match: { class: { $in: ids }, status: "approved" } },
+        { $group: { _id: "$class", n: { $sum: 1 } } },
+      ])
+    : [];
+  const stu = {};
+  enr.forEach((e) => (stu[String(e._id)] = e.n));
+  const byClass = {};
+  exams.forEach((e) => {
+    const k = String(e.class || "unassigned");
+    (byClass[k] = byClass[k] || []).push(e);
+  });
+  const fmt = (e) => ({
     id: String(e._id),
     name: e.name,
-    className: e.class?.name || null,
     mode: e.mode,
     startDate: e.startDate,
     endDate: e.endDate,
@@ -1333,7 +1302,18 @@ async function toolFindExams(user, classId) {
     showScore: e.showScore,
     showCorrectAnswers: e.showCorrectAnswers,
     revealAfterEnd: e.revealAfterEnd,
-  }));
+  });
+  return {
+    classes: classes.map((c) => ({
+      id: String(c._id),
+      name: c.name,
+      joinCode: c.joinCode,
+      students: stu[String(c._id)] || 0,
+      examCount: (byClass[String(c._id)] || []).length,
+      exams: (byClass[String(c._id)] || []).map(fmt),
+    })),
+    unassignedExams: (byClass["unassigned"] || []).map(fmt),
+  };
 }
 
 async function toolUpdateExam(args, user) {
@@ -1365,8 +1345,7 @@ async function toolUpdateExam(args, user) {
 
 async function execTool(name, args, user) {
   try {
-    if (name === "list_classes") return await toolListClasses(user);
-    if (name === "find_exams") return await toolFindExams(user, args.classId);
+    if (name === "get_account_overview") return await toolOverview(user);
     if (name === "update_exam") return await toolUpdateExam(args, user);
   } catch (e) {
     return { error: e.message || "Əməliyyat alınmadı" };
