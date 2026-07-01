@@ -1037,7 +1037,11 @@ PLATFORMA BİLİKLƏRİ:
 - Nəticə görünüşü: balın və düzgün cavabların şagirdə nə vaxt (dərhal / imtahandan sonra) göstərilməsini idarə etmək olar.
 - İngilis dili imtahanlarına dinləmə (mp3) faylı əlavə etmək olar.
 - WhatsApp: müəllim öz nömrəsini bağlayıb yeni imtahan bildirişini öz qrupuna göndərə bilər (qoşulma kodu ilə birlikdə).
-- Nəticələr: "Nəticələr" bölməsində şagird nəticələri görünür.`;
+- Nəticələr: "Nəticələr" bölməsində şagird nəticələri görünür.
+
+İMTAHAN YARATMA NİYYƏTİ: Əgər istifadəçi imtahan və ya sınaq YARATMAQ/açmaq/hazırlamaq istəyirsə (yazılış səhv olsa belə, məs. "imtnana yaratmaq isteyirem"), UZUN addım-addım izahat VERMƏ. Bunun əvəzinə YALNIZ qısa bir cümlə yaz (məs: "Əla, imtahan formasını açıram 👇") və cavabın ƏN SONUNDA ayrıca sətirdə tam olaraq bu markeri əlavə et:
+<<CREATE_EXAM>>{"description":"<istifadəçi hansı mövzu/sualları istəyirsə qısa yaz; detal deməyibsə boş string>"}
+Marker JSON düzgün olmalıdır. Əgər istifadəçi sadəcə "necə yaradılır?" kimi izah istəyirsə (yaratmaq yox), markeri YAZMA — normal izah ver.`;
 
 // Sanitise the client-sent history: keep only user/assistant text turns, cap it.
 function cleanChatMessages(raw) {
