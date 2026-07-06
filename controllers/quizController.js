@@ -2356,8 +2356,26 @@ const getExamsByUser = asyncHandler(async (req, res) => {
     throw new Error("User not found!");
   }
 
+  const exams = user.exams || [];
+  // Question count per exam for the card stats — a cheap $size aggregation that
+  // does NOT load the (heavy) answer arrays.
+  const qIds = exams.map((e) => e.questions).filter(Boolean);
+  const sizeMap = {};
+  if (qIds.length) {
+    const sizes = await Question.aggregate([
+      { $match: { _id: { $in: qIds } } },
+      { $project: { n: { $size: { $ifNull: ["$correctAnswers", []] } } } },
+    ]);
+    sizes.forEach((s) => (sizeMap[String(s._id)] = s.n));
+  }
+
   // The "my exams" list must not carry the access password or pdf location.
-  res.status(200).json((user.exams || []).map((e) => sanitizeExamForStudent(e)));
+  res.status(200).json(
+    exams.map((e) => ({
+      ...sanitizeExamForStudent(e),
+      questionCount: e.questions ? sizeMap[String(e.questions)] || 0 : 0,
+    }))
+  );
 });
 
 // The most recently CREATED exams the user can access — a dashboard shortcut so
