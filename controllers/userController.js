@@ -521,13 +521,14 @@ const getUserById = asyncHandler(async (req, res) => {
     }
   }
 
+  // Never leak the student's password hash, nor the access `password`/`pdf`
+  // location of the exams they hold (those exams may belong to other teachers).
   const user = await User.findById(id)
-    .populate("exams")
+    .select("-password")
+    .populate({ path: "exams", select: "-password -pdf" })
     .populate({
       path: "results",
-      populate: {
-        path: "examId",
-      },
+      populate: { path: "examId", select: "-password -pdf" },
     })
     .exec();
 
@@ -674,6 +675,18 @@ const sendAutomatedEmail = asyncHandler(async (req, res) => {
   if (!subject || !send_to || !reply_to || !template) {
     res.status(500);
     throw new Error("Missing email parameter");
+  }
+
+  // Anti-abuse: a logged-in user may only trigger mail to THEIR OWN address
+  // (e.g. the password-changed notice). Admins may mail any registered user
+  // (e.g. the role-change notice). Without this, any account could send
+  // platform-branded email to arbitrary addresses (spam / phishing).
+  const isSelf =
+    String(send_to).trim().toLowerCase() ===
+    String(req.user.email).trim().toLowerCase();
+  if (!isSelf && req.user.role !== "admin") {
+    res.status(403);
+    throw new Error("Yalnız öz hesabınıza e-poçt göndərə bilərsiniz");
   }
 
   //Get User

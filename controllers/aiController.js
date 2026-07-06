@@ -1287,10 +1287,17 @@ const EXAM_TOOLS = [
 async function toolOverview(user) {
   const isAdmin = user.role === "admin";
   const scope = isAdmin ? {} : { owner: user._id };
-  const [classes, exams] = await Promise.all([
-    Class.find(scope).sort({ createdAt: -1 }).lean(),
-    Exam.find(scope).sort({ createdAt: -1 }).lean(),
-  ]);
+  // Admin scope is the ENTIRE platform — cap it so a large account can't blow up
+  // the model context (token cost + prompt-injection surface). Teachers are
+  // naturally bounded to their own data.
+  const CAP = isAdmin ? Number(process.env.AI_OVERVIEW_MAX || 200) : 0;
+  const cQ = Class.find(scope).sort({ createdAt: -1 });
+  const eQ = Exam.find(scope).sort({ createdAt: -1 });
+  if (CAP) {
+    cQ.limit(CAP);
+    eQ.limit(CAP);
+  }
+  const [classes, exams] = await Promise.all([cQ.lean(), eQ.lean()]);
   const ids = classes.map((c) => c._id);
   const enr = ids.length
     ? await Enrollment.aggregate([
@@ -1325,6 +1332,7 @@ async function toolOverview(user) {
   return {
     classCount: classes.length,
     totalExams: exams.length,
+    truncated: CAP ? classes.length >= CAP || exams.length >= CAP : false,
     classes: classes.map((c) => ({
       id: String(c._id),
       name: c.name,
@@ -1360,7 +1368,33 @@ async function toolUpdateExam(args, user) {
   if (args.showCorrectAnswers != null) set("showCorrectAnswers", !!args.showCorrectAnswers);
   if (args.revealAfterEnd != null) set("revealAfterEnd", !!args.revealAfterEnd);
   if (!Object.keys(applied).length) return { error: "Dəyişiləcək sahə göstərilmədi" };
+
+  // Consistency guard: the AI (or a misheard voice command) must not be able to
+  // leave the exam in an impossible state.
+  const errs = [];
+  if (Number(exam.totalMarks) < 0) errs.push("ümumi bal mənfi ola bilməz");
+  if (Number(exam.passingMarks) < 0) errs.push("keçid balı mənfi ola bilməz");
+  if (
+    exam.totalMarks != null &&
+    exam.passingMarks != null &&
+    Number(exam.passingMarks) > Number(exam.totalMarks)
+  )
+    errs.push("keçid balı ümumi baldan çox ola bilməz");
+  if (
+    exam.startDate &&
+    exam.endDate &&
+    new Date(exam.startDate).getTime() >= new Date(exam.endDate).getTime()
+  )
+    errs.push("başlama tarixi bitmə tarixindən əvvəl olmalıdır");
+  if (Number(exam.maxTry) < 0) errs.push("cəhd limiti mənfi ola bilməz");
+  if (errs.length) return { error: "Dəyişiklik tətbiq olunmadı: " + errs.join(", ") };
+
   await exam.save();
+  // Audit trail: the AI just mutated a live exam — record WHO changed WHAT so an
+  // unexpected (e.g. prompt-injected) edit is traceable in the server logs.
+  console.info(
+    `[AI_EXAM_EDIT] user=${user._id} role=${user.role} exam=${exam._id} applied=${JSON.stringify(applied)}`
+  );
   return { ok: true, examId: String(exam._id), name: exam.name, applied };
 }
 
@@ -1400,6 +1434,9 @@ async function runChatAgent(messages, user, tz) {
     inTok += u.prompt_tokens || 0;
     outTok += u.completion_tokens || 0;
     const msg = data.choices?.[0]?.message;
+    // No message in the response → don't push undefined into the next request
+    // (that itself 400s at OpenAI). Fall back to the tool-less chat instead.
+    if (!msg) throw aiError(502, "AI köməkçisi cavab vermədi", true);
     convo.push(msg);
     if (msg?.tool_calls?.length) {
       for (const tc of msg.tool_calls) {

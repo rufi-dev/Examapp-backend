@@ -272,6 +272,11 @@ const addExam = asyncHandler(async (req, res) => {
     if (!existingClass) {
       return res.status(404).json({ success: false, error: "Class not found" });
     }
+    // Only the class OWNER (or admin) may add exams into it — otherwise any
+    // teacher could plant an exam in someone else's class.
+    if (!ownsOrAdmin(req.user, existingClass)) {
+      return res.status(403).json({ success: false, error: "Bu sinif sizə aid deyil" });
+    }
 
     const newExam = new Exam({
       name,
@@ -358,12 +363,13 @@ const getPdfByExam = asyncHandler(async (req, res) => {
       throw new Error("Exam not found!");
     }
 
-    // Students may only fetch the PDF once they've actually started an attempt
-    // (which requires the exam password, if any) or already have a result.
-    // This keeps the questions PDF behind the same gate as the answer sheet.
-    const isStaff =
-      req.user && (req.user.role === "admin" || req.user.role === "teacher");
-    if (!isStaff) {
+    // Only the exam's OWNER (or admin) may fetch the questions PDF freely.
+    // Everyone else — students AND other teachers — must have actually started
+    // an attempt (which requires the exam password, if any) or hold a result.
+    // Previously ANY staff bypassed this, so a throwaway "teacher" account could
+    // pull any exam's PDF.
+    const isOwner = ownsOrAdmin(req.user, exam);
+    if (!isOwner) {
       const [hasAttempt, hasResult] = await Promise.all([
         Attempt.countDocuments({ userId: req.user._id, examId }),
         Result.countDocuments({ userId: req.user._id, examId }),
@@ -485,7 +491,6 @@ const addExamToUserById = asyncHandler(async (req, res) => {
   const { userId } = req.params;
   const { examId } = req.body;
   const user = await User.findById(userId);
-  console.log(req.body);
   if (!user) {
     res.status(404);
     throw new Error("User not found!");
@@ -495,14 +500,34 @@ const addExamToUserById = asyncHandler(async (req, res) => {
     throw new Error("Exam is not defined");
   }
 
-  const isExamExist = user.exams.includes(examId);
-
   const exam = await Exam.findById(examId);
 
   if (!exam) {
     res.status(404);
     throw new Error("No Exam found");
   }
+
+  // A teacher may only assign an exam THEY OWN, and only to THEIR OWN student
+  // (someone approved-enrolled in a class they own). Admin can assign anything.
+  // Without this, any teacher account could mutate arbitrary accounts.
+  if (req.user.role !== "admin") {
+    if (!ownsOrAdmin(req.user, exam)) {
+      res.status(403);
+      throw new Error("Bu imtahan sizə aid deyil");
+    }
+    const myClassIds = await Class.find({ owner: req.user._id }).distinct("_id");
+    const isMyStudent = await Enrollment.exists({
+      class: { $in: myClassIds },
+      student: userId,
+      status: "approved",
+    });
+    if (!isMyStudent) {
+      res.status(403);
+      throw new Error("Bu şagird sizə aid deyil");
+    }
+  }
+
+  const isExamExist = user.exams.includes(examId);
 
   if (isExamExist) {
     res.status(500);
@@ -977,10 +1002,25 @@ const getExamTagandClass = asyncHandler(async (req, res) => {
     return;
   }
 
+  // Access gate: the owner/admin, or a student approved-enrolled in this class.
+  // Otherwise anyone with an exam id could read the class — including its
+  // private join code.
+  const isOwner = ownsOrAdmin(req.user, exam);
+  if (!isOwner) {
+    const enrolled = await studentApprovedInClass(req.user._id, exam.class);
+    if (!enrolled) {
+      res.status(403).json({ message: "Bu imtahana giriş yoxdur" });
+      return;
+    }
+  }
+
   // Categories removed — a class may have no tag. Return it as null instead of
   // failing, so review/builders that fetch this context still work.
   const tag = _class.tag ? await Tag.findById(_class.tag) : null;
-  res.status(200).json({ tag, _class });
+  // Strip the private join code from non-owners (students don't need it here).
+  const classObj = _class.toObject();
+  if (!isOwner) delete classObj.joinCode;
+  res.status(200).json({ tag, _class: classObj });
 });
 
 // Position-based point distribution. The last group's per-question value is
@@ -2162,6 +2202,23 @@ const editExam = asyncHandler(async (req, res) => {
     if (typeof coverImage === "string") update.coverImage = coverImage;
     // Empty string disables the password; undefined leaves it unchanged.
     if (typeof password === "string") update.password = password;
+
+    // Keep the exam internally consistent.
+    const _tM = Number(update.totalMarks);
+    const _pM = Number(update.passingMarks);
+    if (!Number.isNaN(_tM) && !Number.isNaN(_pM) && _pM > _tM) {
+      res.status(400);
+      throw new Error("Keçid balı ümumi baldan çox ola bilməz");
+    }
+    if (update.startDate && update.endDate) {
+      const s = new Date(update.startDate).getTime();
+      const e = new Date(update.endDate).getTime();
+      if (!Number.isNaN(s) && !Number.isNaN(e) && s >= e) {
+        res.status(400);
+        throw new Error("Başlama tarixi bitmə tarixindən əvvəl olmalıdır");
+      }
+    }
+
     await Exam.findByIdAndUpdate(examId, update);
 
     if (pdfPath) {
@@ -2407,6 +2464,15 @@ const getQuestionsByExam = asyncHandler(async (req, res) => {
   if (!exam) {
     res.status(404);
     throw new Error("Exam not found!");
+  }
+
+  // The raw Question docs carry the ANSWER KEY (correct[], pairs, openAnswers).
+  // Only the exam's owner (or admin) may read them — otherwise anyone who can
+  // self-assign the teacher role could pull any exam's answers. Students never
+  // hit this route; they get the sanitized runner payload instead.
+  if (!ownsOrAdmin(req.user, exam)) {
+    res.status(403);
+    throw new Error("Bu imtahan sizə aid deyil");
   }
 
   const questions = await Question.find({ exam: examId });

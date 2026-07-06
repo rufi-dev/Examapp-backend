@@ -52,6 +52,7 @@ const {
   getResultsByExam
 } = require("../controllers/quizController");
 const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions, transcribeAudio, realtimeToken } = require("../controllers/aiController");
+const { aiRateLimit, aiBudgetGuard } = require("../middleware/aiLimit");
 const {
   joinClass,
   myEnrollments,
@@ -95,6 +96,15 @@ const memUpload = multer({
   limits: { fileSize: 32 * 1024 * 1024 },
 });
 
+// addExam receives the pdf as a URL *string* field (uploaded earlier via
+// /uploadPdf) — never an actual file. Parse the multipart fields in memory with
+// a tight cap so this route can NEVER write to disk (and can't be used
+// unauthenticated to fill the disk). Text fields still land in req.body.
+const formFieldsOnly = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 512 * 1024, files: 0 },
+});
+
 
 router.post("/addTag", protect, teacherOnly, addTag);
 // AI: extract structured questions from an uploaded PDF (teacher reviews + saves).
@@ -102,6 +112,8 @@ router.post(
   "/extractQuestions/:examId",
   protect,
   teacherOnly,
+  aiRateLimit,
+  aiBudgetGuard,
   memUpload.single("pdf"),
   extractQuestions
 );
@@ -110,25 +122,27 @@ router.post(
   "/extractQuestionsStream/:examId",
   protect,
   teacherOnly,
+  aiRateLimit,
+  aiBudgetGuard,
   memUpload.single("pdf"),
   extractQuestionsStream
 );
 // Admin-only AI spend dashboard data.
 router.get("/aiUsage", protect, adminOnly, getAiUsage);
 // AI chat assistant for teachers (in-dashboard floating helper).
-router.post("/chat", protect, teacherOnly, chatAssistant);
+router.post("/chat", protect, teacherOnly, aiRateLimit, aiBudgetGuard, chatAssistant);
 // AI: generate questions from a text description (for the in-chat exam wizard).
-router.post("/generateQuestions/:examId", protect, teacherOnly, generateQuestions);
+router.post("/generateQuestions/:examId", protect, teacherOnly, aiRateLimit, aiBudgetGuard, generateQuestions);
 // Voice → text (Azerbaijani) for the chat assistant.
-router.post("/transcribe", protect, teacherOnly, memUpload.single("audio"), transcribeAudio);
+router.post("/transcribe", protect, teacherOnly, aiRateLimit, aiBudgetGuard, memUpload.single("audio"), transcribeAudio);
 // Ephemeral token for OpenAI Realtime live transcription (browser → OpenAI direct).
-router.post("/realtime-token", protect, teacherOnly, realtimeToken);
+router.post("/realtime-token", protect, teacherOnly, aiRateLimit, realtimeToken);
 router.post("/addClass", protect, teacherOnly, addClass);
 router.get("/server-time", serverTime);
 // Scoped to the caller (teacher → own, student → enrolled, admin → all), so it
 // now requires auth.
 router.get("/getTags", protect, getTags);
-router.post("/addExam/:classId", upload.single("pdf"), protect, teacherOnly, addExam);
+router.post("/addExam/:classId", protect, teacherOnly, formFieldsOnly.single("pdf"), addExam);
 
 // ---- enrollment (class membership) ----
 router.post("/enroll", protect, verifiedOnly, joinClass);

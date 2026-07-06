@@ -10,6 +10,7 @@ const achivementRoute = require('./routes/achivementRoute')
 const stripeRoute = require('./routes/stripeRoute')
 const telegramRoute = require('./routes/telegramRoute')
 const whatsappRoute = require('./routes/whatsappRoute')
+const videoRoute = require('./routes/videoRoute')
 const { initPersistedSessions } = require('./helper/whatsapp')
 const Attempt = require('./models/attemptModel')
 const Class = require('./models/classModel')
@@ -88,6 +89,7 @@ app.use("/api/achivement", achivementRoute)
 app.use("/api/stripe", stripeRoute)
 app.use("/api/telegram", telegramRoute)
 app.use("/api/whatsapp", whatsappRoute)
+app.use("/api/videos", videoRoute)
 app.use('/uploads', express.static('uploads'));
 
 app.get('/', (req, res) => {
