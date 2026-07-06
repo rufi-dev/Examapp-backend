@@ -2493,8 +2493,27 @@ const getExamsByUser = asyncHandler(async (req, res) => {
     throw new Error("User not found!");
   }
 
+  const exams = user.exams || [];
+
+  // Question count per exam for the card stats — the SAME cheap $size aggregation
+  // the other listings use. Without it every card here showed "Sual: —" even
+  // though questions exist.
+  const qIds = exams.map((e) => e.questions).filter(Boolean);
+  const sizeMap = {};
+  if (qIds.length) {
+    const sizes = await Question.aggregate([
+      { $match: { _id: { $in: qIds } } },
+      { $project: { n: { $size: { $ifNull: ["$correctAnswers", []] } } } },
+    ]);
+    sizes.forEach((s) => (sizeMap[String(s._id)] = s.n));
+  }
+  const withCount = (obj, exam) => ({
+    ...obj,
+    questionCount: exam.questions ? sizeMap[String(exam.questions)] || 0 : 0,
+  });
+
   // The "my exams" list must not carry the access password or pdf location.
-  res.status(200).json((user.exams || []).map((e) => sanitizeExamForStudent(e)));
+  res.status(200).json(exams.map((e) => withCount(sanitizeExamForStudent(e), e)));
 });
 
 // The most recently CREATED exams the user can access — a dashboard shortcut so
