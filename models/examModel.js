@@ -102,6 +102,8 @@ const examSchema = Schema({
     // Soft-delete: when set, the exam is in the Trash (recoverable for 30 days,
     // then auto-purged). Excluded from every listing. null = active.
     deletedAt: { type: Date, default: null, index: true },
+    // Who archived it (audit trail for accidental/disputed deletions).
+    deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     // Result visibility for students:
     showScore: { type: Boolean, default: true },
     showCorrectAnswers: { type: Boolean, default: false },
