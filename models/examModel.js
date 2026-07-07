@@ -128,9 +128,13 @@ const examSchema = Schema({
         type: Schema.Types.ObjectId,
         ref: 'Tag'
     },
+    // Every exam MUST belong to a class — there is no "unassigned" exam. Enforced
+    // at creation (addExam) and on restore (a target class is required when the
+    // original class was deleted); this schema rule is the final backstop.
     class: {
         type: Schema.Types.ObjectId,
-        ref: 'Class'
+        ref: 'Class',
+        required: [true, 'İmtahan mütləq bir sinfə aid olmalıdır'],
     },
     users: [{
         type: Schema.Types.ObjectId,

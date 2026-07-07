@@ -2320,6 +2320,7 @@ const deleteExam = asyncHandler(async (req, res) => {
 // Restore an archived exam back to active.
 const restoreExam = asyncHandler(async (req, res) => {
   const { examId } = req.params;
+  const { classId } = req.body || {};
   const exam = await Exam.findById(examId);
   if (!exam) {
     res.status(404);
@@ -2332,23 +2333,36 @@ const restoreExam = asyncHandler(async (req, res) => {
   if (!exam.deletedAt) {
     return res.status(400).json({ message: "İmtahan arxivdə deyil" });
   }
-  // If the parent class was deleted while this exam sat in Trash, don't restore
-  // into a broken/orphaned state — detach it so it comes back as an unassigned
-  // exam instead of pointing at a missing class.
-  let unassigned = false;
-  if (exam.class) {
-    const parent = await Class.findById(exam.class).select("_id");
-    if (!parent) {
-      exam.class = null;
-      unassigned = true;
-    } else {
-      await Class.updateOne({ _id: exam.class }, { $addToSet: { exams: exam._id } });
+
+  // Does the exam still have a valid parent class?
+  const parentOk = exam.class ? !!(await Class.findById(exam.class).select("_id")) : false;
+
+  if (parentOk) {
+    // Parent still exists — make sure it references the exam again.
+    await Class.updateOne({ _id: exam.class }, { $addToSet: { exams: exam._id } });
+  } else {
+    // Orphaned (class deleted): need a destination class from the caller. An exam
+    // must never be class-less, so restore requires a valid, owned target class.
+    if (!classId) {
+      return res.status(409).json({
+        needsClass: true,
+        message:
+          "Bu imtahanın sinfi silinib. İmtahanı hansı sinfə qaytarmaq istədiyinizi seçin.",
+      });
     }
+    const target = await Class.findById(classId);
+    if (!target) return res.status(404).json({ message: "Sinif tapılmadı" });
+    if (!ownsOrAdmin(req.user, target)) {
+      return res.status(403).json({ message: "Bu sinif sizə aid deyil" });
+    }
+    exam.class = target._id;
+    await Class.updateOne({ _id: target._id }, { $addToSet: { exams: exam._id } });
   }
+
   exam.deletedAt = null;
   exam.deletedBy = null;
   await exam.save();
-  res.status(200).json({ message: "Exam restored", unassigned });
+  res.status(200).json({ message: "Exam restored", classId: String(exam.class) });
 });
 
 // Permanently purge an archived exam (the "delete forever" action in the Trash).
