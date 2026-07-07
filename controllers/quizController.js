@@ -2511,6 +2511,7 @@ const getArchivedExams = asyncHandler(async (req, res) => {
   const exams = await Exam.find(filter)
     .sort({ deletedAt: -1 })
     .populate("class", "name level")
+    .populate("deletedBy", "name")
     .lean();
   const ms = ARCHIVE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   res.status(200).json(
@@ -2519,6 +2520,7 @@ const getArchivedExams = asyncHandler(async (req, res) => {
       name: e.name,
       class: e.class ? { name: e.class.name, level: e.class.level } : null,
       deletedAt: e.deletedAt,
+      deletedByName: e.deletedBy ? e.deletedBy.name : null,
       purgeAt: e.deletedAt ? new Date(new Date(e.deletedAt).getTime() + ms) : null,
       coverImage: e.coverImage || "",
     }))
