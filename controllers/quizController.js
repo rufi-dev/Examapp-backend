@@ -48,6 +48,19 @@ function ownsOrAdmin(user, doc) {
   return String(doc.owner) === String(user._id);
 }
 
+// Shared guard: an archived (trashed) exam is read-only everywhere except the
+// Trash restore / permanent-delete actions. Returns true (and responds) if the
+// exam is archived, so callers do `if (blockIfArchived(res, exam)) return;`.
+function blockIfArchived(res, exam) {
+  if (exam && exam.deletedAt) {
+    res
+      .status(403)
+      .json({ reason: "archived", message: "İmtahan arxivdədir (zibil qutusunda)" });
+    return true;
+  }
+  return false;
+}
+
 // A short, unambiguous join code (no easily-confused chars).
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function genJoinCode(len = 6) {
@@ -685,6 +698,7 @@ const setExamHidden = asyncHandler(async (req, res) => {
     res.status(403);
     throw new Error("Bu imtahan sizə aid deyil");
   }
+  if (blockIfArchived(res, exam)) return;
   exam.hidden = hidden === true || hidden === "true";
   await exam.save();
   // Un-hiding = re-publishing → (re)announce to students even if it was already
@@ -882,6 +896,7 @@ const addQuestion = asyncHandler(async (req, res) => {
   if (!ownsOrAdmin(req.user, exam)) {
     return res.status(403).json({ message: "Bu imtahan sizə aid deyil" });
   }
+  if (blockIfArchived(res, exam)) return;
 
   // Persist the structured per-page layout (0 = show all) alongside the answer
   // key, so saving questions also saves this setting in one round-trip.
@@ -1300,7 +1315,9 @@ const attemptStatus = asyncHandler(async (req, res) => {
     submitted: false,
   }).sort({ createdAt: -1 });
   const exp = attempt ? effectiveExpiry(attempt, exam) : 0;
-  const active = !!attempt && exp > Date.now();
+  // An archived (trashed) exam is never "active" — it can't be started/resumed.
+  const archived = !!(exam && exam.deletedAt);
+  const active = !archived && !!attempt && exp > Date.now();
 
   // Used-try count exactly as startAttempt enforces it (started attempts OR
   // results, whichever is higher), so the details page can show accurate tries
@@ -1320,6 +1337,7 @@ const attemptStatus = asyncHandler(async (req, res) => {
   // can mirror the count and finish/redirect when it's terminated elsewhere.
   res.status(200).json({
     active,
+    archived,
     expiresAt: active ? new Date(exp) : null,
     violations: attempt ? attempt.violations || 0 : 0,
     terminated: attempt ? !!attempt.terminated : false,
@@ -1349,6 +1367,7 @@ const reportViolation = asyncHandler(async (req, res) => {
   if (!attempt) {
     return res.status(404).json({ reason: "no_active_attempt" });
   }
+  if (blockIfArchived(res, exam)) return;
   // Ignore reports after the (effective, endDate-capped) deadline.
   if (effectiveExpiry(attempt, exam) + (ATTEMPT_GRACE_MS || 0) < Date.now()) {
     return res.status(200).json({
@@ -1626,6 +1645,7 @@ const addResult = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("No Exam found");
   }
+  if (blockIfArchived(res, exam)) return;
 
   // Ownership backstop (defense in depth — a result can't exist without an
   // attempt, which already requires ownership, but enforce it here too).
@@ -1713,6 +1733,10 @@ const autosaveAttempt = asyncHandler(async (req, res) => {
   if (!Array.isArray(selectedAnswers)) {
     return res.status(200).json({ ok: false });
   }
+  // Stop autosaves to an archived (trashed) exam — an already-open tab must not
+  // keep writing to an exam the teacher has removed.
+  const archCheck = await Exam.findById(examId).select("deletedAt").lean();
+  if (archCheck?.deletedAt) return res.status(403).json({ reason: "archived", ok: false });
   const filter = { userId: req.user._id, examId, submitted: false };
   if (attemptId && mongoose.Types.ObjectId.isValid(attemptId)) filter._id = attemptId;
   const answers = selectedAnswers.slice(0, 500).map((a) => ({
@@ -2013,6 +2037,7 @@ const editQuestion = asyncHandler(async (req, res) => {
       res.status(403);
       throw new Error("Bu sual sizə aid deyil");
     }
+    if (blockIfArchived(res, ownerExam)) return;
     await Question.findByIdAndUpdate(questionId, {
       name,
       correctOption,
@@ -2062,6 +2087,7 @@ const editExam = asyncHandler(async (req, res) => {
     res.status(403);
     throw new Error("Bu imtahan sizə aid deyil");
   }
+  if (blockIfArchived(res, examExists)) return;
   if (examExists) {
     // Update the exam fields
     const update = {
@@ -2192,6 +2218,7 @@ const deleteQuestion = asyncHandler(async (req, res) => {
       res.status(403);
       throw new Error("Bu sual sizə aid deyil");
     }
+    if (blockIfArchived(res, exam)) return;
     exam.questions = undefined;
     await exam.save();
   } else {
@@ -2243,24 +2270,30 @@ async function purgeExam(examId) {
   await exam.deleteOne();
 }
 
-// Remove a class and every exam under it.
+// Soft-delete (archive) every ACTIVE exam matching the filter, so they land in
+// the Trash instead of being wiped. Used when a class/tag is removed — the
+// exams/results/PDFs stay recoverable for 30 days rather than being lost.
+async function archiveExams(filter) {
+  await Exam.updateMany({ ...filter, deletedAt: null }, { $set: { deletedAt: new Date() } });
+}
+
+// Remove a class. Its exams are ARCHIVED (Trash), not permanently deleted — so a
+// mis-clicked class delete can no longer wipe active exams/results.
 async function purgeClass(classId) {
   const _class = await Class.findById(classId);
   if (!_class) return;
-  const exams = await Exam.find({ class: classId }).select("_id");
-  for (const e of exams) await purgeExam(e._id);
+  await archiveExams({ class: classId });
   if (_class.tag) await Tag.updateOne({ _id: _class.tag }, { $pull: { classes: classId } });
   await _class.deleteOne();
 }
 
-// Remove a tag and every class + exam under it.
+// Remove a tag and its classes. Exams under them are ARCHIVED (Trash), not wiped.
 async function purgeTag(tagId) {
   const tag = await Tag.findById(tagId);
   if (!tag) return;
   const classes = await Class.find({ tag: tagId }).select("_id");
   for (const c of classes) await purgeClass(c._id);
-  const orphanExams = await Exam.find({ tag: tagId }).select("_id");
-  for (const e of orphanExams) await purgeExam(e._id);
+  await archiveExams({ tag: tagId });
   await tag.deleteOne();
 }
 
@@ -2275,9 +2308,11 @@ const deleteExam = asyncHandler(async (req, res) => {
     res.status(403);
     throw new Error("Bu imtahan sizə aid deyil");
   }
-  // Soft-delete: move to the Trash instead of purging. Data is kept so it can be
-  // restored; the sweep purges it after ARCHIVE_RETENTION_DAYS.
+  // Soft-delete: move to the Trash instead of purging. Data (questions, PDF,
+  // attempts, results) is kept so it can be restored; the sweep purges it after
+  // ARCHIVE_RETENTION_DAYS.
   exam.deletedAt = new Date();
+  exam.deletedBy = req.user._id;
   await exam.save();
   res.status(200).json({ message: "Exam archived", archived: true });
 });
@@ -2294,9 +2329,26 @@ const restoreExam = asyncHandler(async (req, res) => {
     res.status(403);
     throw new Error("Bu imtahan sizə aid deyil");
   }
+  if (!exam.deletedAt) {
+    return res.status(400).json({ message: "İmtahan arxivdə deyil" });
+  }
+  // If the parent class was deleted while this exam sat in Trash, don't restore
+  // into a broken/orphaned state — detach it so it comes back as an unassigned
+  // exam instead of pointing at a missing class.
+  let unassigned = false;
+  if (exam.class) {
+    const parent = await Class.findById(exam.class).select("_id");
+    if (!parent) {
+      exam.class = null;
+      unassigned = true;
+    } else {
+      await Class.updateOne({ _id: exam.class }, { $addToSet: { exams: exam._id } });
+    }
+  }
   exam.deletedAt = null;
+  exam.deletedBy = null;
   await exam.save();
-  res.status(200).json({ message: "Exam restored" });
+  res.status(200).json({ message: "Exam restored", unassigned });
 });
 
 // Permanently purge an archived exam (the "delete forever" action in the Trash).
@@ -2311,6 +2363,12 @@ const deleteExamForever = asyncHandler(async (req, res) => {
     res.status(403);
     throw new Error("Bu imtahan sizə aid deyil");
   }
+  // Permanent deletion is only allowed from the Trash — the exam MUST already be
+  // archived. This stops a direct /forever call from skipping the 30-day safety
+  // net and wiping an active exam.
+  if (!exam.deletedAt) {
+    return res.status(400).json({ message: "Əvvəlcə imtahanı arxivə (zibil qutusuna) köçürün" });
+  }
   await purgeExam(examId);
   res.status(200).json({ message: "Exam permanently deleted" });
 });
@@ -2323,6 +2381,7 @@ const getArchivedExams = asyncHandler(async (req, res) => {
   const exams = await Exam.find(filter)
     .sort({ deletedAt: -1 })
     .populate("class", "name level")
+    .populate("deletedBy", "name")
     .lean();
   const ms = ARCHIVE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   res.status(200).json(
@@ -2331,6 +2390,7 @@ const getArchivedExams = asyncHandler(async (req, res) => {
       name: e.name,
       class: e.class ? { name: e.class.name, level: e.class.level } : null,
       deletedAt: e.deletedAt,
+      deletedByName: e.deletedBy ? e.deletedBy.name : null,
       purgeAt: e.deletedAt ? new Date(new Date(e.deletedAt).getTime() + ms) : null,
       coverImage: e.coverImage || "",
     }))

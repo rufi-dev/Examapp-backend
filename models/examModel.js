@@ -96,6 +96,8 @@ const examSchema = Schema({
     // and un-startable) but its data is kept so it can be restored. A periodic
     // sweep permanently purges exams archived longer than the retention window.
     deletedAt: { type: Date, default: null, index: true },
+    // Who archived it (audit trail) — shown in the Trash list.
+    deletedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
     // Result visibility for students:
     showScore: { type: Boolean, default: true },
     showCorrectAnswers: { type: Boolean, default: false },
