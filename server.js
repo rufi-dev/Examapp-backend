@@ -14,7 +14,7 @@ const videoRoute = require('./routes/videoRoute')
 const { initWhatsApp } = require('./helper/whatsapp')
 const Attempt = require('./models/attemptModel')
 const { runDueExamReports } = require('./jobs/examReports')
-const { finalizeExpiredAttempts } = require('./controllers/quizController')
+const { finalizeExpiredAttempts, purgeExpiredArchived } = require('./controllers/quizController')
 const errorHandler = require('./middleware/errorMiddleware')
 
 // Collapse any pre-existing duplicate ACTIVE attempts (keep the newest, mark the
@@ -138,6 +138,13 @@ mongoose
             finalizeExpiredAttempts().catch((e) => console.error("[FINALIZE] tick failed:", e.message))
         setTimeout(finalizeTick, 20 * 1000)
         setInterval(finalizeTick, 60 * 1000)
+
+        // Trash sweep: permanently purge exams archived past the retention window.
+        // Runs shortly after boot, then every 6 hours.
+        const trashTick = () =>
+            purgeExpiredArchived().catch((e) => console.error("[TRASH] tick failed:", e.message))
+        setTimeout(trashTick, 60 * 1000)
+        setInterval(trashTick, 6 * 60 * 60 * 1000)
     })
     .catch((err) => {
         console.log(err)

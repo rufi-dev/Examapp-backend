@@ -92,6 +92,10 @@ const examSchema = Schema({
     studentsNotifiedAt: { type: Date },
     // Hidden = a draft only staff can see; students can't list or start it.
     hidden: { type: Boolean, default: false },
+    // Soft-delete: when set, the exam is in the Trash (hidden from every listing
+    // and un-startable) but its data is kept so it can be restored. A periodic
+    // sweep permanently purges exams archived longer than the retention window.
+    deletedAt: { type: Date, default: null, index: true },
     // Result visibility for students:
     showScore: { type: Boolean, default: true },
     showCorrectAnswers: { type: Boolean, default: false },

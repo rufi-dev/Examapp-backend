@@ -638,7 +638,10 @@ const getExamsByClass = asyncHandler(async (req, res) => {
   // No questions populate: the exam-card listing doesn't render any question
   // data, so sending populated question/option arrays per card is wasted payload.
   // Class IS populated (name/level) so the card can show the category chip.
-  const exams = await Exam.find({ class: exists._id }).populate("class", "name level");
+  const exams = await Exam.find({ class: exists._id, deletedAt: null }).populate(
+    "class",
+    "name level"
+  );
 
   // Question count per exam for the card stats — a cheap $size aggregation that
   // does NOT load the (heavy) answer arrays.
@@ -786,7 +789,7 @@ const getAllClasses = asyncHandler(async (req, res) => {
 // Used by the teacher "İmtahan nəticələri" list — scoped so a teacher sees only
 // their OWN exams (admins see all).
 const getExams = asyncHandler(async (req, res) => {
-  const filter = isAdminUser(req.user) ? {} : { owner: req.user._id };
+  const filter = { deletedAt: null, ...(isAdminUser(req.user) ? {} : { owner: req.user._id }) };
   const exams = await Exam.find(filter);
   res.status(200).json(exams || []);
 });
@@ -1061,6 +1064,8 @@ const startAttempt = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("Exam not found");
   }
+  // Archived (trashed) exams can't be started by anyone, even via a direct URL.
+  if (exam.deletedAt) return res.status(403).json({ reason: "finished" });
 
   // Hidden (draft) exams are not accessible to students, even via a direct URL.
   const isStaff = user.role === "admin" || user.role === "teacher";
@@ -2203,6 +2208,10 @@ const deleteAllQuestions = asyncHandler(async (req, res) => {
   res.status(200).json({ message: "All questions deleted successfully" });
 });
 
+// How long an archived (soft-deleted) exam is kept in the Trash before it is
+// permanently purged.
+const ARCHIVE_RETENTION_DAYS = 30;
+
 // Fully remove an exam: questions, PDF (disk + record), results, attempts, and
 // every reference to it (users, class, tag).
 async function purgeExam(examId) {
@@ -2266,9 +2275,82 @@ const deleteExam = asyncHandler(async (req, res) => {
     res.status(403);
     throw new Error("Bu imtahan sizə aid deyil");
   }
-  await purgeExam(examId);
-  res.status(200).json({ message: "Exam deleted succesfully" });
+  // Soft-delete: move to the Trash instead of purging. Data is kept so it can be
+  // restored; the sweep purges it after ARCHIVE_RETENTION_DAYS.
+  exam.deletedAt = new Date();
+  await exam.save();
+  res.status(200).json({ message: "Exam archived", archived: true });
 });
+
+// Restore an archived exam back to active.
+const restoreExam = asyncHandler(async (req, res) => {
+  const { examId } = req.params;
+  const exam = await Exam.findById(examId);
+  if (!exam) {
+    res.status(404);
+    throw new Error("Exam not found!");
+  }
+  if (!ownsOrAdmin(req.user, exam)) {
+    res.status(403);
+    throw new Error("Bu imtahan sizə aid deyil");
+  }
+  exam.deletedAt = null;
+  await exam.save();
+  res.status(200).json({ message: "Exam restored" });
+});
+
+// Permanently purge an archived exam (the "delete forever" action in the Trash).
+const deleteExamForever = asyncHandler(async (req, res) => {
+  const { examId } = req.params;
+  const exam = await Exam.findById(examId);
+  if (!exam) {
+    res.status(404);
+    throw new Error("Exam not found!");
+  }
+  if (!ownsOrAdmin(req.user, exam)) {
+    res.status(403);
+    throw new Error("Bu imtahan sizə aid deyil");
+  }
+  await purgeExam(examId);
+  res.status(200).json({ message: "Exam permanently deleted" });
+});
+
+// The Trash listing: archived exams the caller owns (admins see all), newest
+// first, with the auto-purge date so the UI can show a countdown.
+const getArchivedExams = asyncHandler(async (req, res) => {
+  const filter = { deletedAt: { $ne: null } };
+  if (!isAdminUser(req.user)) filter.owner = req.user._id;
+  const exams = await Exam.find(filter)
+    .sort({ deletedAt: -1 })
+    .populate("class", "name level")
+    .lean();
+  const ms = ARCHIVE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  res.status(200).json(
+    (exams || []).map((e) => ({
+      _id: e._id,
+      name: e.name,
+      class: e.class ? { name: e.class.name, level: e.class.level } : null,
+      deletedAt: e.deletedAt,
+      purgeAt: e.deletedAt ? new Date(new Date(e.deletedAt).getTime() + ms) : null,
+      coverImage: e.coverImage || "",
+    }))
+  );
+});
+
+// Sweep: permanently purge exams archived longer than the retention window.
+// Scheduled from server.js; safe to run repeatedly.
+async function purgeExpiredArchived() {
+  const cutoff = new Date(Date.now() - ARCHIVE_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+  const due = await Exam.find({ deletedAt: { $ne: null, $lte: cutoff } }).select("_id");
+  for (const e of due) {
+    try {
+      await purgeExam(e._id);
+    } catch (err) {
+      console.error("[TRASH] purge failed for", String(e._id), err.message);
+    }
+  }
+  if (due.length) console.log(`[TRASH] purged ${due.length} expired archived exam(s)`);
+}
 
 const deleteClass = asyncHandler(async (req, res) => {
   const { classId } = req.params;
@@ -2356,7 +2438,7 @@ const getExamsByUser = asyncHandler(async (req, res) => {
     throw new Error("User not found!");
   }
 
-  const exams = user.exams || [];
+  const exams = (user.exams || []).filter((e) => !e.deletedAt); // hide archived
   // Question count per exam for the card stats — a cheap $size aggregation that
   // does NOT load the (heavy) answer arrays.
   const qIds = exams.map((e) => e.questions).filter(Boolean);
@@ -2388,7 +2470,7 @@ const getExamsByUser = asyncHandler(async (req, res) => {
 const getPublicExams = asyncHandler(async (req, res) => {
   const publicIds = await Class.find({ requireCode: false }).distinct("_id");
   if (!publicIds.length) return res.status(200).json([]);
-  const exams = await Exam.find({ class: { $in: publicIds }, hidden: { $ne: true } })
+  const exams = await Exam.find({ class: { $in: publicIds }, hidden: { $ne: true }, deletedAt: null })
     .sort({ createdAt: -1 })
     .limit(8)
     .populate("class", "name level")
@@ -2436,6 +2518,7 @@ const getLatestExams = asyncHandler(async (req, res) => {
   }
   // Students never see drafts (hidden exams).
   if (!isStaffUser(user)) filter.hidden = { $ne: true };
+  filter.deletedAt = null; // never surface archived (trashed) exams
 
   const exams = await Exam.find(filter)
     .sort({ createdAt: -1 })
@@ -2488,6 +2571,10 @@ module.exports = {
   addClass,
   getClassesByTag,
   deleteExam,
+  restoreExam,
+  deleteExamForever,
+  getArchivedExams,
+  purgeExpiredArchived,
   deleteClass,
   getAllClasses,
   deleteTag,

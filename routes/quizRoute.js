@@ -15,6 +15,9 @@ const {
   getTags,
   addQuestion,
   deleteExam,
+  restoreExam,
+  deleteExamForever,
+  getArchivedExams,
   editQuestion,
   deleteQuestion,
   getQuestionsByExam,
@@ -155,6 +158,10 @@ router.get("/getTag/:id", protect, getTag);
 router.get("/getClass/:id", protect, getClass);
 router.patch("/editExam/:examId", protect, teacherOnly, editExam);
 router.delete("/deleteExam/:examId", protect, teacherOnly, deleteExam);
+// Trash (archived exams): list, restore, and permanently delete.
+router.get("/archivedExams", protect, teacherOnly, getArchivedExams);
+router.patch("/exam/:examId/restore", protect, teacherOnly, restoreExam);
+router.delete("/exam/:examId/forever", protect, teacherOnly, deleteExamForever);
 router.delete("/deleteClass/:classId", protect, teacherOnly, deleteClass);
 router.delete("/deleteTag/:tagId", protect, teacherOnly, deleteTag);
 router.patch("/editTag/:tagId", protect, teacherOnly, editTag);
