@@ -25,6 +25,7 @@ const asyncHandler = require("express-async-handler");
 
 const { getMetrics } = require("../middleware/requestMetrics");
 const { getJobs } = require("../utils/heartbeat");
+const { getCpuPct } = require("../utils/cpuSampler");
 const HealthSnapshot = require("../models/healthSnapshotModel");
 const Exam = require("../models/examModel");
 const Attempt = require("../models/attemptModel");
@@ -119,22 +120,11 @@ const GB = 1024 * 1024 * 1024;
 
 // ----------------------------- server resources ---------------------------
 
-const cpuSnapshot = () => {
-  let idle = 0, total = 0;
-  for (const c of os.cpus()) {
-    for (const k in c.times) total += c.times[k];
-    idle += c.times.idle;
-  }
-  return { idle, total };
-};
-
-const cpuUsagePct = async (windowMs = 250) => {
-  const a = cpuSnapshot();
-  await sleep(windowMs);
-  const b = cpuSnapshot();
-  const dt = b.total - a.total;
-  return dt > 0 ? Math.round((1 - (b.idle - a.idle) / dt) * 100) : 0;
-};
+// CPU% comes from a BACKGROUND sampler (utils/cpuSampler) — NOT an on-demand
+// 250ms window. Sampling inside this handler coincided with the health check's
+// own 12-probe burst and reported ~90%+ on an idle box (load avg ~0.2). The
+// background sampler measures over a rolling 10s window, decoupled from
+// requests, so the reading reflects real steady-state utilization.
 
 // Host memory the way `free`/monitoring tools report it. os.freemem() is
 // MemFree (excludes reclaimable page cache), which on any Linux box makes RAM
@@ -233,8 +223,8 @@ const dirSizes = () =>
   });
 
 const checkServer = async () => {
-  const [cpuPct, disk, dirs] = await Promise.all([
-    cpuUsagePct(),
+  const cpuPct = getCpuPct(); // background rolling sample — no self-measurement
+  const [disk, dirs] = await Promise.all([
     diskUsage("/"),
     dirSizes(),
   ]);
@@ -933,10 +923,10 @@ const uptimeWindow = async (ms) => {
 
 // Called by the scheduler in server.js every 5 minutes (wrapped in beat()).
 const sampleHealth = async () => {
-  const [site, ping, cpuPct, disk] = await Promise.all([
+  const cpuPct = getCpuPct(); // background rolling sample
+  const [site, ping, disk] = await Promise.all([
     timedFetch(`${SITE_URL}/`, { timeoutMs: 10000 }),
     withTimeout(dbPing(), 6000, { up: false, ms: 6000 }),
-    cpuUsagePct(),
     diskUsage("/"),
   ]);
   const cMem = containerMem();
