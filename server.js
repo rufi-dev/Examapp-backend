@@ -11,11 +11,15 @@ const stripeRoute = require('./routes/stripeRoute')
 const telegramRoute = require('./routes/telegramRoute')
 const whatsappRoute = require('./routes/whatsappRoute')
 const videoRoute = require('./routes/videoRoute')
+const healthRoute = require('./routes/healthRoute')
 const { initPersistedSessions } = require('./helper/whatsapp')
 const Attempt = require('./models/attemptModel')
 const Class = require('./models/classModel')
 const { runDueExamReports } = require('./jobs/examReports')
 const { finalizeExpiredAttempts, purgeExpiredArchived } = require('./controllers/quizController')
+const { sampleHealth } = require('./controllers/healthController')
+const { requestMetrics } = require('./middleware/requestMetrics')
+const { beat } = require('./utils/heartbeat')
 const errorHandler = require('./middleware/errorMiddleware')
 
 // Collapse any pre-existing duplicate ACTIVE attempts (keep the newest, mark the
@@ -43,6 +47,9 @@ const app = express()
 app.set("trust proxy", 1)
 
 // Middlewares
+// Request timing/error metrics for the admin Health page (in-memory, ~zero
+// overhead). Registered first so every API request is measured.
+app.use(requestMetrics)
 app.use(express.json())
 app.use(express.urlencoded({ extended: false }))
 app.use(cookieParser())
@@ -72,7 +79,11 @@ app.use(
             ) {
                 callback(null, true)
             } else {
-                callback(new Error("Not allowed by CORS: " + origin))
+                // Tag as 403 so the error handler + health metrics classify a
+                // disallowed-origin request as a client (4xx) error, not a 500.
+                const e = new Error("Not allowed by CORS: " + origin)
+                e.status = 403
+                callback(e)
             }
         },
         credentials: true,
@@ -90,6 +101,7 @@ app.use("/api/stripe", stripeRoute)
 app.use("/api/telegram", telegramRoute)
 app.use("/api/whatsapp", whatsappRoute)
 app.use("/api/videos", videoRoute)
+app.use("/api/health", healthRoute)
 app.use('/uploads', express.static('uploads'));
 
 app.get('/', (req, res) => {
@@ -135,25 +147,29 @@ mongoose
             console.error("[WHATSAPP] init error:", e.message)
         }
         // End-of-exam Telegram reports: check shortly after boot, then every
-        // 10 minutes. Errors are logged, never fatal.
-        const reportTick = () =>
-            runDueExamReports().catch((e) => console.error("[REPORT] tick failed:", e.message))
+        // 10 minutes. Errors are logged, never fatal. Each tick is wrapped in
+        // beat() so the admin Health page can see last-run/failure per job.
+        const reportTick = beat("telegram-reports", 10 * 60 * 1000, runDueExamReports)
         setTimeout(reportTick, 30 * 1000)
         setInterval(reportTick, 10 * 60 * 1000)
 
         // Server-side safety net: auto-submit attempts whose timer ran out but
         // were never submitted (student abandoned/closed the exam). Runs every
         // minute so a finished result appears within ~1-2 min of the deadline.
-        const finalizeTick = () =>
-            finalizeExpiredAttempts().catch((e) => console.error("[FINALIZE] tick failed:", e.message))
+        const finalizeTick = beat("attempt-finalizer", 60 * 1000, finalizeExpiredAttempts)
         setTimeout(finalizeTick, 20 * 1000)
         setInterval(finalizeTick, 60 * 1000)
 
         // Trash sweep: purge exams archived longer than the retention window.
-        const trashTick = () =>
-            purgeExpiredArchived().catch((e) => console.error("[TRASH] tick failed:", e.message))
+        const trashTick = beat("trash-purge", 6 * 60 * 60 * 1000, purgeExpiredArchived)
         setTimeout(trashTick, 60 * 1000)
         setInterval(trashTick, 6 * 60 * 60 * 1000)
+
+        // Health sampler: every 5 min record site/db/resource state to Mongo
+        // (31-day TTL) — powers the Health page's uptime history.
+        const healthTick = beat("health-sampler", 5 * 60 * 1000, sampleHealth)
+        setTimeout(healthTick, 90 * 1000)
+        setInterval(healthTick, 5 * 60 * 1000)
     })
     .catch((err) => {
         console.log(err)
