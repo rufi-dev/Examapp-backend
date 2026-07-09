@@ -52,13 +52,13 @@ app.use(express.json())
 app.use(express.urlencoded({ extended: false }))
 app.use(cookieParser())
 app.use(bodyParser.json())
-// Allowed browser origins. The Examopia domains plus anything in
+// Allowed browser origins. The BunkerMath domains plus anything in
 // ALLOWED_ORIGINS (comma-separated env) so future domains can be added without
 // a code change.
 const ALLOWED_ORIGINS = new Set(
     [
-        "https://examopia.com",
-        "https://www.examopia.com",
+        "https://bunkermath.az",
+        "https://www.bunkermath.az",
         ...(process.env.ALLOWED_ORIGINS || "")
             .split(",")
             .map((s) => s.trim())
