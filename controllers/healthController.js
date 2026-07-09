@@ -128,7 +128,7 @@ const cpuSnapshot = () => {
   return { idle, total };
 };
 
-const cpuUsagePct = async (windowMs = 250) => {
+const cpuUsagePct = async (windowMs = 500) => {
   const a = cpuSnapshot();
   await sleep(windowMs);
   const b = cpuSnapshot();
@@ -216,11 +216,12 @@ const dirSizes = () =>
   });
 
 const checkServer = async () => {
-  const [cpuPct, disk, dirs] = await Promise.all([
-    cpuUsagePct(),
-    diskUsage("/"),
-    dirSizes(),
-  ]);
+  // Measure CPU ALONE first. Running it concurrently with the du-heavy
+  // dirSizes()/diskUsage() made the 250ms sample catch the health check's OWN
+  // snapshot spike → a false ~92% even when the server was idle. Sample CPU in
+  // isolation, THEN do the disk/folder scans.
+  const cpuPct = await cpuUsagePct();
+  const [disk, dirs] = await Promise.all([diskUsage("/"), dirSizes()]);
   const cMem = containerMem();
   const host = hostMem();
   const memUsed = cMem ? cMem.used : host.used;
