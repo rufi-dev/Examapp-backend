@@ -35,6 +35,10 @@ const questionSchema = Schema(
         answer: {
           type: String,
         },
+        // Open (Co/Cd): every accepted answer. A typed answer matching ANY of
+        // these (case/space-insensitive) is correct. SERVER-ONLY — stripped from
+        // any pre-reveal student payload. Falls back to `answer` when absent.
+        answers: { type: [String], default: undefined },
         type: {
           // Cm = single-choice, Cs = multi-select, Co/Cd = open, Cma = matching
           // (text pairs), Cmu = correspondence (numbers -> letters, one-to-many).

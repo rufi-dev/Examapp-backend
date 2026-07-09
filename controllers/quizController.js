@@ -1391,6 +1391,9 @@ const reportViolation = asyncHandler(async (req, res) => {
 // Trim surrounding whitespace before comparing (a trailing space/newline on a
 // typed answer shouldn't mark it wrong). Letters/indices are unaffected.
 const norm = (v) => String(v ?? "").trim();
+// Open-answer comparison: trim + lowercase + collapse internal whitespace, so
+// casing and extra spaces don't fail an otherwise-correct typed answer.
+const openNorm = (v) => norm(v).toLowerCase().replace(/\s+/g, " ");
 
 // Does this selection count as a (non-blank) answer? Generalized over the answer
 // shapes: a string (letter/typed), a number/index (structured Cm), an array of
@@ -1450,9 +1453,15 @@ function isCorrectAnswer(ca, sel) {
     }
     case "Co":
     case "Cd":
-    default:
-      // Open/typed (and any legacy type): trimmed string compare.
-      return norm(a) === norm(ca.answer);
+    default: {
+      // Open/typed: correct if the student's answer matches ANY accepted answer
+      // (teachers/AI can list several variants), compared case-insensitively with
+      // collapsed whitespace. Falls back to the single `answer` for legacy items.
+      const accepted =
+        Array.isArray(ca.answers) && ca.answers.length ? ca.answers : [ca.answer];
+      const got = openNorm(a);
+      return got !== "" && accepted.some((ans) => openNorm(ans) === got);
+    }
   }
 }
 
@@ -1501,6 +1510,10 @@ function renderableCorrect(ca) {
   }
   if (ca.type === "Cmu" && Array.isArray(ca.key)) {
     return ca.key; // [[idx,…], …] — correct letter indices per number
+  }
+  // Open: show every accepted variant, e.g. "x+2 / x + 2".
+  if (Array.isArray(ca.answers) && ca.answers.length) {
+    return ca.answers.map(norm).filter(Boolean).join(" / ");
   }
   return norm(ca.answer);
 }

@@ -62,6 +62,9 @@ const EXTRACTION_SCHEMA = {
           // upload manually (Claude can read a figure but can't hand back an image).
           hasFigure: { type: "boolean" },
           openAnswer: { type: "string" },
+          // Open (Co): EVERY acceptable answer as its own array item (variants,
+          // synonyms, spaced/unspaced forms). Empty for non-open questions.
+          openAnswers: { type: "array", items: { type: "string" } },
           explanation: { type: "string" },
         },
         required: [
@@ -73,6 +76,7 @@ const EXTRACTION_SCHEMA = {
           "pairs",
           "hasFigure",
           "openAnswer",
+          "openAnswers",
           "explanation",
         ],
       },
@@ -100,7 +104,7 @@ Rules:
 - "choices": for Cm/Cs, one object per option in the order shown (drop the A/B/C labels — they are implicit by position). Put each option's text in "text" with any math inline via $...$ (e.g. "$9ab$", "2500"). Set the choice "latex" to "". The options live ONLY here — never repeat them inside the question "text". For Co/Cma, use an empty array.
 - "correct": indices (0-based) into "choices" of the correct option(s) — ONLY if the PDF itself marks/states the correct answer (e.g. an answer key, a highlighted option, or a stated solution). If the correct answer is NOT given in the PDF, return an EMPTY array. NEVER guess or solve the question to fill this — leave it empty for the teacher to mark.
 - "pairs": for Cma matching, one object per LEFT item (e.g. one per number 1, 2, 3 …) in order. Put math inline in "left"/"right" via $...$ and set "leftLatex"/"rightLatex" to "". Empty array otherwise. For a numbers→letters correspondence, "left" is the number/item and "right" is its correct letter(s): if ONE left matches SEVERAL letters, list them comma-separated in that one right value (e.g. "a, d"). A letter may repeat across different lefts. The app turns this into a grid where each letter is selected individually.
-- "openAnswer": for Co, the correct answer text (math inline via $...$) ONLY if the PDF states it; otherwise "".
+- "openAnswer" / "openAnswers": for open (Co) questions, the correct answer(s). Write them as PLAIN TEXT exactly as a student types on a keyboard — NO LaTeX, NO $...$ dollar signs, NO markup. Examples: write x+2 (NOT $x + 2$), 3/4 (NOT $\\\\frac{3}{4}$), x=5, 25. Put the primary answer in "openAnswer" AND list EVERY acceptable form in the "openAnswers" ARRAY, each variant as its own element — include the spaced and unspaced forms (x+2 AND x + 2), reordered equivalents (2+x), and common synonyms/notations students would realistically type. A typed answer is marked correct if it matches ANY item (compared case- and space-insensitively), so cover the realistic variations. Fill these ONLY if the PDF states the answer; otherwise openAnswer="" and openAnswers=[]. For non-open questions: openAnswer="" and openAnswers=[].
 - "hasFigure": true if the question depends on a diagram, graph, geometric figure, or image that cannot be represented as text/LaTeX (the teacher will add the image). Still extract the surrounding text.
 - "explanation": a worked solution/explanation (math inline via $...$) ONLY if the PDF provides one; otherwise "".
 
@@ -195,11 +199,12 @@ const GEMINI_SCHEMA = {
           },
           hasFigure: { type: "BOOLEAN" },
           openAnswer: { type: "STRING" },
+          openAnswers: { type: "ARRAY", items: { type: "STRING" } },
           explanation: { type: "STRING" },
         },
         required: [
           "type", "text", "latex", "choices", "correct",
-          "pairs", "hasFigure", "openAnswer", "explanation",
+          "pairs", "hasFigure", "openAnswer", "openAnswers", "explanation",
         ],
       },
     },
