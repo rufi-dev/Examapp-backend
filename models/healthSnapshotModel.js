@@ -14,7 +14,7 @@ const healthSnapshotSchema = new mongoose.Schema(
     // NOTE: indexed via the TTL index below — do not add index:true here too
     // (two index specs on the same key conflict at createIndexes time).
     at: { type: Date, required: true },
-    siteUp: Boolean, // https://examopia.com reachable from the server
+    siteUp: Boolean, // https://bunkermath.az reachable from the server
     siteMs: Number, // homepage response time
     siteStatus: Number, // HTTP status code
     dbUp: Boolean,

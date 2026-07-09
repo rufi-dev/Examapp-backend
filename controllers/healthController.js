@@ -36,8 +36,8 @@ const DebugLog = require("../models/debugLogModel");
 const AiUsage = require("../models/aiUsageModel");
 const pkg = require("../package.json");
 
-const SITE_URL = process.env.SITE_URL || "https://examopia.com";
-const PUBLIC_API_URL = process.env.PUBLIC_API_URL || "https://api.examopia.com";
+const SITE_URL = process.env.SITE_URL || "https://bunkermath.az";
+const PUBLIC_API_URL = process.env.PUBLIC_API_URL || "https://api.bunkermath.az";
 const PORT = process.env.PORT || 5000;
 
 // --------------------------------- utils ----------------------------------
@@ -91,7 +91,7 @@ const timedFetch = async (url, { timeoutMs = 10000, method = "GET" } = {}) => {
       method,
       redirect: "follow",
       signal: AbortSignal.timeout(timeoutMs),
-      headers: { "User-Agent": "Examopia-HealthCheck/1.0" },
+      headers: { "User-Agent": "BunkerMath-HealthCheck/1.0" },
     });
     // Drain (small) bodies so sockets are released; HEAD/failed bodies skipped.
     let bytes = 0;
@@ -704,7 +704,7 @@ const buildAlertsAndScore = (d) => {
   const siteDown = sitePages.length > 0 && sitePages.every((p) => !p.ok);
   const someSiteSlow = sitePages.some((p) => p.ok && p.ms > T.siteMsWarn);
   if (siteDown) {
-    add("down", "Sayt", "examopia.com serverdən açılmır", "Cloudflare statusunu və DNS-i yoxlayın", "offline", "online");
+    add("down", "Sayt", "bunkermath.az serverdən açılmır", "Cloudflare statusunu və DNS-i yoxlayın", "offline", "online");
     dock(20);
   } else if (sitePages.some((p) => !p.ok)) {
     add("warning", "Sayt", "Bəzi səhifə yoxlamaları uğursuz oldu", "Cloudflare-də son deploy-u yoxlayın");
@@ -718,7 +718,7 @@ const buildAlertsAndScore = (d) => {
   const apiRows = d.api?.endpoints || [];
   const publicApi = apiRows.find((r) => r.name.includes("xarici"));
   if (publicApi && !publicApi.ok) {
-    add("critical", "API", "api.examopia.com xaricdən açılmır (Caddy/DNS/SSL)", "Serverdə `docker compose ps` və Caddy loglarına baxın");
+    add("critical", "API", "api.bunkermath.az xaricdən açılmır (Caddy/DNS/SSL)", "Serverdə `docker compose ps` və Caddy loglarına baxın");
     dock(12);
   }
   const internalApi = apiRows.find((r) => r.name.includes("daxili"));
