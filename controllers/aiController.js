@@ -29,7 +29,7 @@ const EXTRACTION_SCHEMA = {
         additionalProperties: false,
         properties: {
           // Cm = single-choice, Cs = multi-select, Co = open, Cma = matching.
-          type: { type: "string", enum: ["Cm", "Cs", "Co", "Cma"] },
+          type: { type: "string", enum: ["Cm", "Cs", "Co", "Cd", "Cma"] },
           text: { type: "string" },
           latex: { type: "string" },
           choices: {
@@ -90,7 +90,8 @@ const SYSTEM_PROMPT = `You extract exam questions from a PDF into structured dat
 Output one item per question, in document order, using these types:
 - "Cm": single correct answer among options.
 - "Cs": multiple correct answers among options (only when the question clearly allows more than one).
-- "Co": open / free-text answer (no options).
+- "Co": open / free-text answer (no options) — a SHORT written answer (a number, expression, word).
+- "Cd": open question that REQUIRES A WRITTEN SOLUTION / working ("Həlli tələb olunan açıq sual"). Use "Cd" (NOT "Co") for questions in a "detailed answer" / "ətraflı yazın" / "həllini yazın" / "show your work" section — e.g. a DİM Buraxılış paper's final "…saylı tapşırıqları ətraflı yazın" block. These are still open answers; fill openAnswer/openAnswers the same way as Co when the PDF states the answer.
 - "Cma": matching (left column items paired with right column items).
 
 Rules:
@@ -172,7 +173,7 @@ const GEMINI_SCHEMA = {
       items: {
         type: "OBJECT",
         properties: {
-          type: { type: "STRING", enum: ["Cm", "Cs", "Co", "Cma"] },
+          type: { type: "STRING", enum: ["Cm", "Cs", "Co", "Cd", "Cma"] },
           text: { type: "STRING" },
           latex: { type: "STRING" },
           choices: {
