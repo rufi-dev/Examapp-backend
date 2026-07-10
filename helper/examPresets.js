@@ -54,6 +54,14 @@ function bur9Plan(count, types) {
   return weights.map((w) => (w / total) * 100);
 }
 
+// Every question worth an EQUAL share of totalMarks (type-independent). For a
+// 10-question, 100-point test → 10 pts each. Adapts if the count changes so the
+// total always stays at totalMarks.
+function equalPlan(count, totalMarks) {
+  const n = Number(count) || 0;
+  return n > 0 ? Array.from({ length: n }, () => totalMarks / n) : [];
+}
+
 const PRESETS = {
   buraxilis: {
     id: "buraxilis",
@@ -85,6 +93,20 @@ const PRESETS = {
     // Həlli tələb olunan (Cd) suallar 2× ağırdır; cəmi 100 (DİM nisbi balı).
     // Səhv düzü aparmır — mənfi qiymətləndirmə yoxdur.
     pointsPlan: bur9Plan,
+    negativeMarking: null,
+  },
+
+  dqt: {
+    id: "dqt",
+    label: "DQT (Dərsi Qiymətləndirmə Testi)",
+    totalMarks: 100,
+    // 10 sual, hər biri 10 bal (cəmi 100). Standart: 7 qapalı + 3 açıq — açıq/
+    // qapalı sayı PDF-ə görə dəyişir, müəllim tipləri özü təyin edə bilər.
+    slots: [
+      { type: "Cm", count: 7 },
+      { type: "Co", count: 3 },
+    ],
+    pointsPlan: (count) => equalPlan(count, 100),
     negativeMarking: null,
   },
 
