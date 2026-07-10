@@ -40,10 +40,24 @@ function blokPlan(count, types) {
   return tailEqualPlan(n, 150, 3, BLOK_SOLVE_PTS);
 }
 
+// Buraxılış 9-cu sinif (DİM), out of 100 (nisbi bal). Solution-required questions
+// (type Cd — "Həlli tələb olunan açıq", the last 4: #22-25) are weighted 2× a
+// normal question; the whole sheet is normalized to 100. So 21 normal + 4 Cd →
+// 21·1 + 4·2 = 29 units → normal 100/29 ≈ 3.45, Cd 200/29 ≈ 6.90. No negative
+// marking (səhv düzü aparmır). Scored BY TYPE so the per-type panel totals 100.
+function bur9Plan(count, types) {
+  const n = Number(count) || 0;
+  if (n <= 0) return [];
+  const t = Array.isArray(types) ? types : [];
+  const weights = Array.from({ length: n }, (_, i) => (t[i] === "Cd" ? 2 : 1));
+  const total = weights.reduce((s, w) => s + w, 0) || 1;
+  return weights.map((w) => (w / total) * 100);
+}
+
 const PRESETS = {
   buraxilis: {
     id: "buraxilis",
-    label: "Buraxılış",
+    label: "Buraxılış 11-ci sinif",
     totalMarks: 100,
     // Seeded structure for the builder (teacher can adjust). Scoring stays the
     // legacy one (pointsPlan null -> quizController falls back to questionPoints:
@@ -54,6 +68,23 @@ const PRESETS = {
       { type: "Cd", count: 7 },
     ],
     pointsPlan: null,
+    negativeMarking: null,
+  },
+
+  "buraxilis-9": {
+    id: "buraxilis-9",
+    label: "Buraxılış 9-cu sinif",
+    totalMarks: 100,
+    // 25 tapşırıq: 15 qapalı (#1-15) + 6 açıq (#16-21) + 4 həlli tələb olunan
+    // açıq (#22-25). Bu yalnız BAŞLANĞIC şablondur — müəllim dəyişə bilər.
+    slots: [
+      { type: "Cm", count: 15 },
+      { type: "Co", count: 6 },
+      { type: "Cd", count: 4 },
+    ],
+    // Həlli tələb olunan (Cd) suallar 2× ağırdır; cəmi 100 (DİM nisbi balı).
+    // Səhv düzü aparmır — mənfi qiymətləndirmə yoxdur.
+    pointsPlan: bur9Plan,
     negativeMarking: null,
   },
 
