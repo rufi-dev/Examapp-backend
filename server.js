@@ -14,6 +14,7 @@ const videoRoute = require('./routes/videoRoute')
 const healthRoute = require('./routes/healthRoute')
 const { initPersistedSessions } = require('./helper/whatsapp')
 const Attempt = require('./models/attemptModel')
+const Result = require('./models/resultModel')
 const Class = require('./models/classModel')
 const { runDueExamReports } = require('./jobs/examReports')
 const { finalizeExpiredAttempts, purgeExpiredArchived } = require('./controllers/quizController')
@@ -22,21 +23,65 @@ const { requestMetrics } = require('./middleware/requestMetrics')
 const { beat } = require('./utils/heartbeat')
 const errorHandler = require('./middleware/errorMiddleware')
 
-// Collapse any pre-existing duplicate ACTIVE attempts (keep the newest, mark the
-// rest submitted) so the unique partial index can build, then ensure indexes
-// exist. Idempotent: a no-op once there are no duplicates.
-async function prepareAttempts() {
-    const dupes = await Attempt.aggregate([
-        { $match: { submitted: false } },
-        { $sort: { createdAt: -1 } },
-        { $group: { _id: { u: "$userId", e: "$examId" }, ids: { $push: "$_id" } } },
-        { $match: { "ids.1": { $exists: true } } },
-    ])
-    for (const d of dupes) {
-        const [, ...older] = d.ids // keep ids[0] (newest); retire the rest
-        await Attempt.updateMany({ _id: { $in: older } }, { $set: { submitted: true } })
+// Startup VERIFY-ONLY. Data mutation (dedup, backfill, index build) lives in the
+// one-time offline migration (scripts/backfillAttemptId.js) — startup must NEVER
+// rewrite Attempts (a boot-time dedup could reintroduce "submitted without
+// Result"). Here we only ASSERT that the migration ran: the critical indexes
+// exist and MIGRATION_TS is a valid timestamp. In production a failed assertion is
+// FATAL (a missing unique index silently permits duplicate Results / active
+// attempts); in dev it builds the indexes for convenience and only warns.
+async function verifyStartupInvariants() {
+    const isProd = process.env.NODE_ENV === 'production'
+
+    const rawTs = process.env.MIGRATION_TS
+    if (!rawTs || Number.isNaN(new Date(rawTs).getTime())) {
+        const msg = `MIGRATION_TS env is missing or not a valid timestamp: ${JSON.stringify(rawTs)}`
+        if (isProd) throw new Error(msg)
+        console.warn('[STARTUP]', msg, '— dev fallback (orphan create-repair disabled until set)')
     }
-    await Attempt.createIndexes()
+
+    // In dev, build indexes on boot so a fresh/in-memory DB just works. In prod,
+    // the offline migration already built them; we only verify.
+    if (!isProd) {
+        await Attempt.createIndexes()
+        await Result.createIndexes()
+    }
+
+    const assertIndexes = async (Model, wants) => {
+        const idx = await Model.collection.indexes()
+        for (const w of wants) {
+            if (!idx.some(w.match)) {
+                const msg = `${Model.modelName} index ${w.label} is missing (run the migration to build it)`
+                if (isProd) throw new Error(msg)
+                console.warn('[STARTUP]', msg)
+            }
+        }
+    }
+    const keyEq = (key) => (i) => JSON.stringify(i.key) === JSON.stringify(key)
+    const pfeEq = (pfe) => (i) => JSON.stringify(i.partialFilterExpression || null) === JSON.stringify(pfe)
+    // Assert the EXACT key AND exact partialFilterExpression (not just "has a
+    // partial filter") — a prior bug shipped a same-key index under a different
+    // name that silently disabled uniqueness, so shape must be verified exactly.
+    await assertIndexes(Attempt, [{
+        label: "'uniq_active_attempt' unique {userId,examId} partial {submitted:false}",
+        match: (i) =>
+            i.name === 'uniq_active_attempt' &&
+            i.unique === true &&
+            keyEq({ userId: 1, examId: 1 })(i) &&
+            pfeEq({ submitted: false })(i),
+    }])
+    await assertIndexes(Result, [
+        {
+            label: "'uniq_result_attempt' unique {attemptId} partial {attemptId:{$exists,$type:objectId}}",
+            match: (i) =>
+                i.name === 'uniq_result_attempt' &&
+                i.unique === true &&
+                keyEq({ attemptId: 1 })(i) &&
+                pfeEq({ attemptId: { $exists: true, $type: 'objectId' } })(i),
+        },
+        { label: '{userId,examId,createdAt}', match: keyEq({ userId: 1, examId: 1, createdAt: 1 }) },
+        { label: '{examId}', match: keyEq({ examId: 1 }) },
+    ])
 }
 
 
@@ -118,12 +163,13 @@ mongoose
     .connect(process.env.MONGO_URI)
     .then(async () => {
         try {
-            await prepareAttempts()
+            await verifyStartupInvariants()
         } catch (e) {
-            // Non-fatal so a transient DB hiccup doesn't block boot, but loud:
-            // a missing uniqueness index silently disables the single-active-
-            // attempt guarantee.
-            console.error("[ATTEMPT INDEX] prep FAILED — single-active-attempt uniqueness NOT enforced:", e.message)
+            // FATAL: a missing unique index or an unset MIGRATION_TS means the data
+            // invariants aren't guaranteed. Do NOT serve traffic — abort so a
+            // partial/unmigrated deploy can't silently permit duplicate Results.
+            console.error("[STARTUP] invariant verification FAILED — refusing to boot:", e.message)
+            process.exit(1)
         }
         // Public/open classes were removed — convert any legacy public class to
         // code-only so nothing stays openly accessible (idempotent).

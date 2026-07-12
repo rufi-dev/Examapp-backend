@@ -9,7 +9,8 @@
   "scripts": {
     "start": "node server.js",
     "backend": "nodemon server.js",
-    "dev:localdb": "node dev-local-db.js"
+    "dev:localdb": "node dev-local-db.js",
+    "test": "node tests/invariant.test.js && node tests/finalizer.test.js && node tests/late-submit.test.js && node tests/migration.test.js"
   },
   "keywords": [
     "MERN",

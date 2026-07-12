@@ -33,7 +33,7 @@ const EXTRACTION_SCHEMA = {
         properties: {
           // Cm = single-choice, Cs = multi-select, Co = open, Cma = matching,
           // reading = a passage block (not a question) shown before its questions.
-          type: { type: "string", enum: ["Cm", "Cs", "Co", "Cma", "reading"] },
+          type: { type: "string", enum: ["Cm", "Cs", "Co", "Cd", "Cma", "reading"] },
           text: { type: "string" },
           // Reading passage heading (e.g. "Mətn 1"); "" for normal questions.
           title: { type: "string" },
@@ -95,7 +95,8 @@ const SYSTEM_PROMPT = `You extract exam questions from a PDF into structured dat
 Output one item per question, in document order, using these types:
 - "Cm": single correct answer among options.
 - "Cs": multiple correct answers among options (only when the question clearly allows more than one).
-- "Co": open / free-text answer (no options).
+- "Co": open / free-text answer (no options) — a SHORT written answer (a number, expression, word).
+- "Cd": open question that REQUIRES A WRITTEN SOLUTION / working ("Həlli tələb olunan açıq sual"). Use "Cd" (NOT "Co") for questions in a "detailed answer" / "ətraflı yazın" / "həllini yazın" / "show your work" section — e.g. a DİM Buraxılış paper's final "…saylı tapşırıqları ətraflı yazın" block. Still open answers; fill openAnswer/openAnswers the same way as Co when the PDF states the answer.
 - "Cma": matching (left column items paired with right column items).
 - "reading": a reading-comprehension PASSAGE (a "mətn" / text the student must read), NOT a question. When the PDF contains a passage that several following questions refer to, emit it as ONE separate "reading" item placed IMMEDIATELY BEFORE those questions, then continue with the questions as normal types. Never inline the passage into each question and never duplicate it.
 
@@ -152,6 +153,9 @@ const presetHint = (presetId) => {
   }
   if (p === "az-buraxilis-9" || p === "az-buraxilis-11") {
     return "SUBJECT: This is an Azerbaijani-language (Azərbaycan dili) DİM buraxılış exam: language-rule multiple-choice questions, then reading passages (Mətn) each extracted as a reading block and followed by closed and OPEN (written) questions.";
+  }
+  if (p === "buraxilis-9") {
+    return "SUBJECT: This is a MATH (Riyaziyyat) 9th-grade DİM buraxılış exam. Structure: a CLOSED (Qapalı) multiple-choice section, then an OPEN (Açıq) short-answer section, then a final 'solution-required' section (labelled '…saylı tapşırıqları ətraflı yazın' / həlli tələb olunan). Type the solution-required questions as \"Cd\" (NOT \"Co\"); the short open ones as \"Co\"; the multiple-choice ones as \"Cm\".";
   }
   return "";
 };
@@ -231,7 +235,7 @@ const GEMINI_SCHEMA = {
       items: {
         type: "OBJECT",
         properties: {
-          type: { type: "STRING", enum: ["Cm", "Cs", "Co", "Cma", "reading"] },
+          type: { type: "STRING", enum: ["Cm", "Cs", "Co", "Cd", "Cma", "reading"] },
           text: { type: "STRING" },
           title: { type: "STRING" },
           latex: { type: "STRING" },

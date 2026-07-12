@@ -15,6 +15,23 @@ const attemptSchema = new Schema(
     // The client can't lower these by editing storage/JS or by reloading.
     violations: { type: Number, default: 0 },
     terminated: { type: Boolean, default: false },
+    // Terminal exception to the "every submitted attempt has a Result" invariant:
+    // an attempt that can never be scored (its exam/user was deleted, or it was a
+    // retired duplicate / a legacy ghost). Excluded from ALL counts. NOTE: only
+    // `unscorable === true` is terminal; `legacy_unlinked` is an observability tag
+    // on a real Result and MUST NOT set unscorable:true.
+    unscorable: { type: Boolean, default: false },
+    unscorableReason: {
+      type: String,
+      enum: [
+        "deleted_exam",
+        "deleted_user",
+        "retired_duplicate",
+        "ghost_no_result",
+        "legacy_unlinked",
+      ],
+      default: undefined,
+    },
     // Per-attempt structured choice shuffle (only when exam.shuffleOptions). Maps
     // a question index -> permutation array, where perm[displayPos] = originalIdx.
     // Generated once at start, reused on resume (stable order), and used at submit

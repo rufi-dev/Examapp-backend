@@ -191,11 +191,14 @@ async function notifyExamStarted(exam, student) {
   }
 }
 
+// Returns true when the notification was delivered OR was a no-op (no recipients
+// configured — a completed no-op, NOT a failure); false only on a real send
+// failure. Callers use this to decide whether to set terminationNotifiedAt.
 async function notifyExamFinished(exam, student, result) {
   try {
     const terminated = !!result?.terminated;
     const recips = await recipientsForExam(exam, terminated ? "onViolation" : "onFinish");
-    if (!recips.length) return;
+    if (!recips.length) return true; // no recipients = completed no-op
     const cname = await className(exam);
     const head = `📝 ${esc(exam.name || "İmtahan")}${cname ? ` · 🏫 ${esc(cname)}` : ""}`;
     const who = `👤 ${esc(student?.name || "Şagird")}${contactLine(student)}`;
@@ -211,7 +214,7 @@ async function notifyExamFinished(exam, student, result) {
           `🕒 ${fmtTime()}`,
         ].join("\n")
       );
-      return;
+      return true;
     }
 
     const pts = Number(result?.earnPoints ?? 0);
@@ -235,9 +238,11 @@ async function notifyExamFinished(exam, student, result) {
         .filter(Boolean)
         .join("\n")
     );
+    return true;
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("[TELEGRAM] notifyExamFinished failed:", e.message);
+    return false;
   }
 }
 

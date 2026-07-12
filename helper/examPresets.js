@@ -55,6 +55,24 @@ function azWrittenPlan(count, types) {
   return weights.map((w) => (w / total) * 100);
 }
 
+// Riyaziyyat Buraxılış 9-cu sinif (DİM), out of 100: solution-required questions
+// (type Cd) are weighted 2×; normalized to 100. No negative marking. BY TYPE.
+function bur9Plan(count, types) {
+  const n = Number(count) || 0;
+  if (n <= 0) return [];
+  const t = Array.isArray(types) ? types : [];
+  const weights = Array.from({ length: n }, (_, i) => (t[i] === "Cd" ? 2 : 1));
+  const total = weights.reduce((s, w) => s + w, 0) || 1;
+  return weights.map((w) => (w / total) * 100);
+}
+
+// Every question worth an EQUAL share of totalMarks (10 pts each for a 10-question
+// test). Adapts to the count so the total stays at totalMarks.
+function equalPlan(count, totalMarks) {
+  const n = Number(count) || 0;
+  return n > 0 ? Array.from({ length: n }, () => totalMarks / n) : [];
+}
+
 const PRESETS = {
   // Custom — no fixed blueprint. The teacher builds from scratch; for PDF+AI the
   // model auto-detects the actual question count and open/closed types. Scoring
@@ -70,7 +88,7 @@ const PRESETS = {
 
   buraxilis: {
     id: "buraxilis",
-    label: "Buraxılış",
+    label: "Buraxılış (11-ci sinif)",
     totalMarks: 100,
     // Seeded structure for the builder (teacher can adjust). Scoring stays the
     // legacy one (pointsPlan null -> quizController falls back to questionPoints:
@@ -81,6 +99,35 @@ const PRESETS = {
       { type: "Cd", count: 7 },
     ],
     pointsPlan: null,
+    negativeMarking: null,
+  },
+
+  "buraxilis-9": {
+    id: "buraxilis-9",
+    label: "Buraxılış (9-cu sinif)",
+    totalMarks: 100,
+    // 25 tapşırıq: 15 qapalı (#1-15) + 6 açıq (#16-21) + 4 həlli tələb olunan açıq
+    // (#22-25, type Cd). Cd suallar 2× ağırdır; cəmi 100. Səhv düzü aparmır.
+    slots: [
+      { type: "Cm", count: 15 },
+      { type: "Co", count: 6 },
+      { type: "Cd", count: 4 },
+    ],
+    pointsPlan: bur9Plan,
+    negativeMarking: null,
+  },
+
+  dqt: {
+    id: "dqt",
+    label: "DQT (Dərsi Qiymətləndirmə Testi)",
+    totalMarks: 100,
+    // 10 sual, hər biri 10 bal (cəmi 100). Standart 7 qapalı + 3 açıq — açıq/qapalı
+    // sayı PDF-ə görə dəyişir, müəllim tipləri özü təyin edə bilər.
+    slots: [
+      { type: "Cm", count: 7 },
+      { type: "Co", count: 3 },
+    ],
+    pointsPlan: (count) => equalPlan(count, 100),
     negativeMarking: null,
   },
 
