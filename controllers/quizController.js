@@ -380,7 +380,7 @@ const getPdfByExam = asyncHandler(async (req, res) => {
       req.user && (req.user.role === "admin" || req.user.role === "teacher");
     if (!isStaff) {
       const [hasAttempt, hasResult] = await Promise.all([
-        Attempt.countDocuments({ userId: req.user._id, examId }),
+        Attempt.countDocuments({ userId: req.user._id, examId, unscorable: { $ne: true } }),
         Result.countDocuments({ userId: req.user._id, examId }),
       ]);
       if (!hasAttempt && !hasResult) {
@@ -1052,6 +1052,14 @@ function applyResultVisibility(result, vis) {
 
 const ATTEMPT_GRACE_MS = 30 * 1000;
 
+// Deploy boundary set by the one-time migration (backfillAttemptId.js). Orphan
+// repair that CREATES a missing Result only runs for attempts started after this,
+// so legacy attempts (whose Results may lack attemptId) are never touched. Parsed
+// and validated fatally at startup (server.js); null here only in dev/pre-migration.
+const MIGRATION_TS = process.env.MIGRATION_TS
+  ? new Date(process.env.MIGRATION_TS)
+  : null;
+
 // Effective deadline for a live attempt: its stored expiry, but never later than
 // the exam's CURRENT endDate. So if a teacher shortens endDate while a student
 // is mid-exam, the attempt is cut down to the new endDate on resume/status/
@@ -1079,39 +1087,6 @@ const startAttempt = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("Exam not found");
   }
-  // Archived (trashed) exams can't be started by anyone, even via a direct URL.
-  if (exam.deletedAt) return res.status(403).json({ reason: "finished" });
-
-  // Hidden (draft) exams are not accessible to students, even via a direct URL.
-  const isStaff = user.role === "admin" || user.role === "teacher";
-  if (exam.hidden && !isStaff) {
-    return res.status(403).json({ reason: "not_started" });
-  }
-
-  // Ownership gate: a student must have ACQUIRED the exam (free add, paid
-  // purchase, or teacher assignment) before starting it. Without this, any
-  // verified user could start a paid/unassigned exam just by POSTing its id.
-  // A FREE exam is accessible to a student who is approved-enrolled OR whose
-  // class is PUBLIC. Paid exams still go through the purchase flow either way —
-  // neither enrollment nor a public class is a payment bypass.
-  const isFree = !exam.price || Number(exam.price) === 0;
-  let classFreeAccess = false;
-  if (isFree && exam.class) {
-    if (await studentApprovedInClass(user._id, exam.class)) {
-      classFreeAccess = true;
-    } else {
-      const classDoc = await Class.findById(exam.class).select("requireCode").lean();
-      classFreeAccess = classIsPublic(classDoc);
-    }
-  }
-  const owns =
-    user.exams.some((e) => e.toString() === String(examId)) ||
-    exam.users.some((u) => u.toString() === user._id.toString()) ||
-    classFreeAccess;
-  if (!isStaff && !owns) {
-    return res.status(403).json({ reason: "not_owned" });
-  }
-
   const now = Date.now();
   const correctAnswers = exam.questions?.correctAnswers || [];
 
@@ -1174,12 +1149,53 @@ const startAttempt = asyncHandler(async (req, res) => {
   }).sort({ createdAt: -1 });
 
   if (attempt) {
-    if (effectiveExpiry(attempt, exam) > now) {
-      return res.status(200).json(payload(attempt));
+    // Crash-orphan repair: a Result already exists but `submitted` never flipped
+    // (e.g. a crash after Result.create). Finalize (mark submitted + repair links)
+    // and tell the client the attempt is already finished.
+    const existingResult = await Result.findOne({ attemptId: attempt._id })
+      .select("_id")
+      .lean();
+    if (existingResult) {
+      await finalizeAttempt(attempt, { reason: "resume_result_exists" });
+      return res
+        .status(200)
+        .json({ finished: true, reason: "already_submitted", attemptId: attempt._id });
     }
-    attempt.submitted = true; // expired without submitting -> a used try
-    await attempt.save();
+    if (effectiveExpiry(attempt, exam) > now) {
+      return res.status(200).json(payload(attempt)); // live resume
+    }
+    // Expired without submitting -> finalize from the autosaved answers (never a
+    // bare `submitted:true` with no Result), then fall through to a possible NEW start.
+    await finalizeAttempt(attempt, { reason: "expired_resume" });
+    attempt = null;
   }
+
+  // ── NEW START gates (only reached when there is NO in-flight attempt) ─────────
+  // A legally-started attempt already resumed/finalized above regardless of these,
+  // so archival / hidden / ownership changes never strand an in-flight student.
+  const isStaff = user.role === "admin" || user.role === "teacher";
+  // Archived (trashed) exams can't be freshly started.
+  if (exam.deletedAt) return res.status(403).json({ reason: "finished" });
+  // Hidden (draft) exams are not accessible to students.
+  if (exam.hidden && !isStaff) return res.status(403).json({ reason: "not_started" });
+  // Ownership gate: a student must have ACQUIRED the exam (free add, paid purchase,
+  // or teacher assignment). A FREE exam is accessible to an approved-enrolled
+  // student OR one whose class is PUBLIC; paid exams still go through purchase.
+  const isFree = !exam.price || Number(exam.price) === 0;
+  let classFreeAccess = false;
+  if (isFree && exam.class) {
+    if (await studentApprovedInClass(user._id, exam.class)) {
+      classFreeAccess = true;
+    } else {
+      const classDoc = await Class.findById(exam.class).select("requireCode").lean();
+      classFreeAccess = classIsPublic(classDoc);
+    }
+  }
+  const owns =
+    user.exams.some((e) => e.toString() === String(examId)) ||
+    exam.users.some((u) => u.toString() === user._id.toString()) ||
+    classFreeAccess;
+  if (!isStaff && !owns) return res.status(403).json({ reason: "not_owned" });
 
   // NEW START from here on: enforce the window, password, questions, max tries.
   if (exam.startDate && new Date(exam.startDate).getTime() > now)
@@ -1199,10 +1215,12 @@ const startAttempt = asyncHandler(async (req, res) => {
   if (!correctAnswers.length) return res.status(403).json({ reason: "no_questions" });
 
   // Enforce maxTry (number of started tries; also counts legacy results).
+  // Unscorable attempts (deleted exam/user, retired duplicates) never consumed a
+  // real try, so they're excluded from the count.
   const maxTry = exam.maxTry || 0;
   if (maxTry > 0) {
     const [attemptCount, resultCount] = await Promise.all([
-      Attempt.countDocuments({ userId: user._id, examId }),
+      Attempt.countDocuments({ userId: user._id, examId, unscorable: { $ne: true } }),
       Result.countDocuments({ userId: user._id, examId }),
     ]);
     if (Math.max(attemptCount, resultCount) >= maxTry)
@@ -1308,35 +1326,97 @@ const getExamRank = asyncHandler(async (req, res) => {
 // this user (so "Start" can become "Resume")? Server-truth only.
 const attemptStatus = asyncHandler(async (req, res) => {
   const { examId } = req.params;
+  const qAttemptId = req.query.attemptId || (req.body && req.body.attemptId);
+  // Exam may be null (deleted). We still answer for a deleted-exam attempt so the
+  // Result page can show the terminal `unscorable` reason.
   const exam = await Exam.findById(examId);
-  const attempt = await Attempt.findOne({
-    userId: req.user._id,
-    examId,
-    submitted: false,
-  }).sort({ createdAt: -1 });
-  const exp = attempt ? effectiveExpiry(attempt, exam) : 0;
-  // An archived (trashed) exam is never "active" — it can't be started/resumed.
-  const archived = !!(exam && exam.deletedAt);
-  const active = !archived && !!attempt && exp > Date.now();
 
-  // Used-try count exactly as startAttempt enforces it (started attempts OR
-  // results, whichever is higher), so the details page can show accurate tries
-  // left. Only computed when ?counts=1 (the details page) — the in-exam 8s poll
-  // never reads it, so it skips these two extra counts every tick.
+  // Resolve the attempt in scope. When an attemptId is supplied it is STRICTLY
+  // pinned (this user's own attempt for this exam); an invalid/foreign id gets a
+  // distinct terminal response — never a fallback to "latest" or a broad lookup.
+  let attempt = null;
+  if (qAttemptId) {
+    if (!mongoose.Types.ObjectId.isValid(qAttemptId)) {
+      return res
+        .status(404)
+        .json({ reason: "invalid_attempt", active: false, finished: false, hasResult: false, unscorable: false });
+    }
+    attempt = await Attempt.findOne({ _id: qAttemptId, userId: req.user._id, examId });
+    if (!attempt) {
+      return res
+        .status(404)
+        .json({ reason: "invalid_attempt", active: false, finished: false, hasResult: false, unscorable: false });
+    }
+  } else {
+    // Latest attempt of ANY state, so submitted / unscorable are visible (not just
+    // the unsubmitted one).
+    attempt = await Attempt.findOne({ userId: req.user._id, examId }).sort({ createdAt: -1 });
+  }
+
+  // Does THIS attempt already have its Result? (One indexed query, reused below.)
+  let attemptHasResult = false;
+  if (attempt) attemptHasResult = !!(await Result.exists({ attemptId: attempt._id }));
+
+  // Crash-orphan repair: an unsubmitted attempt that already has a Result — flip it
+  // submitted + repair links immediately (don't wait for expiry), then treat as finished.
+  if (attempt && !attempt.submitted && !attempt.unscorable && attemptHasResult) {
+    try {
+      await finalizeAttempt(attempt, { reason: "status_result_exists" });
+    } catch (e) {
+      console.error("[STATUS] repair failed", String(attempt._id), e.message);
+    }
+    attempt.submitted = true;
+  }
+
+  const archived = !!(exam && exam.deletedAt);
+  const now = Date.now();
+  const exp = attempt
+    ? exam
+      ? effectiveExpiry(attempt, exam)
+      : new Date(attempt.expiresAt).getTime()
+    : 0;
+  const unscorable = !!(attempt && attempt.unscorable);
+  const active =
+    !archived && !!attempt && !attempt.submitted && !unscorable && exp > now;
+
+  // hasResult: prefer the attemptId-scoped answer for the current attempt; the
+  // broad {userId,examId} fallback is used ONLY when there is no attempt context OR
+  // the attempt is legacy (pre-MIGRATION_TS, no attemptId-linked Result) — so a
+  // multi-try student with an OLD result + a NEWER pending attempt is not falsely
+  // reported finished.
+  let hasResult = attemptHasResult;
+  if (attempt) {
+    if (!hasResult) {
+      const legacy =
+        MIGRATION_TS && attempt.createdAt && new Date(attempt.createdAt) < MIGRATION_TS;
+      if (legacy) hasResult = !!(await Result.exists({ userId: req.user._id, examId }));
+    }
+  } else {
+    hasResult = !!(await Result.exists({ userId: req.user._id, examId }));
+  }
+
+  const finished =
+    !active && (hasResult || unscorable || !!(attempt && attempt.submitted));
+  const reason = unscorable ? attempt.unscorableReason || "unscorable" : undefined;
+
+  // Used-try count (details page only) — exclude unscorable attempts (they never
+  // consumed a real try).
   const maxTry = exam?.maxTry || 0;
   let used = 0;
   if (req.query.counts && maxTry > 0) {
     const [attemptCount, resultCount] = await Promise.all([
-      Attempt.countDocuments({ userId: req.user._id, examId }),
+      Attempt.countDocuments({ userId: req.user._id, examId, unscorable: { $ne: true } }),
       Result.countDocuments({ userId: req.user._id, examId }),
     ]);
     used = Math.max(attemptCount, resultCount);
   }
 
-  // Expose the live anti-cheat state so a second device sharing this attempt
-  // can mirror the count and finish/redirect when it's terminated elsewhere.
   res.status(200).json({
     active,
+    finished,
+    hasResult,
+    unscorable,
+    reason,
     archived,
     expiresAt: active ? new Date(exp) : null,
     violations: attempt ? attempt.violations || 0 : 0,
@@ -1357,17 +1437,41 @@ const ANTICHEAT_LIMIT = 3;
 const reportViolation = asyncHandler(async (req, res) => {
   const { examId } = req.params;
   const { attemptId } = req.body || {};
-  const filter = { userId: req.user._id, examId, submitted: false };
-  if (attemptId && mongoose.Types.ObjectId.isValid(attemptId)) filter._id = attemptId;
-  const [exam, attempt] = await Promise.all([
-    Exam.findById(examId),
-    Attempt.findOne(filter).sort({ createdAt: -1 }),
-  ]);
-
-  if (!attempt) {
-    return res.status(404).json({ reason: "no_active_attempt" });
+  // STRICT attemptId: when supplied it must be this user's own in-flight attempt —
+  // never fall back to the "latest active attempt" on an invalid/foreign id.
+  let attempt;
+  if (attemptId) {
+    // Supplied attemptId is STRICT (even if malformed) — never fall back to latest.
+    if (
+      !mongoose.Types.ObjectId.isValid(attemptId) ||
+      !(attempt = await Attempt.findOne({
+        _id: attemptId,
+        userId: req.user._id,
+        examId,
+        submitted: false,
+      }))
+    ) {
+      return res.status(409).json({ reason: "invalid_attempt" });
+    }
+  } else {
+    attempt = await Attempt.findOne({
+      userId: req.user._id,
+      examId,
+      submitted: false,
+    }).sort({ createdAt: -1 });
+    if (!attempt) return res.status(404).json({ reason: "no_active_attempt" });
   }
-  if (blockIfArchived(res, exam)) return;
+  // Anti-cheat keeps counting for an in-flight attempt even if the exam was
+  // archived mid-attempt (else a student could finish with under-counted
+  // violations) — only the deadline gates reports. exam is loaded just for endDate.
+  const exam = await Exam.findById(examId).select("endDate").lean();
+  if (attempt.unscorable) {
+    return res.status(200).json({
+      violations: attempt.violations || 0,
+      terminated: !!attempt.terminated,
+      limit: ANTICHEAT_LIMIT,
+    });
+  }
   // Ignore reports after the (effective, endDate-capped) deadline.
   if (effectiveExpiry(attempt, exam) + (ATTEMPT_GRACE_MS || 0) < Date.now()) {
     return res.status(200).json({
@@ -1518,13 +1622,105 @@ function renderableCorrect(ca) {
   return norm(ca.answer);
 }
 
+// Idempotently link a Result into the exam's + user's result arrays. $addToSet so
+// a retry / crash-recovery never double-adds (unlike push+save).
+async function linkResult(examId, userId, resultId) {
+  await Promise.all([
+    Exam.updateOne({ _id: examId }, { $addToSet: { results: resultId } }),
+    User.updateOne({ _id: userId }, { $addToSet: { results: resultId } }),
+  ]);
+}
+
+// Notify staff of a termination exactly once, gated by the persisted
+// terminationNotifiedAt marker. Sets the marker only on a confirmed-successful
+// send (notifyExamFinished returns true, incl. the no-recipients no-op). When
+// suppressed (migration), still stamp the marker so a later live retry won't alert.
+async function markTerminationNotified(result) {
+  const at = new Date();
+  result.terminationNotifiedAt = at;
+  await Result.updateOne({ _id: result._id }, { $set: { terminationNotifiedAt: at } });
+}
+async function maybeNotifyTermination(exam, user, result, suppress) {
+  if (!result.terminated || result.terminationNotifiedAt) return;
+  if (suppress) {
+    await markTerminationNotified(result);
+    return;
+  }
+  const ok = await notifyExamFinished(exam, user, result);
+  if (ok) await markTerminationNotified(result);
+}
+
+// Reconcile an already-existing Result for this attempt with a (possibly retried
+// or racing) submit: identity assert, MONOTONIC merge (violations never lower,
+// termination one-way), ensure the attempt is submitted, repair links, notify.
+// Returns the (possibly upgraded) earnPoints. Never creates a second Result.
+async function reconcileExistingResult(existing, exam, user, attempt, opts = {}) {
+  const { violations, terminated, suppressNotifications } = opts;
+  // Identity ONLY (not current exam access — ownership removal mid-attempt is
+  // allowed). Guards against a foreign/guessed attemptId leaking/altering a result.
+  if (
+    String(existing.userId) !== String(user._id) ||
+    String(existing.examId) !== String(exam._id)
+  ) {
+    throw new Error("attempt_result_identity_mismatch");
+  }
+  const wantTerminated =
+    terminated === true || terminated === "true" || !!attempt.terminated;
+  const newViol = Math.max(
+    existing.violations || 0,
+    Number(violations) || 0,
+    attempt.violations || 0
+  );
+  const set = {};
+  if (newViol !== (existing.violations || 0)) {
+    set.violations = newViol;
+    existing.violations = newViol;
+  }
+  if (wantTerminated && !existing.terminated) {
+    set.terminated = true;
+    set.earnPoints = 0;
+    existing.terminated = true;
+    existing.earnPoints = 0;
+  }
+  if (Object.keys(set).length)
+    await Result.updateOne({ _id: existing._id }, { $set: set });
+  await linkResult(exam._id, user._id, existing._id);
+  // Ensure the attempt is marked submitted even if a prior run crashed after
+  // creating the Result but before flipping submitted (else uniq_active_attempt
+  // stays blocked forever though a Result exists).
+  await Attempt.updateOne(
+    { _id: attempt._id, submitted: false },
+    { $set: { submitted: true } }
+  );
+  await maybeNotifyTermination(exam, user, existing, suppressNotifications);
+  return existing.earnPoints;
+}
+
 // Score a (already-claimed) attempt's selections and persist the Result. Shared
 // by the live client submit (addResult) AND the server-side finalizer, so an
-// auto-submitted exam is scored EXACTLY like a hand-submitted one. The caller
-// must have atomically claimed the attempt (submitted:false -> true) first.
+// auto-submitted exam is scored EXACTLY like a hand-submitted one. Idempotent by
+// attemptId: a repeat call for an already-scored attempt reconciles the existing
+// Result instead of creating a second one.
 async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts = {}) {
-  const { violations, terminated } = opts;
+  const { violations, terminated, suppressNotifications, auto } = opts;
   const examId = exam._id;
+
+  // attemptId is the idempotency key — new Results are never created without it.
+  if (!attempt || !attempt._id) {
+    throw new Error("scoreAndCreateResult: attempt._id is required");
+  }
+  // An existing Result for this attempt is AUTHORITATIVE and is NEVER overwritten
+  // by a later submit — only reconciled (violations/termination merged monotonically).
+  // ANTI-CHEAT: a late client submit must NOT be able to replace a server
+  // auto-finalized Result. The server cannot distinguish a legitimately-frozen late
+  // submit from a deliberate POST-DEADLINE cheat (a direct API call with a known
+  // attemptId), and the deadline-cutoff autosave the finalizer already scored is the
+  // trustworthy record of the student's answers AT the deadline. So once a Result
+  // exists (client or finalizer), its answers/score are frozen.
+  const preExisting = await Result.findOne({ attemptId: attempt._id });
+  if (preExisting) {
+    return reconcileExistingResult(preExisting, exam, user, attempt, opts);
+  }
 
   // Score on the server, against answers the client never received.
   const correct = exam.questions?.correctAnswers || [];
@@ -1603,9 +1799,11 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
     !!attempt.terminated || terminated === true || terminated === "true";
   if (isTerminated) earnedPoints = 0;
 
-  const newResult = await Result.create({
+  const fields = {
     userId: user._id,
     examId,
+    attemptId: attempt._id,
+    autoSubmitted: !!auto,
     attempts: sel.filter(isAnswered).length,
     earnPoints: earnedPoints,
     violations: Math.max(attempt.violations || 0, Number(violations) || 0),
@@ -1626,15 +1824,41 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
       { type: "Cma", count: counts.Cma },
       { type: "Cmu", count: counts.Cmu },
     ],
-  });
+  };
 
-  exam.results.push(newResult._id);
-  await exam.save();
-  user.results.push(newResult._id);
-  await user.save();
+  // ── CREATE (result-first; a pre-existing Result was already reconciled above) ──
+  let newResult;
+  try {
+    newResult = await Result.create(fields);
+  } catch (e) {
+    // A concurrent submit / finalizer won the unique attemptId race — reconcile its
+    // Result instead of creating a duplicate (never overwrite it).
+    if (e && e.code === 11000) {
+      const existing = await Result.findOne({ attemptId: attempt._id });
+      if (existing) return reconcileExistingResult(existing, exam, user, attempt, opts);
+    }
+    throw e;
+  }
 
-  // Telegram: tell the exam owner the student finished (or was terminated).
-  notifyExamFinished(exam, user, newResult);
+  // Idempotent link + ensure the attempt is flagged submitted (result-first: if a
+  // crash lands between here and the caller's submitted flip, the finalizer/repair
+  // heals it via the attemptId Result).
+  await linkResult(examId, user._id, newResult._id);
+  await Attempt.updateOne(
+    { _id: attempt._id, submitted: false },
+    { $set: { submitted: true } }
+  );
+
+  // Telegram: normal "finished" alert fires on first creation (unless suppressed
+  // by a migration run). If the result was created already terminated, treat the
+  // finish alert as the termination alert and stamp terminationNotifiedAt on a
+  // confirmed send so a later retry can't re-alert.
+  if (!suppressNotifications) {
+    const ok = await notifyExamFinished(exam, user, newResult);
+    if (isTerminated && ok) await markTerminationNotified(newResult);
+  } else if (isTerminated) {
+    await markTerminationNotified(newResult);
+  }
 
   return earnedPoints;
 }
@@ -1658,83 +1882,75 @@ const addResult = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("No Exam found");
   }
-  if (blockIfArchived(res, exam)) return;
-
-  // Ownership backstop (defense in depth — a result can't exist without an
-  // attempt, which already requires ownership, but enforce it here too).
-  // Mirrors startAttempt so anything a user could START they can also SUBMIT:
-  // a FREE exam is owned implicitly when the class is enrolled OR public.
-  const isStaff = user.role === "admin" || user.role === "teacher";
-  const isFree = !exam.price || Number(exam.price) === 0;
-  let classFreeAccess = false;
-  if (isFree && exam.class) {
-    if (await studentApprovedInClass(user._id, exam.class)) {
-      classFreeAccess = true;
-    } else {
-      const classDoc = await Class.findById(exam.class).select("requireCode").lean();
-      classFreeAccess = classIsPublic(classDoc);
-    }
-  }
-  const owns =
-    user.exams.some((e) => e.toString() === String(examId)) ||
-    exam.users.some((u) => u.toString() === user._id.toString()) ||
-    classFreeAccess;
-  if (!isStaff && !owns) {
-    res.status(403);
-    throw new Error("Bu imtahana giriş yoxdur");
-  }
-
+  // NOTE: no archived / ownership gate here. A legally-started attempt (looked up
+  // below by its own id + owner) must be able to FINALIZE even if the exam was
+  // archived / un-assigned mid-attempt — the student's work is never lost. Only
+  // NEW starts are gated (startAttempt). We also don't hard-reject on start/endDate:
+  // effectiveExpiry + grace is the single deadline source, so a valid submit landing
+  // a few seconds late (auto-submit / lag) is still accepted, not silently lost.
   const now = Date.now();
-  // NOTE: we deliberately do NOT hard-reject on exam.startDate/endDate here.
-  // The attempt's expiresAt (already capped at endDate) PLUS the grace window
-  // below is the single source of truth, so a valid final submit that lands a
-  // few seconds after endDate (auto-submit / network lag) is still accepted
-  // instead of silently losing the whole result.
 
-  // The in-progress attempt is the source of truth for the deadline. Atomically
-  // claim THIS specific attempt (bound by attemptId when the client supplies it)
-  // so two devices sharing the exam can't both create a result, and a stale
-  // client can't claim a different attempt. The loser is told the exam is
-  // already closed — not an error, just "go to the result page".
-  const claimFilter = { userId: user._id, examId, submitted: false };
-  if (attemptId && mongoose.Types.ObjectId.isValid(attemptId)) {
-    claimFilter._id = attemptId;
-  }
-  const attempt = await Attempt.findOneAndUpdate(
-    claimFilter,
-    { $set: { submitted: true } },
-    { sort: { createdAt: -1 }, new: false }
-  );
-  if (!attempt) {
-    return res
-      .status(409)
-      .json({ reason: "already_submitted", message: "İmtahan artıq bağlanıb" });
-  }
-  if (effectiveExpiry(attempt, exam) + ATTEMPT_GRACE_MS < now) {
-    res.status(400);
-    throw new Error("İmtahan vaxtı bitib");
-  }
-
-  // maxTry backstop: cap the number of scored results even if a race created an
-  // extra attempt. The just-claimed attempt is already consumed as a used try.
-  const maxTry = exam.maxTry || 0;
-  if (maxTry > 0) {
-    const resultCount = await Result.countDocuments({ userId: user._id, examId });
-    if (resultCount >= maxTry) {
+  // Find THIS attempt in ANY submitted state (so a retry after a succeeded-but-lost
+  // submit still reconciles idempotently), bound to the owner + exam.
+  let attempt = null;
+  if (attemptId) {
+    // A supplied attemptId (even a malformed one) is STRICT — never fall back to
+    // the "latest attempt". Reject distinctly so the client treats it as fatal,
+    // not "already submitted → success".
+    if (
+      !mongoose.Types.ObjectId.isValid(attemptId) ||
+      !(attempt = await Attempt.findOne({ _id: attemptId, userId: user._id, examId }))
+    ) {
       return res
-        .status(403)
-        .json({ reason: "max_tries", message: "Maksimum cəhd sayına çatmısınız" });
+        .status(409)
+        .json({ reason: "invalid_attempt", message: "Cəhd tapılmadı" });
+    }
+  } else {
+    // Legacy client without an attemptId: fall back to the newest in-flight attempt.
+    console.warn(
+      "[addResult] legacy submit without attemptId",
+      String(user._id),
+      String(examId)
+    );
+    attempt = await Attempt.findOne({
+      userId: user._id,
+      examId,
+      submitted: false,
+    }).sort({ createdAt: -1 });
+    if (!attempt) {
+      return res
+        .status(409)
+        .json({ reason: "already_submitted", message: "İmtahan artıq bağlanıb" });
     }
   }
 
-  // Score + persist (shared with the server-side finalizer so auto-submit and
-  // hand-submit are scored identically). The attempt was already claimed above.
-  const earnPoints = await scoreAndCreateResult(exam, user, attempt, selectedAnswers, {
+  // Terminal `unscorable` attempt (deleted exam/user, retired duplicate): never
+  // score it — return its terminal status so the client routes to the result page.
+  if (attempt.unscorable) {
+    return res.status(409).json({
+      reason: "unscorable",
+      unscorableReason: attempt.unscorableReason || null,
+      attemptId: attempt._id,
+    });
+  }
+
+  // WITHIN grace: score the client's submitted answers — a syntactically valid
+  // payload is AUTHORITATIVE even if every answer is blank (the student may submit
+  // blank); fall back to autosave only for a non-array (corrupt) payload.
+  // PAST grace (late): score the SERVER's deadline-cut autosave (attempt.answers),
+  // NEVER the late client payload — the finalizer only runs ~60s after the deadline,
+  // so without this a forged/manual API submit in the deadline+30s..+60s window could
+  // inject post-deadline answers. (And once a Result exists, scoreAndCreateResult
+  // reconciles and never overwrites either way.)
+  const late = now > effectiveExpiry(attempt, exam) + ATTEMPT_GRACE_MS;
+  const answers =
+    !late && Array.isArray(selectedAnswers) ? selectedAnswers : attempt.answers || [];
+  const earnPoints = await scoreAndCreateResult(exam, user, attempt, answers, {
     violations,
     terminated,
   });
 
-  res.status(200).json({ message: "Result has been saved", earnPoints });
+  res.status(200).json({ message: "Result has been saved", earnPoints, late });
 });
 
 // Periodic autosave of the in-progress selections onto the active attempt, so
@@ -1746,12 +1962,42 @@ const autosaveAttempt = asyncHandler(async (req, res) => {
   if (!Array.isArray(selectedAnswers)) {
     return res.status(200).json({ ok: false });
   }
-  // Stop autosaves to an archived (trashed) exam — an already-open tab must not
-  // keep writing to an exam the teacher has removed.
-  const archCheck = await Exam.findById(examId).select("deletedAt").lean();
-  if (archCheck?.deletedAt) return res.status(403).json({ reason: "archived", ok: false });
-  const filter = { userId: req.user._id, examId, submitted: false };
-  if (attemptId && mongoose.Types.ObjectId.isValid(attemptId)) filter._id = attemptId;
+  // Find the target attempt. STRICT when attemptId is supplied — never fall back
+  // to the "latest active attempt" (which could hide a failed autosave or mutate
+  // the wrong attempt). A matching in-flight attempt is allowed to autosave even
+  // if the exam was archived / removed mid-attempt (its work must not be lost);
+  // ONLY the deadline gates it.
+  let attempt;
+  if (attemptId) {
+    // Supplied attemptId is STRICT (even if malformed) — never fall back to latest.
+    if (
+      !mongoose.Types.ObjectId.isValid(attemptId) ||
+      !(attempt = await Attempt.findOne({
+        _id: attemptId,
+        userId: req.user._id,
+        examId,
+        submitted: false,
+      }))
+    ) {
+      return res.status(409).json({ ok: false, reason: "invalid_attempt" });
+    }
+  } else {
+    attempt = await Attempt.findOne({
+      userId: req.user._id,
+      examId,
+      submitted: false,
+    }).sort({ createdAt: -1 });
+    if (!attempt) return res.status(200).json({ ok: false });
+  }
+  if (attempt.unscorable) return res.status(409).json({ ok: false, reason: "unscorable" });
+  // STRICT deadline cutoff (NO grace): drop autosaves past the effective deadline
+  // so attempt.answers can never contain post-deadline edits (which the late-submit
+  // path scores). effectiveExpiry honors a shortened exam.endDate.
+  const examDl = await Exam.findById(examId).select("endDate").lean();
+  if (Date.now() > effectiveExpiry(attempt, examDl)) {
+    return res.status(200).json({ ok: false, reason: "expired" });
+  }
+  const filter = { _id: attempt._id };
   const answers = selectedAnswers.slice(0, 500).map((a) => ({
     type: a?.type,
     answer: a?.answer,
@@ -1842,47 +2088,112 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   });
 });
 
+// Finalize ONE attempt: load its exam + user, score from the given (or autosaved)
+// answers, and ensure the attempt ends terminal. If the exam or user was deleted,
+// the attempt can never be scored -> mark it terminal `unscorable` (never left
+// dangling `submitted:false` counting toward tries). Meta (violations/terminated)
+// is merged MONOTONICALLY. Idempotent via scoreAndCreateResult's attemptId key.
+async function finalizeAttempt(attempt, opts = {}) {
+  const { answersOverride, meta, reason, suppressNotifications } = opts;
+  const exam = await Exam.findById(attempt.examId).populate("questions");
+  if (!exam) {
+    await Attempt.updateOne(
+      { _id: attempt._id },
+      { $set: { submitted: true, unscorable: true, unscorableReason: "deleted_exam" } }
+    );
+    console.warn("[FINALIZE] unscorable deleted_exam", String(attempt._id), reason || "");
+    return null;
+  }
+  const user = await User.findById(attempt.userId);
+  if (!user) {
+    await Attempt.updateOne(
+      { _id: attempt._id },
+      { $set: { submitted: true, unscorable: true, unscorableReason: "deleted_user" } }
+    );
+    console.warn("[FINALIZE] unscorable deleted_user", String(attempt._id), reason || "");
+    return null;
+  }
+  const m = meta || {};
+  const mergedTerminated =
+    !!attempt.terminated || m.terminated === true || m.terminated === "true";
+  const mergedViolations = Math.max(attempt.violations || 0, Number(m.violations) || 0);
+  const answers = answersOverride != null ? answersOverride : attempt.answers || [];
+  // scoreAndCreateResult stamps attemptId, creates-or-reconciles the Result, and
+  // flips submitted:true (result-first). A crash before that flip leaves
+  // submitted:false + Result, healed by the migration / attemptStatus / start.
+  // auto:true only marks this as a SERVER autosave finalize (observability); it does
+  // NOT let a later client submit replace the result (reconcile-only / anti-cheat).
+  return scoreAndCreateResult(exam, user, attempt, answers, {
+    violations: mergedViolations,
+    terminated: mergedTerminated,
+    suppressNotifications,
+    auto: true,
+  });
+}
+
 // ── Server-side safety net ──────────────────────────────────────────────────
 // Once an exam is started it WILL be scored. When an attempt's timer runs out
 // and the student never submitted (closed the tab, lost connection, abandoned
 // it), the server auto-submits the LAST autosaved answers and creates the
 // result — so the student/teacher can see it later. Runs on an interval from
-// server.js. A grace window lets a live client submit first; the atomic claim
-// guarantees no double result if the client and the job race.
+// server.js. A grace window lets a live client submit first; the unique attemptId
+// index (+ scoreAndCreateResult's idempotent reconcile) guarantees no double result
+// if the client and the job race — there is no atomic pre-claim anymore.
 const FINALIZE_GRACE_MS = 60 * 1000;
 async function finalizeExpiredAttempts() {
   let finalized = 0;
   try {
     const now = Date.now();
-    const cutoff = new Date(now - FINALIZE_GRACE_MS);
+    const nowD = new Date(now);
     // Floor: ignore very old orphan attempts so the FIRST run after deploy
     // doesn't resurrect months of history in one burst. Going forward the job
     // runs every minute, so nothing legitimate ever ages past this window.
     const floor = new Date(now - 7 * 24 * 60 * 60 * 1000);
-    const due = await Attempt.find({
+    // Candidates come from TWO sources so a shortened exam.endDate is honored:
+    //   (a) attempts whose RAW expiresAt has already passed, and
+    //   (b) attempts whose exam's endDate has passed even though their raw
+    //       expiresAt is still in the future (teacher shortened the window).
+    const rawExpired = await Attempt.find({
       submitted: false,
-      expiresAt: { $lt: cutoff, $gt: floor },
+      unscorable: { $ne: true },
+      expiresAt: { $lt: nowD, $gt: floor },
     })
       .sort({ expiresAt: 1 })
-      .limit(100)
+      .limit(200)
       .lean();
+    const endedExams = await Exam.find({ endDate: { $lt: nowD, $gt: floor } })
+      .select("_id")
+      .lean();
+    let endedAttempts = [];
+    if (endedExams.length) {
+      endedAttempts = await Attempt.find({
+        examId: { $in: endedExams.map((e) => e._id) },
+        submitted: false,
+        unscorable: { $ne: true },
+        expiresAt: { $gte: nowD, $gt: floor },
+      })
+        .limit(200)
+        .lean();
+    }
+    const seen = new Set();
+    const due = [...rawExpired, ...endedAttempts].filter((a) => {
+      const k = String(a._id);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
     for (const row of due) {
       try {
-        // Atomically claim so a racing client submit can't double-create.
-        const claimed = await Attempt.findOneAndUpdate(
-          { _id: row._id, submitted: false },
-          { $set: { submitted: true } },
-          { new: false }
-        );
-        if (!claimed) continue; // a live submit beat us to it
-        const exam = await Exam.findById(claimed.examId).populate("questions");
-        if (!exam) continue;
-        const user = await User.findById(claimed.userId);
-        if (!user) continue;
-        await scoreAndCreateResult(exam, user, claimed, claimed.answers || [], {
-          violations: claimed.violations,
-          terminated: claimed.terminated,
-        });
+        const exam = await Exam.findById(row.examId).populate("questions");
+        const expiry = exam
+          ? effectiveExpiry(row, exam)
+          : new Date(row.expiresAt).getTime();
+        if (expiry + FINALIZE_GRACE_MS >= now) continue; // not yet due
+        // NO pre-claim: scoreAndCreateResult is idempotent (unique attemptId) and
+        // RESULT-FIRST (creates the Result, then flips submitted). So a crash can
+        // never leave submitted:true with no Result, and a racing client submit
+        // converges to the same single Result instead of a double or a lost one.
+        await finalizeAttempt(row, { reason: "finalizer" });
         finalized += 1;
       } catch (e) {
         console.error("[FINALIZE] attempt", String(row._id), "failed:", e.message);
@@ -2396,6 +2707,22 @@ const deleteExamForever = asyncHandler(async (req, res) => {
   if (!exam.deletedAt) {
     return res.status(400).json({ message: "Əvvəlcə imtahanı arxivə (zibil qutusuna) köçürün" });
   }
+  // Refuse while any in-flight (non-terminal) attempt exists — purge deletes
+  // Results AND Attempts, so destroying an unfinished attempt would leave the
+  // student with `invalid_attempt` and no terminal status. Safe once every attempt
+  // is submitted or `unscorable`. (Finalize-then-delete is NOT safe — it would
+  // delete the just-created Result too.)
+  const inflight = await Attempt.exists({
+    examId,
+    submitted: false,
+    unscorable: { $ne: true },
+  });
+  if (inflight) {
+    return res.status(409).json({
+      reason: "attempt_in_progress",
+      message: "Bir imtahan hələ davam edir; bitdikdən sonra silin",
+    });
+  }
   await purgeExam(examId);
   res.status(200).json({ message: "Exam permanently deleted" });
 });
@@ -2673,6 +3000,9 @@ module.exports = {
   autosaveAttempt,
   getLiveAttempts,
   finalizeExpiredAttempts,
+  finalizeAttempt,
+  scoreAndCreateResult,
+  effectiveExpiry,
   startAttempt,
   attemptStatus,
   reportViolation,

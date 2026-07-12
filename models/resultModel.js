@@ -81,10 +81,42 @@ const resultSchema = Schema(
       type: Boolean,
       default: false,
     },
+    // The attempt this result belongs to. The single idempotency key: at most one
+    // Result per attempt (enforced by the partial-unique index below). REQUIRED for
+    // every NEW Result (guards against a future code path creating one without it);
+    // `isNew`-gated so LEGACY docs (which lack it) still re-save fine.
+    attemptId: {
+      type: Schema.Types.ObjectId,
+      ref: "Attempt",
+      required: function () {
+        return this.isNew;
+      },
+    },
+    // True when the SERVER auto-created this Result (finalizer / expired-resume /
+    // migration) from autosave, NOT a real client submit. Observability ONLY — it is
+    // NOT used to allow replacing the result. An already-scored Result is
+    // authoritative and is only ever reconciled (violations/termination merged
+    // monotonically), never overwritten (anti-cheat: a late client submit must not
+    // be able to replace a finalized result).
+    autoSubmitted: {
+      type: Boolean,
+      default: false,
+    },
+    // Set once a termination-upgrade notification has been confirmed-delivered, so
+    // a retry (or a crash-recovered pass) never double-sends the staff alert. This
+    // is ONLY the termination marker, not a general "finished notified" gate.
+    terminationNotifiedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,
     minimize: false,
+    // Indexes are built explicitly at startup-verify time via the offline
+    // migration (backfillAttemptId.js), NOT auto-created on boot: the unique
+    // attemptId index must build against migrated data, and startup only verifies.
+    autoIndex: false,
   }
 );
 
@@ -94,6 +126,18 @@ const resultSchema = Schema(
 // and get slower as results grow.
 resultSchema.index({ userId: 1, examId: 1, createdAt: 1 });
 resultSchema.index({ examId: 1 });
+
+// At most ONE Result per attempt. Partial (only docs that HAVE an objectId
+// attemptId) so legacy Results without attemptId never collide on null, and a
+// stray string attemptId can't silently escape uniqueness ($type:"objectId").
+resultSchema.index(
+  { attemptId: 1 },
+  {
+    unique: true,
+    name: "uniq_result_attempt",
+    partialFilterExpression: { attemptId: { $exists: true, $type: "objectId" } },
+  }
+);
 
 const ResultModel = mongoose.model("Result", resultSchema);
 
