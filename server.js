@@ -138,6 +138,18 @@ app.use(
     })
 )
 
+// SEO — api.examopia.com is an API host, not a page to be indexed. A blanket
+// noindex header on every response plus a disallow-all robots.txt keep API URLs
+// (and /uploads) out of Google. The public site (examopia.com) is unaffected and
+// indexes normally.
+app.use((req, res, next) => {
+    res.setHeader("X-Robots-Tag", "noindex, nofollow")
+    next()
+})
+app.get("/robots.txt", (req, res) => {
+    res.type("text/plain").send("User-agent: *\nDisallow: /\n")
+})
+
 // Routes
 app.use("/api/users", userRoute)
 app.use("/api/quiz", quizRoute)
