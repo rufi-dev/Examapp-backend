@@ -829,16 +829,69 @@ const getAllClasses = asyncHandler(async (req, res) => {
   });
   const manageIds = classes.filter(canManage).map((c) => c._id);
   if (manageIds.length) {
+    // Approved AND pending in one pass — the card shows the roster size and,
+    // for the owner, how many requests are still waiting to be let in.
     const counts = await Enrollment.aggregate([
-      { $match: { class: { $in: manageIds }, status: "approved" } },
-      { $group: { _id: "$class", n: { $sum: 1 } } },
+      { $match: { class: { $in: manageIds }, status: { $in: ["approved", "pending"] } } },
+      { $group: { _id: { c: "$class", s: "$status" }, n: { $sum: 1 } } },
     ]);
-    const map = {};
-    counts.forEach((c) => (map[String(c._id)] = c.n));
+    const approved = {};
+    const pending = {};
+    counts.forEach((r) => {
+      const target = r._id.s === "pending" ? pending : approved;
+      target[String(r._id.c)] = r.n;
+    });
     classes.forEach((c) => {
-      if (canManage(c)) c.students = map[String(c._id)] || 0;
+      if (!canManage(c)) return;
+      c.students = approved[String(c._id)] || 0;
+      c.pending = pending[String(c._id)] || 0;
     });
   }
+
+  // Exam count per class for the card. A student's count must match what they
+  // will actually find inside, so it excludes hidden exams and ones with no
+  // questions yet — the same rule getExamsByClass applies.
+  const allIds = classes.map((c) => c._id);
+  if (allIds.length) {
+    const examCounts = await Exam.aggregate([
+      { $match: { class: { $in: allIds }, deletedAt: null } },
+      {
+        $lookup: {
+          from: "questions",
+          localField: "questions",
+          foreignField: "_id",
+          as: "q",
+        },
+      },
+      {
+        $project: {
+          class: 1,
+          hidden: 1,
+          n: {
+            $size: { $ifNull: [{ $arrayElemAt: ["$q.correctAnswers", 0] }, []] },
+          },
+        },
+      },
+      {
+        $group: {
+          _id: "$class",
+          total: { $sum: 1 },
+          ready: {
+            $sum: {
+              $cond: [{ $and: [{ $ne: ["$hidden", true] }, { $gt: ["$n", 0] }] }, 1, 0],
+            },
+          },
+        },
+      },
+    ]);
+    const map = {};
+    examCounts.forEach((r) => (map[String(r._id)] = r));
+    classes.forEach((c) => {
+      const row = map[String(c._id)];
+      c.exams = canManage(c) ? row?.total || 0 : row?.ready || 0;
+    });
+  }
+
   res.status(200).json(classes || []);
 });
 
