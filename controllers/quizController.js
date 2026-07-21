@@ -717,9 +717,13 @@ const getExamsByClass = asyncHandler(async (req, res) => {
   if (isOwnerOrAdmin) {
     return res.status(200).json(exams.map((e) => withCount(e.toObject(), e)));
   }
+  // Hide drafts AND exams whose author never added questions: a student who
+  // opens one only finds out at the start screen, and it makes the class look
+  // full of broken exams. It reappears by itself once questions are saved.
   const visible = (exams || [])
     .filter((e) => !e.hidden)
-    .map((e) => withCount(sanitizeExamForStudent(e), e));
+    .map((e) => withCount(sanitizeExamForStudent(e), e))
+    .filter((e) => e.questionCount > 0);
   res.status(200).json(visible);
 });
 
@@ -1147,6 +1151,7 @@ const startAttempt = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("Exam not found");
   }
+
   const now = Date.now();
   const correctAnswers = exam.questions?.correctAnswers || [];
 
@@ -1274,7 +1279,13 @@ const startAttempt = asyncHandler(async (req, res) => {
       return res.status(403).json({ reason: "password_wrong" });
   }
 
-  if (!correctAnswers.length) return res.status(403).json({ reason: "no_questions" });
+  // An exam whose author never added questions must not be startable — a student
+  // would land in a blank paper and burn an attempt.
+  if (!correctAnswers.length)
+    return res.status(403).json({
+      reason: "no_questions",
+      message: "Bu imtahana hələ sual əlavə edilməyib. Müəlliminizlə əlaqə saxlayın.",
+    });
 
   // Enforce maxTry (number of started tries; also counts legacy results).
   // Unscorable attempts (deleted exam/user, retired duplicates) never consumed a

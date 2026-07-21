@@ -90,7 +90,7 @@ const EXTRACTION_SCHEMA = {
   required: ["questions"],
 };
 
-const SYSTEM_PROMPT = `You extract exam questions from a PDF into structured data for a math exam platform. The exam content is in Azerbaijani; keep all text in its original language.
+const SYSTEM_PROMPT = `You extract exam questions from a PDF into structured data for an exam platform used for ANY school subject (maths, physics, chemistry, biology, history, geography, IT, literature, languages, …). The exam content is in Azerbaijani; keep all text in its original language.
 
 Output one item per question, in document order, using these types:
 - "Cm": single correct answer among options.
@@ -885,6 +885,7 @@ const getAiUsage = asyncHandler(async (req, res) => {
 const GEN_SYSTEM_PROMPT = `Sən imtahan sualları YARADAN AI köməkçisisən. Müəllimin təsvirinə əsasən suallar yarat və NƏTİCƏNİ YALNIZ verilən JSON sxemi ilə qaytar.
 
 QAYDALAR:
+- İSTƏNİLƏN FƏNN üçün sual yarat (riyaziyyat, fizika, kimya, biologiya, tarix, coğrafiya, informatika, ədəbiyyat, dillər və s.). Fənnə görə HEÇ VAXT imtina etmə.
 - Müəllimin istədiyi SAY və NÖV sualları yarat (məs. "10 qapalı riyaziyyat sualı").
 - Dil: mövzuya uyğun — İngilis dili mövzusu deyilsə, suallar Azərbaycan dilində olsun.
 - Qapalı sual (Cm/Cs): "choices" massivində A–E variantları ver və düzgün variant(lar)ın indeksini "correct" massivinə yaz.
@@ -1028,7 +1029,8 @@ const generateQuestions = asyncHandler(async (req, res) => {
 // Examopia" in Azerbaijani. Uses Gemini Flash (cheap) with a Claude fallback.
 // The knowledge base is baked into the system prompt for now (RAG can come later).
 
-const CHAT_SYSTEM_PROMPT = `Sən "Examopia" platformasının köməkçisisən. Examopia müəllimlər üçün onlayn imtahan/sınaq platformasıdır (riyaziyyat, Azərbaycan dili, İngilis dili — DİM formatı).
+const CHAT_SYSTEM_PROMPT = `Sən "Examopia" platformasının köməkçisisən. Examopia müəllimlər üçün onlayn imtahan/sınaq platformasıdır və İSTƏNİLƏN FƏNN üçün imtahan yaratmağa imkan verir — riyaziyyat, fizika, kimya, biologiya, tarix, coğrafiya, informatika, ədəbiyyat, Azərbaycan dili, İngilis dili, rus dili və digərləri. Riyaziyyat, Azərbaycan dili və İngilis dili üçün əlavə olaraq HAZIR DİM presetləri var; digər fənlər üçün "Fərdi (sıfırdan)" preseti ilə eyni şəkildə imtahan yaradılır.
+MÜHÜM: Heç vaxt "bu fənn üçün imtahan yarada bilmərəm" DEMƏ — istənilən fənn dəstəklənir.
 
 QAYDALAR:
 - Cavabları HƏMİŞƏ Azərbaycan dilində, qısa, aydın və mümkünsə addım-addım ver.
