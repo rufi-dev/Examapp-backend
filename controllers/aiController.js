@@ -971,6 +971,84 @@ QAYDALAR:
 - Xahiş olunmayıbsa oxu mətni (reading) əlavə etmə.
 - Suallar aydın, düzgün və imtahan səviyyəsinə uyğun olsun.`;
 
+
+// ── OpenAI: the default engine for prompt-generated questions ────────────
+// Priced per MILLION tokens and overridable without a deploy, so a price change
+// or a model swap is an env edit rather than a release.
+const OPENAI_GEN_MODEL = process.env.OPENAI_GEN_MODEL || "gpt-4o";
+const computeOpenAIGenCost = (usage, model) => {
+  const inP = Number(process.env.OPENAI_GEN_PRICE_IN || 2.5);
+  const outP = Number(process.env.OPENAI_GEN_PRICE_OUT || 10);
+  const inputTokens = usage?.prompt_tokens || 0;
+  const outputTokens = usage?.completion_tokens || 0;
+  return {
+    model: model || OPENAI_GEN_MODEL,
+    inputTokens,
+    outputTokens,
+    cacheWriteTokens: 0,
+    cacheReadTokens: 0,
+    totalTokens: inputTokens + outputTokens,
+    usd: (inputTokens / 1e6) * inP + (outputTokens / 1e6) * outP,
+  };
+};
+
+async function generateWithOpenAI(prompt, presetId) {
+  if (!process.env.OPENAI_API_KEY)
+    throw aiError(503, "AI konfiqurasiya olunmayib (OPENAI_API_KEY)", true);
+
+  const sys = GEN_SYSTEM_PROMPT + (presetHint(presetId) ? "\n\n" + presetHint(presetId) : "");
+  let r;
+  try {
+    r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: OPENAI_GEN_MODEL,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: prompt },
+        ],
+        // Structured Outputs: the model cannot return anything but this shape,
+        // so the SAME schema the other providers use applies here and the
+        // builder receives an identical payload whichever engine ran.
+        response_format: {
+          type: "json_schema",
+          json_schema: { name: "exam_questions", strict: true, schema: EXTRACTION_SCHEMA },
+        },
+        max_tokens: 16000,
+      }),
+    });
+  } catch {
+    throw aiError(502, "AI suallar yarada bilmedi. Yeniden cehd et.", true);
+  }
+
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    console.error("OpenAI generate failed:", r.status, body.slice(0, 300));
+    // Quota and 5xx are worth handing to the next provider; a 400 is our bug.
+    throw aiError(
+      502,
+      "AI suallar yarada bilmedi. Yeniden cehd et.",
+      r.status === 429 || r.status >= 500
+    );
+  }
+
+  const data = await r.json();
+  let parsed;
+  try {
+    parsed = JSON.parse(data?.choices?.[0]?.message?.content || "{}");
+  } catch {
+    throw aiError(502, "AI cavabi oxunmadi. Yeniden cehd et.", true);
+  }
+  return {
+    questions: Array.isArray(parsed.questions) ? parsed.questions : [],
+    cost: computeOpenAIGenCost(data?.usage, data?.model),
+  };
+}
+
 async function generateWithGemini(prompt, presetId) {
   if (!process.env.GEMINI_API_KEY)
     throw aiError(503, "AI konfiqurasiya olunmayıb (GEMINI_API_KEY)", true);
@@ -1068,17 +1146,30 @@ const generateQuestions = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("İmtahan təsviri boşdur");
   }
-  let out;
-  try {
-    out = process.env.GEMINI_API_KEY
-      ? await generateWithGemini(prompt, preset)
-      : await generateWithClaude(prompt, preset);
-  } catch (e) {
-    if (e.aiFallback && getClient()) out = await generateWithClaude(prompt, preset);
-    else {
-      res.status(e.aiStatus || 502);
-      throw new Error(e.userMessage || "AI suallar yarada bilmədi");
+  // OpenAI first, then Gemini, then Claude. A provider is only skipped past when
+  // it fails in a way worth retrying (quota, 5xx, unreadable output) — a bad
+  // prompt is not paid for three times at three prices.
+  const chain = [
+    ["openai", process.env.OPENAI_API_KEY, generateWithOpenAI],
+    ["gemini", process.env.GEMINI_API_KEY, generateWithGemini],
+    ["claude", process.env.ANTHROPIC_API_KEY, generateWithClaude],
+  ].filter(([, key]) => !!key);
+
+  let out = null;
+  let lastErr = null;
+  for (const [name, , fn] of chain) {
+    try {
+      out = await fn(prompt, preset);
+      break;
+    } catch (e) {
+      lastErr = e;
+      console.error(`generate via ${name} failed:`, e?.message);
+      if (!e.aiFallback) break;
     }
+  }
+  if (!out) {
+    res.status(lastErr?.aiStatus || 502);
+    throw new Error(lastErr?.userMessage || "AI suallar yarada bilmədi");
   }
   try {
     const c = out.cost || {};
