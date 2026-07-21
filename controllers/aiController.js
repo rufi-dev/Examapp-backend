@@ -972,17 +972,105 @@ QAYDALAR:
 - Suallar aydın, düzgün və imtahan səviyyəsinə uyğun olsun.`;
 
 
+
+// ── the engines a teacher may pick for question generation ───────────────
+// An ALLOW-LIST, not free text: the model id arrives from the browser, and
+// without this a caller could name any model on the account — including the
+// pro tiers, at many times the price.
+//
+// `usd` is per MILLION tokens. Where a model is newer than the prices we can
+// vouch for, it is marked pricing: "unknown" — spend is still logged in tokens,
+// but the dollar figure would be a guess, so the UI says so instead of showing
+// a confident wrong number. Override any of it with AI_MODEL_PRICES (JSON).
+const AI_MODELS = [
+  {
+    id: "gpt-4.1-mini",
+    label: "GPT-4.1 mini",
+    provider: "openai",
+    note: "Sürətli və ucuz — tövsiyə olunur",
+    usd: { in: 0.4, out: 1.6 },
+  },
+  { id: "gpt-4.1", label: "GPT-4.1", provider: "openai", note: "Daha güclü", usd: { in: 2, out: 8 } },
+  {
+    id: "gpt-4.1-nano",
+    label: "GPT-4.1 nano",
+    provider: "openai",
+    note: "Ən ucuz — sadə suallar üçün",
+    usd: { in: 0.1, out: 0.4 },
+  },
+  { id: "gpt-4o", label: "GPT-4o", provider: "openai", usd: { in: 2.5, out: 10 } },
+  { id: "gpt-4o-mini", label: "GPT-4o mini", provider: "openai", usd: { in: 0.15, out: 0.6 } },
+  {
+    id: "gpt-5-mini",
+    label: "GPT-5 mini",
+    provider: "openai",
+    note: "Düşünmə rejimi — yavaş, çox token",
+    pricing: "unknown",
+  },
+  { id: "gpt-5", label: "GPT-5", provider: "openai", pricing: "unknown" },
+  {
+    id: "gpt-5.4-mini",
+    label: "GPT-5.4 mini",
+    provider: "openai",
+    note: "Ən sürətli (testdə 3 san)",
+    pricing: "unknown",
+  },
+  { id: "gpt-5.4", label: "GPT-5.4", provider: "openai", pricing: "unknown" },
+  { id: "gpt-5.5", label: "GPT-5.5", provider: "openai", pricing: "unknown" },
+  // The two engines that were already here, kept selectable.
+  { id: "gemini", label: "Gemini Flash", provider: "gemini", note: "Ucuz", },
+  { id: "claude", label: "Claude Opus 4.8", provider: "claude", note: "Bahalı, güclü" },
+];
+
+const DEFAULT_AI_MODEL = process.env.OPENAI_GEN_MODEL || "gpt-4.1-mini";
+
+let PRICE_OVERRIDES = {};
+try {
+  PRICE_OVERRIDES = JSON.parse(process.env.AI_MODEL_PRICES || "{}");
+} catch {
+  console.warn("AI_MODEL_PRICES is not valid JSON — ignoring");
+}
+
+const findAiModel = (id) => AI_MODELS.find((m) => m.id === id) || null;
+
+const priceFor = (id) => {
+  const m = findAiModel(id);
+  const o = PRICE_OVERRIDES[id];
+  if (o && Number.isFinite(o.in) && Number.isFinite(o.out)) return o;
+  return m?.usd || null;
+};
+
+// GET /api/quiz/ai/models — what the picker offers, and which one is preselected.
+const listAiModels = asyncHandler(async (req, res) => {
+  const available = AI_MODELS.filter((m) => {
+    if (m.provider === "openai") return !!process.env.OPENAI_API_KEY;
+    if (m.provider === "gemini") return !!process.env.GEMINI_API_KEY;
+    if (m.provider === "claude") return !!process.env.ANTHROPIC_API_KEY;
+    return false;
+  }).map((m) => ({
+    id: m.id,
+    label: m.label,
+    provider: m.provider,
+    note: m.note || "",
+    // Never ship the numbers as fact when we cannot vouch for them.
+    priceKnown: !!priceFor(m.id),
+  }));
+  const fallback = available.find((m) => m.id === DEFAULT_AI_MODEL) || available[0];
+  res.json({ models: available, default: fallback?.id || DEFAULT_AI_MODEL });
+});
+
 // ── OpenAI: the default engine for prompt-generated questions ────────────
 // Priced per MILLION tokens and overridable without a deploy, so a price change
 // or a model swap is an env edit rather than a release.
-const OPENAI_GEN_MODEL = process.env.OPENAI_GEN_MODEL || "gpt-4o";
-const computeOpenAIGenCost = (usage, model) => {
-  const inP = Number(process.env.OPENAI_GEN_PRICE_IN || 2.5);
-  const outP = Number(process.env.OPENAI_GEN_PRICE_OUT || 10);
+const OPENAI_GEN_MODEL = DEFAULT_AI_MODEL;
+const computeOpenAIGenCost = (usage, model, askedId) => {
+  const price = priceFor(askedId || model) || { in: 0, out: 0 };
+  const inP = Number(price.in);
+  const outP = Number(price.out);
   const inputTokens = usage?.prompt_tokens || 0;
   const outputTokens = usage?.completion_tokens || 0;
   return {
-    model: model || OPENAI_GEN_MODEL,
+    model: model || askedId || OPENAI_GEN_MODEL,
     inputTokens,
     outputTokens,
     cacheWriteTokens: 0,
@@ -992,7 +1080,8 @@ const computeOpenAIGenCost = (usage, model) => {
   };
 };
 
-async function generateWithOpenAI(prompt, presetId) {
+async function generateWithOpenAI(prompt, presetId, modelId) {
+  const useModel = modelId || OPENAI_GEN_MODEL;
   if (!process.env.OPENAI_API_KEY)
     throw aiError(503, "AI konfiqurasiya olunmayib (OPENAI_API_KEY)", true);
 
@@ -1006,7 +1095,7 @@ async function generateWithOpenAI(prompt, presetId) {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: OPENAI_GEN_MODEL,
+        model: useModel,
         messages: [
           { role: "system", content: sys },
           { role: "user", content: prompt },
@@ -1018,7 +1107,10 @@ async function generateWithOpenAI(prompt, presetId) {
           type: "json_schema",
           json_schema: { name: "exam_questions", strict: true, schema: EXTRACTION_SCHEMA },
         },
-        max_tokens: 16000,
+        // gpt-5+ and the o-series renamed this and reject the old name with a
+        // 400, so the field is chosen from the model id rather than hardcoded.
+        [/^(gpt-[5-9]|o\d)/.test(useModel) ? "max_completion_tokens" : "max_tokens"]:
+          16000,
       }),
     });
   } catch {
@@ -1045,7 +1137,7 @@ async function generateWithOpenAI(prompt, presetId) {
   }
   return {
     questions: Array.isArray(parsed.questions) ? parsed.questions : [],
-    cost: computeOpenAIGenCost(data?.usage, data?.model),
+    cost: computeOpenAIGenCost(data?.usage, data?.model, useModel),
   };
 }
 
@@ -1146,14 +1238,31 @@ const generateQuestions = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("İmtahan təsviri boşdur");
   }
-  // OpenAI first, then Gemini, then Claude. A provider is only skipped past when
-  // it fails in a way worth retrying (quota, 5xx, unreadable output) — a bad
-  // prompt is not paid for three times at three prices.
-  const chain = [
-    ["openai", process.env.OPENAI_API_KEY, generateWithOpenAI],
-    ["gemini", process.env.GEMINI_API_KEY, generateWithGemini],
-    ["claude", process.env.ANTHROPIC_API_KEY, generateWithClaude],
-  ].filter(([, key]) => !!key);
+  // The teacher's choice wins, but only from the allow-list: the id arrives
+  // from a browser, and an unchecked one could name a pro tier at many times
+  // the price. Anything unrecognised silently falls back to the default.
+  const picked = findAiModel(String(req.body?.model || "")) || findAiModel(DEFAULT_AI_MODEL);
+
+  const runners = {
+    openai: (pr, ps) => generateWithOpenAI(pr, ps, picked?.provider === "openai" ? picked.id : undefined),
+    gemini: generateWithGemini,
+    claude: generateWithClaude,
+  };
+  const keyFor = {
+    openai: process.env.OPENAI_API_KEY,
+    gemini: process.env.GEMINI_API_KEY,
+    claude: process.env.ANTHROPIC_API_KEY,
+  };
+
+  // Start with whatever was picked, then fall through the others. A provider is
+  // only skipped past when it fails in a way worth retrying (quota, 5xx,
+  // unreadable output) — a bad prompt is not paid for three times.
+  const order = [picked?.provider, "openai", "gemini", "claude"].filter(
+    (p2, i, a) => p2 && a.indexOf(p2) === i
+  );
+  const chain = order
+    .filter((p2) => !!keyFor[p2])
+    .map((p2) => [p2, keyFor[p2], runners[p2]]);
 
   let out = null;
   let lastErr = null;
@@ -1775,6 +1884,10 @@ const realtimeToken = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  listAiModels,
+  // exported for tests / benchmarking
+  GEN_SYSTEM_PROMPT,
+  EXTRACTION_SCHEMA,
   // exported for tests
   cleanQuestions,
   extractQuestions,
