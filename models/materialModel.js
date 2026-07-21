@@ -28,7 +28,11 @@ const materialSchema = Schema(
     mimeType: { type: String, default: "" },
     sizeBytes: { type: Number, default: 0 },
 
-    // Optional class scope. null = shared with all of this teacher's students.
+    // Audience. EMPTY = shared with all of this teacher's students; otherwise
+    // only the listed classes see it.
+    classes: [{ type: Schema.Types.ObjectId, ref: "Class", index: true }],
+    // Legacy single-class field kept so material published before multi-class
+    // support keeps its audience. Reads prefer `classes` when it is non-empty.
     class: { type: Schema.Types.ObjectId, ref: "Class", default: null, index: true },
 
     // Locked by default: the material can be READ in the in-app viewer but not

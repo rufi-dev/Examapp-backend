@@ -22,6 +22,41 @@ function extractYouTubeId(input) {
   return "";
 }
 
+// Keep only the classes this user may publish to (their own; admins: any).
+async function ownedClassIds(user, raw) {
+  let ids = raw;
+  if (typeof ids === "string") {
+    try {
+      ids = JSON.parse(ids);
+    } catch {
+      ids = ids ? [ids] : [];
+    }
+  }
+  if (!Array.isArray(ids)) ids = ids ? [ids] : [];
+  ids = ids.filter(Boolean).map(String);
+  if (!ids.length) return [];
+  const found = await Class.find({ _id: { $in: ids } }).select("owner").lean();
+  return found
+    .filter((c) => user.role === "admin" || String(c.owner) === String(user._id))
+    .map((c) => String(c._id));
+}
+
+// Shared with everyone, or overlapping the student's classes — checking the
+// new list AND the legacy single-class field, so videos published before
+// multi-class support keep their audience.
+const audienceFilter = (classIds) => ({
+  $or: [
+    {
+      $and: [
+        { $or: [{ classes: { $exists: false } }, { classes: { $size: 0 } }] },
+        { $or: [{ class: null }, { class: { $exists: false } }] },
+      ],
+    },
+    { classes: { $in: classIds } },
+    { class: { $in: classIds } },
+  ],
+});
+
 // GET /api/videos — scoped like the rest of the platform (teacher data is
 // isolated):
 //   • admin   → every video
@@ -45,14 +80,11 @@ const getVideos = asyncHandler(async (req, res) => {
     // Same rule as study materials: a video shared with everyone (class: null)
     // reaches all of that teacher's students; a class-scoped one only reaches
     // students actually enrolled in that class.
-    filter = {
-      owner: { $in: ownerIds },
-      $or: [{ class: null }, { class: { $in: classIds } }],
-    };
+    filter = { owner: { $in: ownerIds }, ...audienceFilter(classIds) };
   }
   const videos = await Video.find(filter)
     .sort({ createdAt: -1 })
-    .populate("class", "name level")
+    .populate("classes", "name level").populate("class", "name level")
     .lean();
   res.json(videos);
 });
@@ -67,24 +99,19 @@ const addVideo = asyncHandler(async (req, res) => {
   if (!videoId) {
     return res.status(400).json({ message: "Düzgün YouTube linki daxil edin" });
   }
-  // Only allow attaching to a class the uploader actually owns.
-  let classId = req.body.classId || null;
-  if (classId) {
-    const cls = await Class.findById(classId).select("owner");
-    const ownsClass =
-      cls && (String(cls.owner) === String(req.user._id) || req.user.role === "admin");
-    if (!ownsClass) classId = null;
-  }
+  // Only allow attaching to classes the uploader actually owns. Empty = all.
+  const classIds = await ownedClassIds(req.user, req.body.classIds ?? req.body.classId);
 
   const video = await Video.create({
     title: String(title).trim(),
     videoId,
     url: String(url).trim(),
-    class: classId || null,
+    classes: classIds,
+    class: null,
     owner: req.user._id,
     ownerName: req.user.name || "",
   });
-  const populated = await Video.findById(video._id).populate("class", "name level").lean();
+  const populated = await Video.findById(video._id).populate("classes", "name level").populate("class", "name level").lean();
   res.status(201).json(populated);
 });
 
@@ -100,22 +127,15 @@ const updateVideo = asyncHandler(async (req, res) => {
   if (typeof req.body.title === "string" && req.body.title.trim()) {
     video.title = req.body.title.trim();
   }
-  if (Object.prototype.hasOwnProperty.call(req.body, "classId")) {
-    const wanted = req.body.classId || null;
-    if (!wanted) {
-      video.class = null;
-    } else {
-      const cls = await Class.findById(wanted).select("owner");
-      const ownsClass =
-        cls && (String(cls.owner) === String(req.user._id) || req.user.role === "admin");
-      if (!ownsClass) {
-        return res.status(403).json({ message: "Bu sinif sizə aid deyil" });
-      }
-      video.class = wanted;
-    }
+  if (
+    Object.prototype.hasOwnProperty.call(req.body, "classIds") ||
+    Object.prototype.hasOwnProperty.call(req.body, "classId")
+  ) {
+    video.classes = await ownedClassIds(req.user, req.body.classIds ?? req.body.classId);
+    video.class = null; // the list is authoritative from here on
   }
   await video.save();
-  const populated = await Video.findById(video._id).populate("class", "name level").lean();
+  const populated = await Video.findById(video._id).populate("classes", "name level").populate("class", "name level").lean();
   res.json(populated);
 });
 

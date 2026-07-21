@@ -28,6 +28,46 @@ async function studentScope(studentId) {
   return { classIds, ownerIds };
 }
 
+// Keep only the classes this user may publish to (their own; admins: any).
+// Accepts an array, a JSON string (multipart sends strings) or a single id.
+async function ownedClassIds(user, raw) {
+  let ids = raw;
+  if (typeof ids === "string") {
+    try {
+      ids = JSON.parse(ids);
+    } catch {
+      ids = ids ? [ids] : [];
+    }
+  }
+  if (!Array.isArray(ids)) ids = ids ? [ids] : [];
+  ids = ids.filter(Boolean).map(String);
+  if (!ids.length) return [];
+  const found = await Class.find({ _id: { $in: ids } }).select("owner").lean();
+  return found
+    .filter((c) => user.role === "admin" || String(c.owner) === String(user._id))
+    .map((c) => String(c._id));
+}
+
+// A doc's audience: the new list, falling back to the legacy single class so
+// anything published before multi-class support keeps working.
+const audienceOf = (doc) =>
+  doc.classes?.length ? doc.classes.map(String) : doc.class ? [String(doc.class)] : [];
+
+// Mongo form of the same rule: shared-with-everyone, or overlapping the
+// student's classes (checking both the new list and the legacy field).
+const audienceFilter = (classIds) => ({
+  $or: [
+    {
+      $and: [
+        { $or: [{ classes: { $exists: false } }, { classes: { $size: 0 } }] },
+        { $or: [{ class: null }, { class: { $exists: false } }] },
+      ],
+    },
+    { classes: { $in: classIds } },
+    { class: { $in: classIds } },
+  ],
+});
+
 // Can this user open this material? Mirrors the list filter below.
 async function canAccess(user, material) {
   if (!material) return false;
@@ -37,8 +77,9 @@ async function canAccess(user, material) {
   const { classIds, ownerIds } = await studentScope(user._id);
   const fromMyTeacher = ownerIds.some((o) => String(o) === String(material.owner));
   if (!fromMyTeacher) return false;
-  if (!material.class) return true; // shared with all of that teacher's students
-  return classIds.some((c) => String(c) === String(material.class));
+  const audience = audienceOf(material);
+  if (!audience.length) return true; // shared with all of that teacher's students
+  return classIds.some((c) => audience.includes(String(c)));
 }
 
 // GET /api/materials — scoped list (see materialModel for the rules).
@@ -51,14 +92,11 @@ const getMaterials = asyncHandler(async (req, res) => {
   } else {
     const { classIds, ownerIds } = await studentScope(req.user._id);
     if (!ownerIds.length) return res.json([]);
-    filter = {
-      owner: { $in: ownerIds },
-      $or: [{ class: null }, { class: { $in: classIds } }],
-    };
+    filter = { owner: { $in: ownerIds }, ...audienceFilter(classIds) };
   }
   const materials = await Material.find(filter)
     .sort({ createdAt: -1 })
-    .populate("class", "name level")
+    .populate("classes", "name level").populate("class", "name level")
     .lean();
   res.json(materials);
 });
@@ -109,14 +147,8 @@ const addMaterial = asyncHandler(async (req, res) => {
       .json({ message: "Yalnız PDF, şəkil, Word və ya PowerPoint faylı yükləyin" });
   }
 
-  // Only allow attaching to a class the uploader actually owns.
-  let classId = req.body.classId || null;
-  if (classId) {
-    const cls = await Class.findById(classId).select("owner");
-    const ownsClass =
-      cls && (String(cls.owner) === String(req.user._id) || req.user.role === "admin");
-    if (!ownsClass) classId = null;
-  }
+  // Only allow attaching to classes the uploader actually owns. Empty = all.
+  const classIds = await ownedClassIds(req.user, req.body.classIds ?? req.body.classId);
 
   let sizeBytes = 0;
   try {
@@ -133,7 +165,8 @@ const addMaterial = asyncHandler(async (req, res) => {
     kind,
     mimeType,
     sizeBytes,
-    class: classId || null,
+    classes: classIds,
+    class: null,
     // Checkboxes arrive as the string "true" from multipart form data.
     allowDownload: String(req.body.allowDownload) === "true",
     allowCopy: String(req.body.allowCopy) === "true",
@@ -142,7 +175,7 @@ const addMaterial = asyncHandler(async (req, res) => {
   });
 
   const populated = await Material.findById(material._id)
-    .populate("class", "name level")
+    .populate("classes", "name level").populate("class", "name level")
     .lean();
   res.status(201).json(populated);
 });
@@ -221,25 +254,18 @@ const updateMaterial = asyncHandler(async (req, res) => {
   if (typeof req.body.allowCopy === "boolean") {
     material.allowCopy = req.body.allowCopy;
   }
-  // Re-target the material at another class (or back to "all my students").
-  // Same ownership rule as upload: you can only point it at a class you own.
-  if (Object.prototype.hasOwnProperty.call(req.body, "classId")) {
-    const wanted = req.body.classId || null;
-    if (!wanted) {
-      material.class = null;
-    } else {
-      const cls = await Class.findById(wanted).select("owner");
-      const ownsClass =
-        cls && (String(cls.owner) === String(req.user._id) || req.user.role === "admin");
-      if (!ownsClass) {
-        return res.status(403).json({ message: "Bu sinif sizə aid deyil" });
-      }
-      material.class = wanted;
-    }
+  // Re-target the material at other classes (or back to "all my students").
+  // Same ownership rule as upload.
+  if (
+    Object.prototype.hasOwnProperty.call(req.body, "classIds") ||
+    Object.prototype.hasOwnProperty.call(req.body, "classId")
+  ) {
+    material.classes = await ownedClassIds(req.user, req.body.classIds ?? req.body.classId);
+    material.class = null; // the list is authoritative from here on
   }
   await material.save();
   const populated = await Material.findById(material._id)
-    .populate("class", "name level")
+    .populate("classes", "name level").populate("class", "name level")
     .lean();
   res.json(populated);
 });
