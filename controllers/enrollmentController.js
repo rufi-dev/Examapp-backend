@@ -46,6 +46,7 @@ const joinClass = asyncHandler(async (req, res) => {
     }
     return res.status(200).json({
       status: "approved",
+      classId: cls._id,
       message: "Siz artıq bu sinifə qoşulmusunuz",
     });
   }
@@ -59,7 +60,7 @@ const joinClass = asyncHandler(async (req, res) => {
   // Telegram: tell the class owner a student joined (fire-and-forget; gated by
   // the owner's onJoin flag + class scope).
   notifyEnrollment(cls, req.user, false);
-  res.status(201).json({ status: "approved", message: "Sinifə qoşuldunuz" });
+  res.status(201).json({ status: "approved", classId: cls._id, message: "Sinifə qoşuldunuz" });
 });
 
 // The student's own enrollments (any status), with class info.

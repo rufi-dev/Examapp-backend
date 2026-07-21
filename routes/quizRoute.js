@@ -9,9 +9,6 @@ const {
   serverTime,
   addExam,
   getExamsByClass,
-  guestClassByCode,
-  guestExam,
-  guestClaim,
   getPdfByExam,
   uploadPdf,
   addTag,
@@ -167,12 +164,6 @@ router.post("/uploadPdf", protect, teacherOnly, pdfUpload.single("file"), upload
 router.get("/getExamTagandClass/:examId", protect, getExamTagandClass);
 router.get("/getResultsByExam/:examId", protect, teacherOnly, getResultsByExam);
 router.get("/getExamsByClass/:classId", protect, getExamsByClass);
-
-// Guest (no account) access behind a class share link. Read-only and
-// answer-key-free; `claim` is the one authenticated step, run after sign-in.
-router.get("/guest/class/:code", guestClassByCode);
-router.get("/guest/exam/:code/:examId", guestExam);
-router.post("/guest/claim", protect, guestClaim);
 router.get("/getClassesByTag/:tagId", protect, getClassesByTag);
 router.get("/getClasses", protect, getAllClasses);
 router.post("/addQuestion/:examId", protect, teacherOnly, addQuestion);
