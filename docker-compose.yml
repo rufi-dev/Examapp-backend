@@ -18,6 +18,7 @@ services:
       - "5000" # internal only; Caddy is the public entrypoint
     volumes:
       - uploads:/app/uploads # persist uploaded PDFs across rebuilds
+      - materials:/app/materials # persist study materials across rebuilds
       - wa_auth:/app/.wwebjs_auth # persist the linked WhatsApp session
     networks:
       - web
@@ -45,6 +46,7 @@ networks:
 
 volumes:
   uploads:
+  materials:
   wa_auth:
   caddy_data:
   caddy_config:

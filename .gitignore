@@ -1,6 +1,7 @@
 node_modules
 .env
 *.log
-# Runtime data — never commit (uploaded PDFs, linked WhatsApp sessions)
+# Runtime data — never commit (uploaded PDFs, study materials, WhatsApp sessions)
 uploads/
+materials/
 .wwebjs_auth/

@@ -11,6 +11,7 @@ const stripeRoute = require('./routes/stripeRoute')
 const telegramRoute = require('./routes/telegramRoute')
 const whatsappRoute = require('./routes/whatsappRoute')
 const videoRoute = require('./routes/videoRoute')
+const materialRoute = require('./routes/materialRoute')
 const healthRoute = require('./routes/healthRoute')
 const { initPersistedSessions } = require('./helper/whatsapp')
 const Attempt = require('./models/attemptModel')
@@ -158,7 +159,11 @@ app.use("/api/stripe", stripeRoute)
 app.use("/api/telegram", telegramRoute)
 app.use("/api/whatsapp", whatsappRoute)
 app.use("/api/videos", videoRoute)
+app.use("/api/materials", materialRoute)
 app.use("/api/health", healthRoute)
+// NOTE: only uploads/ is public. Study materials live in materials/ and are
+// deliberately NOT served statically — they're streamed by materialController
+// after an access check, so students can read them but can't share a file URL.
 app.use('/uploads', express.static('uploads'));
 
 app.get('/', (req, res) => {

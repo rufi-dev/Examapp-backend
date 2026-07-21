@@ -13,6 +13,18 @@ RUN apk add --no-cache \
     ca-certificates \
     ttf-freefont \
     tzdata
+
+# LibreOffice (headless) converts uploaded Word/PowerPoint study materials to
+# PDF so they can be shown in the in-app viewer. Only the Writer/Impress/Calc
+# filters are installed to keep the image as small as this can reasonably be.
+# If this ever fails to install, the Materials feature still works for PDFs and
+# images — the upload just tells the teacher to convert to PDF first.
+RUN apk add --no-cache \
+    libreoffice-writer \
+    libreoffice-impress \
+    libreoffice-calc \
+    ttf-dejavu \
+    ttf-liberation
 ENV PUPPETEER_SKIP_DOWNLOAD=true \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
