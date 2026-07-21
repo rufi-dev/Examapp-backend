@@ -1186,14 +1186,24 @@ function applyResultVisibility(result, vis) {
 // PDF-mode papers are excluded: the file itself is served through an
 // authenticated route, so a guest would be handed an answer sheet with no
 // questions to read. Guests get exams whose questions live on the platform.
+//
+// A password is NOT an exclusion — it is a gate the guest can pass, exactly as
+// a logged-in student does. Hiding those exams made a teacher's share link land
+// on "no exams", which looks broken rather than protected.
 const guestExamEligible = (e) =>
-  !e.password && !(Number(e.price) > 0) && !e.pdf && e.mode !== "pdf";
+  !(Number(e.price) > 0) && !e.pdf && e.mode !== "pdf";
+
+const examPasswordOk = (exam, provided) =>
+  !(exam.password && String(exam.password).length) ||
+  String(provided ?? "") === String(exam.password);
 
 // Trim an exam down to what a card needs. Never spreads the document, so a new
 // field on the model cannot leak here by accident.
 const guestExamCard = (e, questionCount) => ({
   _id: e._id,
   name: e.name,
+  // The card says a password is needed; it never carries the password itself.
+  needsPassword: !!(e.password && String(e.password).length),
   duration: e.duration,
   totalMarks: e.totalMarks,
   passingMarks: e.passingMarks,
@@ -1226,11 +1236,15 @@ const guestClassByCode = asyncHandler(async (req, res) => {
     .lean();
 
   const list = [];
+  let restricted = 0; // real exams a guest cannot open, so the page can say why
   exams.forEach((e) => {
-    if (!guestExamEligible(e)) return;
     const questionCount = e.questions?.correctAnswers?.length || 0;
     // Same rule students get: an exam with nothing in it is not offered.
-    if (questionCount === 0) return;
+    if (questionCount === 0 && !e.pdf) return;
+    if (!guestExamEligible(e)) {
+      restricted += 1;
+      return;
+    }
     list.push(guestExamCard(e, questionCount));
   });
 
@@ -1242,6 +1256,7 @@ const guestClassByCode = asyncHandler(async (req, res) => {
       teacherName: owner?.name || "",
     },
     exams: list,
+    restricted,
   });
 });
 
@@ -1275,6 +1290,11 @@ const guestExam = asyncHandler(async (req, res) => {
     });
   }
 
+  // Header, not a query string: an exam password should not end up in access
+  // logs or a shared URL.
+  const provided = req.headers["x-exam-password"];
+  const unlocked = examPasswordOk(exam, provided);
+
   const correctAnswers = exam.questions?.correctAnswers || [];
   if (correctAnswers.length === 0) {
     return res.status(409).json({
@@ -1299,7 +1319,11 @@ const guestExam = asyncHandler(async (req, res) => {
     forwardOnly: !!exam.forwardOnly,
     studentSolutionPhotos: false, // uploads need an account
     className: _class.name || "",
-    questions: correctAnswers.map(sanitizeQuestionItem),
+    // Metadata is public so the intro page can render and ask for the password;
+    // the questions themselves only cross the wire once it matches.
+    questions: unlocked ? correctAnswers.map(sanitizeQuestionItem) : [],
+    locked: !unlocked,
+    badPassword: !unlocked && provided != null && String(provided).length > 0,
   });
 });
 
@@ -1325,6 +1349,9 @@ const guestClaim = asyncHandler(async (req, res) => {
   if (!exam) return res.status(404).json({ message: "İmtahan tapılmadı" });
   if (!guestExamEligible(exam)) {
     return res.status(403).json({ message: "Bu imtahan üçün icazə yoxdur" });
+  }
+  if (!examPasswordOk(exam, req.headers["x-exam-password"])) {
+    return res.status(401).json({ reason: "bad_password", message: "Şifrə yanlışdır" });
   }
 
   // Sitting the paper is the join: refusing the result because the enrolment is
