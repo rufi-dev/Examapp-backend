@@ -208,11 +208,21 @@ const viewMaterial = asyncHandler(async (req, res) => {
   const loaded = await loadForRead(req, res);
   if (!loaded) return;
   const { material, abs } = loaded;
-  res.setHeader("Content-Type", material.mimeType || "application/octet-stream");
-  res.setHeader("Content-Disposition", "inline");
-  res.setHeader("Cache-Control", "private, no-store");
-  res.setHeader("X-Robots-Tag", "noindex, nofollow");
-  fs.createReadStream(abs).pipe(res);
+  // sendFile (not createReadStream) so the response honours Range requests.
+  // pdf.js asks for byte ranges and renders the first pages while the rest of
+  // a large file is still on the wire; piping the whole stream forced the
+  // reader to download every page before showing anything.
+  res.sendFile(abs, {
+    acceptRanges: true,
+    headers: {
+      "Content-Type": material.mimeType || "application/octet-stream",
+      "Content-Disposition": "inline",
+      // `private` (not no-store) so the browser may reuse ranges it already
+      // holds; it still never lands in a shared cache.
+      "Cache-Control": "private, max-age=0, must-revalidate",
+      "X-Robots-Tag": "noindex, nofollow",
+    },
+  });
 });
 
 // GET /api/materials/:id/download — only when the teacher allowed it (the
