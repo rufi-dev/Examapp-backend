@@ -37,7 +37,7 @@ const ALLOWED_EXT = new Set([
 
 const upload = multer({
   storage,
-  limits: { fileSize: 30 * 1024 * 1024 }, // 30MB — plenty for lecture notes
+  limits: { fileSize: 200 * 1024 * 1024 }, // 200MB — full scanned textbooks fit
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname || "").toLowerCase();
     if (!ALLOWED_EXT.has(ext)) {
@@ -56,7 +56,7 @@ const uploadSingle = (req, res, next) =>
     if (!err) return next();
     const message =
       err.code === "LIMIT_FILE_SIZE"
-        ? "Fayl çox böyükdür (maksimum 30MB)"
+        ? "Fayl çox böyükdür (maksimum 200MB)"
         : err.message || "Fayl yüklənmədi";
     res.status(400).json({ message });
   });
