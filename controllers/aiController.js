@@ -132,7 +132,17 @@ Rules:
   • A numbered list PLUS a separate lettered list (a., b., c. …) with NO uppercase A–E answer variants → "Cma", one "pairs" entry per number (answer "1b2d3c" → pairs 1→b, 2→d, 3→c).
   Reserve Co/Cd for answers a student genuinely writes out: a number, a word, a formula.
 - MATCHING WITH ANSWER VARIANTS → CLOSED, NOT Cma: a question may say "Uyğunluğu müəyyən(ləşdir)in" yet PROVIDE lettered answer variants A–E that each encode a pairing (e.g. "A) 1 – a, b; 2 – d"  "B) 1 – a, c; 2 – b, e"). That is a CLOSED single-choice question: use type "Cm". Put the items being matched (the 1., 2., … list AND the a., b., c., … list) in "text", and put each A–E variant as a "choices" entry with its exact text (e.g. "1 – a, b; 2 – d"). Do NOT output "Cma"/pairs for these. Use "Cma" ONLY when the question gives NO answer variants and the student must build the pairing themselves. (The lowercase a., b., c. items belong in "text" — they are content to match, NOT the answer choices; only the uppercase A–E variants are choices.)
-- "pairs": NEVER empty for a "Cma" question — emit one object per LEFT item even when the paper does not reveal the correct letters (leave "right" as "" then), so the teacher gets a grid with the right number of rows to fill in. One object per LEFT item (e.g. one per number 1, 2, 3 …) in order. Put math inline in "left"/"right" via $...$ and set "leftLatex"/"rightLatex" to "". Empty array otherwise. For a numbers→letters correspondence, "left" is the number/item and "right" is its correct letter(s): if ONE left matches SEVERAL letters, list them comma-separated in that one right value (e.g. "a, d"). A letter may repeat across different lefts. The app turns this into a grid where each letter is selected individually.
+- "pairs" — READ THIS CAREFULLY, IT IS THE MOST COMMONLY GOT WRONG. The app renders a Cma question as a BARE number→letter grid:
+      1 →  A B C D E
+      2 →  A B C D E
+  The student sees ONLY the numbers and the letters. NOTHING you put in "pairs" is ever displayed — it is the answer key, not content. So the ITEMS THEMSELVES (the numbered list AND the lettered list, with their full wording) MUST appear in "text", or the question is unanswerable.
+  • "text" = the instruction + the numbered list (each item on its own line) + the lettered list (each item on its own line).
+  • "pairs" = the mapping only: "left" is just the number ("1"), "right" is just its correct letter(s) ("b", or "a, d" when one number matches several). A letter may repeat across lefts.
+  • NEVER empty for a "Cma" question — emit one object per LEFT item even when the paper does not reveal the correct letters (leave "right" as "" then), so the teacher gets a grid with the right number of rows to fill in, in order.
+  CORRECT:   text: "Uyğunluğu müəyyən edin.\\n1. [p]\\n2. [m]\\n\\na) dodaq\\nb) burun"   pairs: [{"left":"1","right":"a"},{"left":"2","right":"b"}]
+  WRONG:     text: "Uyğunluğu müəyyən edin."                                        pairs: [{"left":"1. [p]","right":"a"}]
+  • LETTERS: use only the English-alphabet letters a, b, c, d, e … as labels. Never use the Azerbaijani-only letters ç, ə, ğ, ı, ö, ş, ü as a matching label — the app does not recognise them. If the PDF itself labels the list with them, relabel in order (a, b, c, d, e) in BOTH the text and "right".
+  Put math inline in "left"/"right" via $...$ and set "leftLatex"/"rightLatex" to "". Empty array for non-matching questions.
 - "openAnswer" / "openAnswers": for open (Co) questions, the correct answer(s). Write them as PLAIN TEXT exactly as a student types on a keyboard — NO LaTeX, NO $...$ dollar signs, NO markup. Examples: write x+2 (NOT $x + 2$), 3/4 (NOT $\\\\frac{3}{4}$), x=5, 25. Put the primary answer in "openAnswer" AND list EVERY acceptable form in the "openAnswers" ARRAY, each variant as its own element — include the spaced and unspaced forms (x+2 AND x + 2), reordered equivalents (2+x), and common synonyms/notations students would realistically type. A typed answer is marked correct if it matches ANY item (compared case- and space-insensitively), so cover the realistic variations. Fill these ONLY if the PDF states the answer; otherwise openAnswer="" and openAnswers=[]. For non-open questions: openAnswer="" and openAnswers=[].
 - "hasFigure": true whenever the question relies on anything that is not plain text — a geometric figure, graph/chart, image, ANY table/grid, a Venn/Euler diagram, or a syntactic-analysis scheme. Set hasFigure=true and still extract the instruction text (+ A–E choices if any); the teacher crops the figure/table from the PDF.
 - NEVER repeat the answer options inside "text". The A/B/C/D/E choices a student selects belong ONLY in "choices" (for Cm/Cs) — never in "text". "text" holds the question statement plus any items that are PART of it (e.g. the numbered 1-5 statements being asked about, or the a-e items of a matching list), but NOT the final lettered answer choices.
@@ -587,8 +597,104 @@ const stripProseMath = (t) => {
 
 const cleanText = (t) => (typeof t === "string" ? stripProseMath(unescapeQuotes(t)) : t);
 
+// A matching question is rendered as a bare number→letter grid: nothing in
+// `pairs` reaches the student. When a model writes the items INTO pairs.left
+// instead of into the question text — the single most common way it gets this
+// type wrong — that content would vanish and leave an unanswerable question.
+//
+// This does not invent anything: it moves wording the model already produced
+// into the one place that is displayed, and only when the text does not
+// already contain it. The lettered legend cannot be recovered this way (the
+// model has to write it), which is why the prompts spell that out.
+// The letter grid only understands a–z. A model reaching for the Azerbaijani
+// alphabet ("ç") produces a label the app silently drops, which quietly changes
+// the question from a letter grid into an unusable 1:1 drag list.
+//
+// Relabelling is safe because the letters are positional: the question's own
+// lettered list defines the order, so the nth entry becomes the nth Latin
+// letter in both the text and the answer key. Nothing is invented or dropped.
+const LETTER_LINE = /^([^\s).\]]{1,2})\s*[).\]]\s+/;
+const normaliseMatchingLetters = (q) => {
+  if (q?.type !== "Cma" || !Array.isArray(q.pairs) || !q.pairs.length) return q;
+  const rights = q.pairs.flatMap((p) =>
+    String(p?.right ?? "")
+      .split(/[,;/|\s]+/)
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  // Every label already a plain latin letter? Nothing to do.
+  if (!rights.length || rights.every((r) => /^[a-z]$/.test(r))) return q;
+
+  const text = String(q.text || "");
+  const labels = [];
+  for (const line of text.split("\n")) {
+    const m = line.match(LETTER_LINE);
+    const label = m && m[1].toLowerCase();
+    // Numbers are the LEFT column's labels — only letter labels count here.
+    if (label && !/^\d+$/.test(label) && !labels.includes(label)) labels.push(label);
+  }
+  if (labels.length < 2) return q; // no lettered list to take an order from
+
+  const latin = (i) => String.fromCharCode(97 + i);
+  const remap = new Map(labels.map((l, i) => [l, latin(i)]));
+  // Untouched if the list is already a, b, c… in order.
+  if (labels.every((l, i) => l === latin(i))) return q;
+
+  const newText = text
+    .split("\n")
+    .map((line) => {
+      const m = line.match(LETTER_LINE);
+      const label = m && m[1].toLowerCase();
+      if (!label || !remap.has(label)) return line;
+      return line.replace(m[1], remap.get(label));
+    })
+    .join("\n");
+
+  return {
+    ...q,
+    text: newText,
+    pairs: q.pairs.map((p) => ({
+      ...p,
+      right: String(p?.right ?? "")
+        .split(",")
+        .map((s) => {
+          const k = s.trim().toLowerCase();
+          return remap.get(k) ?? s.trim();
+        })
+        .filter(Boolean)
+        .join(", "),
+    })),
+  };
+};
+
+const foldMatchingItemsIntoText = (q) => {
+  if (q?.type !== "Cma" || !Array.isArray(q.pairs) || q.pairs.length < 2) return q;
+  // "1", "2." and "" carry nothing; anything else is content that would be lost.
+  const contentful = q.pairs.filter((p) => {
+    const left = String(p?.left ?? "").trim();
+    return left && !/^\d+[.)]?$/.test(left);
+  });
+  if (contentful.length !== q.pairs.length) return q;
+
+  const text = String(q.text || "");
+  const stripped = (s) => s.replace(/^\s*\d+\s*[.)]\s*/, "").trim();
+  // Already listed in the question? Then the model did it right; leave it alone.
+  // Tested on the LIST STRUCTURE, not on the item wording — a matched item is
+  // often a single character ("p", "m") that occurs all over the text anyway.
+  const numberedLines = (text.match(/^\s*\d+\s*[.)]/gm) || []).length;
+  if (numberedLines >= q.pairs.length) return q;
+
+  const list = q.pairs.map((p, i) => `${i + 1}. ${stripped(String(p?.left ?? ""))}`).join("\n");
+  return {
+    ...q,
+    text: `${text.trim()}\n${list}`.trim(),
+    pairs: q.pairs.map((p, i) => ({ ...p, left: String(i + 1) })),
+  };
+};
+
 const cleanQuestions = (list) =>
-  (Array.isArray(list) ? list : []).map((q) => {
+  (Array.isArray(list) ? list : []).map((q0) => {
+    const q = normaliseMatchingLetters(foldMatchingItemsIntoText(q0));
     if (!q || typeof q !== "object") return q;
     const out = { ...q };
     out.text = cleanText(q.text);
@@ -1124,7 +1230,21 @@ QAYDALAR:
 - Qapalı sual (Cm/Cs): "choices" massivində A–E variantları ver və düzgün variant(lar)ın indeksini "correct" massivinə yaz.
 - Açıq sual (Co): "choices" boş. BÜTÜN məqbul cavabları "openAnswers" MASSİVİNƏ yaz — HƏR məqbul cavab (sinonim/variant) AYRICA element olsun (məs: ["yaş","quru","dolu"]). Cavabları DÜZ MƏTN kimi yaz — LaTeX/$...$ dollar işarəsi VƏ YA hər hansı işarələmə İSTİFADƏ ETMƏ, şagird klaviaturada necə yazırsa elə yaz (məs: x+2, yox $x + 2$; 3/4, yox kəsr işarəsi). Riyazi cavablarda boşluqlu VƏ boşluqsuz formaları, eləcə də yerdəyişmiş ekvivalentləri variant kimi əlavə et (məs: ["x+2","x + 2","2+x"]). Nömrələmə, "və ya", "/", mötərizə İSTİFADƏ ETMƏ — bir sətirdə bir neçə cavab birləşdirmə. "openAnswer" sahəsinə isə birinci cavabı yaz. Qapalı suallarda "openAnswers" boş massiv [] olsun.
 - Çoxseçimlə sual (Cs): bir neçə düzgün variant olduqda TIP "Cs" olsun və "correct" massivinə BÜTÜN düzgün indeksləri yaz. Cavabı "2,5" kimi mətnə çevirib açıq sual etmə.
-- Uyğunluq sualı (Cma): şagird nömrələnmiş (1., 2., 3. …) və hərflənmiş (a., b., c. …) siyahıları qarşılaşdırmalıdırsa, TIP "Cma" olsun: hər nömrə üçün bir "pairs" elementi ver ("left" = nömrə/ifadə, "right" = düzgün hərf(lər), bir neçə hərf olarsa vərgullə ayır). Uyğunluğu "1b2d3c" kimi mətn cavaba çevirmə.
+- Uyğunluq sualı (Cma) — ƏN ÇOX SƏHV EDİLƏN YER, DİQQƏTLƏ OXU:
+  Proqram uyğunluq sualını YALNIZ boş nömrə→hərf şəbəkəsi kimi göstərir. Şagird ekranda ancaq bunu görür:
+      1 →  A B C D E
+      2 →  A B C D E
+  Yəni nömrələrin və hərflərin NƏ olduğu ekranda GÖRÜNMÜR. "pairs" sahəsinə yazdığın hər hansı məzmun EKRANA ÇIXMIR və İTİR.
+  Buna görə HƏR İKİ SİYAHININ MƏZMUNU tam şəkildə sualın "text" hissəsində yazılmalıdır:
+    • "text" = təlimat + nömrələnmiş siyahı (hər element AYRI sətirdə) + hərflənmiş siyahı (hər element AYRI sətirdə).
+    • "pairs" = YALNIZ uyğunluq cədvəli: "left" sadəcə nömrə ("1"), "right" sadəcə düzgün hərf(lər) ("b" və ya bir neçə olarsa "a, d").
+  DÜZGÜN NÜMUNƏ:
+    text: "Aşağıdakı alman samitlərini çıxış yerləri ilə uyğunlaşdırın.\\n1. [p]\\n2. [m]\\n3. [x]\\n\\na) dodaq (bilabial)\\nb) burun (nazal)\\nc) damaq arxası (velar)"
+    pairs: [{"left":"1","right":"a"},{"left":"2","right":"b"},{"left":"3","right":"c"}]
+  YANLIŞ (belə YAZMA): text: "Səsləri çıxış yerləri ilə uyğunlaşdırın." + pairs: [{"left":"1. [p]","right":"a"}] — burada nə səslər, nə də a/b/c-nin mənası şagirdə görünmür; sual cavabsızdır.
+  Hərf siyahısını yazmağı UNUTMA: "a)", "b)", "c)" nə deməkdirsə, mətndə açıq yazılmalıdır. Uyğunluğu "1b2d3c" kimi mətn cavaba çevirmə.
+  HƏRFLƏR: yalnız ingilis əlifbasının hərflərini işlət — a, b, c, d, e. Azərbaycan əlifbasına məxsus ç, ə, ğ, ı, ö, ş, ü hərflərini uyğunluq etiketi kimi İSTİFADƏ ETMƏ (proqram onları tanımır).
+- Uyğunluq sualından SONRA gələn suallarda "1 nömrəli səs", "2-ci variant" kimi əvvəlki sualın nömrələrinə İSTİNAD ETMƏ — hər sual öz-özünə tam başa düşülən olmalıdır.
 - Açıq sualı (Co) YALNIZ şagirdin əslən yazdığı cavablar üçün işlət: rəqəm, söz, düstur. Seçim və ya uyğunluq cavabını heç vaxt mətn kimi yazma.
 - Riyazi ifadələr üçün "latex" sahəsindən istifadə et. Sual mətnini BÜTÖVLÜKDƏ $...$ içinə ALMA — yalnız həqiqi düstur/ifadə $...$ ilə yazılır; adi cümlə heç vaxt.
 - Dırnaq işarəsi lazımdırsa adi " işlət — \\" kimi qaçış simvolu YAZMA.
@@ -1735,6 +1855,9 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     "- Göstəriş tələb edirsə sualın TİPİNİ dəyişə bilərsən (məs. açıq → çox seçim).",
     "- Göstərişdə başqa cür deyilməyibsə, mövzu və fənn eyni qalsın.",
     "- Köhnə sualı təkrarlama — yeni sual fərqli olsun.",
+    // The rewrite panel is the one place a teacher explicitly asks for a
+    // matching question, so the rule it is easiest to break gets repeated here.
+    "- UYĞUNLUQ (Cma) yazırsansa: nömrələnmiş və hərflənmiş siyahıların MƏTNİ mütləq \"text\" içində olsun (hər element ayrı sətirdə); \"pairs\" yalnız uyğunluğu saxlayır (\"left\"=\"1\", \"right\"=\"b\"). Şagird ekranda yalnız boş 1/2/3 → A/B/C şəbəkəsini görür; \"pairs\" içindəki məzmun GÖRÜNMÜR.",
   ]
     .filter(Boolean)
     .join("\n");
