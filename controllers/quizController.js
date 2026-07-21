@@ -1168,6 +1168,199 @@ function applyResultVisibility(result, vis) {
   return obj;
 }
 
+
+// ══════════════════ Guest access via a class share link ══════════════════
+// A student handed a join link should be able to SIT the exam before creating
+// an account. The audience is not comfortable with sign-up forms, and a login
+// wall is exactly where they give up — so the account is asked for at the end,
+// when there is a finished paper worth saving.
+//
+// These are the only unauthenticated reads in the app. They resolve a join code
+// to display-only content: every question goes through the SAME
+// sanitizeQuestionItem used for logged-in students, so the answer key never
+// leaves the server, and neither endpoint writes anything.
+//
+// Deliberately out of the guest flow: paid exams (a guest cannot pay) and
+// password-protected ones (that gate is the teacher's on purpose).
+
+// PDF-mode papers are excluded: the file itself is served through an
+// authenticated route, so a guest would be handed an answer sheet with no
+// questions to read. Guests get exams whose questions live on the platform.
+const guestExamEligible = (e) =>
+  !e.password && !(Number(e.price) > 0) && !e.pdf && e.mode !== "pdf";
+
+// Trim an exam down to what a card needs. Never spreads the document, so a new
+// field on the model cannot leak here by accident.
+const guestExamCard = (e, questionCount) => ({
+  _id: e._id,
+  name: e.name,
+  duration: e.duration,
+  totalMarks: e.totalMarks,
+  passingMarks: e.passingMarks,
+  coverImage: e.coverImage || "",
+  mode: e.mode,
+  startDate: e.startDate,
+  endDate: e.endDate,
+  questionCount,
+});
+
+// GET /api/quiz/guest/class/:code — the class behind a share link, plus the
+// exams a guest may open.
+const guestClassByCode = asyncHandler(async (req, res) => {
+  const code = String(req.params.code || "").trim().toUpperCase();
+  if (!code) return res.status(400).json({ message: "Kod yoxdur" });
+
+  const _class = await Class.findOne({ joinCode: code }).lean();
+  if (!_class) return res.status(404).json({ message: "Sinif tapılmadı" });
+
+  const owner = _class.owner
+    ? await User.findById(_class.owner).select("name").lean()
+    : null;
+
+  const exams = await Exam.find({
+    class: _class._id,
+    deletedAt: null,
+    hidden: { $ne: true },
+  })
+    .populate("questions")
+    .lean();
+
+  const list = [];
+  exams.forEach((e) => {
+    if (!guestExamEligible(e)) return;
+    const questionCount = e.questions?.correctAnswers?.length || 0;
+    // Same rule students get: an exam with nothing in it is not offered.
+    if (questionCount === 0) return;
+    list.push(guestExamCard(e, questionCount));
+  });
+
+  res.json({
+    class: {
+      _id: _class._id,
+      name: _class.name || (_class.level != null ? `${_class.level} sinif` : "Sinif"),
+      coverImage: _class.coverImage || "",
+      teacherName: owner?.name || "",
+    },
+    exams: list,
+  });
+});
+
+// GET /api/quiz/guest/exam/:code/:examId — one exam with its questions, minus
+// every answer. The code must actually own the exam, so a bare exam id is not
+// enough to read a paper.
+const guestExam = asyncHandler(async (req, res) => {
+  const code = String(req.params.code || "").trim().toUpperCase();
+  const { examId } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(examId)) {
+    return res.status(400).json({ message: "İmtahan tapılmadı" });
+  }
+
+  const _class = await Class.findOne({ joinCode: code }).lean();
+  if (!_class) return res.status(404).json({ message: "Sinif tapılmadı" });
+
+  const exam = await Exam.findOne({
+    _id: examId,
+    class: _class._id,
+    deletedAt: null,
+    hidden: { $ne: true },
+  })
+    .populate("questions")
+    .lean();
+  if (!exam) return res.status(404).json({ message: "İmtahan tapılmadı" });
+
+  if (!guestExamEligible(exam)) {
+    return res.status(403).json({
+      reason: "needs_account",
+      message: "Bu imtahan üçün daxil olmalısınız",
+    });
+  }
+
+  const correctAnswers = exam.questions?.correctAnswers || [];
+  if (correctAnswers.length === 0) {
+    return res.status(409).json({
+      reason: "empty_exam",
+      message: "Bu imtahana hələ sual əlavə edilməyib.",
+    });
+  }
+
+  const now = Date.now();
+  const startsAt = exam.startDate ? new Date(exam.startDate).getTime() : null;
+  const endsAt = exam.endDate ? new Date(exam.endDate).getTime() : null;
+  if (startsAt && now < startsAt) {
+    return res.status(409).json({ reason: "not_started", message: "İmtahan hələ başlamayıb" });
+  }
+  if (endsAt && now > endsAt) {
+    return res.status(409).json({ reason: "ended", message: "İmtahan bitib" });
+  }
+
+  res.json({
+    ...guestExamCard(exam, correctAnswers.length),
+    questionsPerPage: exam.questionsPerPage || 0,
+    forwardOnly: !!exam.forwardOnly,
+    studentSolutionPhotos: false, // uploads need an account
+    className: _class.name || "",
+    questions: correctAnswers.map(sanitizeQuestionItem),
+  });
+});
+
+// POST /api/quiz/guest/claim — called AFTER the guest signs in, with the code of
+// the exam they just finished. Enrols them, then opens a normal attempt and
+// hands back its id; the client submits through the ordinary addResult path, so
+// scoring, maxTry and result creation stay in exactly one place.
+const guestClaim = asyncHandler(async (req, res) => {
+  const code = String(req.body?.code || "").trim().toUpperCase();
+  const { examId } = req.body || {};
+  if (!code || !mongoose.Types.ObjectId.isValid(examId)) {
+    return res.status(400).json({ message: "Məlumat natamamdır" });
+  }
+
+  const _class = await Class.findOne({ joinCode: code });
+  if (!_class) return res.status(404).json({ message: "Sinif tapılmadı" });
+
+  const exam = await Exam.findOne({
+    _id: examId,
+    class: _class._id,
+    deletedAt: null,
+  }).populate("questions");
+  if (!exam) return res.status(404).json({ message: "İmtahan tapılmadı" });
+  if (!guestExamEligible(exam)) {
+    return res.status(403).json({ message: "Bu imtahan üçün icazə yoxdur" });
+  }
+
+  // Sitting the paper is the join: refusing the result because the enrolment is
+  // still pending would throw away work the student has already done.
+  await Enrollment.findOneAndUpdate(
+    { student: req.user._id, class: _class._id },
+    {
+      $setOnInsert: { student: req.user._id, class: _class._id },
+      $set: { teacher: _class.owner, status: "approved" },
+    },
+    { upsert: true, new: true }
+  );
+
+  // Reuse an already-open attempt rather than racing the unique index.
+  let attempt = await Attempt.findOne({
+    userId: req.user._id,
+    examId: exam._id,
+    submitted: false,
+  });
+  if (!attempt) {
+    const startedAt = new Date();
+    const seconds = Number(exam.duration) > 0 ? Number(exam.duration) : 3600;
+    attempt = await Attempt.create({
+      userId: req.user._id,
+      examId: exam._id,
+      startedAt,
+      // A fresh window: the guest spent their time in the browser, and this
+      // exists only so the submit that follows immediately lands inside a
+      // valid deadline.
+      expiresAt: new Date(startedAt.getTime() + seconds * 1000),
+    });
+  }
+
+  res.status(201).json({ attemptId: attempt._id });
+});
+
 const ATTEMPT_GRACE_MS = 30 * 1000;
 
 // Deploy boundary set by the one-time migration (backfillAttemptId.js). Orphan
@@ -3169,6 +3362,9 @@ const serverTime = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  guestClassByCode,
+  guestExam,
+  guestClaim,
   serverTime,
   addExam,
   getExamsByClass,
