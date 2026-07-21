@@ -983,44 +983,84 @@ QAYDALAR:
 // but the dollar figure would be a guess, so the UI says so instead of showing
 // a confident wrong number. Override any of it with AI_MODEL_PRICES (JSON).
 const AI_MODELS = [
+  // ── priced from OpenAI's published table (standard tier, short context) ──
   {
     id: "gpt-4.1-mini",
     label: "GPT-4.1 mini",
     provider: "openai",
     note: "Sürətli və ucuz — tövsiyə olunur",
-    usd: { in: 0.4, out: 1.6 },
+    usd: { in: 0.4, cached: 0.1, out: 1.6 },
   },
-  { id: "gpt-4.1", label: "GPT-4.1", provider: "openai", note: "Daha güclü", usd: { in: 2, out: 8 } },
-  {
-    id: "gpt-4.1-nano",
-    label: "GPT-4.1 nano",
-    provider: "openai",
-    note: "Ən ucuz — sadə suallar üçün",
-    usd: { in: 0.1, out: 0.4 },
-  },
-  { id: "gpt-4o", label: "GPT-4o", provider: "openai", usd: { in: 2.5, out: 10 } },
-  { id: "gpt-4o-mini", label: "GPT-4o mini", provider: "openai", usd: { in: 0.15, out: 0.6 } },
-  {
-    id: "gpt-5-mini",
-    label: "GPT-5 mini",
-    provider: "openai",
-    note: "Düşünmə rejimi — yavaş, çox token",
-    pricing: "unknown",
-  },
-  { id: "gpt-5", label: "GPT-5", provider: "openai", pricing: "unknown" },
   {
     id: "gpt-5.4-mini",
     label: "GPT-5.4 mini",
     provider: "openai",
-    note: "Ən sürətli (testdə 3 san)",
-    pricing: "unknown",
+    note: "Ən sürətli",
+    usd: { in: 0.75, cached: 0.075, out: 4.5 },
   },
-  { id: "gpt-5.4", label: "GPT-5.4", provider: "openai", pricing: "unknown" },
-  { id: "gpt-5.5", label: "GPT-5.5", provider: "openai", pricing: "unknown" },
-  // The two engines that were already here, kept selectable.
-  { id: "gemini", label: "Gemini Flash", provider: "gemini", note: "Ucuz", },
-  { id: "claude", label: "Claude Opus 4.8", provider: "claude", note: "Bahalı, güclü" },
+  {
+    id: "gpt-5.4-nano",
+    label: "GPT-5.4 nano",
+    provider: "openai",
+    note: "Ən ucuz — sadə suallar üçün",
+    usd: { in: 0.2, cached: 0.02, out: 1.25 },
+  },
+  {
+    id: "gpt-5.6-luna",
+    label: "GPT-5.6 luna",
+    provider: "openai",
+    note: "Güclü, orta qiymət",
+    usd: { in: 1, cached: 0.1, out: 6 },
+  },
+  {
+    id: "gpt-5.4",
+    label: "GPT-5.4",
+    provider: "openai",
+    usd: { in: 2.5, cached: 0.25, out: 15 },
+  },
+  {
+    id: "gpt-5.6-terra",
+    label: "GPT-5.6 terra",
+    provider: "openai",
+    usd: { in: 2.5, cached: 0.25, out: 15 },
+  },
+  {
+    id: "gpt-5.5",
+    label: "GPT-5.5",
+    provider: "openai",
+    note: "Bahalı",
+    usd: { in: 5, cached: 0.5, out: 30 },
+  },
+  {
+    id: "gpt-5.6-sol",
+    label: "GPT-5.6 sol",
+    provider: "openai",
+    note: "Ən güclü — bahalı",
+    usd: { in: 5, cached: 0.5, out: 30 },
+  },
+  {
+    id: "gpt-4.1",
+    label: "GPT-4.1",
+    provider: "openai",
+    usd: { in: 2, cached: 0.5, out: 8 },
+  },
+  { id: "gpt-4o", label: "GPT-4o", provider: "openai", usd: { in: 2.5, cached: 1.25, out: 10 } },
+  {
+    id: "gpt-4o-mini",
+    label: "GPT-4o mini",
+    provider: "openai",
+    usd: { in: 0.15, cached: 0.075, out: 0.6 },
+  },
+  // The two engines that were already here. Their spend is computed by their
+  // own cost functions, not by this table.
+  { id: "gemini", label: "Gemini Flash", provider: "gemini", note: "Ucuz", usd: null },
+  { id: "claude", label: "Claude Opus 4.8", provider: "claude", note: "Bahalı, güclü", usd: null },
 ];
+
+// The pro tiers (gpt-5.5-pro / gpt-5.4-pro at $30 in / $180 out — 40x the
+// default) and the unpriced gpt-5 / gpt-5-mini are deliberately NOT offered:
+// everything on this list has a price we can charge against, so the spend page
+// is never a guess, and no click can cost forty times what the teacher expects.
 
 const DEFAULT_AI_MODEL = process.env.OPENAI_GEN_MODEL || "gpt-4.1-mini";
 
@@ -1052,8 +1092,10 @@ const listAiModels = asyncHandler(async (req, res) => {
     label: m.label,
     provider: m.provider,
     note: m.note || "",
-    // Never ship the numbers as fact when we cannot vouch for them.
-    priceKnown: !!priceFor(m.id),
+    // Every OpenAI engine on the list carries a real price; the other two
+    // providers price themselves.
+    priceKnown: m.provider !== "openai" ? true : !!priceFor(m.id),
+    usd: m.usd || null,
   }));
   const fallback = available.find((m) => m.id === DEFAULT_AI_MODEL) || available[0];
   res.json({ models: available, default: fallback?.id || DEFAULT_AI_MODEL });
@@ -1064,19 +1106,30 @@ const listAiModels = asyncHandler(async (req, res) => {
 // or a model swap is an env edit rather than a release.
 const OPENAI_GEN_MODEL = DEFAULT_AI_MODEL;
 const computeOpenAIGenCost = (usage, model, askedId) => {
-  const price = priceFor(askedId || model) || { in: 0, out: 0 };
-  const inP = Number(price.in);
-  const outP = Number(price.out);
-  const inputTokens = usage?.prompt_tokens || 0;
+  const price = priceFor(askedId || model) || { in: 0, cached: 0, out: 0 };
+  const inP = Number(price.in) || 0;
+  const cachedP = Number(price.cached ?? price.in) || 0;
+  const outP = Number(price.out) || 0;
+
+  // prompt_tokens INCLUDES the cached ones, and cached input is billed at a
+  // fraction of the normal rate — charging the whole prompt at full price
+  // overstates every repeat call.
+  const promptTokens = usage?.prompt_tokens || 0;
+  const cachedTokens = usage?.prompt_tokens_details?.cached_tokens || 0;
+  const freshTokens = Math.max(0, promptTokens - cachedTokens);
   const outputTokens = usage?.completion_tokens || 0;
+
   return {
     model: model || askedId || OPENAI_GEN_MODEL,
-    inputTokens,
+    inputTokens: promptTokens,
     outputTokens,
     cacheWriteTokens: 0,
-    cacheReadTokens: 0,
-    totalTokens: inputTokens + outputTokens,
-    usd: (inputTokens / 1e6) * inP + (outputTokens / 1e6) * outP,
+    cacheReadTokens: cachedTokens,
+    totalTokens: usage?.total_tokens || promptTokens + outputTokens,
+    usd:
+      (freshTokens / 1e6) * inP +
+      (cachedTokens / 1e6) * cachedP +
+      (outputTokens / 1e6) * outP,
   };
 };
 
