@@ -365,6 +365,106 @@ async function extractWithClaude(base64, instructions = "") {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+
+// Extract from a PDF with OpenAI. Same signature and return shape as the Gemini
+// and Claude extractors, so the callers do not care which one ran.
+//
+// Uses the Responses API rather than chat completions: that is the endpoint
+// that takes a PDF as an input_file, so the whole paper goes over in one call
+// exactly as it does for the other two providers.
+async function extractWithOpenAI(base64, instructions = "", modelId) {
+  if (!process.env.OPENAI_API_KEY)
+    throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (OPENAI_API_KEY)", true);
+  const model = modelId || DEFAULT_AI_MODEL;
+  const instr = clampInstr(instructions);
+
+  let r;
+  try {
+    r = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        input: [
+          {
+            role: "system",
+            content: [{ type: "input_text", text: SYSTEM_PROMPT + instructionBlock(instr) }],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_file",
+                filename: "exam.pdf",
+                file_data: `data:application/pdf;base64,${base64}`,
+              },
+              { type: "input_text", text: "Bu PDF-dəki bütün sualları çıxar." },
+            ],
+          },
+        ],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "exam_questions",
+            strict: true,
+            schema: EXTRACTION_SCHEMA,
+          },
+        },
+        max_output_tokens: 32000,
+      }),
+    });
+  } catch {
+    throw aiError(502, "AI PDF-i emal edə bilmədi. Yenidən cəhd et.", true);
+  }
+
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    console.error("OpenAI extract failed:", r.status, body.slice(0, 400));
+    // Quota/5xx are worth handing to another provider; a 400 is our own bug.
+    throw aiError(
+      502,
+      "AI PDF-i emal edə bilmədi. Yenidən cəhd et.",
+      r.status === 429 || r.status >= 500
+    );
+  }
+
+  const data = await r.json();
+  // output_text is the convenience field; fall back to walking the content
+  // blocks if the SDK-less shape differs.
+  const text =
+    data.output_text ||
+    (data.output || [])
+      .flatMap((o) => o.content || [])
+      .map((c) => c.text)
+      .filter(Boolean)
+      .join("") ||
+    "";
+  let parsed;
+  try {
+    parsed = JSON.parse(text || "{}");
+  } catch {
+    console.error("OpenAI extract: unparseable output, head =", text.slice(0, 200));
+    throw aiError(502, "AI cavabı oxunmadı. Yenidən cəhd et.", true);
+  }
+
+  const usage = {
+    prompt_tokens: data?.usage?.input_tokens || 0,
+    completion_tokens: data?.usage?.output_tokens || 0,
+    total_tokens: data?.usage?.total_tokens || 0,
+    prompt_tokens_details: {
+      cached_tokens: data?.usage?.input_tokens_details?.cached_tokens || 0,
+    },
+  };
+  return {
+    questions: Array.isArray(parsed.questions) ? parsed.questions : [],
+    usage,
+    cost: computeOpenAIGenCost(usage, data?.model, model),
+  };
+}
+
 async function extractWithGemini(base64, instructions = "") {
   if (!process.env.GEMINI_API_KEY) throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (GEMINI_API_KEY)");
   const instr = clampInstr(instructions);
@@ -521,8 +621,17 @@ const extractQuestions = asyncHandler(async (req, res) => {
   }
 
   const base64 = req.file.buffer.toString("base64");
+  // The builder sends the model id it picked. An OpenAI id routes to OpenAI;
+  // "gemini"/"claude" keep working as the plain provider names they always were.
+  const asked = String(req.body?.provider || "").toLowerCase();
+  const askedModel = findAiModel(String(req.body?.model || asked));
   const provider =
-    String(req.body?.provider || "").toLowerCase() === "gemini" ? "gemini" : "claude";
+    askedModel?.provider === "openai"
+      ? "openai"
+      : asked === "gemini" || askedModel?.provider === "gemini"
+      ? "gemini"
+      : "claude";
+  const openaiModel = askedModel?.provider === "openai" ? askedModel.id : undefined;
   const instructions = buildInstructions(req.body?.preset, req.body?.instructions);
 
   let questions = [];
@@ -532,13 +641,15 @@ const extractQuestions = asyncHandler(async (req, res) => {
   let fellBack = false;
   try {
     ({ questions, usage, cost } =
-      provider === "gemini"
+      provider === "openai"
+        ? await extractWithOpenAI(base64, instructions, openaiModel)
+        : provider === "gemini"
         ? await extractWithGemini(base64, instructions)
         : await extractWithClaude(base64, instructions));
   } catch (e) {
     // If Gemini is busy / out of quota, automatically retry on Claude so the
     // teacher isn't dead-ended — they still get their questions (slightly pricier).
-    if (provider === "gemini" && e.aiFallback) {
+    if ((provider === "gemini" || provider === "openai") && e.aiFallback) {
       try {
         ({ questions, usage, cost } = await extractWithClaude(base64, instructions));
         usedProvider = "claude";
@@ -779,8 +890,17 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     throw new Error("Yalnız PDF fayl dəstəklənir");
   }
   const base64 = req.file.buffer.toString("base64");
+  // The builder sends the model id it picked. An OpenAI id routes to OpenAI;
+  // "gemini"/"claude" keep working as the plain provider names they always were.
+  const asked = String(req.body?.provider || "").toLowerCase();
+  const askedModel = findAiModel(String(req.body?.model || asked));
   const provider =
-    String(req.body?.provider || "").toLowerCase() === "gemini" ? "gemini" : "claude";
+    askedModel?.provider === "openai"
+      ? "openai"
+      : asked === "gemini" || askedModel?.provider === "gemini"
+      ? "gemini"
+      : "claude";
+  const openaiModel = askedModel?.provider === "openai" ? askedModel.id : undefined;
   const instructions = buildInstructions(req.body?.preset, req.body?.instructions);
 
   res.writeHead(200, {
@@ -816,13 +936,28 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
   let usedProvider = provider;
   let fellBack = false;
   try {
-    result =
-      provider === "gemini"
-        ? await streamGemini(base64, instructions, mkOnText())
-        : await streamClaude(base64, instructions, mkOnText());
+    if (provider === "openai") {
+      // No token stream for this one: the Responses API call returns the whole
+      // paper at once. The teacher still sees the animated loader, they just do
+      // not watch questions land one by one — worth it to keep every engine on
+      // offer rather than a subset that happens to stream.
+      sse("status", { message: "PDF oxunur…" });
+      const one = await extractWithOpenAI(base64, instructions, openaiModel);
+      result = {
+        full: JSON.stringify({ questions: one.questions }),
+        usage: one.usage,
+        model: one.cost?.model,
+        openaiCost: one.cost,
+      };
+    } else {
+      result =
+        provider === "gemini"
+          ? await streamGemini(base64, instructions, mkOnText())
+          : await streamClaude(base64, instructions, mkOnText());
+    }
   } catch (e) {
     console.error(`AI extract (${provider}) failed:`, e?.status, e?.message);
-    if (provider === "gemini" && e.aiFallback) {
+    if ((provider === "gemini" || provider === "openai") && e.aiFallback) {
       sse("status", { message: "Gemini əlçatan deyil — Claude ilə davam edilir…" });
       try {
         result = await streamClaude(base64, instructions, mkOnText());
@@ -861,9 +996,10 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     );
   }
   const cost =
-    usedProvider === "gemini"
+    result.openaiCost ||
+    (usedProvider === "gemini"
       ? computeGeminiCost(result.usage, result.model)
-      : computeCost(result.usage);
+      : computeCost(result.usage));
   if (cost && req.user?._id) {
     try {
       await AiUsage.create({
