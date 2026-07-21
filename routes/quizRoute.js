@@ -54,7 +54,7 @@ const {
   getExamTagandClass,
   getResultsByExam
 } = require("../controllers/quizController");
-const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions, transcribeAudio, realtimeToken, listAiModels } = require("../controllers/aiController");
+const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions, transcribeAudio, realtimeToken, listAiModels, regenerateQuestion } = require("../controllers/aiController");
 const { aiRateLimit, aiBudgetGuard } = require("../middleware/aiLimit");
 const {
   joinClass,
@@ -139,6 +139,8 @@ router.post("/generateQuestions/:examId", protect, teacherOnly, aiRateLimit, aiB
 
 // Which engines the builder may offer for question generation.
 router.get("/ai/models", protect, teacherOnly, listAiModels);
+// Rewrite a single question in the builder.
+router.post("/regenerateQuestion/:examId", protect, teacherOnly, regenerateQuestion);
 // Voice → text (Azerbaijani) for the chat assistant.
 router.post("/transcribe", protect, teacherOnly, aiRateLimit, aiBudgetGuard, memUpload.single("audio"), transcribeAudio);
 // Ephemeral token for OpenAI Realtime live transcription (browser → OpenAI direct).

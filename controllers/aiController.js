@@ -1353,6 +1353,104 @@ const generateQuestions = asyncHandler(async (req, res) => {
   res.json({ questions: cleanQuestions(out.questions), cost: out.cost });
 });
 
+
+// POST /api/quiz/regenerateQuestion/:examId — rewrite ONE question.
+//
+// Runs through the same provider chain, schema and cleanup as a full
+// generation, so a rewritten question is indistinguishable from a generated
+// one. The model is allowed to change the question's TYPE: "make this multiple
+// choice" is a normal thing to ask, and forcing the old type would make half
+// the useful instructions impossible.
+const regenerateQuestion = asyncHandler(async (req, res) => {
+  const { question, instructions, examPrompt } = req.body || {};
+  if (!question || typeof question !== "object") {
+    res.status(400);
+    throw new Error("Sual göndərilmədi");
+  }
+
+  const picked = findAiModel(String(req.body?.model || "")) || findAiModel(DEFAULT_AI_MODEL);
+  const runners = {
+    openai: (pr, ps) =>
+      generateWithOpenAI(pr, ps, picked?.provider === "openai" ? picked.id : undefined),
+    gemini: generateWithGemini,
+    claude: generateWithClaude,
+  };
+  const keyFor = {
+    openai: process.env.OPENAI_API_KEY,
+    gemini: process.env.GEMINI_API_KEY,
+    claude: process.env.ANTHROPIC_API_KEY,
+  };
+  const order = [picked?.provider, "openai", "gemini", "claude"].filter(
+    (x, i, a) => x && a.indexOf(x) === i
+  );
+
+  // Everything the model needs to rewrite this one item, and nothing else.
+  const ask = [
+    "Aşağıdakı imtahan sualını YENİDƏN yaz. YALNIZ BİR sual qaytar.",
+    "",
+    "MÖVCUD SUAL (JSON):",
+    JSON.stringify(question).slice(0, 4000),
+    "",
+    examPrompt ? `İMTAHANIN ÜMUMİ TƏSVİRİ: ${String(examPrompt).slice(0, 500)}` : "",
+    "",
+    instructions && String(instructions).trim()
+      ? `MÜƏLLİMİN GÖSTƏRİŞİ: ${String(instructions).trim().slice(0, 1000)}`
+      : "GÖSTƏRİŞ YOXDUR: eyni mövzuda, eyni çətinlikdə, TAMAMİLƏ BAŞQA bir sual yaz.",
+    "",
+    "QAYDALAR:",
+    "- Dəqiq 1 sual qaytar (questions massivində bir element).",
+    "- Göstəriş tələb edirsə sualın TİPİNİ dəyişə bilərsən (məs. açıq → çox seçim).",
+    "- Göstərişdə başqa cür deyilməyibsə, mövzu və fənn eyni qalsın.",
+    "- Köhnə sualı təkrarlama — yeni sual fərqli olsun.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  let out = null;
+  let lastErr = null;
+  for (const name of order) {
+    if (!keyFor[name]) continue;
+    try {
+      out = await runners[name](ask, req.body?.preset);
+      break;
+    } catch (e) {
+      lastErr = e;
+      console.error(`regenerate via ${name} failed:`, e?.message);
+      if (!e.aiFallback) break;
+    }
+  }
+  if (!out) {
+    res.status(lastErr?.aiStatus || 502);
+    throw new Error(lastErr?.userMessage || "Sual yenidən yazıla bilmədi");
+  }
+
+  const [fresh] = cleanQuestions(out.questions || []);
+  if (!fresh) {
+    res.status(502);
+    throw new Error("AI yeni sual qaytarmadı");
+  }
+
+  try {
+    const c = out.cost || {};
+    await AiUsage.create({
+      user: req.user._id,
+      exam: req.params.examId,
+      model: c.model,
+      inputTokens: c.inputTokens || 0,
+      outputTokens: c.outputTokens || 0,
+      cacheWriteTokens: c.cacheWriteTokens || 0,
+      cacheReadTokens: c.cacheReadTokens || 0,
+      totalTokens: c.totalTokens || 0,
+      usd: c.usd || 0,
+      questions: 1,
+    });
+  } catch (e) {
+    console.error("regenerate usage log failed:", e?.message);
+  }
+
+  res.json({ question: fresh, cost: out.cost });
+});
+
 // ============================ Teacher chat assistant ============================
 // A lightweight in-dashboard helper for TEACHERS: answers "how do I do X in
 // Examopia" in Azerbaijani. Uses Gemini Flash (cheap) with a Claude fallback.
@@ -1937,6 +2035,7 @@ const realtimeToken = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  regenerateQuestion,
   listAiModels,
   // exported for tests / benchmarking
   GEN_SYSTEM_PROMPT,
