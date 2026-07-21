@@ -455,6 +455,61 @@ async function extractWithGemini(base64, instructions = "") {
 // Extract structured questions from an uploaded PDF. Teacher-only. Provider is
 // "claude" (default, higher quality, expensive) or "gemini" (cheaper). Returns
 // { questions: [...] } in the builder's shape for review (never auto-saved).
+
+// ── tidy the model's text before anyone sees it ──────────────────────────
+// Two failures show up often enough to be worth fixing here rather than hoping
+// a prompt prevents them:
+//
+//   1. A whole sentence wrapped in $...$. The builder hands anything in dollars
+//      to KaTeX, which cannot typeset prose, so the question renders as a red
+//      error line under the field.
+//   2. Literal \" inside the text, from the model escaping quotes a second time
+//      after JSON already escaped them.
+//
+// Both are unambiguous, so they are repaired on every path — PDF extraction and
+// prompt generation alike — instead of being left for the teacher to clean up.
+const unescapeQuotes = (t) => String(t ?? "").replace(/\\+(["'])/g, "$1");
+
+// Real maths carries a command, a super/subscript, a brace group, or an
+// operator between numbers. Prose carries none of those, so a $...$ wrapper
+// around prose can be removed without touching a genuine formula.
+const looksLikeMath = (s) => /[\\^_{}]|\d\s*[+\-*/=]\s*\d/.test(s);
+
+const stripProseMath = (t) => {
+  const s = String(t ?? "").trim();
+  if (!(s.startsWith("$") && s.endsWith("$") && s.length > 2)) return t;
+  const inner = s.slice(1, -1);
+  // Several segments (e.g. "$a$ and $b$") — not a single wrapper, leave it.
+  if (inner.includes("$")) return t;
+  if (looksLikeMath(inner)) return t;
+  return inner.trim();
+};
+
+const cleanText = (t) => (typeof t === "string" ? stripProseMath(unescapeQuotes(t)) : t);
+
+const cleanQuestions = (list) =>
+  (Array.isArray(list) ? list : []).map((q) => {
+    if (!q || typeof q !== "object") return q;
+    const out = { ...q };
+    out.text = cleanText(q.text);
+    if (typeof q.title === "string") out.title = cleanText(q.title);
+    if (typeof q.openAnswer === "string") out.openAnswer = cleanText(q.openAnswer);
+    if (Array.isArray(q.openAnswers)) out.openAnswers = q.openAnswers.map(cleanText);
+    if (Array.isArray(q.choices)) {
+      out.choices = q.choices.map((c) =>
+        c && typeof c === "object" ? { ...c, text: cleanText(c.text) } : cleanText(c)
+      );
+    }
+    if (Array.isArray(q.pairs)) {
+      out.pairs = q.pairs.map((pr) =>
+        pr && typeof pr === "object"
+          ? { ...pr, left: cleanText(pr.left), right: cleanText(pr.right) }
+          : pr
+      );
+    }
+    return out;
+  });
+
 const extractQuestions = asyncHandler(async (req, res) => {
   if (!req.file || !req.file.buffer || !req.file.buffer.length) {
     res.status(400);
@@ -520,7 +575,14 @@ const extractQuestions = asyncHandler(async (req, res) => {
     }
   }
 
-  res.status(200).json({ success: true, questions, usage, cost, provider: usedProvider, fellBack });
+  res.status(200).json({
+    success: true,
+    questions: cleanQuestions(questions),
+    usage,
+    cost,
+    provider: usedProvider,
+    fellBack,
+  });
 });
 
 // --- Streaming extraction (SSE): same model call, delivered incrementally so the
@@ -791,7 +853,7 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     sse("error", { message: "AI cavabı oxunmadı. Yenidən cəhd edin." });
     return res.end();
   }
-  const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+  const questions = cleanQuestions(parsed.questions);
   if (!questions.length) {
     console.warn(
       `AI extract (${usedProvider}) returned 0 questions; full length=${(result.full || "").length}, head=`,
@@ -903,7 +965,8 @@ QAYDALAR:
 - Çoxseçimlə sual (Cs): bir neçə düzgün variant olduqda TIP "Cs" olsun və "correct" massivinə BÜTÜN düzgün indeksləri yaz. Cavabı "2,5" kimi mətnə çevirib açıq sual etmə.
 - Uyğunluq sualı (Cma): şagird nömrələnmiş (1., 2., 3. …) və hərflənmiş (a., b., c. …) siyahıları qarşılaşdırmalıdırsa, TIP "Cma" olsun: hər nömrə üçün bir "pairs" elementi ver ("left" = nömrə/ifadə, "right" = düzgün hərf(lər), bir neçə hərf olarsa vərgullə ayır). Uyğunluğu "1b2d3c" kimi mətn cavaba çevirmə.
 - Açıq sualı (Co) YALNIZ şagirdin əslən yazdığı cavablar üçün işlət: rəqəm, söz, düstur. Seçim və ya uyğunluq cavabını heç vaxt mətn kimi yazma.
-- Riyazi ifadələr üçün "latex" sahəsindən istifadə et.
+- Riyazi ifadələr üçün "latex" sahəsindən istifadə et. Sual mətnini BÜTÖVLÜKDƏ $...$ içinə ALMA — yalnız həqiqi düstur/ifadə $...$ ilə yazılır; adi cümlə heç vaxt.
+- Dırnaq işarəsi lazımdırsa adi " işlət — \\" kimi qaçış simvolu YAZMA.
 - Şəkil/qrafik tələb edən sual YARATMA (hasFigure həmişə false). Mümkün qədər mətnlə həll olunan suallar yarat.
 - Xahiş olunmayıbsa oxu mətni (reading) əlavə etmə.
 - Suallar aydın, düzgün və imtahan səviyyəsinə uyğun olsun.`;
@@ -1034,7 +1097,7 @@ const generateQuestions = asyncHandler(async (req, res) => {
   } catch (e) {
     console.error("generate usage log failed:", e?.message);
   }
-  res.json({ questions: out.questions || [], cost: out.cost });
+  res.json({ questions: cleanQuestions(out.questions), cost: out.cost });
 });
 
 // ============================ Teacher chat assistant ============================
@@ -1621,6 +1684,8 @@ const realtimeToken = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  // exported for tests
+  cleanQuestions,
   extractQuestions,
   extractQuestionsStream,
   getAiUsage,
