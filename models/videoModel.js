@@ -11,6 +11,9 @@ const videoSchema = Schema(
     title: { type: String, trim: true, required: true },
     videoId: { type: String, required: true }, // 11-char YouTube id
     url: { type: String, trim: true }, // original link, for reference
+    // Optional class scope, same rule as study materials: null = shared with
+    // ALL of this teacher's students, otherwise only that class sees it.
+    class: { type: Schema.Types.ObjectId, ref: "Class", default: null, index: true },
     owner: { type: Schema.Types.ObjectId, ref: "User", index: true },
     ownerName: { type: String, trim: true },
   },

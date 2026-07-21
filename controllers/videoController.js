@@ -42,9 +42,18 @@ const getVideos = asyncHandler(async (req, res) => {
     const ownerIds = classIds.length
       ? await Class.find({ _id: { $in: classIds } }).distinct("owner")
       : [];
-    filter = { owner: { $in: ownerIds } };
+    // Same rule as study materials: a video shared with everyone (class: null)
+    // reaches all of that teacher's students; a class-scoped one only reaches
+    // students actually enrolled in that class.
+    filter = {
+      owner: { $in: ownerIds },
+      $or: [{ class: null }, { class: { $in: classIds } }],
+    };
   }
-  const videos = await Video.find(filter).sort({ createdAt: -1 }).lean();
+  const videos = await Video.find(filter)
+    .sort({ createdAt: -1 })
+    .populate("class", "name level")
+    .lean();
   res.json(videos);
 });
 
@@ -58,14 +67,56 @@ const addVideo = asyncHandler(async (req, res) => {
   if (!videoId) {
     return res.status(400).json({ message: "Düzgün YouTube linki daxil edin" });
   }
+  // Only allow attaching to a class the uploader actually owns.
+  let classId = req.body.classId || null;
+  if (classId) {
+    const cls = await Class.findById(classId).select("owner");
+    const ownsClass =
+      cls && (String(cls.owner) === String(req.user._id) || req.user.role === "admin");
+    if (!ownsClass) classId = null;
+  }
+
   const video = await Video.create({
     title: String(title).trim(),
     videoId,
     url: String(url).trim(),
+    class: classId || null,
     owner: req.user._id,
     ownerName: req.user.name || "",
   });
-  res.status(201).json(video);
+  const populated = await Video.findById(video._id).populate("class", "name level").lean();
+  res.status(201).json(populated);
+});
+
+// PATCH /api/videos/:id — owner/admin retargets the video at another class (or
+// back to "all my students"), or renames it.
+const updateVideo = asyncHandler(async (req, res) => {
+  const video = await Video.findById(req.params.id);
+  if (!video) return res.status(404).json({ message: "Tapılmadı" });
+  const isOwner = video.owner && String(video.owner) === String(req.user._id);
+  if (!isOwner && req.user.role !== "admin") {
+    return res.status(403).json({ message: "Bu video sizə aid deyil" });
+  }
+  if (typeof req.body.title === "string" && req.body.title.trim()) {
+    video.title = req.body.title.trim();
+  }
+  if (Object.prototype.hasOwnProperty.call(req.body, "classId")) {
+    const wanted = req.body.classId || null;
+    if (!wanted) {
+      video.class = null;
+    } else {
+      const cls = await Class.findById(wanted).select("owner");
+      const ownsClass =
+        cls && (String(cls.owner) === String(req.user._id) || req.user.role === "admin");
+      if (!ownsClass) {
+        return res.status(403).json({ message: "Bu sinif sizə aid deyil" });
+      }
+      video.class = wanted;
+    }
+  }
+  await video.save();
+  const populated = await Video.findById(video._id).populate("class", "name level").lean();
+  res.json(populated);
 });
 
 // DELETE /api/videos/:id — only the owner or an admin can remove a video.
@@ -81,4 +132,4 @@ const deleteVideo = asyncHandler(async (req, res) => {
   res.json({ id: req.params.id });
 });
 
-module.exports = { getVideos, addVideo, deleteVideo };
+module.exports = { getVideos, addVideo, updateVideo, deleteVideo };

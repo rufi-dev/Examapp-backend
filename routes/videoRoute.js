@@ -4,6 +4,7 @@ const { protect, teacherOnly } = require("../middleware/authMiddleware");
 const {
   getVideos,
   addVideo,
+  updateVideo,
   deleteVideo,
 } = require("../controllers/videoController");
 
@@ -11,6 +12,7 @@ const {
 // only teachers/admins add or delete (delete gated to owner/admin).
 router.get("/", protect, getVideos);
 router.post("/", protect, teacherOnly, addVideo);
+router.patch("/:id", protect, teacherOnly, updateVideo);
 router.delete("/:id", protect, teacherOnly, deleteVideo);
 
 module.exports = router;
