@@ -663,6 +663,8 @@ function sanitizeExamForStudent(exam) {
   }
   delete obj.password;
   delete obj.pdf;
+  // The generation prompt can name the answers outright ("düzgün cavab B olsun").
+  delete obj.aiPrompt;
   // Solution media reveals the answers — never expose it on a pre-exam payload
   // (listing / details / my-exams). It is shown only in the gated review.
   delete obj.videoLink;
@@ -947,7 +949,8 @@ const getExam = asyncHandler(async (req, res) => {
 
 const addQuestion = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const { correctAnswers, questionsPerPage, forwardOnly, typePoints, listeningAudio } = req.body;
+  const { correctAnswers, questionsPerPage, forwardOnly, typePoints, listeningAudio, aiPrompt } =
+    req.body;
 
   if (!correctAnswers || !examId) {
     res.status(400).json({ message: "All fields are required" });
@@ -998,6 +1001,13 @@ const addQuestion = asyncHandler(async (req, res) => {
   // builder/PDF page can attach it after the exam is created. "" clears it.
   if (listeningAudio !== undefined) {
     exam.listeningAudio = typeof listeningAudio === "string" ? listeningAudio.trim() : "";
+    await exam.save();
+  }
+
+  // The AI description the teacher may have edited in the builder. Teacher-only
+  // (the student sanitisers strip it) — see the field comment on the model.
+  if (aiPrompt !== undefined) {
+    exam.aiPrompt = typeof aiPrompt === "string" ? aiPrompt.trim().slice(0, 4000) : "";
     await exam.save();
   }
 
@@ -1154,6 +1164,7 @@ function applyResultVisibility(result, vis) {
   if (ex && typeof ex === "object") {
     delete ex.password;
     delete ex.pdf;
+    delete ex.aiPrompt;
     if (!vis.canSeeAnswers) {
       delete ex.videoLink;
       ex.solutionPhotos = [];

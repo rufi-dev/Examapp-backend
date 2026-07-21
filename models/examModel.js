@@ -39,6 +39,14 @@ const examSchema = Schema({
         type: String,
         default: ""
     },
+    // What the teacher asked the AI for when the questions were written. Kept so
+    // a later rewrite of a single question knows what the paper is about without
+    // the teacher retyping it. TEACHER-ONLY — it can name the answers, so the
+    // student sanitisers strip it.
+    aiPrompt: {
+        type: String,
+        default: ""
+    },
     // Optional listening-section audio (Cloudinary URL, e.g. an mp3). Shown as a
     // player at the top of the exam (English buraxılış has a Dinləmə section).
     // Display content, so it is sent to students.

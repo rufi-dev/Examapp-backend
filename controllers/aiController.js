@@ -751,6 +751,28 @@ const makeQuestionStreamer = () => {
   };
 };
 
+// Reads an SSE response body and hands each `data:` payload to `onPayload` as a
+// raw string. Both OpenAI and Gemini speak this framing, and the streaming
+// generators below differ only in what they pull out of the parsed chunk.
+async function readSSEBody(body, onPayload) {
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload && payload !== "[DONE]") onPayload(payload);
+    }
+  }
+}
+
 async function streamGemini(base64, instructions, onText) {
   if (!process.env.GEMINI_API_KEY)
     throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (GEMINI_API_KEY)", true);
@@ -1018,6 +1040,9 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
       console.error("AiUsage log failed:", e?.message);
     }
   }
+  // Instructions given alongside a PDF describe the exam just as a written
+  // prompt does, so a later rewrite gets them too.
+  if (questions.length) await rememberExamPrompt(req, req.body?.instructions);
   sse("done", { questions, cost, provider: usedProvider, fellBack });
   res.end();
 });
@@ -1269,7 +1294,10 @@ const computeOpenAIGenCost = (usage, model, askedId) => {
   };
 };
 
-async function generateWithOpenAI(prompt, presetId, modelId) {
+// `onText` opts into token streaming: it receives the whole output so far after
+// every chunk, which is what lets the builder show questions as they are
+// written. The parsed result is identical either way.
+async function generateWithOpenAI(prompt, presetId, modelId, onText) {
   const useModel = modelId || OPENAI_GEN_MODEL;
   if (!process.env.OPENAI_API_KEY)
     throw aiError(503, "AI konfiqurasiya olunmayib (OPENAI_API_KEY)", true);
@@ -1296,6 +1324,9 @@ async function generateWithOpenAI(prompt, presetId, modelId) {
           type: "json_schema",
           json_schema: { name: "exam_questions", strict: true, schema: EXTRACTION_SCHEMA },
         },
+        // Usage arrives in a final chunk with no choices when streaming; without
+        // this flag a streamed call reports no cost at all.
+        ...(onText ? { stream: true, stream_options: { include_usage: true } } : {}),
         // gpt-5+ and the o-series renamed this and reject the old name with a
         // 400, so the field is chosen from the model id rather than hardcoded.
         [/^(gpt-[5-9]|o\d)/.test(useModel) ? "max_completion_tokens" : "max_tokens"]:
@@ -1317,20 +1348,45 @@ async function generateWithOpenAI(prompt, presetId, modelId) {
     );
   }
 
-  const data = await r.json();
+  let text = "";
+  let usage = null;
+  let servedModel = useModel;
+  if (onText && r.body) {
+    await readSSEBody(r.body, (payload) => {
+      let chunk;
+      try {
+        chunk = JSON.parse(payload);
+      } catch {
+        return;
+      }
+      if (chunk.model) servedModel = chunk.model;
+      if (chunk.usage) usage = chunk.usage;
+      const delta = chunk.choices?.[0]?.delta?.content;
+      if (delta) {
+        text += delta;
+        onText(text);
+      }
+    });
+  } else {
+    const data = await r.json();
+    text = data?.choices?.[0]?.message?.content || "{}";
+    usage = data?.usage;
+    servedModel = data?.model || useModel;
+  }
+
   let parsed;
   try {
-    parsed = JSON.parse(data?.choices?.[0]?.message?.content || "{}");
+    parsed = JSON.parse(text || "{}");
   } catch {
     throw aiError(502, "AI cavabi oxunmadi. Yeniden cehd et.", true);
   }
   return {
     questions: Array.isArray(parsed.questions) ? parsed.questions : [],
-    cost: computeOpenAIGenCost(data?.usage, data?.model, useModel),
+    cost: computeOpenAIGenCost(usage, servedModel, useModel),
   };
 }
 
-async function generateWithGemini(prompt, presetId) {
+async function generateWithGemini(prompt, presetId, onText) {
   if (!process.env.GEMINI_API_KEY)
     throw aiError(503, "AI konfiqurasiya olunmayıb (GEMINI_API_KEY)", true);
   const sys = GEN_SYSTEM_PROMPT + (presetHint(presetId) ? "\n\n" + presetHint(presetId) : "");
@@ -1349,24 +1405,57 @@ async function generateWithGemini(prompt, presetId) {
     });
   for (const model of models) {
     for (let attempt = 0; attempt < 2; attempt++) {
-      let r, data;
+      // Streaming is a different endpoint returning the same content parts in
+      // pieces. Both branches end with `text` + `usage`, so everything after
+      // this point is shared.
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:${
+        onText ? "streamGenerateContent?alt=sse" : "generateContent"
+      }`;
+      let r;
+      let text = null;
+      let usage = null;
       try {
-        r = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-goog-api-key": process.env.GEMINI_API_KEY },
-            body: buildBody(model),
+        r = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-goog-api-key": process.env.GEMINI_API_KEY },
+          body: buildBody(model),
+        });
+        if (onText) {
+          if (r.ok && r.body) {
+            let acc = "";
+            await readSSEBody(r.body, (payload) => {
+              let chunk;
+              try {
+                chunk = JSON.parse(payload);
+              } catch {
+                return;
+              }
+              let grew = false;
+              for (const p of chunk.candidates?.[0]?.content?.parts || [])
+                if (p.text && !p.thought) {
+                  // "thought" parts would corrupt the JSON if mixed in
+                  acc += p.text;
+                  grew = true;
+                }
+              if (chunk.usageMetadata) usage = chunk.usageMetadata;
+              if (grew) onText(acc);
+            });
+            if (acc) text = acc;
           }
-        );
-        data = await r.json();
+        } else {
+          const data = await r.json();
+          if (r.ok && !data?.error) {
+            text =
+              (data.candidates?.[0]?.content?.parts || []).map((p) => p.text).filter(Boolean).join("") ||
+              "{}";
+            usage = data.usageMetadata;
+          }
+        }
       } catch (e) {
         await sleep(1000 * (attempt + 1));
         continue;
       }
-      if (r.ok && !data?.error) {
-        const text =
-          (data.candidates?.[0]?.content?.parts || []).map((p) => p.text).filter(Boolean).join("") || "{}";
+      if (text) {
         let parsed;
         try {
           parsed = JSON.parse(text);
@@ -1375,7 +1464,7 @@ async function generateWithGemini(prompt, presetId) {
         }
         return {
           questions: Array.isArray(parsed.questions) ? parsed.questions : [],
-          cost: computeGeminiCost(data.usageMetadata, model),
+          cost: computeGeminiCost(usage, model),
         };
       }
       if (r.status && ![429, 500, 503].includes(r.status)) break;
@@ -1385,7 +1474,7 @@ async function generateWithGemini(prompt, presetId) {
   throw aiError(502, "AI suallar yarada bilmədi, yenidən cəhd et", true);
 }
 
-async function generateWithClaude(prompt, presetId) {
+async function generateWithClaude(prompt, presetId, onText) {
   const client = getClient();
   if (!client) throw aiError(503, "AI konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)");
   const sys = [
@@ -1393,16 +1482,23 @@ async function generateWithClaude(prompt, presetId) {
   ];
   let message;
   try {
-    message = await client.messages
-      .stream({
-        model: "claude-opus-4-8",
-        max_tokens: 32000,
-        thinking: { type: "adaptive" },
-        system: sys,
-        output_config: { effort: "high", format: { type: "json_schema", schema: EXTRACTION_SCHEMA } },
-        messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
-      })
-      .finalMessage();
+    // Already a stream — `onText` just taps the deltas that were being dropped.
+    const stream = client.messages.stream({
+      model: "claude-opus-4-8",
+      max_tokens: 32000,
+      thinking: { type: "adaptive" },
+      system: sys,
+      output_config: { effort: "high", format: { type: "json_schema", schema: EXTRACTION_SCHEMA } },
+      messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+    });
+    if (onText) {
+      let acc = "";
+      stream.on("text", (delta) => {
+        acc += delta;
+        onText(acc);
+      });
+    }
+    message = await stream.finalMessage();
   } catch (e) {
     throw aiError(502, "AI suallar yarada bilmədi. Yenidən cəhd et.");
   }
@@ -1419,21 +1515,19 @@ async function generateWithClaude(prompt, presetId) {
   };
 }
 
-// POST /api/quiz/generateQuestions/:examId (teacher) — { prompt, preset } -> { questions, cost }
-const generateQuestions = asyncHandler(async (req, res) => {
-  const prompt = String(req.body?.prompt || "").trim().slice(0, 4000);
-  const preset = req.body?.preset;
-  if (!prompt) {
-    res.status(400);
-    throw new Error("İmtahan təsviri boşdur");
-  }
+// Runs a prompt through the provider chain and returns { questions, cost }.
+//
+// Shared by the plain and the streaming generate endpoints so the two cannot
+// drift: the only difference between them is that `onText` is supplied.
+async function runGeneration({ prompt, preset, model, onText }) {
   // The teacher's choice wins, but only from the allow-list: the id arrives
   // from a browser, and an unchecked one could name a pro tier at many times
   // the price. Anything unrecognised silently falls back to the default.
-  const picked = findAiModel(String(req.body?.model || "")) || findAiModel(DEFAULT_AI_MODEL);
+  const picked = findAiModel(String(model || "")) || findAiModel(DEFAULT_AI_MODEL);
 
   const runners = {
-    openai: (pr, ps) => generateWithOpenAI(pr, ps, picked?.provider === "openai" ? picked.id : undefined),
+    openai: (pr, ps, cb) =>
+      generateWithOpenAI(pr, ps, picked?.provider === "openai" ? picked.id : undefined, cb),
     gemini: generateWithGemini,
     claude: generateWithClaude,
   };
@@ -1449,15 +1543,15 @@ const generateQuestions = asyncHandler(async (req, res) => {
   const order = [picked?.provider, "openai", "gemini", "claude"].filter(
     (p2, i, a) => p2 && a.indexOf(p2) === i
   );
-  const chain = order
-    .filter((p2) => !!keyFor[p2])
-    .map((p2) => [p2, keyFor[p2], runners[p2]]);
+  const chain = order.filter((p2) => !!keyFor[p2]).map((p2) => [p2, runners[p2]]);
 
   let out = null;
   let lastErr = null;
-  for (const [name, , fn] of chain) {
+  for (const [name, fn] of chain) {
     try {
-      out = await fn(prompt, preset);
+      // A fresh callback per attempt: the previous provider may have emitted
+      // questions before failing, and its counter must not carry over.
+      out = await fn(prompt, preset, onText ? onText(name) : undefined);
       break;
     } catch (e) {
       lastErr = e;
@@ -1465,10 +1559,27 @@ const generateQuestions = asyncHandler(async (req, res) => {
       if (!e.aiFallback) break;
     }
   }
-  if (!out) {
-    res.status(lastErr?.aiStatus || 502);
-    throw new Error(lastErr?.userMessage || "AI suallar yarada bilmədi");
+  if (!out) throw lastErr || aiError(502, "AI suallar yarada bilmədi");
+  return out;
+}
+
+// Remember what this exam was asked for, so a later single-question rewrite
+// carries the same context. Scoped to the owner, and never fatal: failing to
+// record the prompt must not fail the generation the teacher just paid for.
+const rememberExamPrompt = async (req, prompt) => {
+  const text = String(prompt || "").trim();
+  if (!text || !req.params?.examId) return;
+  try {
+    await Exam.updateOne(
+      { _id: req.params.examId, user: req.user._id },
+      { $set: { aiPrompt: text.slice(0, 4000) } }
+    );
+  } catch (e) {
+    console.error("aiPrompt save failed:", e?.message);
   }
+};
+
+const logGenerationUsage = async (req, out) => {
   try {
     const c = out.cost || {};
     await AiUsage.create({
@@ -1486,7 +1597,93 @@ const generateQuestions = asyncHandler(async (req, res) => {
   } catch (e) {
     console.error("generate usage log failed:", e?.message);
   }
+};
+
+// POST /api/quiz/generateQuestions/:examId (teacher) — { prompt, preset } -> { questions, cost }
+const generateQuestions = asyncHandler(async (req, res) => {
+  const prompt = String(req.body?.prompt || "").trim().slice(0, 4000);
+  if (!prompt) {
+    res.status(400);
+    throw new Error("İmtahan təsviri boşdur");
+  }
+  let out;
+  try {
+    out = await runGeneration({ prompt, preset: req.body?.preset, model: req.body?.model });
+  } catch (e) {
+    res.status(e?.aiStatus || 502);
+    throw new Error(e?.userMessage || "AI suallar yarada bilmədi");
+  }
+  await logGenerationUsage(req, out);
+  await rememberExamPrompt(req, prompt);
   res.json({ questions: cleanQuestions(out.questions), cost: out.cost });
+});
+
+// POST /api/quiz/generateQuestionsStream/:examId — same thing over SSE.
+//
+// The `question` events are PREVIEW ONLY, parsed out of a half-written response;
+// `done` carries the authoritative, cleaned result that actually gets committed.
+// Mirrors extractQuestionsStream so the builder can treat both the same way.
+const generateQuestionsStream = asyncHandler(async (req, res) => {
+  const prompt = String(req.body?.prompt || "").trim().slice(0, 4000);
+  if (!prompt) {
+    res.status(400);
+    throw new Error("İmtahan təsviri boşdur");
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders?.();
+  const sse = (event, data) => {
+    try {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      /* client gone */
+    }
+  };
+  const hb = setInterval(() => {
+    try {
+      res.write(": ping\n\n");
+    } catch {
+      /* ignore */
+    }
+  }, 15000);
+
+  let out = null;
+  try {
+    out = await runGeneration({
+      prompt,
+      preset: req.body?.preset,
+      model: req.body?.model,
+      onText: (provider) => {
+        const streamer = makeQuestionStreamer();
+        let announced = false;
+        return (full) => {
+          if (!announced) {
+            announced = true;
+            sse("provider", { provider });
+          }
+          for (const q of streamer(full)) sse("question", q);
+        };
+      },
+    });
+  } catch (e) {
+    clearInterval(hb);
+    sse("error", { message: e?.userMessage || "AI suallar yarada bilmədi" });
+    return res.end();
+  }
+
+  const questions = cleanQuestions(out.questions);
+  if (questions.length) {
+    await logGenerationUsage(req, out);
+    await rememberExamPrompt(req, prompt);
+  }
+  clearInterval(hb);
+  sse("done", { questions, cost: out.cost });
+  res.end();
 });
 
 
@@ -1584,6 +1781,9 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     console.error("regenerate usage log failed:", e?.message);
   }
 
+  // An edited description sent from the rewrite panel becomes the exam's
+  // description from here on.
+  await rememberExamPrompt(req, examPrompt);
   res.json({ question: fresh, cost: out.cost });
 });
 
@@ -2183,6 +2383,7 @@ module.exports = {
   getAiUsage,
   chatAssistant,
   generateQuestions,
+  generateQuestionsStream,
   transcribeAudio,
   realtimeToken,
 };
