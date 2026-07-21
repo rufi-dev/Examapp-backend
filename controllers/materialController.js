@@ -134,8 +134,9 @@ const addMaterial = asyncHandler(async (req, res) => {
     mimeType,
     sizeBytes,
     class: classId || null,
-    // Checkbox arrives as the string "true" from multipart form data.
+    // Checkboxes arrive as the string "true" from multipart form data.
     allowDownload: String(req.body.allowDownload) === "true",
+    allowCopy: String(req.body.allowCopy) === "true",
     owner: req.user._id,
     ownerName: req.user.name || "",
   });
@@ -216,6 +217,9 @@ const updateMaterial = asyncHandler(async (req, res) => {
   }
   if (typeof req.body.allowDownload === "boolean") {
     material.allowDownload = req.body.allowDownload;
+  }
+  if (typeof req.body.allowCopy === "boolean") {
+    material.allowCopy = req.body.allowCopy;
   }
   await material.save();
   const populated = await Material.findById(material._id)

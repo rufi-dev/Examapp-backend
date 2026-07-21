@@ -35,6 +35,11 @@ const materialSchema = Schema(
     // downloaded. A teacher can flip this per material (e.g. a worksheet to print).
     allowDownload: { type: Boolean, default: false },
 
+    // Off by default: the viewer renders the PDF without a text layer, so there
+    // is nothing to select. Turning this on renders the text layer and lets a
+    // student select/copy passages (useful for notes the teacher wants quoted).
+    allowCopy: { type: Boolean, default: false },
+
     owner: { type: Schema.Types.ObjectId, ref: "User", index: true },
     ownerName: { type: String, trim: true },
   },
