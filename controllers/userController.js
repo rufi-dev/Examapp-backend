@@ -2,6 +2,7 @@ const asyncHandler = require("express-async-handler");
 const User = require("../models/userModel");
 const Enrollment = require("../models/enrollmentModel");
 const Class = require("../models/classModel");
+const Exam = require("../models/examModel");
 const bcrypt = require("bcryptjs");
 const { generateToken, hashToken, getToken } = require("../utils/index");
 const { recordDebug } = require("../utils/debugLog");
@@ -623,8 +624,151 @@ const getUsers = asyncHandler(async (req, res) => {
     }).distinct("student");
     filter = { _id: { $in: studentIds } };
   }
-  const users = await User.find(filter).sort("-createdAt").select("-password");
+  const users = await User.find(filter).sort("-createdAt").select("-password").lean();
+
+  // For the admin directory, attach each student's teacher(s) so the list can
+  // answer "whose student is this?" without a request per row. A student can
+  // belong to several teachers (one per class they joined), so this is a list.
+  // Three queries total, regardless of how many users there are.
+  if (req.user.role === "admin" && users.length) {
+    const enrollments = await Enrollment.find({ status: "approved" })
+      .select("student teacher class")
+      .lean();
+
+    // `teacher` is denormalised on newer enrollments; fall back to the class
+    // owner for older rows that predate it.
+    const classIds = [...new Set(enrollments.map((e) => String(e.class)))];
+    const classes = classIds.length
+      ? await Class.find({ _id: { $in: classIds } }).select("owner").lean()
+      : [];
+    const ownerOfClass = new Map(classes.map((c) => [String(c._id), String(c.owner)]));
+
+    const byStudent = new Map();
+    const teacherIds = new Set();
+    enrollments.forEach((e) => {
+      const tid = String(e.teacher || ownerOfClass.get(String(e.class)) || "");
+      if (!tid || tid === "undefined") return;
+      teacherIds.add(tid);
+      const key = String(e.student);
+      if (!byStudent.has(key)) byStudent.set(key, new Set());
+      byStudent.get(key).add(tid);
+    });
+
+    const teachers = teacherIds.size
+      ? await User.find({ _id: { $in: [...teacherIds] } }).select("name").lean()
+      : [];
+    const nameOf = new Map(teachers.map((t) => [String(t._id), t.name]));
+
+    users.forEach((u) => {
+      const ids = byStudent.get(String(u._id));
+      u.teachers = ids
+        ? [...ids].map((id) => ({ _id: id, name: nameOf.get(id) || "—" }))
+        : [];
+    });
+  }
+
   res.status(200).json(users || []);
+});
+
+// PATCH /api/users/bulk — admin-only batch role change or delete, so a class of
+// newly-registered students doesn't have to be handled one row at a time.
+const bulkUsers = asyncHandler(async (req, res) => {
+  const { ids, action, role } = req.body || {};
+  if (!Array.isArray(ids) || !ids.length) {
+    return res.status(400).json({ message: "İstifadəçi seçilməyib" });
+  }
+  // Never let an admin wipe out their own account in a bulk sweep.
+  const targets = ids.filter((id) => String(id) !== String(req.user._id));
+  if (!targets.length) {
+    return res.status(400).json({ message: "Öz hesabınızı dəyişə bilməzsiniz" });
+  }
+
+  if (action === "delete") {
+    const { deletedCount } = await User.deleteMany({ _id: { $in: targets } });
+    return res.json({ action, count: deletedCount, ids: targets });
+  }
+
+  if (action === "role") {
+    const allowed = ["student", "teacher", "admin", "suspended"];
+    if (!allowed.includes(role)) {
+      return res.status(400).json({ message: "Yanlış rol" });
+    }
+    const { modifiedCount } = await User.updateMany(
+      { _id: { $in: targets } },
+      { $set: { role } }
+    );
+    return res.json({ action, role, count: modifiedCount, ids: targets });
+  }
+
+  res.status(400).json({ message: "Yanlış əməliyyat" });
+});
+
+// GET /api/users/teacher/:id/overview — everything an admin needs about ONE
+// teacher in a single call: the classes they own, the students in them
+// (approved + still pending), and the exams they created.
+const teacherOverview = asyncHandler(async (req, res) => {
+  const teacher = await User.findById(req.params.id).select("-password").lean();
+  if (!teacher) return res.status(404).json({ message: "Tapılmadı" });
+
+  const classes = await Class.find({ owner: teacher._id })
+    .sort("-createdAt")
+    .select("name level joinCode createdAt")
+    .lean();
+  const classIds = classes.map((c) => c._id);
+
+  const enrollments = classIds.length
+    ? await Enrollment.find({ class: { $in: classIds } })
+        .select("student class status createdAt")
+        .lean()
+    : [];
+
+  const studentIds = [...new Set(enrollments.map((e) => String(e.student)))];
+  const students = studentIds.length
+    ? await User.find({ _id: { $in: studentIds } })
+        .select("name email phone role lastActiveAt")
+        .lean()
+    : [];
+  const studentById = new Map(students.map((s) => [String(s._id), s]));
+  const classById = new Map(classes.map((c) => [String(c._id), c]));
+
+  // Per-class head counts for the class cards.
+  const counts = new Map(classIds.map((id) => [String(id), { approved: 0, pending: 0 }]));
+  enrollments.forEach((e) => {
+    const c = counts.get(String(e.class));
+    if (c && (e.status === "approved" || e.status === "pending")) c[e.status] += 1;
+  });
+
+  const exams = await Exam.find({ owner: teacher._id })
+    .sort("-createdAt")
+    .select("title class createdAt isArchived duration")
+    .populate("class", "name level")
+    .lean();
+
+  res.json({
+    teacher,
+    classes: classes.map((c) => ({
+      ...c,
+      approved: counts.get(String(c._id))?.approved || 0,
+      pending: counts.get(String(c._id))?.pending || 0,
+    })),
+    students: enrollments.map((e) => ({
+      ...(studentById.get(String(e.student)) || { _id: e.student, name: "—" }),
+      status: e.status,
+      className:
+        classById.get(String(e.class))?.name ||
+        (classById.get(String(e.class))?.level
+          ? `${classById.get(String(e.class)).level}-ci sinif`
+          : "—"),
+      joinedAt: e.createdAt,
+    })),
+    exams,
+    stats: {
+      classes: classes.length,
+      students: studentIds.length,
+      pending: enrollments.filter((e) => e.status === "pending").length,
+      exams: exams.length,
+    },
+  });
 });
 
 // Login Status
@@ -981,4 +1125,6 @@ module.exports = {
   loginWithCode,
   loginWithGoogle,
   getUserById,
+  bulkUsers,
+  teacherOverview,
 };

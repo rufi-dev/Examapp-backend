@@ -50,6 +50,14 @@ const protect = asyncHandler(async (req, res, next) => {
       throw new Error("User suspended, please contact support");
     }
 
+    // Track activity for the admin user list. Throttled to once every 10
+    // minutes per user and deliberately NOT awaited, so an authenticated
+    // request never pays for an extra write (this runs on every API call).
+    const TEN_MIN = 10 * 60 * 1000;
+    if (!user.lastActiveAt || Date.now() - new Date(user.lastActiveAt).getTime() > TEN_MIN) {
+      User.updateOne({ _id: user._id }, { $set: { lastActiveAt: new Date() } }).catch(() => {});
+    }
+
     req.user = user;
     next();
   } catch (error) {

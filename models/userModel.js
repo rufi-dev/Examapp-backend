@@ -80,6 +80,14 @@ const userSchema = Schema(
             type: Boolean,
             default: true
         },
+        // Last time this user made an authenticated request. Written by the
+        // `protect` middleware at most once every 10 minutes (see
+        // authMiddleware) so it costs ~nothing, and lets the admin user list
+        // show who is actually active vs. a dormant account.
+        lastActiveAt: {
+            type: Date,
+            index: true,
+        },
         userAgent: {
             type: Array,
             required: true,
