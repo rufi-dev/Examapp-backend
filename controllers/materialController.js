@@ -160,6 +160,7 @@ const addMaterial = asyncHandler(async (req, res) => {
   const material = await Material.create({
     title,
     description: String(req.body.description || "").trim(),
+    coverImage: String(req.body.coverImage || "").trim(),
     fileName: path.basename(storedPath),
     originalName: file.originalname || "",
     kind,
@@ -257,6 +258,9 @@ const updateMaterial = asyncHandler(async (req, res) => {
   }
   if (typeof req.body.description === "string") {
     material.description = req.body.description.trim();
+  }
+  if (typeof req.body.coverImage === "string") {
+    material.coverImage = req.body.coverImage.trim();
   }
   if (typeof req.body.allowDownload === "boolean") {
     material.allowDownload = req.body.allowDownload;

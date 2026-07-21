@@ -19,6 +19,12 @@ const { Schema } = mongoose;
 const materialSchema = Schema(
   {
     title: { type: String, trim: true, required: true },
+    // Optional banner picked by the teacher. Display-only Cloudinary URL, so
+    // it is safe to send to students; without one the card draws its own.
+    coverImage: {
+      type: String,
+      default: "",
+    },
     description: { type: String, trim: true, default: "" },
 
     // Stored file name inside materials/ (random, not the original name).
