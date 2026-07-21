@@ -8,6 +8,12 @@ const classSchema = Schema(
       type: String,
       trim: true,
     },
+    // Optional banner the teacher picks when creating the class. Display-only
+    // (a hosted Cloudinary URL), so it is safe to send to students.
+    coverImage: {
+      type: String,
+      default: "",
+    },
     // Legacy numeric level — kept for old classes; new ones use `name`.
     level: {
       type: Number,

@@ -133,7 +133,7 @@ const addTag = asyncHandler(async (req, res) => {
 
 // Add Class
 const addClass = asyncHandler(async (req, res) => {
-  const { name, level } = req.body;
+  const { name, level, coverImage } = req.body;
 
   try {
     // A class needs a label: a text name (preferred) or the legacy numeric level.
@@ -149,6 +149,7 @@ const addClass = asyncHandler(async (req, res) => {
     const newClass = await Class.create({
       name: label || undefined,
       level: level !== undefined && level !== "" ? level : undefined,
+      coverImage: typeof coverImage === "string" ? coverImage.trim() : "",
       owner: req.user._id,
       joinCode: await uniqueJoinCode(),
       requireCode: true,
@@ -2678,7 +2679,7 @@ const editTag = asyncHandler(async (req, res) => {
 
 const editClass = asyncHandler(async (req, res) => {
   const { classId } = req.params;
-  const { name, level, regenerateCode } = req.body;
+  const { name, level, regenerateCode, coverImage } = req.body;
   const label = typeof name === "string" ? name.trim() : "";
   if (!label && !level) {
     res.status(400);
@@ -2695,6 +2696,7 @@ const editClass = asyncHandler(async (req, res) => {
   }
   const update = {};
   if (typeof name === "string") update.name = label;
+  if (typeof coverImage === "string") update.coverImage = coverImage.trim();
   if (level !== undefined && level !== "") update.level = level;
   // Classes are always code-only (public was removed); keep it enforced.
   update.requireCode = true;
