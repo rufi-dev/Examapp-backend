@@ -221,6 +221,22 @@ const updateMaterial = asyncHandler(async (req, res) => {
   if (typeof req.body.allowCopy === "boolean") {
     material.allowCopy = req.body.allowCopy;
   }
+  // Re-target the material at another class (or back to "all my students").
+  // Same ownership rule as upload: you can only point it at a class you own.
+  if (Object.prototype.hasOwnProperty.call(req.body, "classId")) {
+    const wanted = req.body.classId || null;
+    if (!wanted) {
+      material.class = null;
+    } else {
+      const cls = await Class.findById(wanted).select("owner");
+      const ownsClass =
+        cls && (String(cls.owner) === String(req.user._id) || req.user.role === "admin");
+      if (!ownsClass) {
+        return res.status(403).json({ message: "Bu sinif sizə aid deyil" });
+      }
+      material.class = wanted;
+    }
+  }
   await material.save();
   const populated = await Material.findById(material._id)
     .populate("class", "name level")
