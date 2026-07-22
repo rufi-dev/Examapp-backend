@@ -322,6 +322,20 @@ const crypto = require("crypto");
 const shareUrl = (token) =>
   `${(process.env.FRONTEND_URL || "").replace(/\/$/, "")}/m/${token}`;
 
+// Which class a gated link joins: the teacher's pick, else the first class the
+// material is shared with.
+//
+// Falling back to the FIRST rather than refusing unless there is exactly one:
+// a material shared with two classes is ordinary, and refusing left the link
+// unable to join anyone at all — including every link created before the
+// picker existed. A default the teacher can see and change in the dialog beats
+// a link that silently does nothing.
+const joinTargetId = (m) => {
+  if (m.share?.joinClass) return m.share.joinClass;
+  const audience = audienceOf(m);
+  return audience.length ? audience[0] : null;
+};
+
 const shareState = (m) => ({
   enabled: !!m.share?.enabled,
   requireAuth: !!m.share?.requireAuth,
@@ -366,12 +380,9 @@ const setMaterialShare = asyncHandler(async (req, res) => {
     }
     joinClass = cls._id;
   }
-  // Not picked: fall back to the only class it is shared with, when there is
-  // exactly one — the common case, where asking would be pointless.
-  if (requireAuth && !joinClass) {
-    const audience = audienceOf(material);
-    if (audience.length === 1) joinClass = audience[0];
-  }
+  // Not picked: default to the first class it is shared with, so a gated link
+  // always joins somewhere. The dialog shows which, and the teacher can change it.
+  if (requireAuth && !joinClass) joinClass = joinTargetId(material);
 
   material.share = material.share || {};
   if (enabled && !material.share.token) {
@@ -474,8 +485,9 @@ const getSharedMaterial = asyncHandler(async (req, res) => {
     // exactly the person who needs it, and who can already join through the
     // button beside it, so it grants nothing extra. Never in an anonymous
     // response.
-    if (material.share.joinClass) {
-      const target = await Class.findById(material.share.joinClass)
+    const targetId = joinTargetId(material);
+    if (targetId) {
+      const target = await Class.findById(targetId)
         .select("name level joinCode")
         .lean();
       if (target) {
@@ -518,12 +530,8 @@ const joinFromShare = asyncHandler(async (req, res) => {
   if (!material.share.requireAuth) return res.json({ joined: true, reason: "open" });
   if (await canAccess(req.user, material)) return res.json({ joined: true, already: true });
 
-  // The class the teacher named when they gated the link. Falling back to the
-  // audience covers links created before the picker existed.
-  const audience = audienceOf(material);
-  const targetId =
-    material.share.joinClass || (audience.length === 1 ? audience[0] : null);
-  if (!targetId) return res.json({ joined: false, reason: audience.length ? "many" : "no-class" });
+  const targetId = joinTargetId(material);
+  if (!targetId) return res.json({ joined: false, reason: "no-class" });
   const cls = await Class.findById(targetId);
   if (!cls) return res.json({ joined: false, reason: "no-class" });
 
