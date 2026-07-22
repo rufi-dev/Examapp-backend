@@ -1432,7 +1432,7 @@ const computeOpenAIGenCost = (usage, model, askedId) => {
 // `onText` opts into token streaming: it receives the whole output so far after
 // every chunk, which is what lets the builder show questions as they are
 // written. The parsed result is identical either way.
-async function generateWithOpenAI(prompt, presetId, modelId, onText) {
+async function generateWithOpenAI(prompt, presetId, modelId, onText, signal) {
   const useModel = modelId || OPENAI_GEN_MODEL;
   if (!process.env.OPENAI_API_KEY)
     throw aiError(503, "AI konfiqurasiya olunmayib (OPENAI_API_KEY)", true);
@@ -1442,6 +1442,7 @@ async function generateWithOpenAI(prompt, presetId, modelId, onText) {
   try {
     r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
+      signal,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -1521,7 +1522,7 @@ async function generateWithOpenAI(prompt, presetId, modelId, onText) {
   };
 }
 
-async function generateWithGemini(prompt, presetId, onText) {
+async function generateWithGemini(prompt, presetId, onText, signal) {
   if (!process.env.GEMINI_API_KEY)
     throw aiError(503, "AI konfiqurasiya olunmayıb (GEMINI_API_KEY)", true);
   const sys = GEN_SYSTEM_PROMPT + (presetHint(presetId) ? "\n\n" + presetHint(presetId) : "");
@@ -1552,6 +1553,7 @@ async function generateWithGemini(prompt, presetId, onText) {
       try {
         r = await fetch(url, {
           method: "POST",
+          signal,
           headers: { "Content-Type": "application/json", "X-goog-api-key": process.env.GEMINI_API_KEY },
           body: buildBody(model),
         });
@@ -1609,7 +1611,7 @@ async function generateWithGemini(prompt, presetId, onText) {
   throw aiError(502, "AI suallar yarada bilmədi, yenidən cəhd et", true);
 }
 
-async function generateWithClaude(prompt, presetId, onText) {
+async function generateWithClaude(prompt, presetId, onText, signal) {
   const client = getClient();
   if (!client) throw aiError(503, "AI konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)");
   const sys = [
@@ -1625,7 +1627,7 @@ async function generateWithClaude(prompt, presetId, onText) {
       system: sys,
       output_config: { effort: "high", format: { type: "json_schema", schema: EXTRACTION_SCHEMA } },
       messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
-    });
+    }, { signal });
     if (onText) {
       let acc = "";
       stream.on("text", (delta) => {
@@ -1654,7 +1656,7 @@ async function generateWithClaude(prompt, presetId, onText) {
 //
 // Shared by the plain and the streaming generate endpoints so the two cannot
 // drift: the only difference between them is that `onText` is supplied.
-async function runGeneration({ prompt, preset, model, onText }) {
+async function runGeneration({ prompt, preset, model, onText, signal }) {
   // The teacher's choice wins, but only from the allow-list: the id arrives
   // from a browser, and an unchecked one could name a pro tier at many times
   // the price. Anything unrecognised silently falls back to the default.
@@ -1662,9 +1664,9 @@ async function runGeneration({ prompt, preset, model, onText }) {
 
   const runners = {
     openai: (pr, ps, cb) =>
-      generateWithOpenAI(pr, ps, picked?.provider === "openai" ? picked.id : undefined, cb),
-    gemini: generateWithGemini,
-    claude: generateWithClaude,
+      generateWithOpenAI(pr, ps, picked?.provider === "openai" ? picked.id : undefined, cb, signal),
+    gemini: (pr, ps, cb) => generateWithGemini(pr, ps, cb, signal),
+    claude: (pr, ps, cb) => generateWithClaude(pr, ps, cb, signal),
   };
   const keyFor = {
     openai: process.env.OPENAI_API_KEY,
@@ -1690,6 +1692,9 @@ async function runGeneration({ prompt, preset, model, onText }) {
       break;
     } catch (e) {
       lastErr = e;
+      // A cancelled request must not fall through to the next provider — that
+      // would bill two more models for output nobody is waiting for.
+      if (signal?.aborted) throw aiError(499, "Ləğv edildi");
       console.error(`generate via ${name} failed:`, e?.message);
       if (!e.aiFallback) break;
     }
@@ -1705,10 +1710,13 @@ const rememberExamPrompt = async (req, prompt) => {
   const text = String(prompt || "").trim();
   if (!text || !req.params?.examId) return;
   try {
-    await Exam.updateOne(
-      { _id: req.params.examId, user: req.user._id },
-      { $set: { aiPrompt: text.slice(0, 4000) } }
-    );
+    // NB: the exam's creator is `owner`. Scoped on `user` this matched nothing
+    // and silently saved nothing — updateOne reports success on zero matches.
+    const scope =
+      req.user.role === "admin"
+        ? { _id: req.params.examId }
+        : { _id: req.params.examId, owner: req.user._id };
+    await Exam.updateOne(scope, { $set: { aiPrompt: text.slice(0, 4000) } });
   } catch (e) {
     console.error("aiPrompt save failed:", e?.message);
   }
@@ -1787,9 +1795,21 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
     }
   }, 15000);
 
+  // Cancelling in the browser only closed the socket; the provider kept
+  // generating and kept billing for output nobody would read. The upstream
+  // request is aborted with the connection now.
+  const ac = new AbortController();
+  let clientGone = false;
+  req.on("close", () => {
+    clientGone = true;
+    clearInterval(hb);
+    ac.abort();
+  });
+
   let out = null;
   try {
     out = await runGeneration({
+      signal: ac.signal,
       prompt,
       preset: req.body?.preset,
       model: req.body?.model,
@@ -1807,16 +1827,21 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
     });
   } catch (e) {
     clearInterval(hb);
+    if (clientGone) return res.end();
     sse("error", { message: e?.userMessage || "AI suallar yarada bilmədi" });
     return res.end();
   }
+
+  clearInterval(hb);
+  // Nobody is listening any more: skip the commit work and the cost row for
+  // output that will never be used.
+  if (clientGone) return res.end();
 
   const questions = cleanQuestions(out.questions);
   if (questions.length) {
     await logGenerationUsage(req, out);
     await rememberExamPrompt(req, prompt);
   }
-  clearInterval(hb);
   sse("done", { questions, cost: out.cost });
   res.end();
 });

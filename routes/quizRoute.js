@@ -141,11 +141,13 @@ router.post("/generateQuestionsStream/:examId", protect, teacherOnly, aiRateLimi
 // Which engines the builder may offer for question generation.
 router.get("/ai/models", protect, teacherOnly, listAiModels);
 // Rewrite a single question in the builder.
-router.post("/regenerateQuestion/:examId", protect, teacherOnly, regenerateQuestion);
+router.post("/regenerateQuestion/:examId", protect, teacherOnly, aiRateLimit, aiBudgetGuard, regenerateQuestion);
 // Voice → text (Azerbaijani) for the chat assistant.
 router.post("/transcribe", protect, teacherOnly, aiRateLimit, aiBudgetGuard, memUpload.single("audio"), transcribeAudio);
 // Ephemeral token for OpenAI Realtime live transcription (browser → OpenAI direct).
-router.post("/realtime-token", protect, teacherOnly, aiRateLimit, realtimeToken);
+// Mints a client secret the browser uses to talk to OpenAI directly — spend we
+// never see in AiUsage, so the daily budget has to gate handing one out.
+router.post("/realtime-token", protect, teacherOnly, aiRateLimit, aiBudgetGuard, realtimeToken);
 router.post("/addClass", protect, teacherOnly, addClass);
 router.get("/server-time", serverTime);
 // Scoped to the caller (teacher → own, student → enrolled, admin → all), so it
