@@ -422,8 +422,32 @@ async function noteRead(material, user) {
 const getSharedMaterial = asyncHandler(async (req, res) => {
   const material = await loadShared(req, res);
   if (!material) return;
-  const needsAuth = !!material.share.requireAuth && !req.user;
+
+  // "Sign-in required" means the reader must be a STUDENT OF THIS MATERIAL, not
+  // merely someone with an account: the same rule the in-app library applies.
+  // An account alone would let anyone with the link identify themselves and
+  // read, which is the open mode with extra steps.
+  const requireAuth = !!material.share.requireAuth;
+  const needsAuth = requireAuth && !req.user;
+  let needsJoin = false;
+  let classNames = [];
+  if (requireAuth && req.user && !(await canAccess(req.user, material))) {
+    needsJoin = true;
+    // Names only, fetched separately: populating the material would replace
+    // the class ids that canAccess compares against. The join CODE is what
+    // grants entry, so it stays out of a response anyone holding the link reads.
+    const audience = audienceOf(material);
+    if (audience.length) {
+      const rows = await Class.find({ _id: { $in: audience } }).select("name level").lean();
+      classNames = rows
+        .map((c) => c.name || (c.level != null ? `${c.level} sinif` : ""))
+        .filter(Boolean);
+    }
+  }
+
   res.json({
+    needsJoin,
+    classNames,
     title: material.title,
     description: material.description || "",
     kind: material.kind,
@@ -440,9 +464,16 @@ const getSharedMaterial = asyncHandler(async (req, res) => {
 const getSharedFile = asyncHandler(async (req, res) => {
   const material = await loadShared(req, res);
   if (!material) return;
-  if (material.share.requireAuth && !req.user) {
-    res.status(401);
-    throw new Error("Bu materialı oxumaq üçün daxil olun");
+  if (material.share.requireAuth) {
+    if (!req.user) {
+      res.status(401);
+      throw new Error("Bu materialı oxumaq üçün daxil olun");
+    }
+    // Same rule as the metadata call — being signed in is not enough.
+    if (!(await canAccess(req.user, material))) {
+      res.status(403);
+      throw new Error("Bu material müəllimin sinfindəki şagirdlər üçündür");
+    }
   }
   const abs = path.join(MATERIALS_DIR, material.fileName);
   if (!abs.startsWith(MATERIALS_DIR) || !fs.existsSync(abs)) {
