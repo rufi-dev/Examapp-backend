@@ -325,6 +325,7 @@ const shareUrl = (token) =>
 const shareState = (m) => ({
   enabled: !!m.share?.enabled,
   requireAuth: !!m.share?.requireAuth,
+  joinClass: m.share?.joinClass ? String(m.share.joinClass) : null,
   token: m.share?.token || null,
   url: m.share?.token ? shareUrl(m.share.token) : null,
   views: m.share?.views || 0,
@@ -351,6 +352,27 @@ const setMaterialShare = asyncHandler(async (req, res) => {
   const enabled = req.body?.enabled === true || req.body?.enabled === "true";
   const requireAuth = req.body?.requireAuth === true || req.body?.requireAuth === "true";
 
+  // The class the link invites into. Validated against what this teacher
+  // actually owns — the id arrives from a browser, and an unchecked one would
+  // let a teacher hand out entry to somebody else's class.
+  let joinClass = null;
+  if (requireAuth && req.body?.joinClass) {
+    const cls = await Class.findById(String(req.body.joinClass)).select("owner").lean();
+    const ownsClass =
+      cls && (req.user.role === "admin" || String(cls.owner) === String(material.owner));
+    if (!ownsClass) {
+      res.status(400);
+      throw new Error("Bu sinif sizin deyil");
+    }
+    joinClass = cls._id;
+  }
+  // Not picked: fall back to the only class it is shared with, when there is
+  // exactly one — the common case, where asking would be pointless.
+  if (requireAuth && !joinClass) {
+    const audience = audienceOf(material);
+    if (audience.length === 1) joinClass = audience[0];
+  }
+
   material.share = material.share || {};
   if (enabled && !material.share.token) {
     // 48 hex chars. This is the entire access control for a public link, so it
@@ -360,6 +382,7 @@ const setMaterialShare = asyncHandler(async (req, res) => {
   }
   material.share.enabled = enabled;
   material.share.requireAuth = requireAuth;
+  material.share.joinClass = joinClass;
   // Sign-in is what makes a reader identifiable; without it the list would
   // freeze half-filled and read as though nobody else opened the link.
   if (!requireAuth) material.share.readers = [];
@@ -433,6 +456,7 @@ const getSharedMaterial = asyncHandler(async (req, res) => {
   let needsJoin = false;
   let classNames = [];
   let joinCode = null;
+  let joinClassName = "";
   if (requireAuth && req.user && !(await canAccess(req.user, material))) {
     needsJoin = true;
     // Names only, fetched separately: populating the material would replace
@@ -440,17 +464,24 @@ const getSharedMaterial = asyncHandler(async (req, res) => {
     // grants entry, so it stays out of a response anyone holding the link reads.
     const audience = audienceOf(material);
     if (audience.length) {
-      const rows = await Class.find({ _id: { $in: audience } })
-        .select("name level joinCode")
-        .lean();
+      const rows = await Class.find({ _id: { $in: audience } }).select("name level").lean();
       classNames = rows
         .map((c) => c.name || (c.level != null ? `${c.level} sinif` : ""))
         .filter(Boolean);
-      // The code only goes to someone who is SIGNED IN and still shut out —
-      // exactly the person who needs it. They can already join through the
-      // button below, so the code grants nothing extra; it is the fallback for
-      // when that fails. It is never in an anonymous response.
-      if (rows.length === 1) joinCode = rows[0].joinCode || null;
+    }
+    // The code is the teacher's chosen class, however many the material is
+    // shared with. It only goes to someone SIGNED IN and still shut out —
+    // exactly the person who needs it, and who can already join through the
+    // button beside it, so it grants nothing extra. Never in an anonymous
+    // response.
+    if (material.share.joinClass) {
+      const target = await Class.findById(material.share.joinClass)
+        .select("name level joinCode")
+        .lean();
+      if (target) {
+        joinCode = target.joinCode || null;
+        joinClassName = target.name || (target.level != null ? `${target.level} sinif` : "");
+      }
     }
   }
 
@@ -458,6 +489,7 @@ const getSharedMaterial = asyncHandler(async (req, res) => {
     needsJoin,
     classNames,
     joinCode,
+    joinClassName,
     title: material.title,
     description: material.description || "",
     kind: material.kind,
@@ -486,11 +518,13 @@ const joinFromShare = asyncHandler(async (req, res) => {
   if (!material.share.requireAuth) return res.json({ joined: true, reason: "open" });
   if (await canAccess(req.user, material)) return res.json({ joined: true, already: true });
 
+  // The class the teacher named when they gated the link. Falling back to the
+  // audience covers links created before the picker existed.
   const audience = audienceOf(material);
-  if (audience.length !== 1) {
-    return res.json({ joined: false, reason: audience.length ? "many" : "no-class" });
-  }
-  const cls = await Class.findById(audience[0]);
+  const targetId =
+    material.share.joinClass || (audience.length === 1 ? audience[0] : null);
+  if (!targetId) return res.json({ joined: false, reason: audience.length ? "many" : "no-class" });
+  const cls = await Class.findById(targetId);
   if (!cls) return res.json({ joined: false, reason: "no-class" });
 
   const existing = await Enrollment.findOne({ student: req.user._id, class: cls._id });

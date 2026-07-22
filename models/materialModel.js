@@ -63,6 +63,11 @@ const materialSchema = Schema(
       enabled: { type: Boolean, default: false },
       token: { type: String, index: true, sparse: true },
       requireAuth: { type: Boolean, default: false },
+      // Which class the link invites into. A material can be shared with
+      // several classes (or with all of them), and "join the class" is only a
+      // sensible instruction once ONE of them is named — so the teacher picks
+      // it when they gate the link.
+      joinClass: { type: Schema.Types.ObjectId, ref: "Class", default: null },
       createdAt: { type: Date },
       // Total opens, counted whether or not sign-in is required.
       views: { type: Number, default: 0 },
