@@ -98,6 +98,14 @@ const getMaterials = asyncHandler(async (req, res) => {
     .sort({ createdAt: -1 })
     .populate("classes", "name level").populate("class", "name level")
     .lean();
+  // `share` is owner-only. It holds the live link token and the reader list
+  // WITH EMAIL ADDRESSES; students can legitimately see a teacher's material,
+  // and sending them the whole document would hand them both.
+  const isOwner = (m) =>
+    req.user.role === "admin" || String(m.owner) === String(req.user._id);
+  materials.forEach((m) => {
+    if (!isOwner(m)) delete m.share;
+  });
   res.json(materials);
 });
 
@@ -302,7 +310,165 @@ const deleteMaterial = asyncHandler(async (req, res) => {
   res.json({ id: req.params.id });
 });
 
+// ───────────────────────── public share links ─────────────────────────
+//
+// A share link carries its own secret. The material id never appears in it, so
+// a leaked link exposes exactly one material and nothing about the account
+// behind it. Turning sharing off closes the link at once but keeps the token,
+// so switching it back on does not break a link already handed out.
+const crypto = require("crypto");
+
+const shareUrl = (token) =>
+  `${(process.env.FRONTEND_URL || "").replace(/\/$/, "")}/m/${token}`;
+
+const shareState = (m) => ({
+  enabled: !!m.share?.enabled,
+  requireAuth: !!m.share?.requireAuth,
+  token: m.share?.token || null,
+  url: m.share?.token ? shareUrl(m.share.token) : null,
+  views: m.share?.views || 0,
+  readers: (m.share?.readers || [])
+    .slice()
+    .sort((a, b) => new Date(b.at) - new Date(a.at))
+    .map((r) => ({ name: r.name, email: r.email, at: r.at })),
+});
+
+// PATCH /api/materials/:id/share — owner only. { enabled, requireAuth }
+const setMaterialShare = asyncHandler(async (req, res) => {
+  const material = await Material.findById(req.params.id);
+  if (!material) {
+    res.status(404);
+    throw new Error("Tapılmadı");
+  }
+  const owns =
+    req.user.role === "admin" || String(material.owner) === String(req.user._id);
+  if (!owns) {
+    res.status(403);
+    throw new Error("Bu materialı paylaşa bilməzsiniz");
+  }
+
+  const enabled = req.body?.enabled === true || req.body?.enabled === "true";
+  const requireAuth = req.body?.requireAuth === true || req.body?.requireAuth === "true";
+
+  material.share = material.share || {};
+  if (enabled && !material.share.token) {
+    // 48 hex chars. This is the entire access control for a public link, so it
+    // has to be far past guessing rather than merely "random looking".
+    material.share.token = crypto.randomBytes(24).toString("hex");
+    material.share.createdAt = new Date();
+  }
+  material.share.enabled = enabled;
+  material.share.requireAuth = requireAuth;
+  // Sign-in is what makes a reader identifiable; without it the list would
+  // freeze half-filled and read as though nobody else opened the link.
+  if (!requireAuth) material.share.readers = [];
+  await material.save();
+  res.json(shareState(material));
+});
+
+// Loads a shared material by token, or answers the request itself and returns
+// null. `needsAuth` is a 200, not a 401: the page has to render a sign-in
+// prompt, and a 401 would be indistinguishable from a dead link.
+async function loadShared(req, res) {
+  const token = String(req.params.token || "");
+  if (token.length < 32) {
+    res.status(404).json({ message: "Link tapılmadı" });
+    return null;
+  }
+  const material = await Material.findOne({ "share.token": token });
+  if (!material || !material.share?.enabled) {
+    res.status(404).json({ message: "Link tapılmadı və ya bağlanıb" });
+    return null;
+  }
+  return material;
+}
+
+// Records who opened it. Deduped per person — a teacher wants the roll call,
+// not a click log — and capped so a popular link cannot grow the document
+// without bound.
+async function noteRead(material, user) {
+  const inc = { "share.views": 1 };
+  if (!user || !material.share?.requireAuth) {
+    await Material.updateOne({ _id: material._id }, { $inc: inc });
+    return;
+  }
+  const existing = (material.share.readers || []).find(
+    (r) => String(r.user) === String(user._id)
+  );
+  if (existing) {
+    await Material.updateOne(
+      { _id: material._id, "share.readers.user": user._id },
+      { $inc: inc, $set: { "share.readers.$.at": new Date() } }
+    );
+    return;
+  }
+  await Material.updateOne(
+    { _id: material._id },
+    {
+      $inc: inc,
+      $push: {
+        "share.readers": {
+          $each: [{ user: user._id, name: user.name, email: user.email, at: new Date() }],
+          $slice: -500,
+        },
+      },
+    }
+  );
+}
+
+// GET /api/materials/share/:token — what the public page needs to render.
+// Deliberately thin: title, kind and the reading flags. No owner id, no
+// material id, nothing about the rest of the account.
+const getSharedMaterial = asyncHandler(async (req, res) => {
+  const material = await loadShared(req, res);
+  if (!material) return;
+  const needsAuth = !!material.share.requireAuth && !req.user;
+  res.json({
+    title: material.title,
+    description: material.description || "",
+    kind: material.kind,
+    ownerName: material.ownerName || "",
+    sizeBytes: material.sizeBytes || 0,
+    allowDownload: !!material.allowDownload,
+    allowCopy: !!material.allowCopy,
+    requireAuth: !!material.share.requireAuth,
+    needsAuth,
+  });
+});
+
+// GET /api/materials/share/:token/file — the file itself.
+const getSharedFile = asyncHandler(async (req, res) => {
+  const material = await loadShared(req, res);
+  if (!material) return;
+  if (material.share.requireAuth && !req.user) {
+    res.status(401);
+    throw new Error("Bu materialı oxumaq üçün daxil olun");
+  }
+  const abs = path.join(MATERIALS_DIR, material.fileName);
+  if (!abs.startsWith(MATERIALS_DIR) || !fs.existsSync(abs)) {
+    res.status(404);
+    throw new Error("Fayl tapılmadı");
+  }
+  // Range requests only ever arrive as follow-ups to a read that was already
+  // counted, so counting them again would multiply one reader into dozens.
+  if (!req.headers.range) {
+    noteRead(material, req.user).catch((e) => console.error("share read log:", e?.message));
+  }
+  res.sendFile(abs, {
+    acceptRanges: true,
+    headers: {
+      "Content-Type": material.mimeType || "application/octet-stream",
+      "Content-Disposition": "inline",
+      "Cache-Control": "private, max-age=0, must-revalidate",
+      "X-Robots-Tag": "noindex, nofollow",
+    },
+  });
+});
+
 module.exports = {
+  setMaterialShare,
+  getSharedMaterial,
+  getSharedFile,
   getMaterials,
   addMaterial,
   viewMaterial,

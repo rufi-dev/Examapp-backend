@@ -3,7 +3,7 @@ const router = express.Router();
 const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
-const { protect, teacherOnly } = require("../middleware/authMiddleware");
+const { protect, teacherOnly, attachUser } = require("../middleware/authMiddleware");
 const {
   getMaterials,
   addMaterial,
@@ -11,6 +11,9 @@ const {
   downloadMaterial,
   updateMaterial,
   deleteMaterial,
+  setMaterialShare,
+  getSharedMaterial,
+  getSharedFile,
   MATERIALS_DIR,
 } = require("../controllers/materialController");
 
@@ -63,11 +66,19 @@ const uploadSingle = (req, res, next) =>
 
 // Any signed-in user can list/read (scoped per role in the controller);
 // only teachers/admins upload, edit or delete (further gated to the owner).
+// Public share links. `attachUser` (not `protect`) so an anonymous reader is
+// served when the teacher allowed it, and identified when they did not.
+// Declared BEFORE "/:id/..." so the literal "share" segment is not swallowed
+// by the id parameter.
+router.get("/share/:token", attachUser, getSharedMaterial);
+router.get("/share/:token/file", attachUser, getSharedFile);
+
 router.get("/", protect, getMaterials);
 router.get("/:id/file", protect, viewMaterial);
 router.get("/:id/download", protect, downloadMaterial);
 router.post("/", protect, teacherOnly, uploadSingle, addMaterial);
 router.patch("/:id", protect, teacherOnly, updateMaterial);
+router.patch("/:id/share", protect, teacherOnly, setMaterialShare);
 router.delete("/:id", protect, teacherOnly, deleteMaterial);
 
 module.exports = router;

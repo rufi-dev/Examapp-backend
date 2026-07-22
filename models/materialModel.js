@@ -50,6 +50,36 @@ const materialSchema = Schema(
     // student select/copy passages (useful for notes the teacher wants quoted).
     allowCopy: { type: Boolean, default: false },
 
+    // Public share link. The token is the whole secret, so it is long and
+    // random; the material id never appears in a shared URL. `enabled` is the
+    // kill switch — flipping it off closes existing links immediately without
+    // destroying the token, so turning sharing back on does not break a link
+    // the teacher has already sent out.
+    //
+    // `requireAuth` is the teacher's choice at share time: off means anyone
+    // with the link reads it, on means they must sign in first — which is the
+    // only way `readers` below can be filled in.
+    share: {
+      enabled: { type: Boolean, default: false },
+      token: { type: String, index: true, sparse: true },
+      requireAuth: { type: Boolean, default: false },
+      createdAt: { type: Date },
+      // Total opens, counted whether or not sign-in is required.
+      views: { type: Number, default: 0 },
+      // Who opened it, one entry per person (last-seen wins) rather than a raw
+      // log — "who has read this" is the question a teacher actually asks.
+      // Only fills when requireAuth is on; capped so it cannot grow forever.
+      readers: [
+        {
+          _id: false,
+          user: { type: Schema.Types.ObjectId, ref: "User" },
+          name: { type: String, trim: true },
+          email: { type: String, trim: true },
+          at: { type: Date },
+        },
+      ],
+    },
+
     owner: { type: Schema.Types.ObjectId, ref: "User", index: true },
     ownerName: { type: String, trim: true },
   },

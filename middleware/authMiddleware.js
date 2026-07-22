@@ -96,4 +96,24 @@ const verifiedOnly = asyncHandler(async (req, res, next) => {
   }
 });
 
-module.exports = { protect, adminOnly, teacherOnly, verifiedOnly };
+// Attaches req.user when a valid token is present and carries on regardless.
+//
+// For routes that serve BOTH signed-in and anonymous callers — a public share
+// link where the teacher may or may not have required sign-in. Never rejects:
+// the route itself decides what an anonymous caller is allowed to see, so an
+// expired token degrades to "anonymous" instead of a 401 on a public page.
+const attachUser = asyncHandler(async (req, res, next) => {
+  try {
+    const token = getToken(req);
+    if (token) {
+      const verified = jwt.verify(token, process.env.JWT_SECRET);
+      const user = await User.findById(verified.id).select("-password");
+      if (user && user.role !== "suspended") req.user = user;
+    }
+  } catch {
+    /* anonymous */
+  }
+  next();
+});
+
+module.exports = { protect, adminOnly, teacherOnly, verifiedOnly, attachUser };
