@@ -88,6 +88,13 @@ const userSchema = Schema(
             type: Date,
             index: true,
         },
+        // Setup walkthrough. Every step except the last is read from real data
+        // (does a class exist, an exam, questions in it) so it cannot drift out
+        // of sync with reality. Sharing the join link is the one step that
+        // leaves no trace of its own, so it is recorded here when it happens.
+        onboarding: {
+            invitedAt: { type: Date },
+        },
         userAgent: {
             type: Array,
             required: true,

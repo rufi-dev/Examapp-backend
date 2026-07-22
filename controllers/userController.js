@@ -1105,7 +1105,126 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
   }
 });
 
+// The setup walkthrough, as the server sees it.
+//
+// Only the LAST step is stored. Everything before it is derived from data that
+// already exists, so a teacher who set their class up before this feature
+// shipped is not told to start over, and deleting a class moves them back
+// rather than leaving a stale tick behind.
+const TEACHER_STEPS = ["class", "exam", "questions", "invite"];
+
+// POST /api/users/onboarding — record the one step that leaves no other trace.
+const markOnboardingStep = asyncHandler(async (req, res) => {
+  if (String(req.body?.step) !== "invite") {
+    res.status(400);
+    throw new Error("Naməlum addım");
+  }
+  // First time wins: this is "when did they first share", not a click counter.
+  await User.updateOne(
+    { _id: req.user._id, "onboarding.invitedAt": { $exists: false } },
+    { $set: { "onboarding.invitedAt": new Date() } }
+  );
+  res.json({ ok: true });
+});
+
+// GET /api/users/onboardingReport (admin) — how far each teacher got.
+//
+// Three grouped aggregations rather than a query per teacher, so this stays
+// one round trip regardless of how many accounts exist.
+const onboardingReport = asyncHandler(async (req, res) => {
+  const teachers = await User.find({ role: { $in: ["teacher", "admin"] } })
+    .select("name email role createdAt lastActiveAt onboarding")
+    .sort({ createdAt: -1 })
+    .lean();
+  if (!teachers.length) return res.json({ steps: TEACHER_STEPS, teachers: [] });
+
+  const ids = teachers.map((t) => t._id);
+
+  const classRows = await Class.aggregate([
+    { $match: { owner: { $in: ids } } },
+    { $group: { _id: "$owner", n: { $sum: 1 } } },
+  ]);
+
+  // Exams, split into "exists" and "has questions in it" — an exam with no
+  // questions is invisible to students, so it is not a finished step.
+  // NB: the exam's creator is `owner`, not `user` — `user` does not exist on
+  // this collection, and matching on it silently returns nothing, which reads
+  // as "no teacher has ever made an exam" rather than as an error.
+  const examRows = await Exam.aggregate([
+    { $match: { owner: { $in: ids }, deletedAt: null } },
+    { $lookup: { from: "questions", localField: "questions", foreignField: "_id", as: "q" } },
+    {
+      $project: {
+        owner: 1,
+        n: { $size: { $ifNull: [{ $arrayElemAt: ["$q.correctAnswers", 0] }, []] } },
+      },
+    },
+    {
+      $group: {
+        _id: "$owner",
+        exams: { $sum: 1 },
+        ready: { $sum: { $cond: [{ $gt: ["$n", 0] }, 1, 0] } },
+      },
+    },
+  ]);
+
+  const studentRows = await Enrollment.aggregate([
+    { $match: { status: "approved" } },
+    { $lookup: { from: "classes", localField: "class", foreignField: "_id", as: "c" } },
+    { $unwind: "$c" },
+    { $match: { "c.owner": { $in: ids } } },
+    { $group: { _id: "$c.owner", n: { $sum: 1 } } },
+  ]);
+
+  const byId = (rows) =>
+    rows.reduce((m, r) => {
+      m[String(r._id)] = r;
+      return m;
+    }, {});
+  const cls = byId(classRows);
+  const exm = byId(examRows);
+  const std = byId(studentRows);
+
+  const out = teachers.map((t) => {
+    const id = String(t._id);
+    const counts = {
+      classes: cls[id]?.n || 0,
+      exams: exm[id]?.exams || 0,
+      examsReady: exm[id]?.ready || 0,
+      students: std[id]?.n || 0,
+    };
+    const done = [
+      counts.classes > 0,
+      counts.exams > 0,
+      counts.examsReady > 0,
+      !!t.onboarding?.invitedAt || counts.students > 0,
+    ];
+    // Where they are is the FIRST unfinished step, not the count of finished
+    // ones: someone who shared a link but never added questions is stuck on
+    // questions, and reporting them as "3 of 4" would hide that.
+    const stuckAt = done.indexOf(false);
+    return {
+      _id: t._id,
+      name: t.name,
+      email: t.email,
+      role: t.role,
+      createdAt: t.createdAt,
+      lastActiveAt: t.lastActiveAt,
+      invitedAt: t.onboarding?.invitedAt || null,
+      counts,
+      done,
+      completed: stuckAt === -1,
+      stuckAt: stuckAt === -1 ? null : stuckAt,
+      percent: Math.round((done.filter(Boolean).length / done.length) * 100),
+    };
+  });
+
+  res.json({ steps: TEACHER_STEPS, teachers: out });
+});
+
 module.exports = {
+  markOnboardingStep,
+  onboardingReport,
   registerUser,
   loginUser,
   logoutUser,

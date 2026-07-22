@@ -1,5 +1,5 @@
 const express = require('express')
-const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, loginStatus, upgradeUser, sendAutomatedEmail, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements } = require('../controllers/userController')
+const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, loginStatus, upgradeUser, sendAutomatedEmail, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport } = require('../controllers/userController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
 const router = express.Router()
 
@@ -17,6 +17,9 @@ router.get('/getUsers', protect, teacherOnly, getUsers)
 // a single teacher (their classes, students and created exams).
 router.patch('/bulk', protect, adminOnly, bulkUsers)
 router.get('/teacher/:id/overview', protect, adminOnly, teacherOverview)
+// Setup walkthrough: teachers record their own progress, admins read everyone's.
+router.post('/onboarding', protect, markOnboardingStep)
+router.get('/onboardingReport', protect, adminOnly, onboardingReport)
 
 router.get('/loginStatus', loginStatus)
 router.post('/upgradeUser', protect, adminOnly, upgradeUser)

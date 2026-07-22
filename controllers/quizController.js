@@ -892,6 +892,10 @@ const getAllClasses = asyncHandler(async (req, res) => {
     classes.forEach((c) => {
       const row = map[String(c._id)];
       c.exams = canManage(c) ? row?.total || 0 : row?.ready || 0;
+      // Exams a student can actually sit (visible, and with questions in them).
+      // The owner sees both numbers: "3 exams, 1 ready" is the difference
+      // between a class that works and one that only looks set up.
+      if (canManage(c)) c.examsReady = row?.ready || 0;
     });
   }
 
