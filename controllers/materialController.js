@@ -6,6 +6,11 @@ const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 const { notifyEnrollment } = require("../helper/telegram");
 const { convertOfficeToPdf, isOfficeFile } = require("../utils/officeToPdf");
+const { enqueueConversion } = require("../utils/convertQueue");
+
+// Office documents are capped tighter than PDFs: every one of them costs a
+// LibreOffice process, not just disk.
+const OFFICE_MAX_BYTES = Number(process.env.OFFICE_MAX_BYTES || 100 * 1024 * 1024);
 
 // PRIVATE storage — deliberately NOT under uploads/, which express.static
 // serves publicly. Nothing here is reachable without passing the access check
@@ -124,6 +129,14 @@ const addMaterial = asyncHandler(async (req, res) => {
     }
   };
 
+  // Quota is checked BEFORE anything expensive happens: multer has already
+  // written the file (it streams to disk as it arrives), but nothing has been
+  // converted or recorded yet, so rejecting here costs only the delete.
+  if (req.quotaRejected) {
+    cleanup(file.path);
+    return res.status(413).json({ message: req.quotaRejected.message });
+  }
+
   const title = String(req.body.title || "").trim();
   if (!title) {
     cleanup(file.path);
@@ -139,8 +152,22 @@ const addMaterial = asyncHandler(async (req, res) => {
   } else if ((file.mimetype || "").toLowerCase() === "application/pdf") {
     kind = "pdf";
   } else if (isOfficeFile(file.originalname)) {
+    // Conversion is the expensive path: a headless LibreOffice process for up
+    // to two minutes. A tighter cap than the 200MB for plain PDFs, because the
+    // cost here is CPU and wall-clock, not just disk.
+    if (Number(file.size || 0) > OFFICE_MAX_BYTES) {
+      cleanup(file.path);
+      return res.status(413).json({
+        message: `Word/PowerPoint faylı ${Math.round(
+          OFFICE_MAX_BYTES / (1024 * 1024)
+        )}MB-dan böyük ola bilməz. PDF kimi yükləyin.`,
+      });
+    }
     try {
-      const pdfPath = await convertOfficeToPdf(file.path, MATERIALS_DIR);
+      // One conversion at a time, and one per teacher — see utils/convertQueue.
+      const pdfPath = await enqueueConversion(req.user._id, () =>
+        convertOfficeToPdf(file.path, MATERIALS_DIR)
+      );
       cleanup(file.path); // keep only the PDF
       storedPath = pdfPath;
       kind = "pdf";

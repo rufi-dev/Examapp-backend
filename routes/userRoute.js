@@ -1,5 +1,5 @@
 const express = require('express')
-const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, loginStatus, upgradeUser, sendAutomatedEmail, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport } = require('../controllers/userController')
+const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, loginStatus, upgradeUser, sendAutomatedEmail, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage } = require('../controllers/userController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
 const router = express.Router()
 
@@ -20,6 +20,9 @@ router.get('/teacher/:id/overview', protect, adminOnly, teacherOverview)
 // Setup walkthrough: teachers record their own progress, admins read everyone's.
 router.post('/onboarding', protect, markOnboardingStep)
 router.get('/onboardingReport', protect, adminOnly, onboardingReport)
+// Storage allowance: a teacher sees their own, an admin raises anyone's.
+router.get('/storage', protect, teacherOnly, getMyStorage)
+router.patch('/:id/storage', protect, adminOnly, setUserStorage)
 
 router.get('/loginStatus', loginStatus)
 router.post('/upgradeUser', protect, adminOnly, upgradeUser)

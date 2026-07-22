@@ -18,7 +18,7 @@ const Attempt = require('./models/attemptModel')
 const Result = require('./models/resultModel')
 const Class = require('./models/classModel')
 const { runDueExamReports } = require('./jobs/examReports')
-const { finalizeExpiredAttempts, purgeExpiredArchived } = require('./controllers/quizController')
+const { finalizeExpiredAttempts, purgeExpiredArchived, purgeOrphanPdfs } = require('./controllers/quizController')
 const { sampleHealth } = require('./controllers/healthController')
 const { requestMetrics } = require('./middleware/requestMetrics')
 const { beat } = require('./utils/heartbeat')
@@ -227,6 +227,12 @@ mongoose
         const trashTick = beat("trash-purge", 6 * 60 * 60 * 1000, purgeExpiredArchived)
         setTimeout(trashTick, 60 * 1000)
         setInterval(trashTick, 6 * 60 * 60 * 1000)
+
+        // Orphan sweep: PDFs uploaded for an exam that was never created. Runs
+        // on the same slow cadence as the trash purge — nothing here is urgent.
+        const orphanTick = beat("orphan-pdf", 6 * 60 * 60 * 1000, purgeOrphanPdfs)
+        setTimeout(orphanTick, 5 * 60 * 1000)
+        setInterval(orphanTick, 6 * 60 * 60 * 1000)
 
         // Health sampler: every 5 min record site/db/resource state to Mongo
         // (31-day TTL) — powers the Health page's uptime history.

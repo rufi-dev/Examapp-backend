@@ -1,5 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const User = require("../models/userModel");
+const { usedBytes, quotaFor } = require("../middleware/uploadLimit");
 const Enrollment = require("../models/enrollmentModel");
 const Class = require("../models/classModel");
 const Exam = require("../models/examModel");
@@ -1222,7 +1223,46 @@ const onboardingReport = asyncHandler(async (req, res) => {
   res.json({ steps: TEACHER_STEPS, teachers: out });
 });
 
+// GET /api/users/storage (teacher) — how much of the allowance is used.
+// PATCH /api/users/:id/storage (admin) — raise or reset one teacher's quota.
+const getMyStorage = asyncHandler(async (req, res) => {
+  const used = await usedBytes(req.user._id);
+  res.json({ used, limit: quotaFor(req.user), isDefault: !req.user.storageQuotaBytes });
+});
+
+const setUserStorage = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.params.id).select("name email role storageQuotaBytes");
+  if (!user) {
+    res.status(404);
+    throw new Error("İstifadəçi tapılmadı");
+  }
+  const raw = req.body?.gigabytes;
+  // null/empty puts them back on the platform default rather than storing a
+  // number that then has to be maintained if the default ever changes.
+  if (raw === null || raw === "" || raw === undefined) {
+    user.storageQuotaBytes = undefined;
+  } else {
+    const gbs = Number(raw);
+    if (!Number.isFinite(gbs) || gbs <= 0 || gbs > 500) {
+      res.status(400);
+      throw new Error("1 ilə 500 GB arasında dəyər yazın");
+    }
+    user.storageQuotaBytes = Math.round(gbs * 1024 * 1024 * 1024);
+  }
+  await user.save();
+  const used = await usedBytes(user._id);
+  res.json({
+    _id: user._id,
+    name: user.name,
+    used,
+    limit: quotaFor(user),
+    isDefault: !user.storageQuotaBytes,
+  });
+});
+
 module.exports = {
+  getMyStorage,
+  setUserStorage,
   markOnboardingStep,
   onboardingReport,
   registerUser,

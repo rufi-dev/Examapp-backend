@@ -271,18 +271,9 @@ const addExam = asyncHandler(async (req, res) => {
     return;
   }
   try {
-    // Create a PDF entry only in PDF mode. Structured exams have no PDF doc.
-    let savedPdf = null;
-    if (!isStructured) {
-      const pdfModel = new PDF({
-        path: pdf,
-      });
-      // Save the PDF entry to the database
-      savedPdf = await pdfModel.save();
-    }
-
-    // Create an exam entry with the PDF ID
-
+    // Ownership FIRST. This used to run after the PDF row was written, so a
+    // rejected request still left a PDF document behind for a class the caller
+    // did not own.
     const existingClass = await Class.findById(classId);
     if (!existingClass) {
       return res.status(404).json({ success: false, error: "Class not found" });
@@ -291,6 +282,16 @@ const addExam = asyncHandler(async (req, res) => {
     // teacher could plant an exam in someone else's class.
     if (!ownsOrAdmin(req.user, existingClass)) {
       return res.status(403).json({ success: false, error: "Bu sinif sizə aid deyil" });
+    }
+
+    // Create a PDF entry only in PDF mode. Structured exams have no PDF doc.
+    let savedPdf = null;
+    if (!isStructured) {
+      const pdfModel = new PDF({
+        path: pdf,
+      });
+      // Save the PDF entry to the database
+      savedPdf = await pdfModel.save();
     }
 
     const newExam = new Exam({
@@ -355,6 +356,31 @@ const uploadPdf = asyncHandler(async (req, res) => {
   if (!req.file) {
     res.status(400);
     throw new Error("Fayl tapılmadı");
+  }
+  // The storage engine names every upload *.pdf regardless of what arrived, and
+  // /uploads is served publicly — so without this the route is a general file
+  // host. The declared type is the client's word for it; the first five bytes
+  // are the file's. Both must agree.
+  const declared = String(req.file.mimetype || "").toLowerCase();
+  const abs = path.join("uploads", req.file.filename);
+  let head = Buffer.alloc(0);
+  try {
+    const fd = fs.openSync(abs, "r");
+    head = Buffer.alloc(5);
+    fs.readSync(fd, head, 0, 5, 0);
+    fs.closeSync(fd);
+  } catch {
+    /* fall through to the rejection below */
+  }
+  const looksPdf = head.toString("latin1") === "%PDF-";
+  if (declared !== "application/pdf" || !looksPdf) {
+    try {
+      fs.unlinkSync(abs);
+    } catch {
+      /* best effort */
+    }
+    res.status(400);
+    throw new Error("Yalnız PDF fayl yükləyin");
   }
   const url = httpsify(
     `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`
@@ -2983,6 +3009,63 @@ const getArchivedExams = asyncHandler(async (req, res) => {
   );
 });
 
+// Sweep: delete uploaded PDFs that never became an exam.
+//
+// The builder uploads the file BEFORE creating the exam, so an abandoned form,
+// a failed validation or a closed tab leaves the PDF on disk forever. Only
+// files older than the grace window are considered, so an upload still being
+// filled in on the form is never taken out from under the teacher.
+//
+// Safety rails: only the dated filenames this route produces, only when no PDF
+// document references them, and never anything younger than the window.
+const ORPHAN_GRACE_MS = Number(process.env.ORPHAN_PDF_GRACE_MS || 6 * 60 * 60 * 1000);
+const UPLOADED_PDF = /^\d{13}-\d+\.pdf$/; // `${Date.now()}-${rand}.pdf`
+
+async function purgeOrphanPdfs() {
+  const dir = "uploads";
+  let names = [];
+  try {
+    names = fs.readdirSync(dir).filter((n) => UPLOADED_PDF.test(n));
+  } catch {
+    return { scanned: 0, removed: 0 };
+  }
+  const cutoff = Date.now() - ORPHAN_GRACE_MS;
+  const candidates = names.filter((n) => {
+    try {
+      return fs.statSync(path.join(dir, n)).mtimeMs < cutoff;
+    } catch {
+      return false;
+    }
+  });
+  if (!candidates.length) return { scanned: names.length, removed: 0 };
+
+  // One query rather than one per file: match on the filename appearing in the
+  // stored URL, since that is what addExam persists.
+  const referenced = new Set();
+  const rows = await PDF.find({
+    path: { $regex: candidates.map((n) => n.replace(/\./g, "\.")).join("|") },
+  })
+    .select("path")
+    .lean();
+  rows.forEach((r) => {
+    const base = String(r.path || "").split("/").pop();
+    if (base) referenced.add(base);
+  });
+
+  let removed = 0;
+  for (const n of candidates) {
+    if (referenced.has(n)) continue;
+    try {
+      fs.unlinkSync(path.join(dir, n));
+      removed += 1;
+    } catch {
+      /* best effort */
+    }
+  }
+  if (removed) console.log(`[orphan-pdf] removed ${removed} unattached upload(s)`);
+  return { scanned: names.length, removed };
+}
+
 // Sweep: permanently purge exams archived longer than the retention window.
 // Scheduled from server.js; safe to run repeatedly.
 async function purgeExpiredArchived() {
@@ -3231,6 +3314,7 @@ module.exports = {
   deleteExamForever,
   getArchivedExams,
   purgeExpiredArchived,
+  purgeOrphanPdfs,
   deleteClass,
   getAllClasses,
   deleteTag,

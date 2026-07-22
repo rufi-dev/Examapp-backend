@@ -4,6 +4,7 @@ const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
 const { protect, teacherOnly, attachUser } = require("../middleware/authMiddleware");
+const { uploadRateLimit, storageQuota } = require("../middleware/uploadLimit");
 const {
   getMaterials,
   addMaterial,
@@ -80,7 +81,9 @@ router.post("/share/:token/join", protect, joinFromShare);
 router.get("/", protect, getMaterials);
 router.get("/:id/file", protect, viewMaterial);
 router.get("/:id/download", protect, downloadMaterial);
-router.post("/", protect, teacherOnly, uploadSingle, addMaterial);
+// Rate limit BEFORE multer so a flood is refused without writing 200MB to
+// disk first; the quota check needs the file size, so it comes after.
+router.post("/", protect, teacherOnly, uploadRateLimit, uploadSingle, storageQuota, addMaterial);
 router.patch("/:id", protect, teacherOnly, updateMaterial);
 router.patch("/:id/share", protect, teacherOnly, setMaterialShare);
 router.delete("/:id", protect, teacherOnly, deleteMaterial);

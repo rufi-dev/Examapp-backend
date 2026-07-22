@@ -88,6 +88,12 @@ const userSchema = Schema(
             type: Date,
             index: true,
         },
+        // Per-teacher storage allowance for uploaded materials, in bytes.
+        // Unset means the platform default (UPLOAD_QUOTA_BYTES, 4GB); an admin
+        // raises it for the accounts that genuinely need more.
+        storageQuotaBytes: {
+            type: Number,
+        },
         // Setup walkthrough. Every step except the last is read from real data
         // (does a class exist, an exam, questions in it) so it cannot drift out
         // of sync with reality. Sharing the join link is the one step that
