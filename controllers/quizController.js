@@ -1643,6 +1643,34 @@ const norm = (v) => String(v ?? "").trim();
 // casing and extra spaces don't fail an otherwise-correct typed answer.
 const openNorm = (v) => norm(v).toLowerCase().replace(/\s+/g, " ");
 
+// A second, looser reading of a typed answer, used only after the strict one
+// fails. A student who types "6 x + 2" for "6x+2", or a minus sign their
+// keyboard produced as U+2212, has answered correctly and should not lose the
+// mark to a character they cannot see.
+//
+// Deliberately NOT normalised: the decimal separator. "2,3" is the pair {2,3}
+// in one question and the number 2.3 in another, and guessing between them
+// would hand out marks for wrong answers. Whitespace is stripped entirely,
+// which is safe for comma-separated lists because the commas survive.
+const openLoose = (v) =>
+  openNorm(v)
+    .replace(/[−‒–—]/g, "-") // unicode minus / dashes
+    .replace(/[×⋅·]/g, "*") // × ⋅ ·
+    .replace(/[÷]/g, "/")
+    .replace(/[  ]/g, "") // non-breaking spaces
+    .replace(/\s+/g, "")
+    .replace(/[.;]+$/, ""); // a trailing full stop is punctuation, not maths
+
+// Does a typed answer match any of the accepted ones?
+const openAccepts = (accepted, typed) => {
+  const strict = openNorm(typed);
+  if (strict === "") return false;
+  const list = (Array.isArray(accepted) ? accepted : [accepted]).filter((x) => x != null);
+  if (list.some((ans) => openNorm(ans) === strict)) return true;
+  const loose = openLoose(typed);
+  return loose !== "" && list.some((ans) => openLoose(ans) === loose);
+};
+
 // Does this selection count as a (non-blank) answer? Generalized over the answer
 // shapes: a string (letter/typed), a number/index (structured Cm), an array of
 // indices (Cs), or a {leftIdx: rightVal} map (Cma). Index 0 must count, so we
@@ -1671,11 +1699,12 @@ function blankScore(ca, sel) {
   let graded = 0;
   let correct = 0;
   for (let k = 0; k < n; k++) {
-    const acc = (Array.isArray(keys[k]) ? keys[k] : []).map(openNorm).filter(Boolean);
+    // Same forgiveness as a single-blank open answer — a blank is not stricter
+    // just because it sits next to others.
+    const acc = (Array.isArray(keys[k]) ? keys[k] : []).filter((x) => norm(x) !== "");
     if (!acc.length) continue;
     graded += 1;
-    const got = openNorm(m[k]);
-    if (got && acc.includes(got)) correct += 1;
+    if (openAccepts(acc, m[k])) correct += 1;
   }
   return { graded, correct };
 }
@@ -1734,8 +1763,7 @@ function isCorrectAnswer(ca, sel) {
       // whitespace. Falls back to the single `answer` for legacy questions.
       const accepted =
         Array.isArray(ca.answers) && ca.answers.length ? ca.answers : [ca.answer];
-      const got = openNorm(a);
-      return got !== "" && accepted.some((ans) => openNorm(ans) === got);
+      return openAccepts(accepted, a);
     }
   }
 }
