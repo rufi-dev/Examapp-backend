@@ -14,6 +14,7 @@ const {
   setMaterialShare,
   getSharedMaterial,
   getSharedFile,
+  joinFromShare,
   MATERIALS_DIR,
 } = require("../controllers/materialController");
 
@@ -72,6 +73,9 @@ const uploadSingle = (req, res, next) =>
 // by the id parameter.
 router.get("/share/:token", attachUser, getSharedMaterial);
 router.get("/share/:token/file", attachUser, getSharedFile);
+// Signing in is not enough for a gated link — this puts the reader in the
+// class it belongs to. Requires a real session, so `protect`, not `attachUser`.
+router.post("/share/:token/join", protect, joinFromShare);
 
 router.get("/", protect, getMaterials);
 router.get("/:id/file", protect, viewMaterial);

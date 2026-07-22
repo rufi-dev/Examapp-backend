@@ -4,6 +4,7 @@ const path = require("path");
 const Material = require("../models/materialModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
+const { notifyEnrollment } = require("../helper/telegram");
 const { convertOfficeToPdf, isOfficeFile } = require("../utils/officeToPdf");
 
 // PRIVATE storage — deliberately NOT under uploads/, which express.static
@@ -431,6 +432,7 @@ const getSharedMaterial = asyncHandler(async (req, res) => {
   const needsAuth = requireAuth && !req.user;
   let needsJoin = false;
   let classNames = [];
+  let joinCode = null;
   if (requireAuth && req.user && !(await canAccess(req.user, material))) {
     needsJoin = true;
     // Names only, fetched separately: populating the material would replace
@@ -438,16 +440,24 @@ const getSharedMaterial = asyncHandler(async (req, res) => {
     // grants entry, so it stays out of a response anyone holding the link reads.
     const audience = audienceOf(material);
     if (audience.length) {
-      const rows = await Class.find({ _id: { $in: audience } }).select("name level").lean();
+      const rows = await Class.find({ _id: { $in: audience } })
+        .select("name level joinCode")
+        .lean();
       classNames = rows
         .map((c) => c.name || (c.level != null ? `${c.level} sinif` : ""))
         .filter(Boolean);
+      // The code only goes to someone who is SIGNED IN and still shut out —
+      // exactly the person who needs it. They can already join through the
+      // button below, so the code grants nothing extra; it is the fallback for
+      // when that fails. It is never in an anonymous response.
+      if (rows.length === 1) joinCode = rows[0].joinCode || null;
     }
   }
 
   res.json({
     needsJoin,
     classNames,
+    joinCode,
     title: material.title,
     description: material.description || "",
     kind: material.kind,
@@ -458,6 +468,47 @@ const getSharedMaterial = asyncHandler(async (req, res) => {
     requireAuth: !!material.share.requireAuth,
     needsAuth,
   });
+});
+
+// POST /api/materials/share/:token/join — put the caller in the class this
+// material belongs to.
+//
+// A gated link IS an invitation: joining by code is approved on the spot
+// elsewhere in the app, so a link the teacher chose to send is the same grant
+// by another route. It only ever joins the class this ONE material is shared
+// with, never anything else the teacher owns.
+//
+// With no specific audience ("all my students") there is no single class to
+// join, and picking one for them would be a guess — so it says so instead.
+const joinFromShare = asyncHandler(async (req, res) => {
+  const material = await loadShared(req, res);
+  if (!material) return;
+  if (!material.share.requireAuth) return res.json({ joined: true, reason: "open" });
+  if (await canAccess(req.user, material)) return res.json({ joined: true, already: true });
+
+  const audience = audienceOf(material);
+  if (audience.length !== 1) {
+    return res.json({ joined: false, reason: audience.length ? "many" : "no-class" });
+  }
+  const cls = await Class.findById(audience[0]);
+  if (!cls) return res.json({ joined: false, reason: "no-class" });
+
+  const existing = await Enrollment.findOne({ student: req.user._id, class: cls._id });
+  if (existing) {
+    if (existing.status !== "approved") {
+      existing.status = "approved";
+      await existing.save();
+    }
+  } else {
+    await Enrollment.create({
+      student: req.user._id,
+      class: cls._id,
+      teacher: cls.owner,
+      status: "approved",
+    });
+    notifyEnrollment(cls, req.user, false);
+  }
+  res.json({ joined: true, className: cls.name || "" });
 });
 
 // GET /api/materials/share/:token/file — the file itself.
@@ -498,6 +549,7 @@ const getSharedFile = asyncHandler(async (req, res) => {
 
 module.exports = {
   setMaterialShare,
+  joinFromShare,
   getSharedMaterial,
   getSharedFile,
   getMaterials,
