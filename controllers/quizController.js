@@ -634,6 +634,7 @@ function sanitizeQuestionItem(q) {
   if (q.covers !== undefined) out.covers = q.covers; // questions this block governs
   if (q.blanks !== undefined) out.blanks = q.blanks; // open: number of answer boxes
   if (q.inline) out.inline = true; // inline gap-fill (text already anonymised)
+  if (q.gapfill) out.gapfill = true; // gap-fill reading / cloze (scored passage)
   if (Array.isArray(q.table)) {
     // "Complete the table": send the grid layout + static cell text, but STRIP
     // every cell's answer key (it lives in blankAnswers, which is never sent).
@@ -1722,7 +1723,7 @@ function isAnswered(sel) {
 // Blank-scored when there are multiple blanks, OR an inline gap-fill (which may
 // have a single blank but is still graded per-blank against blankAnswers).
 const isMultiBlank = (ca) =>
-  Array.isArray(ca.blankAnswers) && ((Number(ca.blanks) || 0) > 1 || ca.inline);
+  Array.isArray(ca.blankAnswers) && ((Number(ca.blanks) || 0) > 1 || ca.inline || ca.gapfill);
 function blankScore(ca, sel) {
   const n = Number(ca.blanks) || 0;
   const a = sel && sel.answer;
@@ -1965,7 +1966,8 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
   // Reading passages aren't scored: build the points plan over QUESTIONS ONLY,
   // then scatter the values back into a full-length array (0 at passage slots),
   // so the totals stay exactly 100 even when passages sit between questions.
-  const isRead = (c) => c && c.type === "reading";
+  // A gap-fill reading (cloze) IS scored — only plain passages are excluded.
+  const isRead = (c) => c && c.type === "reading" && !c.gapfill;
   const qTypes = correct.filter((c) => !isRead(c)).map((c) => c && c.type);
   const planQ =
     presetCfg && typeof presetCfg.pointsPlan === "function"
@@ -2056,7 +2058,11 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
         ? { photo: a.photo }
         : {}),
     })),
-    correctAnswers: correct.map((a) => ({ type: a.type, answer: renderableCorrect(a) })),
+    correctAnswers: correct.map((a) => ({
+      type: a.type,
+      ...(a.gapfill ? { gapfill: true } : {}),
+      answer: renderableCorrect(a),
+    })),
     correctAnswersByType: [
       { type: "Cm", count: counts.Cm },
       { type: "Cs", count: counts.Cs },

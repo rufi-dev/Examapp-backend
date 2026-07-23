@@ -33,6 +33,13 @@ ok("two: one missing → wrong", isCorrectAnswer(two, { answer: { 0: "Baku" } })
 const open = { type: "Co", answer: "Paris", answers: ["Paris"] };
 ok("open: string still graded", isCorrectAnswer(open, { answer: "paris" }) === true);
 
+// A gap-fill READING (cloze): scored per-blank while kept as type "reading".
+const cloze = { type: "reading", gapfill: true, blanks: 2, blankAnswers: [["Baku", "Bakı"], ["Caspian"]] };
+ok("cloze: both blanks correct", isCorrectAnswer(cloze, { answer: { 0: "bakı", 1: "caspian" } }) === true);
+ok("cloze: one wrong → whole wrong", isCorrectAnswer(cloze, { answer: { 0: "Baku", 1: "Black" } }) === false);
+// A plain reading (no gapfill) is never graded true.
+ok("plain reading not scored", isCorrectAnswer({ type: "reading" }, { answer: { 0: "x" } }) === false);
+
 // Sanitisation: the student receives the anonymous text + the inline flag, but
 // NEVER the answer key.
 const stored = {
@@ -49,5 +56,19 @@ ok("sanitize: keeps anonymous text", sent.text === "[[1]] is the capital of [[2]
 ok("sanitize: keeps blanks count", sent.blanks === 2);
 ok("sanitize: DOES NOT leak blankAnswers", sent.blankAnswers === undefined);
 ok("sanitize: no answer key leaked", !("answer" in sent) || sent.answer === "");
+
+// Sanitising a gap-fill reading keeps the gapfill flag + anonymous text, no key.
+const storedCloze = {
+  type: "reading",
+  kind: "reading",
+  gapfill: true,
+  text: "[[1]] is the capital of [[2]].",
+  blanks: 2,
+  blankAnswers: [["Baku"], ["Azerbaijan"]],
+};
+const sc = sanitizeQuestionItem(storedCloze);
+ok("cloze sanitize: gapfill flag kept", sc.gapfill === true);
+ok("cloze sanitize: anonymous text kept", sc.text === "[[1]] is the capital of [[2]].");
+ok("cloze sanitize: DOES NOT leak blankAnswers", sc.blankAnswers === undefined);
 
 console.log(`gapfill.test.js: ${passed} assertions passed`);
