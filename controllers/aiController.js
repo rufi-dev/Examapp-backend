@@ -177,6 +177,9 @@ const presetHint = (presetId) => {
   if (p === "buraxilis-9") {
     return "SUBJECT: This is a MATH (Riyaziyyat) 9th-grade DİM buraxılış exam. Structure: a CLOSED (Qapalı) multiple-choice section, then an OPEN (Açıq) short-answer section, then a final 'solution-required' section (labelled '…saylı tapşırıqları ətraflı yazın' / həlli tələb olunan). Type the solution-required questions as \"Cd\" (NOT \"Co\"); the short open ones as \"Co\"; the multiple-choice ones as \"Cm\".";
   }
+  if (p === "ielts-reading") {
+    return "SUBJECT: This is an IELTS Academic Reading exam — write EVERYTHING in English. Each reading passage must be a LONG, multi-paragraph academic text (~700–900 words) on a real academic topic, extracted as a reading block. For each passage use a realistic IELTS question mix — choose the appropriate ones from: True/False/Not Given, Yes/No/Not Given, Matching Headings to paragraphs, Matching Information to paragraphs, Multiple Choice, Sentence Completion, Summary Completion, Short Answer (no more than three words). For sentence/summary completion, write the sentence(s) as a reading block with the gaps inline as [[answer]] (do NOT make separate questions for those gaps). Each statement is a SEPARATE question. Aim for a realistic full IELTS test — roughly 13 questions per passage. You decide the topics and the exact question mix.";
+  }
   return "";
 };
 
@@ -218,11 +221,13 @@ function computeCost(u) {
 // Primary = the cheap, fast flash model (thinking off — see geminiGenConfig). It
 // does the job for normal extraction; set GEMINI_MODEL=gemini-2.5-pro to switch
 // to the higher-fidelity Pro model for dense papers.
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
+// gemini-2.5-flash — verified to accept the PDF + json-schema extraction config
+// (gemini-flash-latest returns 400 "invalid argument" on it and wastes a call).
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 // Stable fallback tried if the primary model stays overloaded (503). NOTE: keep
-// this a model the key actually has quota for — gemini-2.0-flash returns 429
-// "limit: 0" on free-tier keys, which is useless. gemini-2.5-flash has quota.
-const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash";
+// this a model the key actually has quota for AND that accepts the extraction
+// config — the Pro tier does; gemini-2.0-flash is retired / limit:0.
+const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-pro";
 // Approx USD per 1M tokens, by model tier (env-overridable). 2.5 Pro is pricier
 // than Flash but far more faithful; both are well under Claude Opus (5 / 25).
 const GEMINI_PRICES = {
@@ -374,6 +379,23 @@ async function extractWithClaude(base64, instructions = "") {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Should a failed provider hand off to the NEXT one? Yes for AVAILABILITY
+// problems — rate-limit, 5xx, network, or out-of-credit/billing/quota — so one
+// engine being down or unpaid never dead-ends the teacher. A plain bad request
+// (e.g. an unreadable file) is not retried across providers. Reads the status
+// off aiError OR a raw provider error, and sniffs the message for billing text.
+const isRetriable = (e) => {
+  if (e?.aiFallback) return true;
+  const status = Number(e?.status || e?.statusCode || e?.aiStatus || e?.response?.status || 0);
+  const msg = String(e?.message || e?.error?.message || "").toLowerCase();
+  return (
+    status === 429 ||
+    status >= 500 ||
+    status === 0 ||
+    /credit balance|billing|quota|insufficient|payment|overloaded|rate limit|balance is too low/.test(msg)
+  );
+};
 
 
 // Extract from a PDF with OpenAI. Same signature and return shape as the Gemini
@@ -595,7 +617,20 @@ const stripProseMath = (t) => {
   return inner.trim();
 };
 
-const cleanText = (t) => (typeof t === "string" ? stripProseMath(unescapeQuotes(t)) : t);
+// Models under-escape LaTeX in their JSON — they emit `\times` (a JSON tab escape
+// + "imes") instead of `\\times`, so JSON.parse turns `\times` into a TAB + "imes"
+// and the maths renders as "imes" / "rac" / etc. A CONTROL char (tab, form-feed,
+// backspace, carriage-return) directly followed by a LETTER was the start of a
+// backslash-command, so restore the backslash. Newline is left alone (a real line
+// break). A correctly-escaped `\times` parses to a real backslash — no control
+// char — so it is never touched, and this cannot double-corrupt.
+const fixMathEscapes = (t) =>
+  String(t)
+    .replace(/\t(?=[a-zA-Z])/g, "\\t")
+    .replace(/\f(?=[a-zA-Z])/g, "\\f")
+    .replace(/\x08(?=[a-zA-Z])/g, "\\b")
+    .replace(/\r(?=[a-zA-Z])/g, "\\r");
+const cleanText = (t) => (typeof t === "string" ? stripProseMath(fixMathEscapes(unescapeQuotes(t))) : t);
 
 // A matching question is rendered as a bare number→letter grid: nothing in
 // `pairs` reaches the student. When a model writes the items INTO pairs.left
@@ -698,12 +733,15 @@ const cleanQuestions = (list) =>
     if (!q || typeof q !== "object") return q;
     const out = { ...q };
     out.text = cleanText(q.text);
+    if (typeof q.latex === "string") out.latex = fixMathEscapes(q.latex);
     if (typeof q.title === "string") out.title = cleanText(q.title);
     if (typeof q.openAnswer === "string") out.openAnswer = cleanText(q.openAnswer);
     if (Array.isArray(q.openAnswers)) out.openAnswers = q.openAnswers.map(cleanText);
     if (Array.isArray(q.choices)) {
       out.choices = q.choices.map((c) =>
-        c && typeof c === "object" ? { ...c, text: cleanText(c.text) } : cleanText(c)
+        c && typeof c === "object"
+          ? { ...c, text: cleanText(c.text), ...(typeof c.latex === "string" ? { latex: fixMathEscapes(c.latex) } : {}) }
+          : cleanText(c)
       );
     }
     if (Array.isArray(q.pairs)) {
@@ -1012,30 +1050,33 @@ const extractQuestions = asyncHandler(async (req, res) => {
   let cost = null;
   let usedProvider = provider;
   let fellBack = false;
-  try {
-    ({ questions, usage, cost } =
-      provider === "openai"
-        ? await extractWithOpenAI(base64, instructions, openaiModel)
-        : provider === "gemini"
-        ? await extractWithGemini(base64, instructions)
-        : await extractWithClaude(base64, instructions));
-  } catch (e) {
-    // If Gemini is busy / out of quota, automatically retry on Claude so the
-    // teacher isn't dead-ended — they still get their questions (slightly pricier).
-    if ((provider === "gemini" || provider === "openai") && e.aiFallback) {
-      try {
-        ({ questions, usage, cost } = await extractWithClaude(base64, instructions));
-        usedProvider = "claude";
-        fellBack = true;
-        console.warn("AI extract: Gemini unavailable, fell back to Claude.");
-      } catch (e2) {
-        res.status(e2.aiStatus || 503);
-        throw new Error(e2.userMessage || "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
-      }
-    } else {
-      res.status(e.aiStatus || 503);
-      throw new Error(e.userMessage || "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
+  const extractors = {
+    openai: () => extractWithOpenAI(base64, instructions, openaiModel),
+    gemini: () => extractWithGemini(base64, instructions),
+    claude: () => extractWithClaude(base64, instructions),
+  };
+  // Try the picked provider, then fall through the OTHERS on an availability
+  // failure so one engine being down / out of credit does not dead-end the
+  // teacher. Gemini handles PDFs well and is cheap, so it sits right after the
+  // pick; a genuine bad request stops the chain.
+  const order = [provider, "gemini", "openai", "claude"].filter((p, i, a) => a.indexOf(p) === i);
+  let lastErr = null;
+  for (const name of order) {
+    try {
+      ({ questions, usage, cost } = await extractors[name]());
+      usedProvider = name;
+      fellBack = name !== provider;
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      console.warn(`AI extract via ${name} failed:`, e?.status || e?.aiStatus, e?.userMessage || e?.message);
+      if (!isRetriable(e)) break;
     }
+  }
+  if (lastErr) {
+    res.status(lastErr.aiStatus || 503);
+    throw new Error(lastErr.userMessage || "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
   }
 
   // The teacher's answer-key choice (same three modes as the streaming path).
@@ -1340,48 +1381,43 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     };
   };
 
-  let result;
+  let result = null;
   let usedProvider = provider;
   let fellBack = false;
-  try {
-    if (provider === "openai") {
-      // No token stream for this one: the Responses API call returns the whole
-      // paper at once. The teacher still sees the animated loader, they just do
-      // not watch questions land one by one — worth it to keep every engine on
-      // offer rather than a subset that happens to stream.
-      sse("status", { message: "PDF oxunur…" });
+  const label = { openai: "OpenAI", gemini: "Gemini", claude: "Claude" };
+  const runners = {
+    // OpenAI's Responses API returns the whole paper at once (no token stream) —
+    // the loader still animates, questions just don't land one by one.
+    openai: async () => {
       const one = await extractWithOpenAI(base64, instructions, openaiModel);
-      result = {
-        full: JSON.stringify({ questions: one.questions }),
-        usage: one.usage,
-        model: one.cost?.model,
-        openaiCost: one.cost,
-      };
-    } else {
-      result =
-        provider === "gemini"
-          ? await streamGemini(base64, instructions, mkOnText())
-          : await streamClaude(base64, instructions, mkOnText());
+      return { full: JSON.stringify({ questions: one.questions }), usage: one.usage, model: one.cost?.model, openaiCost: one.cost };
+    },
+    gemini: () => streamGemini(base64, instructions, mkOnText()),
+    claude: () => streamClaude(base64, instructions, mkOnText()),
+  };
+  // Try the picked provider, then fall through the others on an availability
+  // failure (Gemini right after the pick — cheap + good at PDFs) so one engine
+  // being down or out of credit never dead-ends the extraction.
+  const order = [provider, "gemini", "openai", "claude"].filter((p, i, a) => a.indexOf(p) === i);
+  let lastErr = null;
+  for (const name of order) {
+    try {
+      sse("status", { message: name === provider ? "PDF oxunur…" : `${label[name]} ilə davam edilir…` });
+      result = await runners[name]();
+      usedProvider = name;
+      fellBack = name !== provider;
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      console.error(`AI extract (${name}) failed:`, e?.status || e?.aiStatus, e?.message);
+      if (!isRetriable(e)) break;
     }
-  } catch (e) {
-    console.error(`AI extract (${provider}) failed:`, e?.status, e?.message);
-    if ((provider === "gemini" || provider === "openai") && e.aiFallback) {
-      sse("status", { message: "Gemini əlçatan deyil — Claude ilə davam edilir…" });
-      try {
-        result = await streamClaude(base64, instructions, mkOnText());
-        usedProvider = "claude";
-        fellBack = true;
-      } catch (e2) {
-        console.error("AI extract (claude fallback) failed:", e2?.status, e2?.message);
-        clearInterval(hb);
-        sse("error", { message: e2.userMessage || "AI emalı alınmadı. Bir az sonra yenidən cəhd edin." });
-        return res.end();
-      }
-    } else {
-      clearInterval(hb);
-      sse("error", { message: e.userMessage || "AI emalı alınmadı. Bir az sonra yenidən cəhd edin." });
-      return res.end();
-    }
+  }
+  if (!result) {
+    clearInterval(hb);
+    sse("error", { message: (lastErr && lastErr.userMessage) || "AI emalı alınmadı. Bir az sonra yenidən cəhd edin." });
+    return res.end();
   }
   clearInterval(hb);
 
@@ -1566,7 +1602,14 @@ QAYDALAR:
 - Dırnaq işarəsi lazımdırsa adi " işlət — \\" kimi qaçış simvolu YAZMA.
 - Şəkil/qrafik tələb edən sual YARATMA (hasFigure həmişə false). Mümkün qədər mətnlə həll olunan suallar yarat.
 - Oxu mətni (reading) yalnız istənildikdə əlavə et. İstənilsə, onu "reading" tipli AYRICA element kimi ver: bütün mətn "text" sahəsində, abzaslar iki yeni sətirlə (\\n\\n) ayrılsın, başlıq varsa "title"-də. Sonra o mətnə aid suallar ayrıca elementlər kimi gəlsin. choices=[], correct=[], pairs=[], openAnswer="".
-- Boşluq doldurma / cloze mətni istənilsə (məs. "boşluqları doldur", "gap-fill", "fill in the blanks"): boşluqları "reading" mətninin İÇİNDƏ [[düzgün cavab]] kimi yaz — bir neçə qəbul olunan cavab varsa [[cavab|alternativ]]. Düzgün cavab mötərizənin içində qalır. Bu boşluqlar üçün AYRICA sual yaratma; mətnin özü qiymətləndirilir. Boşluq istənilməyibsə mötərizə yazma.
+- FORMATLAMA: oxu mətnində lazım gələndə Markdown işlət — **qalın** vacib terminlər/yarımbaşlıqlar üçün, *maili* xüsusi adlar/vurğu/xarici sözlər üçün. Abzas hərfi/nömrəsi olan mətndə həmin işarəni qalın ver (məs. "**A.** Octopuses exhibit…"). Formatı YALNIZ məna daşıdıqda işlət, hər cümləni qalınlaşdırma. HTML teqi YAZMA — yalnız ** və * işarələri.
+- SIRALAMA: hər oxu mətnindən DƏRHAL SONRA ona aid suallar gəlsin. Bir mətnin summary/sentence-completion CLOZE tapşırığı varsa, onu həmin mətnin adi suallarından SONRA ayrıca "reading" bloku kimi ver — belə ki heç bir mətn "0 sual" ilə qalmır.
+- OXU MƏTNİNİN UZUNLUĞU: akademik/IELTS oxu mətni UZUN və çoxabzaslı olsun — təxminən 700–900 söz (ən azı 500), 4–6 abzas. Qısa (100–300 sözlük) mətn IELTS deyil.
+- SUAL SAYI: müəllim konkret say/tip deyibsə DƏQİQ ona əməl et — "6 True/False/Not Given" = tam 6 AYRICA sual (hər ifadə bir Cm), hamısını bir suala yığma.
+- BOŞLUQ DOLDURMA mətnləri — "boşluqları doldur", "gap-fill", "fill in the blanks", həmçinin IELTS-in "summary completion", "sentence completion", "note completion", "table/flow-chart completion" tapşırıqları: HƏR belə tapşırığı AYRICA "reading" tipli element kimi ver (məs. xülasə/cümlə mətni "text" sahəsində), və boşluqları həmin mətnin İÇİNDƏ [[düzgün cavab]] kimi yaz — bir neçə qəbul olunan cavab varsa [[cavab|alternativ]]. Düzgün cavab HƏMİŞƏ mötərizənin içində qalır. ÇOX VACİB: bu boşluqlar üçün AYRICA sual (nə "Co"/açıq cavab, nə çoxseçim) YARATMA — mətnin özü qiymətləndirilir, hər boşluq 1 baldır. Yəni "Complete the summary…" kimi tapşırıq gələndə onu sual yox, [[...]] boşluqları olan "reading" mətni kimi qaytar. Boşluq istənilməyən adi mətndə mötərizə işlətmə.
+  DÜZGÜN NÜMUNƏ (summary/sentence completion → boşluqlu "reading"):
+    {"type":"reading","title":"Complete the summary","text":"Octopuses change colour using pigment cells called [[chromatophores]]. Beneath these sit [[leucophores]], which reflect ambient light, while [[iridophores]] produce iridescent blues and greens. The animal controls tiny [[muscles]] to shift these cells almost instantly."}
+  YANLIŞ (belə YAZMA): eyni xülasəni boşluqsuz mətn kimi verib, sonra hər boşluq üçün ayrıca "Complete the summary: ___" tipli "Co"/çoxseçim sual yaratmaq. Boşluqlar mətnin İÇİNDƏ [[...]] olmalıdır.
 - Suallar aydın, düzgün və imtahan səviyyəsinə uyğun olsun.`;
 
 
@@ -1941,10 +1984,16 @@ async function generateWithClaude(prompt, presetId, onText, signal, systemOverri
     message = await stream.finalMessage();
   } catch (e) {
     const status = Number(e?.status || e?.statusCode || e?.response?.status || 0);
+    const msg = String(e?.message || e?.error?.message || "").toLowerCase();
+    // Out of credit / billing / quota / overloaded is an AVAILABILITY problem
+    // (Claude simply cannot serve now), NOT a bad prompt — so fall back to another
+    // provider instead of hard-failing the whole request. Anthropic reports "credit
+    // balance is too low" as a 400, which would otherwise be treated as our bug.
+    const unavailable = /credit balance|billing|quota|insufficient|payment|overloaded/.test(msg);
     throw aiError(
       502,
       "AI suallar yarada bilmədi. Yenidən cəhd et.",
-      status === 429 || status >= 500 || status === 0
+      status === 429 || status >= 500 || status === 0 || unavailable
     );
   }
   const textBlock = message.content.find((b) => b.type === "text");
@@ -2013,6 +2062,141 @@ async function runGeneration({ prompt, preset, model, onText, signal, system }) 
   return out;
 }
 
+// IELTS is a 3-passage reading exam — but that ONLY applies when the teacher
+// opts in via the IELTS PRESET. It is never guessed from the prompt text and
+// never a JSON blueprint injected into the prompt; the AI decides the content,
+// and the preset's guidance rides in (opt-in) through presetHint().
+const IELTS_PRESETS = new Set(["ielts-reading"]);
+const isIeltsPreset = (presetId) => IELTS_PRESETS.has(String(presetId || ""));
+
+// A request for several separate long passages ("3 passages", "Passage 1..3"),
+// or the IELTS Reading preset, is split — one passage per call — and merged, so
+// each passage gets full length instead of a shared, rationed stub. Returns 1 for
+// a normal single-passage / non-reading request, so nothing else changes.
+const NUM_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, iki: 2, "üç": 3, dörd: 4, "beş": 5, "altı": 6 };
+const detectPassageCount = (prompt, presetId) => {
+  const p = String(prompt || "").toLowerCase();
+  let n = 0;
+  // Explicit "Passage 1 … Passage 2 … Passage 3" — count the distinct indices.
+  const idx = new Set((p.match(/passage\s+(\d+)/g) || []).map((s) => (s.match(/\d+/) || [])[0]));
+  if (idx.size >= 2) n = idx.size;
+  // "3 passages" / "3 reading(s)" / "3 mətn" / "3 oxu mətni" (number right before).
+  let m = p.match(/(\d+)\s*(?:separate\s+|ayr[ıi]\s+)?(?:reading\s+|oxu\s+)?(?:passages?|readings?|m[əe]tn|oxu)\b/);
+  if (m) n = Math.max(n, parseInt(m[1], 10) || 0);
+  // Word-number form ("three passages", "üç mətn").
+  m = p.match(/\b(one|two|three|four|five|six|iki|üç|dörd|beş|altı)\s+(?:separate\s+|ayr[ıi]\s+)?(?:reading\s+|oxu\s+)?(?:passages?|readings?|m[əe]tn|oxu)/);
+  if (m) n = Math.max(n, NUM_WORDS[m[1]] || 0);
+  // The IELTS Reading PRESET (opt-in) is a 3-passage exam unless the teacher
+  // asked for a specific number. An explicit singular still wins.
+  const explicitSingle = /\b(one|1|single|bir|tək)\s+(?:\w+\s+){0,3}(?:passages?|readings?|m[əe]tn|oxu)\b/.test(p);
+  if (n <= 1 && !explicitSingle && isIeltsPreset(presetId)) n = 3;
+  return Math.min(6, Math.max(1, n || 1)); // cap at 6, never below 1
+};
+
+// One passage's slice of a multi-passage request: the teacher's brief, plus an
+// instruction to emit ONLY passage k (with its questions) on a distinct topic.
+// No fixed structure is imposed — the AI decides the content; any IELTS guidance
+// arrives (opt-in) through the preset hint on the system prompt.
+const buildPassagePrompt = (userPrompt, k, n, prevTitles) =>
+  `${userPrompt}\n\n[SİSTEM TAPŞIRIĞI: Bu ${n} oxu mətnli imtahandır. İNDİ YALNIZ ${k}-Cİ MƏTNİ yarat — TAM, çoxabzaslı bir oxu mətni və ONA aid BÜTÜN suallar. Başqa mətn qaytarma. Mətnin başlığı "Passage ${k}: <mövzu>" formatında olsun.${prevTitles.length ? ` Mövzu bunlardan tam FƏRQLİ olsun: ${prevTitles.join("; ")}.` : ""}]`;
+
+// Deterministic structure check for one passage's items — the things the AI
+// review (verifyAndFix) does NOT enforce: passage length, that the passage
+// actually governs some questions, and that a "summary/cloze" block really has
+// blanks. Returns human-readable issue strings (empty = clean).
+const wordCountOf = (s) => String(s || "").trim().split(/\s+/).filter(Boolean).length;
+const isClozeReading = (q) => !!q && q.type === "reading" && /\[\[[^\]]*\]\]/.test(q.text || "");
+const validatePassageStructure = (items, k) => {
+  const out = [];
+  const passage = items.find((q) => q.type === "reading" && !isClozeReading(q));
+  if (!passage) out.push(`Passage ${k}: oxu mətni yoxdur`);
+  else {
+    const w = wordCountOf(passage.text);
+    if (w < 450) out.push(`Passage ${k}: mətn qısadır (${w} söz)`);
+  }
+  const scored = items.filter((q) => q.type !== "reading" || isClozeReading(q)).length;
+  if (scored < 4) out.push(`Passage ${k}: az sual (${scored})`);
+  items.forEach((q) => {
+    if (q.type === "reading" && !isClozeReading(q) && /summary|cloze|boşluq|gap[- ]?fill/i.test(q.title || ""))
+      out.push(`Passage ${k}: "${q.title}" mətnində boşluq yoxdur`);
+  });
+  return out;
+};
+
+// Generate an N-passage exam one passage at a time and merge. Each passage runs
+// through a DETERMINISTIC gate (free) first; an AI repair is paid for ONLY when
+// the gate flags something — so a clean passage costs one call, not two:
+//   • too short / missing passage / too few questions → regenerate once, harder;
+//   • answer-key / structural defects → one verifyAndFix repair pass.
+// Real `issues` + a `verified` flag are returned so the builder never claims a
+// set was checked when it was not. Distinct topics come from feeding the used
+// titles back in; sequential so each passage can avoid the earlier ones.
+async function runMultiPassage({ prompt, preset, model, n, signal, onProvider, onQuestion, onStatus }) {
+  const all = [];
+  const titles = [];
+  const issues = [];
+  let cost = null;
+  const stream = onQuestion
+    ? (provider) => {
+        onProvider?.(provider);
+        const streamer = makeQuestionStreamer();
+        return (full) => {
+          for (const q of streamer(full)) onQuestion(q);
+        };
+      }
+    : undefined;
+
+  for (let k = 1; k <= n; k++) {
+    if (signal?.aborted) throw aiError(499, "Ləğv edildi");
+    const passagePrompt = buildPassagePrompt(prompt, k, n, titles);
+    onStatus?.(`Mətn ${k}/${n} yazılır…`);
+    const out = await runGeneration({ prompt: passagePrompt, preset, model, signal, onText: stream });
+    let items = Array.isArray(out.questions) ? out.questions : [];
+    cost = sumCost(cost, out.cost);
+
+    // Free deterministic checks. Only a failure buys an AI call.
+    let struct = validatePassageStructure(items, k);
+    let audit = auditQuestions(items, { requireAnswers: true });
+
+    // (1) Short / stub / thin passage → regenerate this one once (not streamed,
+    // so the panel does not show the discarded attempt twice).
+    if (struct.length) {
+      onStatus?.(`Mətn ${k}/${n} yenidən yazılır…`);
+      const retry = await runGeneration({
+        prompt: `${passagePrompt}\n\n[QEYD: əvvəlki cəhd naqis idi (qısa mətn və ya az sual). Mətni ƏN AZI 700 söz, 4–6 abzas yaz və tam sual dəstini ver.]`,
+        preset,
+        model,
+        signal,
+      });
+      const rItems = Array.isArray(retry.questions) ? retry.questions : [];
+      cost = sumCost(cost, retry.cost);
+      const rStruct = validatePassageStructure(rItems, k);
+      if (rItems.length && rStruct.length < struct.length) {
+        items = rItems;
+        struct = rStruct;
+        audit = auditQuestions(items, { requireAnswers: true });
+      }
+    }
+
+    // (2) Answer-key / structural defects → one AI repair pass.
+    if (audit.length) {
+      onStatus?.(`Mətn ${k}/${n} yoxlanılır…`);
+      const v = await verifyAndFix({ questions: items, prompt: passagePrompt, preset, model, signal });
+      items = v.questions;
+      cost = sumCost(cost, v.reviewCost);
+      audit = v.issues;
+    }
+
+    for (const x of audit) issues.push(`Passage ${k} #${(x.index ?? 0) + 1}: ${x.code || "problem"}`);
+    for (const s of struct) issues.push(s);
+
+    const firstReading = items.find((q) => q.type === "reading" && q.title);
+    if (firstReading) titles.push(firstReading.title);
+    all.push(...items);
+  }
+  return { questions: all, cost, issues, verified: issues.length === 0 };
+}
+
 // Remember what this exam was asked for, so a later single-question rewrite
 // carries the same context. Scoped to the owner, and never fatal: failing to
 // record the prompt must not fail the generation the teacher just paid for.
@@ -2059,30 +2243,41 @@ const generateQuestions = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("İmtahan təsviri boşdur");
   }
-  let out;
+  const passageCount = detectPassageCount(prompt, req.body?.preset);
+  let questions = [];
+  let cost = null;
+  let issues = [];
+  let verified = false;
   try {
-    out = await runGeneration({ prompt, preset: req.body?.preset, model: req.body?.model });
+    if (passageCount >= 2) {
+      // Multi-passage IELTS: one call per passage, merged (see runMultiPassage).
+      const r = await runMultiPassage({ prompt, preset: req.body?.preset, model: req.body?.model, n: passageCount });
+      questions = r.questions;
+      cost = r.cost;
+      issues = r.issues;
+      verified = r.verified;
+    } else {
+      const out = await runGeneration({ prompt, preset: req.body?.preset, model: req.body?.model });
+      // Agentic quality gate: the AI reviews its own answers and variants before
+      // the teacher sees them. Falls back to the un-reviewed set if review fails.
+      const v = await verifyAndFix({
+        questions: out.questions,
+        prompt,
+        preset: req.body?.preset,
+        model: req.body?.model,
+      });
+      questions = v.questions;
+      cost = sumCost(out.cost, v.reviewCost);
+      issues = v.issues;
+      verified = v.rounds > 0 && v.issues.length === 0;
+    }
   } catch (e) {
     res.status(e?.aiStatus || 502);
     throw new Error(e?.userMessage || "AI suallar yarada bilmədi");
   }
-  // Agentic quality gate: the AI reviews its own answers and variants before the
-  // teacher ever sees them. Falls back to the un-reviewed set if review fails.
-  const v = await verifyAndFix({
-    questions: out.questions,
-    prompt,
-    preset: req.body?.preset,
-    model: req.body?.model,
-  });
-  const cost = sumCost(out.cost, v.reviewCost);
-  await logGenerationUsage(req, { ...out, cost, questions: v.questions });
+  await logGenerationUsage(req, { cost, questions });
   await rememberExamPrompt(req, prompt);
-  res.json({
-    questions: v.questions,
-    cost,
-    issues: v.issues,
-    verified: v.rounds > 0 && v.issues.length === 0,
-  });
+  res.json({ questions, cost, issues, verified });
 });
 
 // POST /api/quiz/generateQuestionsStream/:examId — same thing over SSE.
@@ -2130,61 +2325,88 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
     ac.abort();
   });
 
-  let out = null;
+  const passageCount = detectPassageCount(prompt, req.body?.preset);
+  let questions = [];
+  let cost = null;
+  let issues = [];
+  let verified = false;
   try {
-    out = await runGeneration({
-      signal: ac.signal,
-      prompt,
-      preset: req.body?.preset,
-      model: req.body?.model,
-      onText: (provider) => {
-        const streamer = makeQuestionStreamer();
-        let announced = false;
-        return (full) => {
+    if (passageCount >= 2) {
+      // Multi-passage IELTS: one call per passage (a single call shrinks each to
+      // a stub and can fail outright), streamed and merged. No separate review
+      // pass — each per-passage call is already focused and small.
+      let announced = false;
+      const r = await runMultiPassage({
+        prompt,
+        preset: req.body?.preset,
+        model: req.body?.model,
+        n: passageCount,
+        signal: ac.signal,
+        onProvider: (provider) => {
           if (!announced) {
             announced = true;
             sse("provider", { provider });
           }
-          for (const q of streamer(full)) sse("question", q);
-        };
-      },
-    });
+        },
+        onQuestion: (q) => sse("question", q),
+        onStatus: (message) => sse("status", { message }),
+      });
+      questions = r.questions;
+      cost = r.cost;
+      issues = r.issues;
+      verified = r.verified;
+    } else {
+      const out = await runGeneration({
+        signal: ac.signal,
+        prompt,
+        preset: req.body?.preset,
+        model: req.body?.model,
+        onText: (provider) => {
+          const streamer = makeQuestionStreamer();
+          let announced = false;
+          return (full) => {
+            if (!announced) {
+              announced = true;
+              sse("provider", { provider });
+            }
+            for (const q of streamer(full)) sse("question", q);
+          };
+        },
+      });
+      if (clientGone) {
+        clearInterval(hb);
+        return res.end();
+      }
+      // The stream showed the questions arriving; now the AI checks its own
+      // answers before they are committed. `status` events drive the panel.
+      const v = await verifyAndFix({
+        questions: out.questions,
+        prompt,
+        preset: req.body?.preset,
+        model: req.body?.model,
+        signal: ac.signal,
+        onStatus: (message) => sse("status", { message }),
+      });
+      questions = v.questions;
+      cost = sumCost(out.cost, v.reviewCost);
+      issues = v.issues;
+      verified = v.rounds > 0 && v.issues.length === 0;
+    }
   } catch (e) {
     clearInterval(hb);
-    if (clientGone) return res.end();
+    if (clientGone || ac.signal.aborted) return res.end();
     sse("error", { message: e?.userMessage || "AI suallar yarada bilmədi" });
     return res.end();
   }
 
   clearInterval(hb);
-  // Nobody is listening any more: skip the commit work and the cost row for
-  // output that will never be used.
+  // Nobody is listening any more: skip the commit work and the cost row.
   if (clientGone) return res.end();
-
-  // The stream showed the questions arriving; now the AI checks its own answers
-  // and variants before they are committed. The `status` events let the builder
-  // show "Suallar yoxlanılır…" during the pass.
-  const v = await verifyAndFix({
-    questions: out.questions,
-    prompt,
-    preset: req.body?.preset,
-    model: req.body?.model,
-    signal: ac.signal,
-    onStatus: (message) => sse("status", { message }),
-  });
-  if (clientGone) return res.end();
-  const cost = sumCost(out.cost, v.reviewCost);
-  const questions = v.questions;
   if (questions.length) {
-    await logGenerationUsage(req, { ...out, cost, questions });
+    await logGenerationUsage(req, { cost, questions });
     await rememberExamPrompt(req, prompt);
   }
-  sse("done", {
-    questions,
-    cost,
-    issues: v.issues,
-    verified: v.rounds > 0 && v.issues.length === 0,
-  });
+  sse("done", { questions, cost, issues, verified });
   res.end();
 });
 
@@ -2861,6 +3083,11 @@ module.exports = {
   // exported for tests / benchmarking
   GEN_SYSTEM_PROMPT,
   EXTRACTION_SCHEMA,
+  runGeneration,
+  runMultiPassage,
+  detectPassageCount,
+  extractWithGemini,
+  extractWithOpenAI,
   // exported for tests
   cleanQuestions,
   auditQuestions,

@@ -236,6 +236,26 @@ const PRESETS = {
     pointsPlan: azWrittenPlan,
     negativeMarking: null,
   },
+
+  // IELTS Academic Reading — 3 long passages, ~13 questions each (~40 total),
+  // scored 1 mark per question (band conversion is external). The AI writes the
+  // real structure; these slots are only a light fallback for manual building.
+  // Reading blocks are content, not scored.
+  "ielts-reading": {
+    id: "ielts-reading",
+    label: "IELTS Academic Reading",
+    totalMarks: 40,
+    slots: [
+      { type: "reading", count: 1 },
+      { type: "Cm", count: 13 },
+      { type: "reading", count: 1 },
+      { type: "Cm", count: 13 },
+      { type: "reading", count: 1 },
+      { type: "Cm", count: 14 },
+    ],
+    pointsPlan: (count) => equalPlan(count, 40),
+    negativeMarking: null,
+  },
 };
 
 // Total number of seeded questions in a preset's structure.
