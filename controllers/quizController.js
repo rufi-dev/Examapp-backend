@@ -633,6 +633,7 @@ function sanitizeQuestionItem(q) {
   if (q.allowPause !== undefined) out.allowPause = q.allowPause; // listening: pausable?
   if (q.covers !== undefined) out.covers = q.covers; // questions this block governs
   if (q.blanks !== undefined) out.blanks = q.blanks; // open: number of answer boxes
+  if (q.inline) out.inline = true; // inline gap-fill (text already anonymised)
   if (Array.isArray(q.table)) {
     // "Complete the table": send the grid layout + static cell text, but STRIP
     // every cell's answer key (it lives in blankAnswers, which is never sent).
@@ -1718,7 +1719,10 @@ function isAnswered(sel) {
 // and ca.blankAnswers[k] is the list of accepted answers for blank k. Returns
 // { graded, correct } over blanks that HAVE a key (blanks with no key are
 // ungraded/manual and excluded).
-const isMultiBlank = (ca) => (Number(ca.blanks) || 0) > 1 && Array.isArray(ca.blankAnswers);
+// Blank-scored when there are multiple blanks, OR an inline gap-fill (which may
+// have a single blank but is still graded per-blank against blankAnswers).
+const isMultiBlank = (ca) =>
+  Array.isArray(ca.blankAnswers) && ((Number(ca.blanks) || 0) > 1 || ca.inline);
 function blankScore(ca, sel) {
   const n = Number(ca.blanks) || 0;
   const a = sel && sel.answer;
@@ -3352,4 +3356,7 @@ module.exports = {
   deleteAllQuestions,
   getExamTagandClass,
   getResultsByExam,
+  // Exported for unit tests (pure scoring / sanitisation helpers):
+  isCorrectAnswer,
+  sanitizeQuestionItem,
 };
