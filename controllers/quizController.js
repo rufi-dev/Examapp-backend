@@ -629,6 +629,7 @@ function sanitizeQuestionItem(q) {
   if (q.title !== undefined) out.title = q.title; // reading passage heading
   if (q.kind !== undefined) out.kind = q.kind; // section block kind (reading/listening)
   if (q.audio !== undefined) out.audio = q.audio; // listening-section audio
+  if (q.maxPlays !== undefined) out.maxPlays = q.maxPlays; // listening: max times playable
   if (q.covers !== undefined) out.covers = q.covers; // questions this block governs
   if (q.blanks !== undefined) out.blanks = q.blanks; // open: number of answer boxes
   if (Array.isArray(q.table)) {
