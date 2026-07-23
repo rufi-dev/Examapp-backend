@@ -136,6 +136,11 @@ app.use(
         // Let the PDF viewer read length/range headers (efficient streaming
         // of server-hosted PDFs).
         exposedHeaders: ["Content-Length", "Content-Range", "Accept-Ranges"],
+        // Cache the CORS preflight for a day. pdf.js opens a big PDF with dozens
+        // of cross-origin range requests; without this EACH one pays for its own
+        // OPTIONS preflight (~15s of round-trips for a 80MB file). With it, only
+        // the first range request is preflighted and the rest go straight through.
+        maxAge: 86400,
     })
 )
 
