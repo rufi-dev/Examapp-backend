@@ -50,6 +50,64 @@ const linearizePdf = (abs) =>
     });
   });
 
+// Optionally shrink a PDF with Ghostscript when the teacher chose "compressed"
+// at upload. The /ebook preset downsamples images to 150 dpi — visibly the same
+// when reading, but a large scan can drop to a fraction of its size, which makes
+// it far quicker to open. Quality-SAFE and best-effort: the compressed copy
+// replaces the original ONLY if gs produced a valid file that is meaningfully
+// smaller (>5%), so an already-optimised PDF (whose images can't shrink) is left
+// exactly as it was rather than swapped for a same-size or larger copy.
+//
+// Serialised through one chain because gs is CPU/RAM-heavy and the box is small;
+// two big compressions at once could starve everything else.
+let compressChain = Promise.resolve();
+const compressPdf = (abs) => {
+  const run = () =>
+    new Promise((resolve) => {
+      const tmp = `${abs}.cmp.tmp`;
+      execFile(
+        "gs",
+        [
+          "-sDEVICE=pdfwrite",
+          "-dCompatibilityLevel=1.5",
+          "-dPDFSETTINGS=/ebook", // 150 dpi — good reading quality, much smaller
+          "-dNOPAUSE", "-dQUIET", "-dBATCH",
+          "-dDetectDuplicateImages=true",
+          "-dCompressFonts=true",
+          "-sOutputFile=" + tmp,
+          abs,
+        ],
+        { timeout: 15 * 60 * 1000 },
+        (err) => {
+          try {
+            if (err || !fs.existsSync(tmp) || fs.statSync(tmp).size === 0) {
+              if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+              return resolve(false);
+            }
+            const before = fs.statSync(abs).size;
+            const after = fs.statSync(tmp).size;
+            if (after > 0 && after < before * 0.95) {
+              fs.renameSync(tmp, abs); // atomic on the same filesystem
+              return resolve(true);
+            }
+            fs.unlinkSync(tmp); // no meaningful saving — keep the original
+            return resolve(false);
+          } catch {
+            try {
+              if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+            } catch {
+              /* ignore */
+            }
+            return resolve(false);
+          }
+        }
+      );
+    });
+  // Append to the chain and hand back THIS run's result.
+  compressChain = compressChain.then(run, run);
+  return compressChain;
+};
+
 const IMAGE_MIME = /^image\/(png|jpe?g|webp|gif|heic|heif)$/i;
 
 // The set of classes a student is approved-enrolled in, plus the teachers who
@@ -243,20 +301,31 @@ const addMaterial = asyncHandler(async (req, res) => {
     ownerName: req.user.name || "",
   });
 
-  // Web-optimise the PDF in the BACKGROUND so the reader opens on page 1 straight
-  // away (range-streamed) instead of waiting for the whole file. Does not block
-  // the upload response; the material is fully usable meanwhile.
+  // Post-process the PDF in the BACKGROUND so the upload response is instant and
+  // the material is usable meanwhile. First (optionally) compress it if the
+  // teacher chose "compressed", THEN web-optimise (linearize) so the reader opens
+  // on page 1 from the first bytes, and finally record the resulting size.
   if (kind === "pdf") {
     const abs = path.join(MATERIALS_DIR, path.basename(storedPath));
-    linearizePdf(abs)
-      .then((done) => {
-        if (done) {
-          Material.updateOne({ _id: material._id }, { sizeBytes: fs.statSync(abs).size }).catch(() => {});
-        } else {
-          console.warn("material linearize skipped:", material._id.toString());
+    const wantCompress = String(req.body.compress) === "true";
+    (async () => {
+      if (wantCompress) {
+        try {
+          await compressPdf(abs);
+        } catch (e) {
+          console.warn("material compress error:", e?.message);
         }
-      })
-      .catch((e) => console.warn("material linearize error:", e?.message));
+      }
+      const done = await linearizePdf(abs);
+      if (!done) console.warn("material linearize skipped:", material._id.toString());
+      // Always refresh the stored size — compression and/or linearization both
+      // change it, and the card/info dialog should show the real number.
+      try {
+        await Material.updateOne({ _id: material._id }, { sizeBytes: fs.statSync(abs).size });
+      } catch {
+        /* non-fatal */
+      }
+    })().catch((e) => console.warn("material post-process error:", e?.message));
   }
 
   const populated = await Material.findById(material._id)

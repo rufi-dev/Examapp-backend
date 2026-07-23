@@ -13,9 +13,13 @@ RUN apk add --no-cache \
     ca-certificates \
     ttf-freefont \
     tzdata \
-    qpdf
+    qpdf \
+    ghostscript
 # qpdf: linearizes (web-optimises) uploaded PDFs so the reader opens page 1 from
 # the first bytes over an HTTP range request instead of downloading the whole file.
+# ghostscript: optionally re-compresses an uploaded PDF (150-dpi /ebook preset)
+# when the teacher picks "compressed" at upload — smaller file, quality unchanged
+# for reading. See compressPdf in controllers/materialController.js.
 
 # LibreOffice (headless) converts uploaded Word/PowerPoint study materials to
 # PDF so they can be shown in the in-app viewer. Only the Writer/Impress/Calc
