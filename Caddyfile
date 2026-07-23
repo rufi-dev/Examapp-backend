@@ -1,6 +1,14 @@
 # SITE_ADDRESS comes from the environment (set in .env / docker-compose).
 # Caddy automatically obtains and renews a Let's Encrypt certificate for it.
 {$SITE_ADDRESS} {
-	encode zstd gzip
+	# Compress text responses (JSON / JS / CSS), but NOT the material file
+	# downloads. gzip/zstd sets Content-Encoding, and pdf.js then abandons HTTP
+	# range requests and downloads the WHOLE PDF before showing page 1. PDFs are
+	# already internally compressed, so skipping them costs nothing and restores
+	# range streaming — the reader opens on page 1 immediately.
+	@compressible {
+		not path /api/materials/*/file /api/materials/*/download /api/materials/share/*/file /api/materials/share/*/download
+	}
+	encode @compressible zstd gzip
 	reverse_proxy backend:5000
 }
