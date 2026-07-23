@@ -716,6 +716,182 @@ const cleanQuestions = (list) =>
     return out;
   });
 
+// Deterministic quality audit. Catches the structural mistakes a model makes —
+// a correct-index pointing past the last choice, a single-choice with two
+// answers, duplicated or blank options, an open question with no answer — the
+// bugs that turn into a mis-marked or unanswerable question. Pure and
+// exported, so it can be tested and so the reviewer below can be told exactly
+// what to fix.
+//
+// `requireAnswers` is on for GENERATED exams (the AI's job is to mark the
+// answer) and off for EXTRACTION (the teacher marks it).
+const AUDIT_STRIP = (s) =>
+  String(s ?? "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+const auditQuestions = (list, { requireAnswers = false } = {}) => {
+  const issues = [];
+  const add = (index, code, detail) => issues.push({ index, code, detail });
+
+  (Array.isArray(list) ? list : []).forEach((q, i) => {
+    if (!q || typeof q !== "object") return add(i, "not-an-object", "");
+    if (q.type === "reading") {
+      if (!AUDIT_STRIP(q.text)) add(i, "empty-passage", "reading block has no text");
+      return;
+    }
+    const hasFig = !!q.hasFigure;
+    if (!AUDIT_STRIP(q.text) && !hasFig) add(i, "empty-text", "question has no text");
+
+    const choices = Array.isArray(q.choices) ? q.choices : [];
+    const texts = choices.map((c) => AUDIT_STRIP(c?.text ?? c));
+    const correct = Array.isArray(q.correct) ? q.correct : [];
+
+    if (q.type === "Cm" || q.type === "Cs") {
+      if (choices.length < 2) add(i, "too-few-choices", `only ${choices.length} choice(s)`);
+      texts.forEach((t, ci) => {
+        if (!t && !hasFig) add(i, "empty-choice", `choice ${ci + 1} is blank`);
+      });
+      const seen = new Map();
+      texts.forEach((t, ci) => {
+        if (!t) return;
+        if (seen.has(t)) add(i, "duplicate-choice", `choices ${seen.get(t) + 1} and ${ci + 1} are identical`);
+        else seen.set(t, ci);
+      });
+      correct.forEach((idx) => {
+        if (!Number.isInteger(idx) || idx < 0 || idx >= choices.length)
+          add(i, "bad-correct-index", `correct=${idx} but there are ${choices.length} choices`);
+      });
+      if (q.type === "Cm" && correct.length > 1)
+        add(i, "cm-multi-correct", `single-choice marked ${correct.length} correct answers`);
+      if (requireAnswers && correct.length === 0)
+        add(i, "no-correct-answer", "no correct answer marked");
+    } else if (q.type === "Co" || q.type === "Cd") {
+      const answers = (Array.isArray(q.openAnswers) ? q.openAnswers : [])
+        .map(AUDIT_STRIP)
+        .filter(Boolean);
+      if (AUDIT_STRIP(q.openAnswer)) answers.push(AUDIT_STRIP(q.openAnswer));
+      if (requireAnswers && !answers.length) add(i, "no-open-answer", "no accepted answer");
+      if (choices.length) add(i, "open-with-choices", "open question should have no choices");
+    } else if (q.type === "Cma") {
+      const pairs = Array.isArray(q.pairs) ? q.pairs : [];
+      if (pairs.length < 2) add(i, "too-few-pairs", `only ${pairs.length} pair(s)`);
+      pairs.forEach((p, pi) => {
+        if (!AUDIT_STRIP(p?.left)) add(i, "incomplete-pair", `pair ${pi + 1} has no left item`);
+        if (requireAnswers && !AUDIT_STRIP(p?.right))
+          add(i, "incomplete-pair", `pair ${pi + 1} has no answer letter`);
+      });
+    }
+  });
+  return issues;
+};
+
+// Sum two AI cost objects (generation + each review round) so the teacher is
+// billed and shown the true total.
+const sumCost = (a, b) => {
+  if (!a) return b || null;
+  if (!b) return a;
+  const keys = ["inputTokens", "outputTokens", "cacheWriteTokens", "cacheReadTokens", "totalTokens", "usd"];
+  const out = { model: a.model || b.model };
+  keys.forEach((k) => (out[k] = (a[k] || 0) + (b[k] || 0)));
+  return out;
+};
+
+// The critic. Reuses the generator's provider/schema/fallback, but with a
+// review system prompt — so it returns the SAME question shape, corrected.
+const REVIEW_SYSTEM_PROMPT = `Sən imtahan suallarını YOXLAYAN və DÜZƏLDƏN təcrübəli AI redaktorsan. Sənə hazır suallar (JSON) verilir. Vəzifən: hər sualı diqqətlə oxu, SƏHVLƏRİ tap və düzəlt. Nəticəni YALNIZ verilən JSON sxemi ilə, EYNİ SAYDA və EYNİ ARDICILLIQLA qaytar (heç bir sualı silmə və əlavə etmə).
+
+DİQQƏTLƏ YOXLA VƏ DÜZƏLT:
+1. DÜZGÜN CAVAB: "correct" massivində göstərilən variant həqiqətən düzgündürmü? Riyazi/məntiqi sualları ÖZÜN HƏLL ET və cavabı yoxla. Səhvdirsə, düzgün variantın indeksinə dəyiş.
+2. TƏK SEÇİM (Cm): variantlardan YALNIZ BİRİ düzgün olmalıdır. Bir neçəsi düzgündürsə, ya sualı dəqiqləşdir, ya variantları düzəlt ki, yalnız biri düzgün qalsın.
+3. ÇOX SEÇİM (Cs): BÜTÜN düzgün variantların indeksi "correct" massivində olmalıdır.
+4. Düzgün cavab qeyd olunmayıbsa (boş "correct"), düzgün variantı tapıb qeyd et.
+5. DISTRAKTORLAR: yanlış variantlar aydın yanlış, amma inandırıcı olmalıdır. Təkrarlanan, boş və ya açıq-aşkar absurd variantları düzəlt.
+6. AÇIQ suallar (Co/Cd): "openAnswers" düzgün və tam olmalıdır — şagirdin yaza biləcəyi bütün formalar. Cavab səhvdirsə düzəlt.
+7. UYĞUNLUQ (Cma): hər nömrənin düzgün hərfi olmalıdır; nömrələnmiş və hərflənmiş siyahılar sualın "text" hissəsində tam görünməlidir.
+8. DİL və AYDINLIQ: sual birmənalı olmalıdır. İki cür başa düşülən sualı dəqiqləşdir.
+9. Sual ARTIQ DÜZGÜNDÜRSƏ, ona TOXUNMA — yalnız real səhvləri düzəlt.
+
+Cavabında bütün sualları (düzəldilmiş və toxunulmamış) tam qaytar.`;
+
+// Generate → audit → have the AI fix what is wrong → audit again. Bounded, and
+// never worse than the un-reviewed result: a review that fails, changes the
+// question count, or increases the defect count is discarded. `onStatus` lets
+// the streaming endpoint tell the teacher a check is running.
+const AI_VERIFY_ROUNDS = Math.max(0, Number(process.env.AI_VERIFY_ROUNDS ?? 2));
+
+async function verifyAndFix({ questions, prompt, preset, model, signal, onStatus }) {
+  let best = cleanQuestions(questions);
+  let bestIssues = auditQuestions(best, { requireAnswers: true });
+  let reviewCost = null;
+  let rounds = 0;
+
+  if (process.env.AI_VERIFY === "off" || AI_VERIFY_ROUNDS === 0) {
+    return { questions: best, issues: bestIssues, reviewCost: null, rounds: 0 };
+  }
+
+  for (let round = 0; round < AI_VERIFY_ROUNDS; round++) {
+    // Round 0 always runs (a correctness pass even on a structurally clean set);
+    // later rounds only if defects remain.
+    if (round > 0 && bestIssues.length === 0) break;
+    if (signal?.aborted) break;
+    onStatus?.(round === 0 ? "Suallar yoxlanılır…" : "Düzəlişlər aparılır…");
+
+    const findings = bestIssues
+      .slice(0, 40)
+      .map((x) => `#${x.index + 1} ${x.code}: ${x.detail}`)
+      .join("\n");
+    const payload = [
+      prompt ? `İLK TAPŞIRIQ: ${String(prompt).slice(0, 1500)}` : "",
+      "",
+      "YOXLANACAQ SUALLAR (JSON):",
+      JSON.stringify({ questions: best }).slice(0, 60000),
+      "",
+      findings
+        ? `AVTOMATİK YOXLAMANIN TAPDIĞI PROBLEMLƏR (mütləq düzəlt):\n${findings}`
+        : "Avtomatik yoxlama struktur problemi tapmadı — məzmun və düzgünlük yoxlaması apar.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    let out;
+    try {
+      // The reviewer may run on a stronger model than the writer — a cheap model
+      // generates acceptable questions but is a weaker critic of its own answers.
+      // Defaults to the teacher's chosen model when AI_VERIFY_MODEL is unset.
+      out = await runGeneration({
+        prompt: payload,
+        preset,
+        model: process.env.AI_VERIFY_MODEL || model,
+        signal,
+        system: REVIEW_SYSTEM_PROMPT,
+      });
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      console.error("verify round failed (keeping best-so-far):", e?.message);
+      break;
+    }
+    rounds += 1;
+    reviewCost = sumCost(reviewCost, out.cost);
+
+    const candidate = cleanQuestions(out.questions);
+    // A review that drops or adds questions is not trustworthy — discard it and
+    // keep what we had.
+    if (!Array.isArray(candidate) || candidate.length !== best.length) break;
+    const candIssues = auditQuestions(candidate, { requireAnswers: true });
+    if (candIssues.length <= bestIssues.length) {
+      best = candidate;
+      bestIssues = candIssues;
+    } else {
+      // The reviewer made it worse — reject and stop.
+      break;
+    }
+  }
+  return { questions: best, issues: bestIssues, reviewCost, rounds };
+}
+
 const extractQuestions = asyncHandler(async (req, res) => {
   if (!req.file || !req.file.buffer || !req.file.buffer.length) {
     res.status(400);
@@ -1432,12 +1608,12 @@ const computeOpenAIGenCost = (usage, model, askedId) => {
 // `onText` opts into token streaming: it receives the whole output so far after
 // every chunk, which is what lets the builder show questions as they are
 // written. The parsed result is identical either way.
-async function generateWithOpenAI(prompt, presetId, modelId, onText, signal) {
+async function generateWithOpenAI(prompt, presetId, modelId, onText, signal, systemOverride) {
   const useModel = modelId || OPENAI_GEN_MODEL;
   if (!process.env.OPENAI_API_KEY)
     throw aiError(503, "AI konfiqurasiya olunmayib (OPENAI_API_KEY)", true);
 
-  const sys = GEN_SYSTEM_PROMPT + (presetHint(presetId) ? "\n\n" + presetHint(presetId) : "");
+  const sys = (systemOverride || GEN_SYSTEM_PROMPT) + (presetHint(presetId) ? "\n\n" + presetHint(presetId) : "");
   let r;
   try {
     r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -1522,10 +1698,10 @@ async function generateWithOpenAI(prompt, presetId, modelId, onText, signal) {
   };
 }
 
-async function generateWithGemini(prompt, presetId, onText, signal) {
+async function generateWithGemini(prompt, presetId, onText, signal, systemOverride) {
   if (!process.env.GEMINI_API_KEY)
     throw aiError(503, "AI konfiqurasiya olunmayıb (GEMINI_API_KEY)", true);
-  const sys = GEN_SYSTEM_PROMPT + (presetHint(presetId) ? "\n\n" + presetHint(presetId) : "");
+  const sys = (systemOverride || GEN_SYSTEM_PROMPT) + (presetHint(presetId) ? "\n\n" + presetHint(presetId) : "");
   const models = [GEMINI_MODEL, GEMINI_FALLBACK_MODEL].filter((m, i, a) => m && a.indexOf(m) === i);
   const buildBody = (model) =>
     JSON.stringify({
@@ -1611,11 +1787,11 @@ async function generateWithGemini(prompt, presetId, onText, signal) {
   throw aiError(502, "AI suallar yarada bilmədi, yenidən cəhd et", true);
 }
 
-async function generateWithClaude(prompt, presetId, onText, signal) {
+async function generateWithClaude(prompt, presetId, onText, signal, systemOverride) {
   const client = getClient();
   if (!client) throw aiError(503, "AI konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)");
   const sys = [
-    { type: "text", text: GEN_SYSTEM_PROMPT + (presetHint(presetId) ? "\n\n" + presetHint(presetId) : "") },
+    { type: "text", text: (systemOverride || GEN_SYSTEM_PROMPT) + (presetHint(presetId) ? "\n\n" + presetHint(presetId) : "") },
   ];
   let message;
   try {
@@ -1656,17 +1832,19 @@ async function generateWithClaude(prompt, presetId, onText, signal) {
 //
 // Shared by the plain and the streaming generate endpoints so the two cannot
 // drift: the only difference between them is that `onText` is supplied.
-async function runGeneration({ prompt, preset, model, onText, signal }) {
+async function runGeneration({ prompt, preset, model, onText, signal, system }) {
   // The teacher's choice wins, but only from the allow-list: the id arrives
   // from a browser, and an unchecked one could name a pro tier at many times
   // the price. Anything unrecognised silently falls back to the default.
   const picked = findAiModel(String(model || "")) || findAiModel(DEFAULT_AI_MODEL);
 
+  // `system` swaps the generator's prompt for a different one (the reviewer),
+  // reusing the same provider chain, schema and fallback for the critic pass.
   const runners = {
     openai: (pr, ps, cb) =>
-      generateWithOpenAI(pr, ps, picked?.provider === "openai" ? picked.id : undefined, cb, signal),
-    gemini: (pr, ps, cb) => generateWithGemini(pr, ps, cb, signal),
-    claude: (pr, ps, cb) => generateWithClaude(pr, ps, cb, signal),
+      generateWithOpenAI(pr, ps, picked?.provider === "openai" ? picked.id : undefined, cb, signal, system),
+    gemini: (pr, ps, cb) => generateWithGemini(pr, ps, cb, signal, system),
+    claude: (pr, ps, cb) => generateWithClaude(pr, ps, cb, signal, system),
   };
   const keyFor = {
     openai: process.env.OPENAI_API_KEY,
@@ -1756,9 +1934,18 @@ const generateQuestions = asyncHandler(async (req, res) => {
     res.status(e?.aiStatus || 502);
     throw new Error(e?.userMessage || "AI suallar yarada bilmədi");
   }
-  await logGenerationUsage(req, out);
+  // Agentic quality gate: the AI reviews its own answers and variants before the
+  // teacher ever sees them. Falls back to the un-reviewed set if review fails.
+  const v = await verifyAndFix({
+    questions: out.questions,
+    prompt,
+    preset: req.body?.preset,
+    model: req.body?.model,
+  });
+  const cost = sumCost(out.cost, v.reviewCost);
+  await logGenerationUsage(req, { ...out, cost, questions: v.questions });
   await rememberExamPrompt(req, prompt);
-  res.json({ questions: cleanQuestions(out.questions), cost: out.cost });
+  res.json({ questions: v.questions, cost, issues: v.issues, verified: v.rounds > 0 });
 });
 
 // POST /api/quiz/generateQuestionsStream/:examId — same thing over SSE.
@@ -1837,12 +2024,25 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
   // output that will never be used.
   if (clientGone) return res.end();
 
-  const questions = cleanQuestions(out.questions);
+  // The stream showed the questions arriving; now the AI checks its own answers
+  // and variants before they are committed. The `status` events let the builder
+  // show "Suallar yoxlanılır…" during the pass.
+  const v = await verifyAndFix({
+    questions: out.questions,
+    prompt,
+    preset: req.body?.preset,
+    model: req.body?.model,
+    signal: ac.signal,
+    onStatus: (message) => sse("status", { message }),
+  });
+  if (clientGone) return res.end();
+  const cost = sumCost(out.cost, v.reviewCost);
+  const questions = v.questions;
   if (questions.length) {
-    await logGenerationUsage(req, out);
+    await logGenerationUsage(req, { ...out, cost, questions });
     await rememberExamPrompt(req, prompt);
   }
-  sse("done", { questions, cost: out.cost });
+  sse("done", { questions, cost, issues: v.issues, verified: v.rounds > 0 });
   res.end();
 });
 
@@ -2541,6 +2741,9 @@ module.exports = {
   EXTRACTION_SCHEMA,
   // exported for tests
   cleanQuestions,
+  auditQuestions,
+  verifyAndFix,
+  sumCost,
   extractQuestions,
   extractQuestionsStream,
   getAiUsage,
