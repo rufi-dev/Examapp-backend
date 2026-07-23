@@ -2425,39 +2425,48 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     throw new Error("Sual göndərilmədi");
   }
 
-  // Everything the model needs to rewrite this one item, and nothing else.
+  const hasInstr = !!(instructions && String(instructions).trim());
+  // Two very different jobs. WITH an instruction it is a SURGICAL edit — apply
+  // only what was asked and keep the rest byte-for-byte. WITHOUT one it is a
+  // fresh, deliberately-different variant of the same question.
   const ask = [
-    "Aşağıdakı imtahan sualını YENİDƏN yaz. YALNIZ BİR sual qaytar.",
+    hasInstr
+      ? "Aşağıdakı imtahan sualına YALNIZ müəllimin göstərişindəki dəyişikliyi et — başqa HEÇ NƏYİ dəyişmə. YALNIZ BİR sual qaytar."
+      : "Aşağıdakı imtahan sualının yerinə eyni mövzuda, eyni çətinlikdə YENİ, FƏRQLİ bir sual yaz. YALNIZ BİR sual qaytar.",
     "",
     "MÖVCUD SUAL (JSON):",
     JSON.stringify(question).slice(0, 4000),
     "",
     examPrompt ? `İMTAHANIN ÜMUMİ TƏSVİRİ: ${String(examPrompt).slice(0, 500)}` : "",
     "",
-    instructions && String(instructions).trim()
-      ? `MÜƏLLİMİN GÖSTƏRİŞİ: ${String(instructions).trim().slice(0, 1000)}`
+    hasInstr
+      ? `MÜƏLLİMİN GÖSTƏRİŞİ (yalnız bunu tətbiq et): ${String(instructions).trim().slice(0, 1000)}`
       : "GÖSTƏRİŞ YOXDUR: eyni mövzuda, eyni çətinlikdə, TAMAMİLƏ BAŞQA bir sual yaz.",
     "",
     "QAYDALAR:",
     "- Dəqiq 1 sual qaytar (questions massivində bir element).",
-    "- Göstəriş tələb edirsə sualın TİPİNİ dəyişə bilərsən (məs. açıq → çox seçim).",
-    "- Göstərişdə başqa cür deyilməyibsə, mövzu və fənn eyni qalsın.",
-    "- Köhnə sualı təkrarlama — yeni sual fərqli olsun.",
+    ...(hasInstr
+      ? [
+          "- ÇOX VACİB: YALNIZ göstərişdə deyilən dəyişikliyi et. Sualın qalan hissəsini — mətni, BÜTÜN variantları (choices), düzgün cavabı (correct/openAnswers/pairs) və tipini — OLDUĞU KİMİ, sözbəsöz SAXLA. Göstərişə aid olmayan heç bir sözü, rəqəmi, düsturu və ya variantı dəyişmə, yenidən ifadə etmə, yerini dəyişmə.",
+          "- Sualı \"yaxşılaşdırmağa\" çalışma, sinonimlə əvəz etmə — yalnız istənən düzəlişi et.",
+          "- Yalnız göstəriş açıq şəkildə tələb edərsə sualın tipini dəyiş (məs. açıq → çox seçim).",
+          "- Oxu mətni (reading) olarsa: mətni və [[cavab]] boşluqlarını olduğu kimi saxla, yalnız göstərişi tətbiq et.",
+        ]
+      : [
+          "- Göstərişdə başqa cür deyilməyibsə, mövzu və fənn eyni qalsın.",
+          "- Köhnə sualı təkrarlama — yeni sual fərqli olsun.",
+          "- Verilən element OXU MƏTNİDİRSƏ (type=\"reading\"): dəqiq 1 \"reading\" elementi qaytar — mətni yenidən yaz, məqsədini və uzunluğunu təxminən saxla, abzasları \\n\\n ilə ayır. Mətndə [[cavab]] boşluqları varsa, cloze formatını saxla və boşluqları yenə [[cavab]] (və ya [[cavab|alternativ]]) kimi mətnin içində ver.",
+        ]),
     // The rewrite panel is the one place a teacher explicitly asks for a
     // matching question, so the rule it is easiest to break gets repeated here.
     "- UYĞUNLUQ (Cma) yazırsansa: nömrələnmiş və hərflənmiş siyahıların MƏTNİ mütləq \"text\" içində olsun (hər element ayrı sətirdə); \"pairs\" yalnız uyğunluğu saxlayır (\"left\"=\"1\", \"right\"=\"b\"). Şagird ekranda yalnız boş 1/2/3 → A/B/C şəbəkəsini görür; \"pairs\" içindəki məzmun GÖRÜNMÜR.",
-    "- Verilən element OXU MƏTNİDİRSƏ (type=\"reading\"): dəqiq 1 \"reading\" elementi qaytar — mətni yenidən yaz, məqsədini və uzunluğunu təxminən saxla, abzasları \\n\\n ilə ayır. Mətndə [[cavab]] boşluqları varsa, cloze formatını saxla və boşluqları yenə [[cavab]] (və ya [[cavab|alternativ]]) kimi mətnin içində ver.",
   ]
     .filter(Boolean)
     .join("\n");
 
   let out = null;
   try {
-    out = await runGeneration({
-      prompt: ask,
-      preset: req.body?.preset,
-      model: req.body?.model,
-    });
+    out = await runGeneration({ prompt: ask, preset: req.body?.preset, model: req.body?.model });
   } catch (e) {
     res.status(e?.aiStatus || 502);
     throw new Error(e?.userMessage || "Sual yenidən yazıla bilmədi");
@@ -2469,29 +2478,31 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     throw new Error("AI dəqiq bir sual qaytarmadı");
   }
 
-  const v = await verifyAndFix({
-    questions: generated,
-    prompt: ask,
-    preset: req.body?.preset,
-    model: req.body?.model,
-  });
-  const [fresh] = v.questions || [];
+  // A SURGICAL edit must not be second-guessed by the AI reviewer — it would
+  // rewrite exactly the parts the teacher asked to keep. Only fresh variants
+  // (no instruction) get the review/answer-audit pass.
+  let fresh = generated[0];
+  let issues = [];
+  let verified = false;
+  let reviewCost = null;
+  if (!hasInstr) {
+    const v = await verifyAndFix({ questions: generated, prompt: ask, preset: req.body?.preset, model: req.body?.model });
+    fresh = (v.questions || [])[0] || fresh;
+    issues = v.issues;
+    verified = v.rounds > 0 && v.issues.length === 0;
+    reviewCost = v.reviewCost;
+  }
   if (!fresh) {
     res.status(502);
     throw new Error("AI yeni sual qaytarmadı");
   }
-  const cost = sumCost(out.cost, v.reviewCost);
+  const cost = sumCost(out.cost, reviewCost);
   await logGenerationUsage(req, { ...out, cost, questions: [fresh] });
 
   // An edited description sent from the rewrite panel becomes the exam's
   // description from here on.
   await rememberExamPrompt(req, examPrompt);
-  res.json({
-    question: fresh,
-    cost,
-    issues: v.issues,
-    verified: v.rounds > 0 && v.issues.length === 0,
-  });
+  res.json({ question: fresh, cost, issues, verified });
 });
 
 // ============================ Teacher chat assistant ============================
