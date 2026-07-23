@@ -12,7 +12,10 @@ RUN apk add --no-cache \
     harfbuzz \
     ca-certificates \
     ttf-freefont \
-    tzdata
+    tzdata \
+    qpdf
+# qpdf: linearizes (web-optimises) uploaded PDFs so the reader opens page 1 from
+# the first bytes over an HTTP range request instead of downloading the whole file.
 
 # LibreOffice (headless) converts uploaded Word/PowerPoint study materials to
 # PDF so they can be shown in the in-app viewer. Only the Writer/Impress/Calc

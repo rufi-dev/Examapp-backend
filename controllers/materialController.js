@@ -18,6 +18,38 @@ const OFFICE_MAX_BYTES = Number(process.env.OFFICE_MAX_BYTES || 100 * 1024 * 102
 const MATERIALS_DIR = path.join(process.cwd(), "materials");
 if (!fs.existsSync(MATERIALS_DIR)) fs.mkdirSync(MATERIALS_DIR, { recursive: true });
 
+const { execFile } = require("child_process");
+
+// Web-optimise (linearize) a PDF IN PLACE so pdf.js can paint page 1 from the
+// first bytes over an HTTP range request, instead of downloading the whole file
+// first (a 150MB test bank otherwise showed only a progress bar until every byte
+// landed). qpdf writes a reordered copy with a linearization hint table into a
+// temp file, then atomically replaces the original. Best-effort: on ANY failure
+// the original is left untouched. qpdf exits 3 on warnings but still produces a
+// valid file, so only a real error or a missing/empty output aborts the swap.
+const linearizePdf = (abs) =>
+  new Promise((resolve) => {
+    const tmp = `${abs}.lin.tmp`;
+    execFile("qpdf", ["--linearize", "--", abs, tmp], { timeout: 240000 }, (err) => {
+      try {
+        const ok = !err || err.code === 3;
+        if (!ok || !fs.existsSync(tmp) || fs.statSync(tmp).size === 0) {
+          if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+          return resolve(false);
+        }
+        fs.renameSync(tmp, abs); // atomic on the same filesystem
+        resolve(true);
+      } catch {
+        try {
+          if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+        } catch {
+          /* ignore */
+        }
+        resolve(false);
+      }
+    });
+  });
+
 const IMAGE_MIME = /^image\/(png|jpe?g|webp|gif|heic|heif)$/i;
 
 // The set of classes a student is approved-enrolled in, plus the teachers who
@@ -210,6 +242,22 @@ const addMaterial = asyncHandler(async (req, res) => {
     owner: req.user._id,
     ownerName: req.user.name || "",
   });
+
+  // Web-optimise the PDF in the BACKGROUND so the reader opens on page 1 straight
+  // away (range-streamed) instead of waiting for the whole file. Does not block
+  // the upload response; the material is fully usable meanwhile.
+  if (kind === "pdf") {
+    const abs = path.join(MATERIALS_DIR, path.basename(storedPath));
+    linearizePdf(abs)
+      .then((done) => {
+        if (done) {
+          Material.updateOne({ _id: material._id }, { sizeBytes: fs.statSync(abs).size }).catch(() => {});
+        } else {
+          console.warn("material linearize skipped:", material._id.toString());
+        }
+      })
+      .catch((e) => console.warn("material linearize error:", e?.message));
+  }
 
   const populated = await Material.findById(material._id)
     .populate("classes", "name level").populate("class", "name level")
