@@ -943,6 +943,46 @@ async function verifyAndFix({ questions, prompt, preset, model, signal, onStatus
   return { questions: best, issues: bestIssues, reviewCost, rounds };
 }
 
+// Clears every answer key so the teacher marks a clean slate — for the mode
+// where the PDF has no answers and the teacher will fill them in by hand.
+const stripAnswers = (list) =>
+  (Array.isArray(list) ? list : []).map((q) => {
+    if (!q || typeof q !== "object" || q.type === "reading") return q;
+    const out = { ...q, correct: [], openAnswer: "", openAnswers: [] };
+    if (Array.isArray(q.pairs)) {
+      out.pairs = q.pairs.map((p) => ({ ...p, right: "", rightLatex: "" }));
+    }
+    return out;
+  });
+
+// How a PDF's answer key is handled, chosen by the teacher before extraction:
+//   has-answers — keep the answers the PDF marks (the default)
+//   manual      — extract the questions only; the teacher marks the answers
+//   ai-solve    — the AI solves each question and proposes the answers, run
+//                 through the same audit → critic → audit gate as generation
+const ANSWER_MODES = new Set(["has-answers", "manual", "ai-solve"]);
+async function applyAnswerMode({ questions, mode, preset, model, signal, onStatus }) {
+  const m = ANSWER_MODES.has(mode) ? mode : "has-answers";
+  if (m === "manual") {
+    return { questions: stripAnswers(questions), issues: null, reviewCost: null, rounds: 0, mode: m };
+  }
+  if (m === "ai-solve") {
+    // verifyAndFix already audits for unmarked answers and the critic prompt
+    // solves them, so an extracted set with empty `correct` comes back solved
+    // and checked — no separate solver needed.
+    const v = await verifyAndFix({
+      questions,
+      prompt: "PDF-dən çıxarılmış sualları həll et və düzgün cavabları qeyd et.",
+      preset,
+      model,
+      signal,
+      onStatus,
+    });
+    return { ...v, mode: m };
+  }
+  return { questions, issues: null, reviewCost: null, rounds: 0, mode: m };
+}
+
 const extractQuestions = asyncHandler(async (req, res) => {
   if (!req.file || !req.file.buffer || !req.file.buffer.length) {
     res.status(400);
@@ -998,21 +1038,31 @@ const extractQuestions = asyncHandler(async (req, res) => {
     }
   }
 
+  // The teacher's answer-key choice (same three modes as the streaming path).
+  const applied = await applyAnswerMode({
+    questions: cleanQuestions(questions),
+    mode: req.body?.answerMode,
+    preset: req.body?.preset,
+    model: req.body?.model,
+  });
+  const finalQuestions = applied.questions;
+  const finalCost = sumCost(cost, applied.reviewCost);
+
   // Persist the usage so admins can see per-teacher spend (best-effort: a logging
   // failure must never break the extraction the teacher is waiting on).
-  if (cost && req.user?._id) {
+  if (finalCost && req.user?._id) {
     try {
       await AiUsage.create({
         user: req.user._id,
         exam: req.params.examId,
-        model: cost.model,
-        inputTokens: cost.inputTokens,
-        outputTokens: cost.outputTokens,
-        cacheWriteTokens: cost.cacheWriteTokens,
-        cacheReadTokens: cost.cacheReadTokens,
-        totalTokens: cost.totalTokens,
-        usd: cost.usd,
-        questions: questions.length,
+        model: finalCost.model,
+        inputTokens: finalCost.inputTokens,
+        outputTokens: finalCost.outputTokens,
+        cacheWriteTokens: finalCost.cacheWriteTokens,
+        cacheReadTokens: finalCost.cacheReadTokens,
+        totalTokens: finalCost.totalTokens,
+        usd: finalCost.usd,
+        questions: finalQuestions.length,
       });
     } catch (e) {
       console.error("AiUsage log failed:", e?.message);
@@ -1021,11 +1071,14 @@ const extractQuestions = asyncHandler(async (req, res) => {
 
   res.status(200).json({
     success: true,
-    questions: cleanQuestions(questions),
+    questions: finalQuestions,
     usage,
-    cost,
+    cost: finalCost,
     provider: usedProvider,
     fellBack,
+    answerMode: applied.mode,
+    issues: applied.issues,
+    verified: applied.rounds > 0 && (applied.issues?.length || 0) === 0,
   });
 });
 
@@ -1343,18 +1396,31 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     sse("error", { message: "AI cavabı oxunmadı. Yenidən cəhd edin." });
     return res.end();
   }
-  const questions = cleanQuestions(parsed.questions);
-  if (!questions.length) {
+  const extracted = cleanQuestions(parsed.questions);
+  if (!extracted.length) {
     console.warn(
       `AI extract (${usedProvider}) returned 0 questions; full length=${(result.full || "").length}, head=`,
       (result.full || "").slice(0, 200)
     );
   }
-  const cost =
+  const extractCost =
     result.openaiCost ||
     (usedProvider === "gemini"
       ? computeGeminiCost(result.usage, result.model)
       : computeCost(result.usage));
+
+  // The teacher's answer-key choice: keep the PDF's answers, leave them blank to
+  // mark by hand, or have the AI solve and propose them (audited + reviewed).
+  const applied = await applyAnswerMode({
+    questions: extracted,
+    mode: req.body?.answerMode,
+    preset: req.body?.preset,
+    model: req.body?.model,
+    onStatus: (message) => sse("status", { message }),
+  });
+  const questions = applied.questions;
+  const cost = sumCost(extractCost, applied.reviewCost);
+
   if (cost && req.user?._id) {
     try {
       await AiUsage.create({
@@ -1376,7 +1442,15 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
   // Instructions given alongside a PDF describe the exam just as a written
   // prompt does, so a later rewrite gets them too.
   if (questions.length) await rememberExamPrompt(req, req.body?.instructions);
-  sse("done", { questions, cost, provider: usedProvider, fellBack });
+  sse("done", {
+    questions,
+    cost,
+    provider: usedProvider,
+    fellBack,
+    answerMode: applied.mode,
+    issues: applied.issues,
+    verified: applied.rounds > 0 && (applied.issues?.length || 0) === 0,
+  });
   res.end();
 });
 
@@ -2788,6 +2862,8 @@ module.exports = {
   // exported for tests
   cleanQuestions,
   auditQuestions,
+  stripAnswers,
+  applyAnswerMode,
   verifyAndFix,
   sumCost,
   extractQuestions,
