@@ -33,6 +33,10 @@ const materialSchema = Schema(
     kind: { type: String, enum: ["pdf", "image"], required: true },
     mimeType: { type: String, default: "" },
     sizeBytes: { type: Number, default: 0 },
+    // PDF page count, filled from pdfinfo on upload (or lazily on first open for
+    // material uploaded before this existed). 0 = not computed yet. The image
+    // viewer needs it up front to lay out one slot per page.
+    pageCount: { type: Number, default: 0 },
 
     // Audience. EMPTY = shared with all of this teacher's students; otherwise
     // only the listed classes see it.

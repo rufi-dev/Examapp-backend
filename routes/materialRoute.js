@@ -15,6 +15,9 @@ const {
   setMaterialShare,
   getSharedMaterial,
   getSharedFile,
+  getSharedPages,
+  getMaterialPages,
+  getMaterialPageImage,
   joinFromShare,
   MATERIALS_DIR,
 } = require("../controllers/materialController");
@@ -74,12 +77,20 @@ const uploadSingle = (req, res, next) =>
 // by the id parameter.
 router.get("/share/:token", attachUser, getSharedMaterial);
 router.get("/share/:token/file", attachUser, getSharedFile);
+router.get("/share/:token/pages", attachUser, getSharedPages);
 // Signing in is not enough for a gated link — this puts the reader in the
 // class it belongs to. Requires a real session, so `protect`, not `attachUser`.
 router.post("/share/:token/join", protect, joinFromShare);
 
+// A single rendered page image. The signed token in the query authorises it
+// (an <img> can't send headers) and carries the material id, so no session or
+// share token is needed here. Declared before "/:id/..." so the literal "page"
+// segment is never read as an id.
+router.get("/page/:n", getMaterialPageImage);
+
 router.get("/", protect, getMaterials);
 router.get("/:id/file", protect, viewMaterial);
+router.get("/:id/pages", protect, getMaterialPages);
 router.get("/:id/download", protect, downloadMaterial);
 // Rate limit BEFORE multer so a flood is refused without writing 200MB to
 // disk first; the quota check needs the file size, so it comes after.
