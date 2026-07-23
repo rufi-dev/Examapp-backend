@@ -656,7 +656,7 @@ const normaliseMatchingLetters = (q) => {
     pairs: q.pairs.map((p) => ({
       ...p,
       right: String(p?.right ?? "")
-        .split(",")
+        .split(/[,;/|\s]+/)
         .map((s) => {
           const k = s.trim().toLowerCase();
           return remap.get(k) ?? s.trim();
@@ -732,12 +732,32 @@ const AUDIT_STRIP = (s) =>
     .trim()
     .toLowerCase();
 
+const AUDIT_TYPES = new Set(["Cm", "Cs", "Co", "Cd", "Cma", "reading"]);
+const splitMatchLabels = (s) =>
+  String(s ?? "")
+    .split(/[,;/|\s]+/)
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
+
+const letterLabelsInText = (text) => {
+  const labels = [];
+  for (const line of String(text || "").split("\n")) {
+    const m = line.match(LETTER_LINE);
+    const label = m && String(m[1] || "").toLowerCase();
+    if (label && !/^\d+$/.test(label) && /^[a-z]$/.test(label) && !labels.includes(label)) {
+      labels.push(label);
+    }
+  }
+  return labels;
+};
+
 const auditQuestions = (list, { requireAnswers = false } = {}) => {
   const issues = [];
   const add = (index, code, detail) => issues.push({ index, code, detail });
 
   (Array.isArray(list) ? list : []).forEach((q, i) => {
     if (!q || typeof q !== "object") return add(i, "not-an-object", "");
+    if (!AUDIT_TYPES.has(q.type)) return add(i, "unknown-type", `type=${q.type || ""}`);
     if (q.type === "reading") {
       if (!AUDIT_STRIP(q.text)) add(i, "empty-passage", "reading block has no text");
       return;
@@ -764,6 +784,12 @@ const auditQuestions = (list, { requireAnswers = false } = {}) => {
         if (!Number.isInteger(idx) || idx < 0 || idx >= choices.length)
           add(i, "bad-correct-index", `correct=${idx} but there are ${choices.length} choices`);
       });
+      const seenCorrect = new Set();
+      correct.forEach((idx) => {
+        if (!Number.isInteger(idx)) return;
+        if (seenCorrect.has(idx)) add(i, "duplicate-correct-index", `choice ${idx + 1} is repeated`);
+        seenCorrect.add(idx);
+      });
       if (q.type === "Cm" && correct.length > 1)
         add(i, "cm-multi-correct", `single-choice marked ${correct.length} correct answers`);
       if (requireAnswers && correct.length === 0)
@@ -778,10 +804,29 @@ const auditQuestions = (list, { requireAnswers = false } = {}) => {
     } else if (q.type === "Cma") {
       const pairs = Array.isArray(q.pairs) ? q.pairs : [];
       if (pairs.length < 2) add(i, "too-few-pairs", `only ${pairs.length} pair(s)`);
+      const numberedLines = (String(q.text || "").match(/^\s*\d+\s*[.)]/gm) || []).length;
+      if (pairs.length >= 2 && numberedLines < pairs.length) {
+        add(i, "matching-missing-left-list", `text shows ${numberedLines} numbered item(s), pairs has ${pairs.length}`);
+      }
+      const labels = letterLabelsInText(q.text);
+      const labelSet = new Set(labels);
+      if (pairs.length >= 2 && labels.length < 2) {
+        add(i, "matching-missing-letter-list", "text has no visible a/b/c letter list");
+      }
       pairs.forEach((p, pi) => {
-        if (!AUDIT_STRIP(p?.left)) add(i, "incomplete-pair", `pair ${pi + 1} has no left item`);
-        if (requireAnswers && !AUDIT_STRIP(p?.right))
+        const left = String(p?.left ?? "").trim();
+        const rights = splitMatchLabels(p?.right);
+        if (!AUDIT_STRIP(left)) add(i, "incomplete-pair", `pair ${pi + 1} has no left item`);
+        else if (!/^\d+[.)]?$/.test(left)) {
+          add(i, "matching-left-not-label", `pair ${pi + 1} left should be just a number`);
+        }
+        if (requireAnswers && !rights.length)
           add(i, "incomplete-pair", `pair ${pi + 1} has no answer letter`);
+        rights.forEach((r) => {
+          if (!/^[a-z]$/.test(r) || (labelSet.size && !labelSet.has(r))) {
+            add(i, "bad-matching-label", `pair ${pi + 1} uses '${r}'`);
+          }
+        });
       });
     }
   });
@@ -813,6 +858,7 @@ DİQQƏTLƏ YOXLA VƏ DÜZƏLT:
 7. UYĞUNLUQ (Cma): hər nömrənin düzgün hərfi olmalıdır; nömrələnmiş və hərflənmiş siyahılar sualın "text" hissəsində tam görünməlidir.
 8. DİL və AYDINLIQ: sual birmənalı olmalıdır. İki cür başa düşülən sualı dəqiqləşdir.
 9. Sual ARTIQ DÜZGÜNDÜRSƏ, ona TOXUNMA — yalnız real səhvləri düzəlt.
+10. LANGUAGE: Preserve each question's original language. Do not translate English, Russian, Turkish or Azerbaijani text while reviewing.
 
 Cavabında bütün sualları (düzəldilmiş və toxunulmamış) tam qaytar.`;
 
@@ -820,7 +866,12 @@ Cavabında bütün sualları (düzəldilmiş və toxunulmamış) tam qaytar.`;
 // never worse than the un-reviewed result: a review that fails, changes the
 // question count, or increases the defect count is discarded. `onStatus` lets
 // the streaming endpoint tell the teacher a check is running.
-const AI_VERIFY_ROUNDS = Math.max(0, Number(process.env.AI_VERIFY_ROUNDS ?? 2));
+const AI_VERIFY_ROUNDS_RAW = Number(process.env.AI_VERIFY_ROUNDS ?? 2);
+const AI_VERIFY_ROUNDS = Number.isFinite(AI_VERIFY_ROUNDS_RAW)
+  ? Math.max(0, Math.floor(AI_VERIFY_ROUNDS_RAW))
+  : 2;
+const aiVerifyDisabled = () =>
+  ["off", "false", "0", "no"].includes(String(process.env.AI_VERIFY || "").trim().toLowerCase());
 
 async function verifyAndFix({ questions, prompt, preset, model, signal, onStatus }) {
   let best = cleanQuestions(questions);
@@ -828,7 +879,7 @@ async function verifyAndFix({ questions, prompt, preset, model, signal, onStatus
   let reviewCost = null;
   let rounds = 0;
 
-  if (process.env.AI_VERIFY === "off" || AI_VERIFY_ROUNDS === 0) {
+  if (aiVerifyDisabled() || AI_VERIFY_ROUNDS === 0) {
     return { questions: best, issues: bestIssues, reviewCost: null, rounds: 0 };
   }
 
@@ -1765,6 +1816,7 @@ async function generateWithGemini(prompt, presetId, onText, signal, systemOverri
           }
         }
       } catch (e) {
+        if (signal?.aborted) throw aiError(499, "Ləğv edildi");
         await sleep(1000 * (attempt + 1));
         continue;
       }
@@ -1813,14 +1865,19 @@ async function generateWithClaude(prompt, presetId, onText, signal, systemOverri
     }
     message = await stream.finalMessage();
   } catch (e) {
-    throw aiError(502, "AI suallar yarada bilmədi. Yenidən cəhd et.");
+    const status = Number(e?.status || e?.statusCode || e?.response?.status || 0);
+    throw aiError(
+      502,
+      "AI suallar yarada bilmədi. Yenidən cəhd et.",
+      status === 429 || status >= 500 || status === 0
+    );
   }
   const textBlock = message.content.find((b) => b.type === "text");
   let parsed;
   try {
     parsed = JSON.parse(textBlock?.text || "{}");
   } catch {
-    throw aiError(502, "AI cavabı oxunmadı. Yenidən cəhd et.");
+    throw aiError(502, "AI cavabı oxunmadı. Yenidən cəhd et.", true);
   }
   return {
     questions: Array.isArray(parsed.questions) ? parsed.questions : [],
@@ -1945,7 +2002,12 @@ const generateQuestions = asyncHandler(async (req, res) => {
   const cost = sumCost(out.cost, v.reviewCost);
   await logGenerationUsage(req, { ...out, cost, questions: v.questions });
   await rememberExamPrompt(req, prompt);
-  res.json({ questions: v.questions, cost, issues: v.issues, verified: v.rounds > 0 });
+  res.json({
+    questions: v.questions,
+    cost,
+    issues: v.issues,
+    verified: v.rounds > 0 && v.issues.length === 0,
+  });
 });
 
 // POST /api/quiz/generateQuestionsStream/:examId — same thing over SSE.
@@ -2042,7 +2104,12 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
     await logGenerationUsage(req, { ...out, cost, questions });
     await rememberExamPrompt(req, prompt);
   }
-  sse("done", { questions, cost, issues: v.issues, verified: v.rounds > 0 });
+  sse("done", {
+    questions,
+    cost,
+    issues: v.issues,
+    verified: v.rounds > 0 && v.issues.length === 0,
+  });
   res.end();
 });
 
@@ -2060,22 +2127,6 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("Sual göndərilmədi");
   }
-
-  const picked = findAiModel(String(req.body?.model || "")) || findAiModel(DEFAULT_AI_MODEL);
-  const runners = {
-    openai: (pr, ps) =>
-      generateWithOpenAI(pr, ps, picked?.provider === "openai" ? picked.id : undefined),
-    gemini: generateWithGemini,
-    claude: generateWithClaude,
-  };
-  const keyFor = {
-    openai: process.env.OPENAI_API_KEY,
-    gemini: process.env.GEMINI_API_KEY,
-    claude: process.env.ANTHROPIC_API_KEY,
-  };
-  const order = [picked?.provider, "openai", "gemini", "claude"].filter(
-    (x, i, a) => x && a.indexOf(x) === i
-  );
 
   // Everything the model needs to rewrite this one item, and nothing else.
   const ask = [
@@ -2103,51 +2154,46 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     .join("\n");
 
   let out = null;
-  let lastErr = null;
-  for (const name of order) {
-    if (!keyFor[name]) continue;
-    try {
-      out = await runners[name](ask, req.body?.preset);
-      break;
-    } catch (e) {
-      lastErr = e;
-      console.error(`regenerate via ${name} failed:`, e?.message);
-      if (!e.aiFallback) break;
-    }
-  }
-  if (!out) {
-    res.status(lastErr?.aiStatus || 502);
-    throw new Error(lastErr?.userMessage || "Sual yenidən yazıla bilmədi");
+  try {
+    out = await runGeneration({
+      prompt: ask,
+      preset: req.body?.preset,
+      model: req.body?.model,
+    });
+  } catch (e) {
+    res.status(e?.aiStatus || 502);
+    throw new Error(e?.userMessage || "Sual yenidən yazıla bilmədi");
   }
 
-  const [fresh] = cleanQuestions(out.questions || []);
+  const generated = cleanQuestions(out.questions || []);
+  if (generated.length !== 1) {
+    res.status(502);
+    throw new Error("AI dəqiq bir sual qaytarmadı");
+  }
+
+  const v = await verifyAndFix({
+    questions: generated,
+    prompt: ask,
+    preset: req.body?.preset,
+    model: req.body?.model,
+  });
+  const [fresh] = v.questions || [];
   if (!fresh) {
     res.status(502);
     throw new Error("AI yeni sual qaytarmadı");
   }
-
-  try {
-    const c = out.cost || {};
-    await AiUsage.create({
-      user: req.user._id,
-      exam: req.params.examId,
-      model: c.model,
-      inputTokens: c.inputTokens || 0,
-      outputTokens: c.outputTokens || 0,
-      cacheWriteTokens: c.cacheWriteTokens || 0,
-      cacheReadTokens: c.cacheReadTokens || 0,
-      totalTokens: c.totalTokens || 0,
-      usd: c.usd || 0,
-      questions: 1,
-    });
-  } catch (e) {
-    console.error("regenerate usage log failed:", e?.message);
-  }
+  const cost = sumCost(out.cost, v.reviewCost);
+  await logGenerationUsage(req, { ...out, cost, questions: [fresh] });
 
   // An edited description sent from the rewrite panel becomes the exam's
   // description from here on.
   await rememberExamPrompt(req, examPrompt);
-  res.json({ question: fresh, cost: out.cost });
+  res.json({
+    question: fresh,
+    cost,
+    issues: v.issues,
+    verified: v.rounds > 0 && v.issues.length === 0,
+  });
 });
 
 // ============================ Teacher chat assistant ============================
