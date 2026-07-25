@@ -936,7 +936,35 @@ const getAllClasses = asyncHandler(async (req, res) => {
 // their OWN exams (admins see all).
 const getExams = asyncHandler(async (req, res) => {
   const filter = { deletedAt: null, ...(isAdminUser(req.user) ? {} : { owner: req.user._id }) };
-  const exams = await Exam.find(filter);
+  const exams = await Exam.find(filter).lean();
+
+  // Attach a lightweight result summary per exam so the results listing can show
+  // the actual OUTCOME of each exam (score spread, average, pass rate), not just
+  // a participant count. One grouped aggregation over all these exams' results;
+  // percentages are computed here so the client just renders them. Cheating-
+  // flagged (terminated) attempts are excluded from the score spread but still
+  // counted as participants.
+  if (exams.length) {
+    const ids = exams.map((e) => e._id);
+    const grouped = await Result.aggregate([
+      { $match: { examId: { $in: ids } } },
+      { $group: { _id: "$examId", rows: { $push: { p: "$earnPoints", t: "$terminated" } } } },
+    ]);
+    const byExam = new Map(grouped.map((g) => [String(g._id), g.rows]));
+    for (const e of exams) {
+      const rows = byExam.get(String(e._id)) || [];
+      const tm = e.totalMarks || 0;
+      const scores = rows
+        .filter((r) => !r.t && r.p != null && tm > 0)
+        .map((r) => Math.max(0, Math.min(100, Math.round((r.p / tm) * 100))));
+      e.stats = {
+        count: rows.length, // participants (incl. terminated)
+        passingPct: tm > 0 ? Math.round(((e.passingMarks || 0) / tm) * 100) : null,
+        scores, // percentage per valid result — the client draws the distribution
+      };
+    }
+  }
+
   res.status(200).json(exams || []);
 });
 
