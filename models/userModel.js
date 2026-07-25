@@ -63,6 +63,13 @@ const userSchema = Schema(
             type: String,
             default: "bio"
         },
+        // Staff preference: hide the floating AI assistant. Some teachers/admins
+        // find it distracting; when true the app never even mounts it (no chunk,
+        // no listeners, no AI calls). Default false = shown.
+        hideAssistant: {
+            type: Boolean,
+            default: false,
+        },
         role: {
             type: String,
             default: "student",

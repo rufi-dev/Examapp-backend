@@ -474,6 +474,7 @@ const getUser = asyncHandler(async (req, res) => {
         whatsappOptIn,
         whatsappGroupJoined,
         grade,
+        hideAssistant,
       } = user;
 
       res.status(200).json({
@@ -490,6 +491,7 @@ const getUser = asyncHandler(async (req, res) => {
         whatsappOptIn,
         whatsappGroupJoined,
         grade,
+        hideAssistant,
       });
     } else {
       res.status(404);
@@ -560,6 +562,10 @@ const updateUser = asyncHandler(async (req, res) => {
     if (typeof req.body.whatsappOptIn === "boolean") {
       user.whatsappOptIn = req.body.whatsappOptIn;
     }
+    // Hide/show the floating AI assistant (staff preference).
+    if (typeof req.body.hideAssistant === "boolean") {
+      user.hideAssistant = req.body.hideAssistant;
+    }
     // Grade ("Sinif") — only when the client sends a non-empty value.
     if (typeof req.body.grade === "string" && req.body.grade.trim()) {
       user.grade = req.body.grade.trim();
@@ -585,6 +591,7 @@ const updateUser = asyncHandler(async (req, res) => {
       isVerified: updatedUser.isVerified,
       whatsappOptIn: updatedUser.whatsappOptIn,
       grade: updatedUser.grade,
+      hideAssistant: updatedUser.hideAssistant,
     });
   } else {
     res.status(404);
