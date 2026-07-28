@@ -1,12 +1,26 @@
 const express = require('express')
-const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, loginStatus, upgradeUser, sendAutomatedEmail, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage } = require('../controllers/userController')
+const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage } = require('../controllers/userController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
+const { refreshHandler, logoutAllHandler, requireSessionFlag } = require('../controllers/authSessionController')
+const { csrfProtect } = require('../middleware/csrf')
+// AUD-008: abuse limiters on the unauthenticated identity endpoints (NAT-safe
+// per-IP windows + a tight per-EMAIL cap on the email-sending routes).
+const { loginLimiter, registerLimiter, resetLimiter, emailSendLimiter, emailSendIpLimiter, accountGuard } = require('../middleware/authLimit')
 const router = express.Router()
 
-// Auth
-router.post('/register', registerUser)
-router.post('/login', loginUser)
+// Auth. accountGuard bounds a DISTRIBUTED (many-IP) attack on ONE identity;
+// loginLimiter is the generous per-IP classroom-safe cap.
+router.post('/register', registerLimiter, registerUser)
+router.post('/login', loginLimiter, accountGuard, loginUser)
 router.get('/logout', logoutUser)
+
+// AUD-002 session model (additive). requireSessionFlag runs BEFORE any auth
+// middleware, so while SESSION_MODEL_ENABLED is off these routes are invisible
+// (404) — an unauthenticated flag-off request never reaches protect (CR-011).
+// CSRF (Gate 2): cookie-authenticated /refresh enforces the Origin allow-list;
+// /logoutAll uses a Bearer access token, so csrfProtect passes it through.
+router.post('/refresh', requireSessionFlag, csrfProtect, refreshHandler)
+router.post('/logoutAll', requireSessionFlag, csrfProtect, protect, logoutAllHandler)
 
 router.get('/getUser', protect, getUser)
 router.get('/getUserById/:id', protect, teacherOnly, getUserById)
@@ -26,23 +40,24 @@ router.patch('/:id/storage', protect, adminOnly, setUserStorage)
 
 router.get('/loginStatus', loginStatus)
 router.post('/upgradeUser', protect, adminOnly, upgradeUser)
-
-router.post('/sendAutomatedEmail', protect, sendAutomatedEmail)
+// CR-108: the client-controlled /sendAutomatedEmail endpoint was REMOVED. Password-
+// and role-changed notifications are now emitted SERVER-SIDE from their domain
+// controllers with a typed, server-owned template allowlist. No route replaces it.
 
 // Verify Account
 router.post('/sendVerificationEmail', protect, sendVerificationEmail)
 router.patch('/verifyUser/:verificationToken', verifyUser)
 
-// Reset Password
-router.post('/forgotPasswordEmail', forgotPasswordEmail)
-router.patch('/resetPassword/:resetToken', resetPassword)
+// Reset Password — an email send (per-email + per-IP limited) and a token redeem.
+router.post('/forgotPasswordEmail', emailSendIpLimiter, emailSendLimiter, forgotPasswordEmail)
+router.patch('/resetPassword/:resetToken', resetLimiter, resetPassword)
 
 // Change Password
-router.patch('/changePassword', protect, changePassword)
+router.patch('/changePassword', csrfProtect, protect, changePassword)
 
-// Login Code Email
-router.post('/sendLoginCode/:email', sendLoginCode)
-router.post('/loginWithCode/:email', loginWithCode)
+// Login Code Email — an email send (per-email + per-IP limited) and a code redeem.
+router.post('/sendLoginCode/:email', emailSendIpLimiter, emailSendLimiter, sendLoginCode)
+router.post('/loginWithCode/:email', loginLimiter, accountGuard, loginWithCode)
 
 router.post('/google/callback/', loginWithGoogle)
 

@@ -16,17 +16,9 @@ const tagSchema = Schema({
         ref: 'User',
         index: true,
     },
+    deletedAt: { type: Date, default: null, index: true },
+    deletedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
 
-    //I gotta delete it I dont know but mostly yes
-    exams: [{
-        type: Schema.Types.ObjectId,
-        ref: 'Exam'
-    }],
-
-    classes: [{
-        type: Schema.Types.ObjectId,
-        ref: 'Class'
-    }]
 },
     {
         timestamps: true,

@@ -83,9 +83,8 @@ async function main() {
 
   const examAfter = await Exam.findById(exam._id).lean();
   const userAfter = await User.findById(user._id).lean();
-  const rid = (await Result.findOne({ attemptId: attempt._id }).lean())._id.toString();
-  ok("exam.results has the result exactly once", (examAfter.results || []).filter((r) => r.toString() === rid).length === 1);
-  ok("user.results has the result exactly once", (userAfter.results || []).filter((r) => r.toString() === rid).length === 1);
+  ok("Exam no longer grows a duplicated results array", (examAfter.results || []).length === 0);
+  ok("User no longer grows a duplicated results array", (userAfter.results || []).length === 0);
 
   await scoreAndCreateResult(exam, user, attempt,
     [{ type: "Cm", answer: 0 }, { type: "Cm", answer: 1 }],

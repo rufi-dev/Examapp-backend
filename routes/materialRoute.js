@@ -5,6 +5,8 @@ const fs = require("fs");
 const path = require("path");
 const { protect, teacherOnly, attachUser } = require("../middleware/authMiddleware");
 const { uploadRateLimit, storageQuota } = require("../middleware/uploadLimit");
+// AUD-013: magic-byte validation — the uploaded content must match its extension.
+const verifyUploadSignature = require("../middleware/verifyUpload");
 const {
   getMaterials,
   addMaterial,
@@ -83,7 +85,7 @@ router.get("/:id/file", protect, viewMaterial);
 router.get("/:id/download", protect, downloadMaterial);
 // Rate limit BEFORE multer so a flood is refused without writing 200MB to
 // disk first; the quota check needs the file size, so it comes after.
-router.post("/", protect, teacherOnly, uploadRateLimit, uploadSingle, storageQuota, addMaterial);
+router.post("/", protect, teacherOnly, uploadRateLimit, uploadSingle, verifyUploadSignature, storageQuota, addMaterial);
 router.patch("/:id", protect, teacherOnly, updateMaterial);
 router.patch("/:id/share", protect, teacherOnly, setMaterialShare);
 router.delete("/:id", protect, teacherOnly, deleteMaterial);

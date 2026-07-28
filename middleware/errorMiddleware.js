@@ -1,4 +1,6 @@
 const { recordErrorEvent } = require("./requestMetrics")
+const crypto = require("crypto")
+const { isAppError } = require("../utils/appError")
 
 const errorHandler = (err, req, res, next) => {
     // Prefer a status the error carries (body-parser sets err.status=400 on
@@ -11,16 +13,36 @@ const errorHandler = (err, req, res, next) => {
     const statusCode = (carried && carried >= 400)
         ? carried
         : (res.statusCode && res.statusCode !== 200 ? res.statusCode : 500)
+    const known = isAppError(err) || (carried >= 400 && carried < 500)
+    const code = isAppError(err)
+        ? err.code
+        : statusCode >= 500
+            ? "internal_error"
+            : `http_${statusCode}`
+    const message = statusCode >= 500 && !isAppError(err)
+        ? "Internal server error"
+        : (err.message || "Request failed")
+    const requestId =
+        req.requestId ||
+        req.get?.("x-request-id") ||
+        crypto.randomUUID()
 
     // Feed the admin Health page's grouped error log (in-memory, never throws).
-    recordErrorEvent(req, statusCode, err.message)
+    recordErrorEvent(req, statusCode, code)
 
     res.status(statusCode)
+    res.setHeader("X-Request-Id", requestId)
 
-    res.json({
-        message: err.message,
-        stack: process.env.NODE_ENV === "development" ? err.stack : null
-    })
+    const body = { code, message, requestId }
+    if (
+        known &&
+        err.details &&
+        typeof err.details === "object" &&
+        JSON.stringify(err.details).length <= 2000
+    ) {
+        body.details = err.details
+    }
+    res.json(body)
 }
 
 module.exports = errorHandler

@@ -10,6 +10,7 @@ const {
   sendTelegramDocument,
   esc,
 } = require("./telegram");
+const Exam = require("../models/examModel");
 
 // Unicode font so Azerbaijani characters (ə, ş, ğ, ı, ç, ö, ü) render in the PDF
 // (pdfkit's built-in fonts are WinAnsi-only and would mangle them).
@@ -46,6 +47,15 @@ function computeStats(exam, results) {
 const rowsSorted = (results) =>
   [...results].sort((a, b) => Number(b.earnPoints || 0) - Number(a.earnPoints || 0));
 
+// CR-111 — hard bounds on the XLSX export (defense-in-depth around exceljs's
+// transitive advisories). Even though the report writes to a buffer with FIXED
+// internal part names (the archiver glob ReDoS is unreachable), we cap the number of
+// rows and the length of every user-controlled cell so a hostile/huge dataset can
+// never blow up output size, memory or time.
+const MAX_ROWS = 5000;
+const MAX_CELL = 200;
+const cap = (v) => { const s = v == null ? "" : String(v); return s.length > MAX_CELL ? s.slice(0, MAX_CELL) : s; };
+
 // ---- Excel ------------------------------------------------------------------
 async function buildResultsExcel(exam, results, cname, stats) {
   const wb = new ExcelJS.Workbook();
@@ -57,8 +67,8 @@ async function buildResultsExcel(exam, results, cname, stats) {
     { width: 40 },
   ];
   const meta = [
-    ["İmtahan", exam.name || "—"],
-    ["Sinif", cname || "—"],
+    ["İmtahan", cap(exam.name || "—")],
+    ["Sinif", cap(cname || "—")],
     ["Bitmə tarixi", fmtDateTime(exam.endDate)],
     ["İştirakçı sayı", stats.n],
     ["Orta bal", stats.avg],
@@ -85,15 +95,16 @@ async function buildResultsExcel(exam, results, cname, stats) {
     { header: "Tarix", key: "date", width: 20 },
   ];
   s2.getRow(1).font = { bold: true };
-  rowsSorted(results).forEach((r, idx) => {
+  // CR-114: CAP before SORT — a hostile huge input is never fully sorted.
+  rowsSorted(results.slice(0, MAX_ROWS)).forEach((r, idx) => {
     const pts = Number(r.earnPoints || 0);
     const pct = stats.total ? Math.round((pts / stats.total) * 100) : null;
     const passed = stats.passingMarks != null ? pts >= stats.passingMarks : null;
     s2.addRow({
       i: idx + 1,
-      name: r.userId?.name || "—",
-      email: r.userId?.email || "",
-      phone: r.userId?.phone || "",
+      name: cap(r.userId?.name || "—"),
+      email: cap(r.userId?.email || ""),
+      phone: cap(r.userId?.phone || ""),
       pts,
       pct: pct != null ? `${pct}%` : "—",
       status: passed === null ? "—" : passed ? "Keçdi" : "Keçmədi",
@@ -101,6 +112,7 @@ async function buildResultsExcel(exam, results, cname, stats) {
       date: fmtDateTime(r.createdAt),
     });
   });
+  if (results.length > MAX_ROWS) s2.addRow({ i: "…", name: `+${results.length - MAX_ROWS} sətir kəsildi (limit ${MAX_ROWS})` });
 
   const buf = await wb.xlsx.writeBuffer();
   return Buffer.from(buf);
@@ -202,13 +214,31 @@ async function sendExamReport(exam, results) {
 
   let sent = 0;
   let failed = 0;
+  const delivered = new Set(
+    (await Exam.findById(exam._id).select("+reportDeliveredKeys").lean())
+      ?.reportDeliveredKeys || []
+  );
   for (const chatId of recips) {
-    const a = await sendTelegramDocument(chatId, xlsx, `${slug}.xlsx`, caption);
-    const b = await sendTelegramDocument(chatId, pdf, `${slug}.pdf`);
+    const xKey = `${chatId}:xlsx`;
+    const pKey = `${chatId}:pdf`;
+    const a = delivered.has(xKey)
+      ? { ok: true, idempotent: true }
+      : await sendTelegramDocument(chatId, xlsx, `${slug}.xlsx`, caption);
+    if (a?.ok && !delivered.has(xKey)) {
+      await Exam.updateOne({ _id: exam._id }, { $addToSet: { reportDeliveredKeys: xKey } });
+      delivered.add(xKey);
+    }
+    const b = delivered.has(pKey)
+      ? { ok: true, idempotent: true }
+      : await sendTelegramDocument(chatId, pdf, `${slug}.pdf`);
+    if (b?.ok && !delivered.has(pKey)) {
+      await Exam.updateOne({ _id: exam._id }, { $addToSet: { reportDeliveredKeys: pKey } });
+      delivered.add(pKey);
+    }
     if (a?.ok && b?.ok) sent += 1;
     else failed += 1;
   }
   return { sent, failed };
 }
 
-module.exports = { buildResultsExcel, buildResultsPdf, sendExamReport, computeStats };
+module.exports = { buildResultsExcel, buildResultsPdf, sendExamReport, computeStats, MAX_ROWS, MAX_CELL };

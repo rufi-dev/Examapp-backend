@@ -5,15 +5,40 @@ const Enrollment = require("../models/enrollmentModel");
 const Class = require("../models/classModel");
 const Exam = require("../models/examModel");
 const bcrypt = require("bcryptjs");
-const { generateToken, hashToken, getToken } = require("../utils/index");
+const { generateToken, hashToken, getToken, validatePassword, normalizeEmail } = require("../utils/index");
 const { recordDebug } = require("../utils/debugLog");
+// CR-001: loginStatus must make the SAME session decision as protect/attachUser
+// (token-version revocation, suspended/deleted) — not just a bare signature check.
+const { resolveSessionUser } = require("../middleware/authMiddleware");
+// AUD-002: new session model, gated by SESSION_MODEL_ENABLED (default off).
+const { flags } = require("../config/featureFlags");
+const {
+  issueLoginToken,
+  sessionAwareLogout,
+  clearAuthCookies,
+  setRefreshCookie,
+  legacyCookiePolicy,
+} = require("./authSessionController");
+const sessionService = require("../services/sessionService");
+const { resolveAdminCapability, resolveApprovalAction, resolveSelfServiceCapability } = require("../services/teacherCapability");
+const { isJourneyEnabled } = require("../config/teacherSuccess/flag");
+const { capabilitiesFor } = require("../helper/teacherCapabilities");
+const teacherReferralService = require("../services/teacherReferralService");
+const { recordLoginResult } = require("../middleware/authLimit");
+const authMetrics = require("../utils/authMetrics");
 const parser = require("ua-parser-js");
 const jwt = require("jsonwebtoken");
-const { sendEmail } = require("../utils/sendEmail");
+const { sendNotification } = require("../utils/sendEmail");
+// CR-109: the ONE stable mail-failure classifier (shared with health + metrics). Mail
+// catch paths persist only its allowlisted category + a fixed event name — never the
+// raw error message, SMTP response, host, credentials, recipient, subject or body.
+const { healthCategory: classifyMailFailure } = require("../utils/mailConfig");
 const crypto = require("crypto");
 const Token = require("../models/tokenModel");
 const Cryptr = require("cryptr");
 const { OAuth2Client } = require("google-auth-library");
+const { archiveUsers } = require("../services/entityLifecycle");
+const { pageLimit, withCursor, pageResult, wantsEnvelope } = require("../utils/cursorPagination");
 
 const cryptr = new Cryptr(process.env.CRYPTR_KEY);
 
@@ -23,13 +48,35 @@ const client = new OAuth2Client(
   "postmessage"
 );
 
+// Google verify seam (exchange auth code → verified id-token payload). The
+// override is TEST-ONLY: it throws unless NODE_ENV === "test", so production code
+// can never mutate the real verifier. Pass null to restore the default.
+const defaultGoogleVerify = async (code) => {
+  const { tokens } = await client.getToken(code);
+  const ticket = await client.verifyIdToken({ idToken: tokens.id_token, audience: process.env.GOOGLE_CLIENT_ID });
+  return ticket.getPayload();
+};
+let googleVerify = defaultGoogleVerify;
+const __setGoogleVerifyForTest = (fn) => {
+  if (process.env.NODE_ENV !== "test") throw new Error("googleVerify override is test-only");
+  googleVerify = fn || defaultGoogleVerify;
+};
+
 // Register User
 const registerUser = asyncHandler(async (req, res) => {
   try {
-    const { name, email, password, phone, grade } = req.body;
+    const { name, password, phone, grade } = req.body;
+    const email = normalizeEmail(req.body.email); // CR-050: canonical identity
     // Role is chosen at sign-up (teacher/student). Anything else falls back to
     // student, so a bad/absent value can never silently create a teacher.
     const role = req.body.role === "teacher" ? "teacher" : "student";
+    // AUD-005 (CR-046): a public registrant NEVER receives teacher CAPABILITY.
+    // Requesting the teacher role only records the request — the shared
+    // self-service resolver creates the account `pending` (method "self"),
+    // unprivileged until an admin approves it (upgradeUser). Any client-supplied
+    // approval field in the body is ignored.
+    const selfCap = resolveSelfServiceCapability({ role });
+    const teacherApproval = selfCap.teacherApproval;
 
     // Validation — name/email/password/phone always required; grade (Sinif) only
     // for students (teachers don't have a grade).
@@ -42,9 +89,11 @@ const registerUser = asyncHandler(async (req, res) => {
       );
     }
 
-    if (password.length < 6) {
+    // AUD-008: shared password policy (min length + letter&digit).
+    const pwCheck = validatePassword(password);
+    if (!pwCheck.ok) {
       res.status(400);
-      throw new Error("Şifrə ən azı 6 karakter uzunluğunda olmalıdır");
+      throw new Error(pwCheck.message);
     }
 
     // Check if the user already exists
@@ -67,23 +116,27 @@ const registerUser = asyncHandler(async (req, res) => {
       password,
       phone,
       role,
+      teacherApproval,
+      teacherApprovalMeta: selfCap.teacherApprovalMeta || undefined,
       grade: role === "student" ? grade : undefined,
       onboarded: true, // role + profile chosen at sign-up, so don't re-prompt
       userAgent,
       isVerified: true,
     });
 
-    // Generate token
-    const token = generateToken(user._id);
+    // AUD-002 (CR-011): unified issuance — legacy off, session/rollback on.
+    const token = await issueLoginToken(req, res, user);
 
-    // Send HTTP-only cookie
-    res.cookie("token", token, {
-      path: "/",
-      httpOnly: true,
-      //expires: new Date(Date.now() + 1000 * 86400), // 1 day
-      sameSite: "none",
-      secure: true,
-    });
+    // CR-125: bind a referral if a valid code came through the register flow
+    // (?ref=<code>). Teacher referees only. NEVER fail registration on a referral
+    // problem — a deferred row is repaired by reconcilePendingBindings().
+    if (isJourneyEnabled()) {
+      const ref = (req.body.ref || "").toString().trim();
+      if (ref && role === "teacher") {
+        try { await teacherReferralService.bind({ refereeId: user._id, code: ref }); }
+        catch (e) { console.warn("referral bind failed:", e && e.message); }
+      }
+    }
 
     if (user) {
       const {
@@ -94,6 +147,7 @@ const registerUser = asyncHandler(async (req, res) => {
         bio,
         photo,
         role,
+        teacherApproval,
         isVerified,
         userAgent,
         grade,
@@ -106,6 +160,12 @@ const registerUser = asyncHandler(async (req, res) => {
         bio,
         photo,
         role,
+        teacherApproval, // AUD-005: a requested teacher is created "pending" (no capability)
+        // Teacher Success Journey — same trusted signals as login/getUser so a
+        // freshly-registered teacher's header/capabilities render immediately.
+        teacherSuccessJourneyEnabled: isJourneyEnabled(),
+        ...(isJourneyEnabled() && role === "teacher" ? { teacherLevel: user.teacherLevel || "spark", journeyWelcomeSeen: !!user.journeyWelcomeSeenAt } : {}),
+        capabilities: [...capabilitiesFor(user, { journeyEnabled: isJourneyEnabled() })],
         isVerified,
         userAgent,
         grade,
@@ -126,7 +186,8 @@ const registerUser = asyncHandler(async (req, res) => {
 // Login User
 const loginUser = asyncHandler(async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { password } = req.body;
+    const email = normalizeEmail(req.body.email); // CR-050: canonical identity
 
     //Validation
     if (!email || !password) {
@@ -134,20 +195,26 @@ const loginUser = asyncHandler(async (req, res) => {
       throw new Error("Email və Şifrə Əlavə edin");
     }
 
-    const user = await User.findOne({ email });
+    // AUD-001: password is select:false by default; load it explicitly here so
+    // the hash can be compared, and NOWHERE else.
+    const user = await User.findOne({ email }).select("+password");
 
-    if (!user) {
-      res.status(400);
-      throw new Error("Belə bir istifadəcimiz mövcud deyil");
-    }
-
-    console.log("login user", user)
-
-    const isPasswordCorrect = await bcrypt.compare(password, user.password);
-    if (!isPasswordCorrect) {
+    // AUD-008: do NOT enumerate accounts. An unknown email and a wrong password
+    // return the SAME status + message. When the email is unknown we still run a
+    // bcrypt compare against a dummy hash so the response TIME doesn't reveal
+    // whether the account exists (constant-work path).
+    const DUMMY_HASH = "$2a$10$0000000000000000000000000000000000000000000000000000u";
+    const isPasswordCorrect = await bcrypt.compare(password, (user && user.password) || DUMMY_HASH);
+    if (!user || !isPasswordCorrect) {
+      // CR-051: record the FAILED login against the per-account bucket.
+      recordLoginResult(email, false);
       res.status(400);
       throw new Error("Email və ya şifrə yanlışdır");
     }
+    recordLoginResult(email, true); // success clears the account's failure bucket
+
+    // AUD-007: do NOT log the user document — it carries the password hash and
+    // personal fields into long-lived, broadly-accessible log storage.
 
     // Trigger 2FA for unknown user agent
     // const ua = parser(req.headers["user-agent"])
@@ -180,8 +247,7 @@ const loginUser = asyncHandler(async (req, res) => {
     //     throw new Error("New browser or device detected")
     // }
 
-    // Generate token
-    const token = generateToken(user._id);
+    let token;
     if (user && isPasswordCorrect) {
       // Diagnostic: which device logged in (to correlate with later failures).
       recordDebug({
@@ -191,14 +257,9 @@ const loginUser = asyncHandler(async (req, res) => {
         ua: req.headers["user-agent"],
         ip: req.ip,
       });
-      // Send HTTP-only cookie
-      res.cookie("token", token, {
-        path: "/",
-        httpOnly: true,
-        //expires: new Date(Date.now() + 1000 * 86400), // 1 day
-        sameSite: "none",
-        secure: true,
-      });
+      // AUD-002 (CR-011): one issuance path — legacy when flag off, session or
+      // bounded rollback cookie when on (never a legacy no-exp token when on).
+      token = await issueLoginToken(req, res, user);
       const {
         _id,
         name,
@@ -207,6 +268,7 @@ const loginUser = asyncHandler(async (req, res) => {
         bio,
         photo,
         role,
+        teacherApproval,
         isVerified,
         userAgent,
       } = user;
@@ -219,9 +281,15 @@ const loginUser = asyncHandler(async (req, res) => {
         bio,
         photo,
         role,
+        teacherApproval, // AUD-005 (CR-046): every identity DTO carries capability state
         isVerified,
         userAgent,
         token,
+        // Teacher Success Journey — the login DTO carries the same trusted signals
+        // as getUser so the header/card render immediately (no getUser round-trip).
+        teacherSuccessJourneyEnabled: isJourneyEnabled(),
+        ...(isJourneyEnabled() && role === "teacher" ? { teacherLevel: user.teacherLevel || "spark", journeyWelcomeSeen: !!user.journeyWelcomeSeenAt } : {}),
+        capabilities: [...capabilitiesFor(user, { journeyEnabled: isJourneyEnabled() })],
       });
     } else {
       res.status(500);
@@ -235,60 +303,38 @@ const loginUser = asyncHandler(async (req, res) => {
   }
 });
 
-// Send Login Code to Email
+// Send Login Code to Email. AUD-008: NON-ENUMERATING — the response is identical
+// (200 + generic message) whether or not the email is registered or a live code
+// exists, and a send failure is logged but still returns the generic 200.
+const GENERIC_CODE_MSG = "Əgər hesab mövcuddursa, giriş kodu göndərildi";
 const sendLoginCode = asyncHandler(async (req, res) => {
-  const { email } = req.params;
+  const email = normalizeEmail(req.params.email); // CR-050: canonical identity
 
-  const user = await User.findOne({ email });
+  const user = email ? await User.findOne({ email }) : null;
+  const userToken = user
+    ? await Token.findOne({ userId: user._id, expiresAt: { $gt: Date.now() }, lToken: { $gt: "" } })
+    : null;
 
-  if (!user) {
-    res.status(404);
-    throw new Error("User not found");
+  if (user && userToken) {
+    try {
+      await sendNotification({
+        kind: "loginCode",
+        to: email,
+        subject: "Examopia — Giriş kodu",
+        name: user.name,
+        code: cryptr.decrypt(userToken.lToken),
+      });
+    } catch (error) {
+      recordDebug({ kind: "login_code_send_failed", category: classifyMailFailure(error) });
+      authMetrics.emailSendFailed();
+    }
   }
-
-  // Find login code in DB
-  let userToken = await Token.findOne({
-    userId: user._id,
-    expiresAt: { $gt: Date.now() },
-  });
-
-  if (!userToken) {
-    res.status(404);
-    throw new Error("Invalid or Expired token, please login again");
-  }
-
-  const loginCode = userToken.lToken;
-  const decryptedLoginCode = cryptr.decrypt(loginCode);
-
-  //Send Login Code Email
-  const subject = "Examopia — Giriş kodu";
-  const send_to = email;
-  const sent_from = process.env.EMAIL_USER;
-  const reply_to = process.env.EMAIL_USER || "examopia@gmail.com";
-  const template = "loginCode";
-  const name = user.name;
-  const link = decryptedLoginCode;
-
-  try {
-    await sendEmail(
-      subject,
-      send_to,
-      sent_from,
-      reply_to,
-      template,
-      name,
-      link
-    );
-    res.status(200).json({ message: `Access code sent to ${email}` });
-  } catch (error) {
-    res.status(500);
-    throw new Error("Reset Password Email not sent, please try again");
-  }
+  return res.status(200).json({ message: GENERIC_CODE_MSG });
 });
 
 // Login With Code
 const loginWithCode = asyncHandler(async (req, res) => {
-  const { email } = req.params;
+  const email = normalizeEmail(req.params.email); // CR-050: canonical identity
   const { loginCode } = req.body;
 
   if (!loginCode) {
@@ -296,30 +342,21 @@ const loginWithCode = asyncHandler(async (req, res) => {
     throw new Error("Please enter login code");
   }
 
+  // AUD-008: NON-ENUMERATING — unknown email, no live code, and a wrong code all
+  // return the SAME 400. (cryptr.decrypt is only reached when a token exists.)
   const user = await User.findOne({ email });
+  const userToken = user
+    ? await Token.findOne({ userId: user._id, expiresAt: { $gt: Date.now() }, lToken: { $gt: "" } })
+    : null;
+  const decryptedLoginCode = userToken ? cryptr.decrypt(userToken.lToken) : null;
 
-  if (!user) {
-    res.status(404);
-    throw new Error("User not found");
-  }
-
-  // Find user login token
-  let userToken = await Token.findOne({
-    userId: user._id,
-    expiresAt: { $gt: Date.now() },
-  });
-
-  if (!userToken) {
-    res.status(404);
-    throw new Error("Invalid or Expired token, please login again");
-  }
-
-  const decryptedLoginCode = cryptr.decrypt(userToken.lToken);
-
-  if (loginCode != decryptedLoginCode) {
+  if (!user || !userToken || String(loginCode) !== String(decryptedLoginCode)) {
+    recordLoginResult(email, false); // CR-051: failed code login counts per account
     res.status(400);
-    throw new Error("Incorrect login code, please try again");
-  } else {
+    throw new Error("Giriş kodu yanlışdır və ya vaxtı bitib");
+  }
+  {
+    recordLoginResult(email, true); // success clears the account failure bucket
     // Register user agent
     const ua = parser(req.headers["user-agent"]);
     const thisUserAgent = ua.ua;
@@ -333,27 +370,21 @@ const loginWithCode = asyncHandler(async (req, res) => {
     await user.save();
 
     // Generate token
-    const token = generateToken(user._id);
+    // AUD-002 (CR-011): unified issuance (loginWithCode) — preserve the historical
+    // 1-day flag-off cookie expiry.
+    const token = await issueLoginToken(req, res, user, { expires: new Date(Date.now() + 1000 * 86400) });
 
-    // Send HTTP-only cookie
-    res.cookie("token", token, {
-      path: "/",
-      httpOnly: true,
-      expires: new Date(Date.now() + 1000 * 86400), // 1 day
-      sameSite: "none",
-      secure: true,
-    });
-
-    const { _id, name, email, phone, bio, photo, role, isVerified, userAgent } =
+    const { _id, name, phone, bio, photo, role, teacherApproval, isVerified, userAgent } =
       user;
     res.status(200).json({
       _id,
       name,
-      email,
+      email, // the canonical (outer) email; avoids shadowing it inside this block
       phone,
       bio,
       photo,
       role,
+      teacherApproval, // AUD-005 (CR-046): code-login DTO carries capability state
       isVerified,
       userAgent,
       token,
@@ -387,25 +418,15 @@ const sendVerificationEmail = asyncHandler(async (req, res) => {
     expiresAt: Date.now() + 60 * (60 * 1000), // 1hour
   }).save();
   //Construct Verification URL
-  const verificationUrl = `${process.env.FRONTEND_URL}/verify/${verificationToken}`;
-  //Send Verification Email
-  const subject = "Examopia — Hesabı təsdiqlə";
-  const send_to = user.email;
-  const sent_from = process.env.EMAIL_USER;
-  const reply_to = process.env.EMAIL_USER || "examopia@gmail.com";
-  const template = "verifyEmail";
-  const name = user.name;
-  const link = verificationUrl;
+  const verificationUrl = `/verify/${verificationToken}`;
   try {
-    await sendEmail(
-      subject,
-      send_to,
-      sent_from,
-      reply_to,
-      template,
-      name,
-      link
-    );
+    await sendNotification({
+      kind: "verify",
+      to: user.email,
+      subject: "Examopia — Hesabı təsdiqlə",
+      name: user.name,
+      link: verificationUrl,
+    });
     res.status(200).json({ message: "Verification Email Sent" });
   } catch (error) {
     res.status(500);
@@ -441,13 +462,19 @@ const verifyUser = asyncHandler(async (req, res) => {
 
 // Logout User
 const logoutUser = asyncHandler(async (req, res) => {
-  res.cookie("token", "", {
-    path: "/",
-    httpOnly: true,
-    expires: new Date(0), // expire immediately
-    sameSite: "none",
-    secure: true,
-  });
+  if (flags.SESSION_MODEL_ENABLED) {
+    // AUD-002 (CR-011): revoke the current Session (sid from the access token)
+    // and clear BOTH credential cookies, not just the legacy one.
+    await sessionAwareLogout(req, res);
+  } else {
+    // Legacy behavior — byte-identical when the flag is off.
+    res.cookie("token", "", {
+      path: "/",
+      httpOnly: true,
+      expires: new Date(0), // expire immediately
+      ...legacyCookiePolicy(),
+    });
+  }
 
   return res.status(200).json({
     message: "Çıxış uğurludur",
@@ -468,6 +495,7 @@ const getUser = asyncHandler(async (req, res) => {
         bio,
         photo,
         role,
+        teacherApproval,
         exams,
         isVerified,
         userAgent,
@@ -475,7 +503,15 @@ const getUser = asyncHandler(async (req, res) => {
         whatsappGroupJoined,
         grade,
         hideAssistant,
+        teacherLevel,
       } = user;
+
+      // Teacher Success Journey — the frontend learns the enabled state from THIS
+      // trusted backend identity response (not a Vite flag). When off, no Journey
+      // fields are surfaced and the client renders exactly as before. When on, we
+      // expose the (recognition-only) level; live credit/allowance comes from the
+      // dedicated Journey endpoint. NEVER a capability/authorization signal.
+      const journeyEnabled = isJourneyEnabled();
 
       res.status(200).json({
         _id,
@@ -485,6 +521,10 @@ const getUser = asyncHandler(async (req, res) => {
         bio,
         photo,
         role,
+        // AUD-005 (CR-042): surface the granted capability state so the client can
+        // show a pending teacher an "awaiting approval" screen instead of a staff
+        // UI whose privileged API calls would all 403.
+        teacherApproval,
         exams,
         isVerified,
         userAgent,
@@ -492,6 +532,12 @@ const getUser = asyncHandler(async (req, res) => {
         whatsappGroupJoined,
         grade,
         hideAssistant,
+        teacherSuccessJourneyEnabled: journeyEnabled,
+        ...(journeyEnabled && role === "teacher" ? { teacherLevel: teacherLevel || "spark", journeyWelcomeSeen: !!user.journeyWelcomeSeenAt } : {}),
+        // CR-124: the SERVER-derived capability set the frontend route tree gates
+        // on (never derived from teacherLevel). Reflects role + approval + flag —
+        // a new Spark teacher gets safe own-scope; risky/admin stay gated.
+        capabilities: [...capabilitiesFor(user, { journeyEnabled })],
       });
     } else {
       res.status(404);
@@ -574,8 +620,16 @@ const updateUser = asyncHandler(async (req, res) => {
     // teacher or student exactly once. After that it's locked (admins use the
     // upgradeUser endpoint) — prevents a student self-promoting to teacher later.
     if (!user.onboarded && (req.body.role === "teacher" || req.body.role === "student")) {
-      user.role = req.body.role;
+      // AUD-005 (CR-046): route the self-service role choice through the SHARED
+      // transition helper so role + capability + provenance are set atomically
+      // (choosing teacher records `pending` with method "self"; any stale
+      // admin/migration provenance is cleared). A self-service choice can never
+      // grant teacher capability.
+      const next = resolveSelfServiceCapability({ role: req.body.role });
+      user.role = next.role;
       user.onboarded = true;
+      user.teacherApproval = next.teacherApproval;
+      user.teacherApprovalMeta = next.teacherApprovalMeta || undefined;
     }
 
     const updatedUser = await user.save();
@@ -588,6 +642,7 @@ const updateUser = asyncHandler(async (req, res) => {
       bio: updatedUser.bio,
       photo: updatedUser.photo,
       role: updatedUser.role,
+      teacherApproval: updatedUser.teacherApproval, // AUD-005 (CR-046): reflect capability after onboarding
       isVerified: updatedUser.isVerified,
       whatsappOptIn: updatedUser.whatsappOptIn,
       grade: updatedUser.grade,
@@ -608,7 +663,7 @@ const deleteUser = asyncHandler(async (req, res) => {
     throw new Error("User not found!");
   }
 
-  await user.deleteOne();
+  await archiveUsers([user._id], req.user._id);
 
   res.status(200).json({
     message: "User removed successfully",
@@ -632,14 +687,25 @@ const getUsers = asyncHandler(async (req, res) => {
     }).distinct("student");
     filter = { _id: { $in: studentIds } };
   }
-  const users = await User.find(filter).sort("-createdAt").select("-password").lean();
+  const query = req.query || {};
+  const limit = pageLimit(query.limit);
+  const usersPlus = await User.find(withCursor(filter, query.cursor))
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(limit + 1)
+    .select("-password")
+    .lean();
+  const page = pageResult(usersPlus, limit);
+  const users = page.items;
 
   // For the admin directory, attach each student's teacher(s) so the list can
   // answer "whose student is this?" without a request per row. A student can
   // belong to several teachers (one per class they joined), so this is a list.
   // Three queries total, regardless of how many users there are.
   if (req.user.role === "admin" && users.length) {
-    const enrollments = await Enrollment.find({ status: "approved" })
+    const enrollments = await Enrollment.find({
+      status: "approved",
+      student: { $in: users.map((user) => user._id) },
+    })
       .select("student teacher class")
       .lean();
 
@@ -675,7 +741,7 @@ const getUsers = asyncHandler(async (req, res) => {
     });
   }
 
-  res.status(200).json(users || []);
+  res.status(200).json(wantsEnvelope(req) ? page : users);
 });
 
 // PATCH /api/users/bulk — admin-only batch role change or delete, so a class of
@@ -692,8 +758,8 @@ const bulkUsers = asyncHandler(async (req, res) => {
   }
 
   if (action === "delete") {
-    const { deletedCount } = await User.deleteMany({ _id: { $in: targets } });
-    return res.json({ action, count: deletedCount, ids: targets });
+    const { archived } = await archiveUsers(targets, req.user._id);
+    return res.json({ action, count: archived, ids: targets });
   }
 
   if (action === "role") {
@@ -701,11 +767,36 @@ const bulkUsers = asyncHandler(async (req, res) => {
     if (!allowed.includes(role)) {
       return res.status(400).json({ message: "Yanlış rol" });
     }
-    const { modifiedCount } = await User.updateMany(
-      { _id: { $in: targets } },
-      { $set: { role } }
-    );
+    // CR-042: resolve role + capability through the shared service so a bulk
+    // promotion to teacher also GRANTS the capability (never leaves a latent
+    // teacherApproval:"none" teacher), and a demotion clears it. One timestamp
+    // for the whole batch. `teacherApprovalMeta:null` is written as an explicit
+    // $unset so a demoted account carries no stale provenance.
+    const next = resolveAdminCapability({ role, actorId: req.user._id, now: new Date() });
+    const set = { role: next.role, teacherApproval: next.teacherApproval };
+    const update = next.teacherApprovalMeta
+      ? { $set: { ...set, teacherApprovalMeta: next.teacherApprovalMeta } }
+      : { $set: set, $unset: { teacherApprovalMeta: "" } };
+    const { modifiedCount } = await User.updateMany({ _id: { $in: targets } }, update);
     return res.json({ action, role, count: modifiedCount, ids: targets });
+  }
+
+  // CR-042: explicit approve / revoke of the teacher CAPABILITY, applied ONLY to
+  // targets that are teachers (role unchanged). approve → capable + provenance;
+  // revoke → held at "pending" (non-capable), provenance cleared.
+  if (action === "approve" || action === "revoke") {
+    const { teacherApproval, teacherApprovalMeta } = resolveApprovalAction({
+      approve: action === "approve", actorId: req.user._id, now: new Date(),
+    });
+    const set = { teacherApproval };
+    const update = teacherApprovalMeta
+      ? { $set: { ...set, teacherApprovalMeta } }
+      : { $set: set, $unset: { teacherApprovalMeta: "" } };
+    const { modifiedCount } = await User.updateMany(
+      { _id: { $in: targets }, role: "teacher" },
+      update
+    );
+    return res.json({ action, count: modifiedCount, ids: targets });
   }
 
   res.status(400).json({ message: "Yanlış əməliyyat" });
@@ -714,6 +805,15 @@ const bulkUsers = asyncHandler(async (req, res) => {
 // GET /api/users/teacher/:id/overview — everything an admin needs about ONE
 // teacher in a single call: the classes they own, the students in them
 // (approved + still pending), and the exams they created.
+const teacherOverviewExamDto = ({ deletedAt, ...exam }) => ({
+  _id: exam._id,
+  name: exam.name,
+  class: exam.class || null,
+  createdAt: exam.createdAt,
+  duration: exam.duration || 0,
+  archived: Boolean(deletedAt),
+});
+
 const teacherOverview = asyncHandler(async (req, res) => {
   const teacher = await User.findById(req.params.id).select("-password").lean();
   if (!teacher) return res.status(404).json({ message: "Tapılmadı" });
@@ -748,9 +848,10 @@ const teacherOverview = asyncHandler(async (req, res) => {
 
   const exams = await Exam.find({ owner: teacher._id })
     .sort("-createdAt")
-    .select("title class createdAt isArchived duration")
+    .select("name class createdAt deletedAt duration")
     .populate("class", "name level")
     .lean();
+  const examDtos = exams.map(teacherOverviewExamDto);
 
   res.json({
     teacher,
@@ -769,41 +870,37 @@ const teacherOverview = asyncHandler(async (req, res) => {
           : "—"),
       joinedAt: e.createdAt,
     })),
-    exams,
+    exams: examDtos,
     stats: {
       classes: classes.length,
       students: studentIds.length,
       pending: enrollments.filter((e) => e.status === "pending").length,
-      exams: exams.length,
+      exams: examDtos.length,
     },
   });
 });
 
 // Login Status
 const loginStatus = asyncHandler(async (req, res) => {
-  try {
-    const token = getToken(req);
-    if (!token) {
-      return res.json(false);
-    }
-    //Verify Token
-    const verified = jwt.verify(token, process.env.JWT_SECRET);
-
-    if (verified) {
-      return res.json(true);
-    }
-    console.log("loginstatus:", token);
-    return res.json(false);
-  } catch (error) {
-    // Malformed/expired token -> treat as logged out instead of hanging the request
-    console.log("loginstatuscatch:", error.message);
-    return res.json(false);
-  }
+  // CR-001: true only for a VALID CURRENT session — a token revoked by password
+  // reset (sv mismatch), a suspended/deleted user, or a malformed token all
+  // report false, matching what protect/attachUser now enforce.
+  const { user } = await resolveSessionUser(getToken(req));
+  return res.json(!!user);
 });
 
-// Update User Role
+// Update User Role — the ADMIN approval mechanism (adminOnly route). AUD-005 /
+// CR-042: this is ONE of two admin entry points; both resolve the role+capability
+// through the SHARED teacherCapability service so approval state can never drift
+// from role. `approved_legacy` is migration-owned and can never be produced here.
+const ROLE_VALUES = new Set(["student", "teacher", "admin", "suspended"]);
 const upgradeUser = asyncHandler(async (req, res) => {
-  const { role, id } = req.body;
+  const { role, id, teacherApproval } = req.body;
+
+  if (!ROLE_VALUES.has(role)) {
+    res.status(400);
+    throw new Error("Invalid role");
+  }
 
   const user = await User.findById(id);
 
@@ -812,73 +909,48 @@ const upgradeUser = asyncHandler(async (req, res) => {
     throw new Error("User not found");
   }
 
-  user.role = role;
+  const next = resolveAdminCapability({ role, desiredApproval: teacherApproval, actorId: req.user._id });
+  user.role = next.role;
+  user.teacherApproval = next.teacherApproval;
+  user.teacherApprovalMeta = next.teacherApprovalMeta || undefined;
   await user.save();
+
+  // CR-108: the role/capability-changed notice is SERVER-OWNED and best-effort — a
+  // send/render/SMTP failure never rolls back the already-committed role change; it
+  // records only a sanitized event.
+  await notifyBestEffort("roleChanged", user, {
+    subject: "Examopia — Hesab statusu yeniləndi",
+    link: "/",
+  });
 
   res.status(200).json({
     message: `User role updated to ${role} successfully`,
   });
 });
 
-// Send Auto Email
-const sendAutomatedEmail = asyncHandler(async (req, res) => {
-  const { subject, send_to, reply_to, template, url } = req.body;
-
-  if (!subject || !send_to || !reply_to || !template) {
-    res.status(500);
-    throw new Error("Missing email parameter");
-  }
-
-  // Anti-abuse: a logged-in user may only trigger mail to THEIR OWN address
-  // (e.g. the password-changed notice). Admins may mail any registered user
-  // (e.g. the role-change notice). Without this, any account could send
-  // platform-branded email to arbitrary addresses (spam / phishing).
-  const isSelf =
-    String(send_to).trim().toLowerCase() ===
-    String(req.user.email).trim().toLowerCase();
-  if (!isSelf && req.user.role !== "admin") {
-    res.status(403);
-    throw new Error("Yalnız öz hesabınıza e-poçt göndərə bilərsiniz");
-  }
-
-  //Get User
-  const user = await User.findOne({ email: send_to });
-
-  if (!user) {
-    res.status(404);
-    throw new Error("User not found");
-  }
-
-  const sent_from = process.env.EMAIL_USER;
-  const name = user.name;
-  const link = `${process.env.FRONTEND_URL}${url}`;
-
+// CR-108: fire a SERVER-OWNED transactional notification. The recipient, template and
+// link are derived entirely from the server (never client input). It NEVER throws
+// into the domain controller — a failure is recorded as a label-safe event so the
+// already-committed password/role change is not rolled back.
+async function notifyBestEffort(kind, user, { subject, link, code } = {}) {
   try {
-    await sendEmail(
-      subject,
-      send_to,
-      sent_from,
-      reply_to,
-      template,
-      name,
-      link
-    );
-    res.status(200).json({ message: "Email sent successfully" });
+    await sendNotification({ kind, to: user.email, subject, name: user.name, link, code });
   } catch (error) {
-    res.status(500);
-    throw new Error("Email not sent, please try again");
+    recordDebug({ kind: "notify_failed", op: kind, category: classifyMailFailure(error) });
   }
-});
+}
 
-// Send Reset Password Email
+// Send Reset Password Email. AUD-008: NON-ENUMERATING — the response is identical
+// (same 200 + message) whether or not the email is registered, so it can't be used
+// to discover accounts. The token/email work happens only for a real user; a send
+// failure is logged server-side but STILL returns the generic 200 (uniform result).
+const GENERIC_RESET_MSG = "Əgər bu email qeydiyyatdadırsa, şifrə bərpası linki göndərildi";
 const forgotPasswordEmail = asyncHandler(async (req, res) => {
-  const { email } = req.body;
+  const email = normalizeEmail(req.body.email); // CR-050: canonical identity
 
-  const user = await User.findOne({ email });
-
+  const user = email ? await User.findOne({ email }) : null;
   if (!user) {
-    res.status(404);
-    throw new Error("No user with this email");
+    return res.status(200).json({ message: GENERIC_RESET_MSG });
   }
 
   // Delete the token if exists
@@ -899,33 +971,24 @@ const forgotPasswordEmail = asyncHandler(async (req, res) => {
     expiresAt: Date.now() + 60 * (60 * 1000), // 1hour
   }).save();
 
-  //Construct Reset Password URL
-  const resetUrl = `${process.env.FRONTEND_URL}/resetPassword/${resetToken}`;
-
-  //Send Reset Password Email
-  const subject = "Examopia — Şifrə bərpası";
-  const send_to = user.email;
-  const sent_from = process.env.EMAIL_USER;
-  const reply_to = process.env.EMAIL_USER || "examopia@gmail.com";
-  const template = "forgotPassword";
-  const name = user.name;
-  const link = resetUrl;
+  //Construct Reset Password URL (relative — resolved to the frontend origin in mail)
+  const resetUrl = `/resetPassword/${resetToken}`;
 
   try {
-    await sendEmail(
-      subject,
-      send_to,
-      sent_from,
-      reply_to,
-      template,
-      name,
-      link
-    );
-    res.status(200).json({ message: "Reset Password Email Sent" });
+    await sendNotification({
+      kind: "forgotPassword",
+      to: user.email,
+      subject: "Examopia — Şifrə bərpası",
+      name: user.name,
+      link: resetUrl,
+    });
   } catch (error) {
-    res.status(500);
-    throw new Error("Reset Password Email not sent, please try again");
+    // Swallow the send error so the response can't reveal (via status/timing) that
+    // the account exists; record it for operators instead.
+    recordDebug({ kind: "forgot_email_send_failed", category: classifyMailFailure(error) });
+    authMetrics.emailSendFailed();
   }
+  return res.status(200).json({ message: GENERIC_RESET_MSG });
 });
 
 // Reset Password Action
@@ -933,29 +996,79 @@ const resetPassword = asyncHandler(async (req, res) => {
   const { resetToken } = req.params;
   const { password } = req.body;
 
-  // Validation
-  if (password.length < 6) {
+  // AUD-008 (CR-005): COMPLETE type + policy validation BEFORE the token is
+  // claimed, so malformed input (missing / non-string / too-short) can never
+  // consume a one-time reset token. (A bare `.length` check let a non-string —
+  // e.g. an array — pass and then strand the token on a Mongoose cast failure.)
+  const pwCheck = validatePassword(password);
+  if (!pwCheck.ok) {
     res.status(400);
-    throw new Error("Password must be at least 6 characters");
+    throw new Error(pwCheck.message);
   }
 
   const hashedToken = hashToken(resetToken);
 
-  const userToken = await Token.findOne({
-    rToken: hashedToken,
-    expiresAt: { $gt: Date.now() },
-  });
+  // AUD-008 (CR-005): atomically CLAIM the token by MARKING it used — set
+  // `usedAt` only if it is still unused. This is one findAndModify, so it
+  // serializes concurrent redemptions (exactly one matches `usedAt:null`), and
+  // — crucially — the token is marked used BEFORE the password is written, so it
+  // can NEVER be redeemed a second time even if the password save commits and
+  // then throws. We deliberately do NOT un-claim on failure (that is exactly the
+  // unsafe delete-then-restore that could re-enable a token after a committed
+  // change). A failed apply strands THIS token (safe, no reuse); the user simply
+  // requests a new reset link. `usedAt:null` also matches legacy tokens that
+  // predate this field.
+  const userToken = await Token.findOneAndUpdate(
+    { rToken: hashedToken, expiresAt: { $gt: Date.now() }, usedAt: null },
+    { $set: { usedAt: new Date() } },
+    { new: true }
+  );
   if (!userToken) {
+    // CR-051: classify a REPLAY (a token that exists but was already used) as a
+    // label-safe metric — no response change (still the opaque 404).
+    const alreadyUsed = await Token.findOne({ rToken: hashedToken, usedAt: { $ne: null } }).select("_id").lean();
+    if (alreadyUsed) authMetrics.resetReplaySeen();
     res.status(404);
     throw new Error("Invalid or Expired Token!");
   }
 
-  // Find user
   const user = await User.findOne({ _id: userToken.userId });
+  if (!user) {
+    // Account no longer exists; the (already-claimed) token is inert.
+    res.status(404);
+    throw new Error("Invalid or Expired Token!");
+  }
 
-  // Now reset user password
-  user.password = password;
-  await user.save();
+  try {
+    user.password = password;
+    // AUD-002 (partial): bump the token-version so every previously-issued token
+    // for this account is revoked by the reset.
+    user.sessionVersion = (user.sessionVersion || 0) + 1;
+    await user.save();
+  } catch (err) {
+    // Do NOT restore the claim. Surface a structured event so a stranded reset
+    // is observable rather than silently swallowed.
+    recordDebug({ kind: "reset_apply_failed", message: err.message, userId: String(userToken.userId) });
+    throw err;
+  }
+
+  // AUD-002 (Gate 2): the sessionVersion bump above is the DURABLE fence (it
+  // already invalidates every issued token). When the session model is on, also
+  // revoke the user's Session records as retryable cleanup — WITHOUT a second
+  // epoch bump (revokeAllSessions does not touch sessionVersion).
+  if (flags.SESSION_MODEL_ENABLED) {
+    // CR-015: epoch-scoped cleanup — pass the committed target epoch (the
+    // post-bump sessionVersion) so only old-epoch sessions are revoked.
+    await sessionService.revokeAllSessions(user._id, user.sessionVersion || 0).catch(() => {});
+  }
+
+  // Best-effort cleanup — safety is already guaranteed by `usedAt`; a failed
+  // delete just leaves an inert, already-used token (it can no longer match the
+  // `usedAt:null` claim predicate). NOTE: the Token collection has no TTL index
+  // yet (deferred under AUD-008), so such a record lingers until that migration
+  // ships. Awaited (with the error swallowed) so cleanup ordering is
+  // deterministic; it can never turn a successful reset into an error.
+  await Token.deleteOne({ _id: userToken._id }).catch(() => {});
 
   res.status(200).json({
     message: "Password reset successful, Please login",
@@ -965,37 +1078,65 @@ const resetPassword = asyncHandler(async (req, res) => {
 // Change password
 const changePassword = asyncHandler(async (req, res) => {
   const { oldPassword, password } = req.body;
-  const user = await User.findById(req.user._id);
+  // AUD-001: needs the hash to compare the old password (schema hides it by default).
+  const user = await User.findById(req.user._id).select("+password");
 
-  if (password.length < 6) {
+  // Validate types + policy BEFORE any mutation (Gate 2 / Queue 1A).
+  if (typeof oldPassword !== "string" || typeof password !== "string" || !oldPassword || !password) {
     res.status(400);
-    throw new Error("Password must be at least 6 characters");
+    throw new Error("Please enter old and new password");
   }
-
+  const pwCheck = validatePassword(password);
+  if (!pwCheck.ok) {
+    res.status(400);
+    throw new Error(pwCheck.message);
+  }
   if (!user) {
     res.status(404);
     throw new Error("User not found");
   }
 
-  if (!oldPassword || !password) {
-    res.status(400);
-    throw new Error("Please enter old and new password");
-  }
-
-  //Check if old password is correct
   const isPasswordCorrect = await bcrypt.compare(oldPassword, user.password);
-
-  //Save new password
-  if (user && isPasswordCorrect) {
-    user.password = password;
-    await user.save();
-    res
-      .status(200)
-      .json({ message: "Password reset successfully, Please re-login" });
-  } else {
+  if (!isPasswordCorrect) {
     res.status(400);
     throw new Error("Old password is incorrect");
   }
+
+  if (!flags.SESSION_MODEL_ENABLED) {
+    // Legacy behavior — byte-identical when the flag is off.
+    user.password = password;
+    await user.save();
+    await notifyBestEffort("passwordChanged", user, { subject: "Examopia — Şifrəniz dəyişdirildi" });
+    return res.status(200).json({ message: "Password reset successfully, Please re-login" });
+  }
+
+  // AUD-002 (Gate 2): atomic guarded write (password hash + one epoch bump) +
+  // caller rebind + sibling revoke. `req.user._id` == sid-bound caller; get the
+  // sid from the presented access token.
+  const salt = await bcrypt.genSalt(10);
+  const newHash = await bcrypt.hash(password, salt);
+  const expectedSv = user.sessionVersion || 0;
+  const decoded = jwt.decode(getToken(req)) || {};
+  const sid = decoded.sid || "";
+
+  const out = await sessionService.changePasswordAtomic(user, newHash, expectedSv, sid);
+  if (!out.ok && out.conflict) {
+    // Lost the guarded race to a concurrent password/epoch change — safe retry.
+    res.status(409);
+    throw new Error("Password change conflicted, please retry");
+  }
+  // Password + epoch are committed here (whether or not the caller can rebind) — the
+  // server-owned notice is best-effort and never affects that committed result.
+  await notifyBestEffort("passwordChanged", user, { subject: "Examopia — Şifrəniz dəyişdirildi" });
+  if (out.reauth) {
+    // Password + epoch committed, but the caller's session could not be rebound
+    // ⇒ clear credentials and require login (never roll back the epoch).
+    clearAuthCookies(res);
+    return res.status(401).json({ error: "reauthenticate", message: "Password changed, please log in again" });
+  }
+  // Caller stays signed in with the new pair.
+  setRefreshCookie(res, out.refreshToken, out.refreshExpiresAt, out.absoluteExpiresAt);
+  return res.status(200).json({ token: out.accessToken, message: "Password changed successfully" });
 });
 
 // Login With Google
@@ -1003,17 +1144,11 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
   const { code } = req.body;
 
   // Exchange the one-time auth code (from the frontend popup "auth-code" flow)
-  // for tokens, server-side. This avoids the GSI button's third-party-cookie
-  // requirement that breaks in modern browsers.
-  const { tokens } = await client.getToken(code);
-
-  const ticket = await client.verifyIdToken({
-    idToken: tokens.id_token,
-    audience: process.env.GOOGLE_CLIENT_ID,
-  });
-
-  const payload = ticket.getPayload();
-  const { name, email, picture, sub } = payload;
+  // for tokens, server-side, and verify the id_token. Routed through the
+  // `googleVerify` seam so tests can inject a payload WITHOUT a real Google call.
+  const payload = await googleVerify(code);
+  const { name, picture, sub } = payload;
+  const email = normalizeEmail(payload.email); // CR-050: canonical identity reconciliation
   const password = Date.now() + sub;
 
   // Get user agent
@@ -1036,16 +1171,9 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
 
     if (newUser) {
       // Generate token
-      const token = generateToken(newUser._id);
-
-      // Send HTTP-only cookie
-      res.cookie("token", token, {
-        path: "/",
-        httpOnly: true,
-        expires: new Date(Date.now() + 1000 * 86400), // 1 day
-        sameSite: "none",
-        secure: true,
-      });
+      // AUD-002 (CR-011): unified issuance (Google, new user) — preserve the
+      // historical 1-day flag-off cookie expiry.
+      const token = await issueLoginToken(req, res, newUser, { expires: new Date(Date.now() + 1000 * 86400) });
 
       const {
         _id,
@@ -1055,6 +1183,7 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
         bio,
         photo,
         role,
+        teacherApproval,
         isVerified,
         userAgent,
       } = newUser;
@@ -1066,6 +1195,7 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
         bio,
         photo,
         role,
+        teacherApproval, // AUD-005 (CR-046): Google new-user DTO carries capability state
         isVerified,
         userAgent,
         token,
@@ -1075,9 +1205,6 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
 
   // User exists Login
   if (user) {
-    // Generate token
-    const token = generateToken(user._id);
-
     // Diagnostic: which device logged in (to correlate with later failures).
     recordDebug({
       kind: "login_ok",
@@ -1087,16 +1214,11 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
       ip: req.ip,
     });
 
-    // Send HTTP-only cookie
-    res.cookie("token", token, {
-      path: "/",
-      httpOnly: true,
-      expires: new Date(Date.now() + 1000 * 86400), // 1 day
-      sameSite: "none",
-      secure: true,
-    });
+    // AUD-002 (CR-011): unified issuance (Google, existing user) — preserve the
+    // historical 1-day flag-off cookie expiry.
+    const token = await issueLoginToken(req, res, user, { expires: new Date(Date.now() + 1000 * 86400) });
 
-    const { _id, name, email, phone, bio, photo, role, isVerified, userAgent } =
+    const { _id, name, email, phone, bio, photo, role, teacherApproval, isVerified, userAgent } =
       user;
     res.status(200).json({
       _id,
@@ -1106,6 +1228,7 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
       bio,
       photo,
       role,
+      teacherApproval, // AUD-005 (CR-046): Google existing-user DTO carries capability state
       isVerified,
       userAgent,
       token,
@@ -1268,6 +1391,7 @@ const setUserStorage = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  __setGoogleVerifyForTest, // test-only seam (rejects unless NODE_ENV==="test")
   getMyStorage,
   setUserStorage,
   markOnboardingStep,
@@ -1281,7 +1405,6 @@ module.exports = {
   deleteUser,
   loginStatus,
   upgradeUser,
-  sendAutomatedEmail,
   sendVerificationEmail,
   verifyUser,
   forgotPasswordEmail,
@@ -1293,4 +1416,5 @@ module.exports = {
   getUserById,
   bulkUsers,
   teacherOverview,
+  teacherOverviewExamDto,
 };

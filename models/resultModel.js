@@ -13,11 +13,41 @@ const resultSchema = Schema(
       required: true,
       ref: "Exam",
     },
+    // AUD-003: the immutable exam version this result was graded against, plus its
+    // content hash — the official grade is reproducible from this snapshot alone.
+    // Null + legacyUnversioned:true when the attempt predates versioning (graded
+    // against the live exam; explicitly NOT a trustworthy immutable snapshot).
+    examVersionId: {
+      type: Schema.Types.ObjectId,
+      ref: "ExamVersion",
+      default: null,
+    },
+    gradingSnapshotHash: {
+      type: String,
+      default: null,
+    },
+    legacyUnversioned: {
+      type: Boolean,
+      default: false,
+    },
+    // AUD-004: the exact autosave revision whose answers were graded. For a live
+    // client submit this is the submitted client revision; for a finalizer/auto
+    // result it is the highest server-acknowledged autosave revision. The review
+    // UI states which revision was graded.
+    gradedRevision: {
+      type: Number,
+      default: null,
+    },
     attempts: {
       type: Number,
       required: true,
       default: 1,
     },
+    // AUD-016: explicit metrics. `answeredCount` is question completion;
+    // `attemptOrdinal` is the server-assigned try number. Legacy rows may have
+    // null because the old overloaded `attempts` value cannot be disambiguated.
+    answeredCount: { type: Number, default: null },
+    attemptOrdinal: { type: Number, default: null },
     earnPoints: {
       type: Number,
       required: true,
@@ -123,8 +153,14 @@ const resultSchema = Schema(
 // student's results, the rank "best score" reads) and per-exam (rankings,
 // results-by-exam). Without these, countDocuments/find full-scan the collection
 // and get slower as results grow.
-resultSchema.index({ userId: 1, examId: 1, createdAt: 1 });
-resultSchema.index({ examId: 1 });
+// CR-119: EXPLICIT names (match the mongoose defaults, so no prod rename) so these
+// performance indexes are unambiguous entries in the shared index contract.
+resultSchema.index({ userId: 1, examId: 1, createdAt: 1 }, { name: "userId_1_examId_1_createdAt_1" });
+resultSchema.index({ examId: 1 }, { name: "examId_1" });
+resultSchema.index(
+  { createdAt: -1, _id: -1 },
+  { name: "page_createdAt_desc" }
+);
 
 // At most ONE Result per attempt. Partial (only docs that HAVE an objectId
 // attemptId) so legacy Results without attemptId never collide on null, and a

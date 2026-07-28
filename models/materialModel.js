@@ -87,11 +87,21 @@ const materialSchema = Schema(
 
     owner: { type: Schema.Types.ObjectId, ref: "User", index: true },
     ownerName: { type: String, trim: true },
+
+    // Teacher Journey (flag-gated usage): distinct VERIFIED students who have opened
+    // this material in the in-app viewer. Recorded idempotently ($addToSet) on real
+    // access so a re-view never inflates it; a material becomes "useful" (earns XP)
+    // once >= 3 distinct students appear here. Bounded by the teacher's own students.
+    viewers: { type: [{ type: Schema.Types.ObjectId, ref: "User" }], default: [] },
   },
   { timestamps: true }
 );
 
 // Newest-first listing per owner is the common query.
 materialSchema.index({ owner: 1, createdAt: -1 });
+materialSchema.index(
+  { createdAt: -1, _id: -1 },
+  { name: "page_createdAt_desc" }
+);
 
 module.exports = mongoose.model("Material", materialSchema);

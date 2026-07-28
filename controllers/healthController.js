@@ -495,11 +495,52 @@ const checkBusiness = () =>
 
 // ------------------------------ file storage ------------------------------
 
-// uploads/ holds the ONLY copy of every exam PDF (Mongo stores just the URL),
-// persisted by the `uploads` Docker volume — so its health matters most.
+// AUD-013 CR-067: exam PDFs now live in the PRIVATE key store (EXAM_PDF_DIR, its
+// own persistent volume), served only through the authorized stream. `uploads/`
+// is legacy public staging kept until the migration relocates old files. Health
+// checks the private store's writability AND DB↔file consistency (keyed rows
+// with no file = data loss; files with no row = orphans).
+const { EXAM_PDF_DIR, PDF_STAGING_DIR, pathForKey } = require("../helper/examPdfStorage");
+const PDFModel = require("../models/pdfModel");
+
+// Cross-check the private store against the pdfs collection, bounded so a large
+// store never makes the health probe expensive. CR-076: orphan detection queries
+// the DB PER FILE (never a sampled in-memory set), so a valid file whose row is
+// outside one sample is NOT mislabeled orphan. Both scans are bounded + flagged.
+async function privateStoreConsistency() {
+  const SAMPLE = 3000;
+  const out = { dir: EXAM_PDF_DIR, keyedRows: 0, missingFiles: 0, files: 0, orphanFiles: 0, missingSampled: false, orphanSampled: false };
+  try {
+    const keyed = await PDFModel.find({ key: { $exists: true, $ne: null } }, { key: 1 }).lean().limit(SAMPLE);
+    out.keyedRows = keyed.length;
+    out.missingSampled = keyed.length >= SAMPLE;
+    for (const r of keyed) {
+      const abs = pathForKey(r.key);
+      if (abs && !fs.existsSync(abs)) out.missingFiles += 1; // keyed row with no file = data loss
+    }
+    try {
+      const names = (await fsp.readdir(EXAM_PDF_DIR)).filter((n) => /^[a-f0-9]{64}\.pdf$/.test(n));
+      out.files = names.length;
+      out.orphanSampled = names.length > SAMPLE;
+      for (const n of names.slice(0, SAMPLE)) {
+        const key = n.slice(0, 64);
+        if (!(await PDFModel.exists({ key }))) out.orphanFiles += 1; // file with no DB row = orphan
+      }
+    } catch { /* dir may not exist yet on a fresh box */ }
+  } catch (e) { out.error = String(e?.message || e); }
+  return out;
+}
+
 const checkStorage = () =>
   cached("storage", 5 * 60 * 1000, async () => {
-    const dir = path.join(process.cwd(), "uploads");
+    // The PRIVATE exam-PDF store's own writability probe (its volume matters most).
+    let privateWrite = { ok: false };
+    try { const { assertWritable } = require("../helper/examPdfStorage"); await assertWritable(EXAM_PDF_DIR); privateWrite = { ok: true }; }
+    catch (e) { privateWrite = { ok: false, error: String(e?.message || e) }; }
+    const privateStore = await privateStoreConsistency();
+
+    // CR-076: probe the CONFIGURED staging dir, not a hard-coded workspace path.
+    const dir = path.resolve(PDF_STAGING_DIR);
     const probe = path.join(dir, ".health-write-test");
     let write = { ok: false };
     const t0 = Date.now();
@@ -545,7 +586,10 @@ const checkStorage = () =>
         .filter((n) => n.startsWith("session-")).length;
     } catch { /* absent unless WhatsApp used */ }
 
-    return { uploadsDir: dir, write, files, waSessions, checkedAt: Date.now() };
+    return {
+      privateStore: { dir: EXAM_PDF_DIR, write: privateWrite, ...privateStore },
+      uploadsDir: dir, write, files, waSessions, checkedAt: Date.now(),
+    };
   });
 
 // ----------------------------- errors / security --------------------------
@@ -582,32 +626,30 @@ const checkDebugLogs = () =>
 // past the caller's timeout and blank the whole section.
 const checkIntegrations = () =>
   cached("integrations", 15 * 60 * 1000, async () => {
-    // --- Email (SMTP) — same env config as utils/sendEmail.js; verify() opens
-    // a real connection (AUTH LOGIN) without sending anything. rejectUnauthorized
-    // is left false to MIRROR the real sender (utils/sendEmail.js) — a stricter
-    // probe would report "broken" while real mail actually goes through. Email
-    // is disabled in prod (EMAIL_ENABLED=false), so this path is usually dormant.
+    // --- Email (SMTP) — CR-107: use the ONE shared, cert-VERIFIED transporter
+    // (utils/mailConfig) so delivery and health can never drift. verify() opens a
+    // real connection (AUTH LOGIN) without sending. The probe NEVER returns the
+    // provider's raw error, host, credentials, recipient or content — only a stable
+    // category code (smtp_timeout | smtp_tls | smtp_auth | smtp_unavailable).
     const emailProbe = async () => {
       if (process.env.EMAIL_ENABLED !== "true")
         return { name: "E-poçt (SMTP)", configured: false, ok: null, detail: "EMAIL_ENABLED deaktivdir — sistem e-poçt göndərmir" };
       const t0 = Date.now();
-      const nodemailer = require("nodemailer");
-      const transporter = nodemailer.createTransport({
-        host: process.env.EMAIL_HOST,
-        port: Number(process.env.EMAIL_PORT || 587),
-        secure: Number(process.env.EMAIL_PORT) === 465,
-        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-        tls: { rejectUnauthorized: false },
-        connectionTimeout: 8000,
-      });
+      const { createMailTransporter, healthCategory } = require("../utils/mailConfig");
+      let transporter;
+      try {
+        transporter = createMailTransporter(); // strict config; throws on invalid env
+      } catch (_) {
+        return { name: "E-poçt (SMTP)", configured: true, ok: false, code: "smtp_unavailable", detail: "SMTP konfiqurasiyası yanlışdır" };
+      }
       const res = await withTimeout(
-        transporter.verify().then(() => ({ ok: true })).catch((e) => ({ ok: false, err: String(e?.message || e) })),
+        transporter.verify().then(() => ({ ok: true })).catch((e) => ({ ok: false, code: healthCategory(e) })),
         9000,
-        { ok: false, err: "vaxt bitdi (timeout)" }
+        { ok: false, code: "smtp_timeout" }
       );
       return res.ok
         ? { name: "E-poçt (SMTP)", configured: true, ok: true, detail: `Qoşulma OK · ${Date.now() - t0}ms` }
-        : { name: "E-poçt (SMTP)", configured: true, ok: false, detail: `Qoşulma alınmadı: ${(res.err || "").slice(0, 120)}` };
+        : { name: "E-poçt (SMTP)", configured: true, ok: false, code: res.code, detail: res.code };
     };
 
     // --- Telegram bot — tgApi never throws (returns null on failure).
@@ -629,25 +671,7 @@ const checkIntegrations = () =>
       }
     };
 
-    // --- Stripe — read-only balance ping (null-guarded like quizController).
-    const stripeProbe = async () => {
-      if (!process.env.STRIPE_KEY)
-        return { name: "Stripe (ödənişlər)", configured: false, ok: null, detail: "STRIPE_KEY qurulmayıb" };
-      const t0 = Date.now();
-      try {
-        const stripe = require("stripe")(process.env.STRIPE_KEY);
-        const res = await withTimeout(
-          stripe.balance.retrieve().then(() => ({ ok: true })).catch((e) => ({ ok: false, err: String(e?.message || e) })),
-          8000,
-          { ok: false, err: "vaxt bitdi (timeout)" }
-        );
-        return res.ok
-          ? { name: "Stripe (ödənişlər)", configured: true, ok: true, detail: `API OK · ${Date.now() - t0}ms` }
-          : { name: "Stripe (ödənişlər)", configured: true, ok: false, detail: (res.err || "").slice(0, 120) };
-      } catch (e) {
-        return { name: "Stripe (ödənişlər)", configured: true, ok: false, detail: String(e?.message || e).slice(0, 120) };
-      }
-    };
+    // Payments (Stripe) removed — no payment integration to probe. All exams free.
 
     // --- WhatsApp Web (no live probe — just count linked Chromium sessions).
     const whatsappRow = () => {
@@ -706,7 +730,6 @@ const checkIntegrations = () =>
       emailProbe(),
       telegramProbe(),
       whatsappRow(),
-      stripeProbe(),
       aiRow(),
       googleRow(),
     ]);
@@ -840,14 +863,26 @@ const buildAlertsAndScore = (d) => {
     else if (s.daysLeft != null && s.daysLeft <= T.sslWarnDays) { add("warning", "SSL", `${s.host} sertifikatı ${s.daysLeft} günə bitir`, "Avtomatik yenilənməni izləyin", `${s.daysLeft} gün`, `${T.sslWarnDays} gün`); dock(1); }
   }
 
-  // ---- storage / media (weight ~5). uploads/ is the ONLY copy of exam PDFs,
-  // so a write failure OR a whole-check timeout ({error}) must alert.
+  // ---- storage / media (weight ~5). AUD-013 CR-067: the PRIVATE exam-PDF store
+  // holds the authoritative copy of every exam PDF, so a write failure, a whole-
+  // check timeout, or DB↔file inconsistency (keyed rows whose file is missing)
+  // must alert.
   if (checkErrored(d.storage)) {
-    add("critical", "Fayllar", "uploads yoxlaması tamamlanmadı (vaxt bitdi) — disk/volume dayanmış ola bilər", "Serverdə diski və uploads volume-u yoxlayın");
+    add("critical", "Fayllar", "fayl yoxlaması tamamlanmadı (vaxt bitdi) — disk/volume dayanmış ola bilər", "Serverdə diski və PDF volume-larını yoxlayın");
     dock(4);
-  } else if (d.storage?.write && d.storage.write.ok !== true) {
-    add("critical", "Fayllar", "uploads qovluğuna yazmaq mümkün olmadı", "Disk dolub? İcazələri yoxlayın");
-    dock(4);
+  } else {
+    if (d.storage?.privateStore?.write && d.storage.privateStore.write.ok !== true) {
+      add("critical", "Fayllar", "gizli PDF qovluğuna (EXAM_PDF_DIR) yazmaq mümkün olmadı", "Volume bağlanıb? Disk dolub? İcazələri yoxlayın");
+      dock(4);
+    }
+    if ((d.storage?.privateStore?.missingFiles || 0) > 0) {
+      add("critical", "Fayllar", `${d.storage.privateStore.missingFiles} imtahan PDF-i bazada var, faylı yoxdur`, "EXAM_PDF_DIR volume-u itib/dəyişib? Migrasiya/bərpa yoxlayın");
+      dock(4);
+    }
+    if (d.storage?.write && d.storage.write.ok !== true) {
+      add("warning", "Fayllar", "köhnə uploads qovluğuna yazmaq mümkün olmadı", "Disk dolub? İcazələri yoxlayın");
+      dock(1);
+    }
   }
   if (d.business?.media && d.business.media.ok === false) {
     add("warning", "Fayllar", "Cloudinary şəkil yoxlaması uğursuz oldu", "Cloudinary statusunu yoxlayın");

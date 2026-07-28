@@ -34,8 +34,14 @@ const MAX_SESSIONS = Number(process.env.WHATSAPP_MAX_SESSIONS || 5);
 // fall back to the library default.
 const WWEB_VERSION = (process.env.WHATSAPP_WEB_VERSION || "").trim();
 
-// ownerId(string) -> { client, ready, lastQrDataUrl, starting, readyTimer }
+// ownerId(string) -> { client, ready, lastQrDataUrl, starting, readyTimer, reconnectTimer }
 const sessions = new Map();
+
+// CR-117: once lifecycleShutdown runs, no session may schedule a NEW reconnect or
+// start a NEW Chromium. shutdownWhatsapp() sets this, clears every per-session timer,
+// and destroys clients WITHOUT logging users out (auth on disk is preserved for the
+// next boot's initPersistedSessions).
+let shuttingDown = false;
 
 // Normalize a stored phone to bare international digits ("994501234567").
 function toDigits(raw) {
@@ -55,7 +61,7 @@ function getSession(ownerId) {
   const id = String(ownerId);
   let s = sessions.get(id);
   if (!s) {
-    s = { client: null, ready: false, lastQrDataUrl: null, starting: false, readyTimer: null };
+    s = { client: null, ready: false, lastQrDataUrl: null, starting: false, readyTimer: null, reconnectTimer: null };
     sessions.set(id, s);
   }
   return s;
@@ -82,7 +88,7 @@ function clearStaleLocks(ownerId) {
 
 // Boot (or re-boot) a teacher's WhatsApp client. Safe to call repeatedly.
 function initFor(ownerId) {
-  if (!ENABLED || !ownerId) return;
+  if (!ENABLED || !ownerId || shuttingDown) return; // CR-117: never start a new client during shutdown
   const id = String(ownerId);
   const s = getSession(id);
   if (s.client || s.starting) return;
@@ -186,9 +192,10 @@ function initFor(ownerId) {
     // Only auto-reconnect a session that was actually LINKED (survive network
     // blips). A never-scanned session that ran out of QR retries is left
     // stopped — the teacher re-links on demand from the dashboard — so we don't
-    // loop a headless browser + QR forever.
-    if (wasLinked) setTimeout(() => initFor(id), 10000);
-    else console.log(`[WHATSAPP] ${id} not linked — stopped (re-link from dashboard).`);
+    // loop a headless browser + QR forever. CR-117: never reconnect during shutdown,
+    // and TRACK the timer so lifecycleShutdown can clear it.
+    if (wasLinked && !shuttingDown) s.reconnectTimer = setTimeout(() => { if (!shuttingDown) initFor(id); }, 10000);
+    else if (!wasLinked) console.log(`[WHATSAPP] ${id} not linked — stopped (re-link from dashboard).`);
   });
 
   s.client.initialize().catch((e) => {
@@ -203,6 +210,7 @@ function initFor(ownerId) {
 // but never ready" reconnect state).
 function restartFor(ownerId) {
   const id = String(ownerId);
+  if (shuttingDown) return; // CR-117: no restarts once shutting down
   const s = getSession(id);
   clearTimeout(s.readyTimer);
   const old = s.client;
@@ -217,7 +225,7 @@ function restartFor(ownerId) {
       /* ignore */
     }
     clearStaleLocks(id);
-    setTimeout(() => initFor(id), 3000);
+    if (!shuttingDown) s.reconnectTimer = setTimeout(() => { if (!shuttingDown) initFor(id); }, 3000);
   });
 }
 
@@ -407,9 +415,44 @@ function initPersistedSessions() {
   }
 }
 
+// CR-117 — graceful shutdown for the optional WhatsApp subsystem. Prevents any new
+// reconnect/start, clears every per-session timer, and DESTROYS each headless client
+// (closes Chromium) WITHOUT logout() — the on-disk auth is preserved so the next boot
+// re-links via initPersistedSessions. Bounded so a stuck client can't hang the process.
+// Flag-off is a genuine no-op: nothing was started, so the sessions map is empty.
+async function shutdownWhatsapp({ timeoutMs = 8000 } = {}) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const tasks = [];
+  let clients = 0;
+  for (const s of sessions.values()) {
+    if (s.readyTimer) { clearTimeout(s.readyTimer); s.readyTimer = null; }
+    if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
+    const c = s.client;
+    s.client = null; s.ready = false; s.starting = false;
+    if (c) { clients += 1; tasks.push(Promise.resolve().then(() => c.destroy()).catch(() => {})); }
+  }
+  if (ENABLED && (clients || sessions.size)) console.log(`[WHATSAPP] shutdown: destroying ${clients} client(s), timers cleared (auth preserved)`);
+  // Bounded: don't let a wedged Chromium destroy() hang the graceful shutdown.
+  await Promise.race([Promise.allSettled(tasks), new Promise((r) => setTimeout(r, timeoutMs))]);
+}
+
+// Test-only: reset the shutdown latch so a fresh process-per-test starts clean.
+function _resetShutdownForTests() { shuttingDown = false; sessions.clear(); }
+// Test-only: inject a fake session so shutdown behaviour is unit-testable without a
+// real headless Chromium. Returns the created session object.
+function _injectSessionForTests(id, session) { const s = { ...getSession(id), ...session }; sessions.set(String(id), s); return s; }
+function _isShuttingDownForTests() { return shuttingDown; }
+function _initForTest(id) { return initFor(id); }
+
 module.exports = {
   initFor,
   initPersistedSessions,
+  shutdownWhatsapp,
+  _resetShutdownForTests,
+  _injectSessionForTests,
+  _isShuttingDownForTests,
+  _initForTest,
   getStatusFor,
   getQrFor,
   logoutFor,

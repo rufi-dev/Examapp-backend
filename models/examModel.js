@@ -102,6 +102,21 @@ const examSchema = Schema({
     // Set once the post-endDate Telegram results report (PDF + Excel) has been
     // sent, so the scheduler never sends it twice for the same exam.
     reportSentAt: { type: Date },
+    // Bounded recipient/artifact idempotency ledger for the report worker.
+    reportDeliveredKeys: { type: [String], default: undefined, select: false },
+    // AUD-017 durable report claim/retry state. A worker owns a bounded lease;
+    // failed work remains due indefinitely (no 12-hour loss window).
+    reportLeaseOwner: { type: String, default: null, select: false },
+    reportLeaseUntil: { type: Date, default: null, select: false },
+    reportNextAttemptAt: { type: Date, default: null, select: false },
+    reportAttempts: { type: Number, default: 0, select: false },
+    reportDeadLetterAt: { type: Date, default: null, select: false },
+    reportLastFailure: {
+        type: String,
+        enum: ["generation", "delivery", "commit", null],
+        default: null,
+        select: false,
+    },
     // Set once the "new exam" WhatsApp notification has gone out to the class's
     // students, so publishing/editing never double-notifies them.
     studentsNotifiedAt: { type: Date },
@@ -112,6 +127,9 @@ const examSchema = Schema({
     deletedAt: { type: Date, default: null, index: true },
     // Who archived it (audit trail for accidental/disputed deletions).
     deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    // A permanent purge removes live resources and private bytes but retains
+    // this tombstone so historical Results/Attempts/ExamVersions never dangle.
+    purgedAt: { type: Date, default: null, index: true },
     // Result visibility for students:
     showScore: { type: Boolean, default: true },
     showCorrectAnswers: { type: Boolean, default: false },
@@ -124,6 +142,10 @@ const examSchema = Schema({
     mode: { type: String, enum: ["pdf", "structured"], default: "pdf" },
     // The teacher/admin who created this exam (visibility/ownership scoping).
     owner: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    // AUD-009: retry identity for exam creation. The client keeps this key
+    // stable until it receives a committed response; the partial unique index
+    // makes a response-loss retry return the original exam.
+    creationKey: { type: String, select: false },
     // Structured exam pagination: how many questions a student sees per page
     // (0 = show all on one page). Set from the structured builder.
     questionsPerPage: { type: Number, default: 0 },
@@ -134,10 +156,36 @@ const examSchema = Schema({
         type: Schema.Types.ObjectId,
         ref: 'Question'
     },
+    // AUD-003 / CR-034: the exam's ACTIVE published version. Student starts bind to
+    // THIS pointer only — never to the live draft. Builder edits stay in the
+    // Question/Exam draft docs; publishing validates one complete snapshot and
+    // atomically CAS-swaps this pointer, so a start mid-edit always gets the
+    // complete previous version, never a partially saved paper. null = never
+    // published (not startable until published / migrated).
+    activeVersionId: {
+        type: Schema.Types.ObjectId,
+        ref: 'ExamVersion',
+        default: null,
+    },
+    // CR-034: the active version's number, advanced together with activeVersionId
+    // in ONE conditional (advance-only) update. The publish CAS filters on this
+    // being strictly lower, so a slower concurrent publish can never move the
+    // active pointer backwards to an older version.
+    activeVersionNumber: {
+        type: Number,
+        default: 0,
+    },
     pdf: {
         type: Schema.Types.ObjectId,
         ref: 'PDF',
     },
+    // AUD-013 CR-087: a durable PDF-lifecycle PURGE FENCE. A permanent purge
+    // atomically CAS-sets this when it claims the exam; while set, `replaceExamPdf`
+    // refuses to commit a new PDF reference (its CAS requires `purging:{$ne:true}`),
+    // so a purge and a concurrent replacement can never leave a freshly-attached
+    // PDF orphaned. The purge reads `pdf` AFTER winning this claim, so it always
+    // deletes the exact winner. Internal only (never returned to clients).
+    purging: { type: Boolean, select: false },
     tag: {
         type: Schema.Types.ObjectId,
         ref: 'Tag'
@@ -154,15 +202,31 @@ const examSchema = Schema({
         type: Schema.Types.ObjectId,
         ref: "User"
     }],
-    results: [{
-        type: Schema.Types.ObjectId,
-        ref: "Result"
-    }]
 },
     {
         timestamps: true,
         minimize: false,
     });
+
+examSchema.index(
+    { endDate: 1, reportNextAttemptAt: 1, reportLeaseUntil: 1 },
+    {
+        name: "due_exam_report",
+        partialFilterExpression: { reportSentAt: null },
+    }
+);
+examSchema.index(
+    { owner: 1, creationKey: 1 },
+    {
+        name: "uniq_exam_creation",
+        unique: true,
+        partialFilterExpression: { creationKey: { $type: "string" } },
+    }
+);
+examSchema.index(
+    { createdAt: -1, _id: -1 },
+    { name: "page_createdAt_desc" }
+);
 
 const ExamModel = mongoose.model('Exam', examSchema);
 

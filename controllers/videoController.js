@@ -2,6 +2,7 @@ const asyncHandler = require("express-async-handler");
 const Video = require("../models/videoModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
+const { pageLimit, withCursor, pageResult, wantsEnvelope } = require("../utils/cursorPagination");
 
 // Pull the 11-char YouTube video id out of the common URL shapes (watch,
 // youtu.be, embed, shorts, live) or accept a bare id.
@@ -82,11 +83,15 @@ const getVideos = asyncHandler(async (req, res) => {
     // students actually enrolled in that class.
     filter = { owner: { $in: ownerIds }, ...audienceFilter(classIds) };
   }
-  const videos = await Video.find(filter)
-    .sort({ createdAt: -1 })
+  const query = req.query || {};
+  const limit = pageLimit(query.limit);
+  const rows = await Video.find(withCursor(filter, query.cursor))
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(limit + 1)
     .populate("classes", "name level").populate("class", "name level")
     .lean();
-  res.json(videos);
+  const page = pageResult(rows, limit);
+  res.json(wantsEnvelope(req) ? page : page.items);
 });
 
 // POST /api/videos — teacher/admin adds a YouTube link (owned by them).

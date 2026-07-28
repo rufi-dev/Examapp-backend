@@ -1,5 +1,7 @@
-# Backend (Express) image for Hetzner
-FROM node:18-alpine
+# Backend (Express) image for Hetzner.
+# AUD-012: current supported LTS (Node 22 "Jod") — Node 18 is EOL, and
+# express-handlebars 9 requires Node >=22.22.2. node:22-alpine tracks the latest 22.x.
+FROM node:22-alpine
 
 WORKDIR /app
 
@@ -35,13 +37,16 @@ RUN apk add --no-cache \
 ENV PUPPETEER_SKIP_DOWNLOAD=true \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
-    WHATSAPP_WEB_ENABLED=true
+    # CR-111: the whatsapp-web.js integration ships DISABLED by default (it pulls the
+    # archiver advisory chain and needs a real WhatsApp session). Set explicitly to
+    # "true" only on a host that actually uses it.
+    WHATSAPP_WEB_ENABLED=false
 
-# Install production dependencies first for better layer caching.
-# Uses `npm install` (not `npm ci`) because the committed lock file is not in
-# perfect sync with package.json; install reconciles it.
+# Install production dependencies first for better layer caching. CR-110: `npm ci`
+# installs EXACTLY the committed lockfile (and fails if package.json and the lock
+# drift), so the image is REPRODUCIBLE — no non-deterministic `npm install` fallback.
 COPY package*.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+RUN npm ci --omit=dev --no-audit --no-fund
 
 # Copy the rest of the source
 COPY . .

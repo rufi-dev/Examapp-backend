@@ -7,6 +7,7 @@ const Enrollment = require("../models/enrollmentModel");
 const { notifyEnrollment } = require("../helper/telegram");
 const { convertOfficeToPdf, isOfficeFile } = require("../utils/officeToPdf");
 const { enqueueConversion } = require("../utils/convertQueue");
+const { pageLimit, withCursor, pageResult, wantsEnvelope } = require("../utils/cursorPagination");
 
 // Office documents are capped tighter than PDFs: every one of them costs a
 // LibreOffice process, not just disk.
@@ -187,13 +188,18 @@ const getMaterials = asyncHandler(async (req, res) => {
     filter = { owner: req.user._id };
   } else {
     const { classIds, ownerIds } = await studentScope(req.user._id);
-    if (!ownerIds.length) return res.json([]);
+    if (!ownerIds.length) return res.json(wantsEnvelope(req) ? { items: [], nextCursor: null, hasMore: false } : []);
     filter = { owner: { $in: ownerIds }, ...audienceFilter(classIds) };
   }
-  const materials = await Material.find(filter)
-    .sort({ createdAt: -1 })
+  const query = req.query || {};
+  const limit = pageLimit(query.limit);
+  const rows = await Material.find(withCursor(filter, query.cursor))
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(limit + 1)
     .populate("classes", "name level").populate("class", "name level")
     .lean();
+  const page = pageResult(rows, limit);
+  const materials = page.items;
   // `share` is owner-only. It holds the live link token and the reader list
   // WITH EMAIL ADDRESSES; students can legitimately see a teacher's material,
   // and sending them the whole document would hand them both.
@@ -202,7 +208,7 @@ const getMaterials = asyncHandler(async (req, res) => {
   materials.forEach((m) => {
     if (!isOwner(m)) delete m.share;
   });
-  res.json(materials);
+  res.json(wantsEnvelope(req) ? page : materials);
 });
 
 // POST /api/materials — teacher/admin uploads a file (multipart).
@@ -235,13 +241,23 @@ const addMaterial = asyncHandler(async (req, res) => {
 
   let storedPath = file.path;
   let kind;
-  let mimeType = file.mimetype || "";
+  // AUD-013 CR-056/CR-066: classify ONLY from the TRUSTED detected type (set by
+  // verifyUploadSignature from the file's real bytes/structure). There is NO
+  // fallback to the client-supplied file.mimetype or filename — a missing/
+  // inconsistent trusted classification FAILS CLOSED before any conversion or
+  // persistence.
+  const detected = req.detectedType;
+  let mimeType = req.canonicalMime;
+  if (!detected || !mimeType) {
+    cleanup(file.path);
+    return res.status(400).json({ message: "Fayl doğrulanmadı" });
+  }
 
-  if (IMAGE_MIME.test(file.mimetype || "")) {
+  if (["png", "jpg", "gif", "webp", "heic"].includes(detected)) {
     kind = "image";
-  } else if ((file.mimetype || "").toLowerCase() === "application/pdf") {
+  } else if (detected === "pdf") {
     kind = "pdf";
-  } else if (isOfficeFile(file.originalname)) {
+  } else if (["ooxml", "odf", "ole", "rtf"].includes(detected)) {
     // Conversion is the expensive path: a headless LibreOffice process for up
     // to two minutes. A tighter cap than the 200MB for plain PDFs, because the
     // cost here is CPU and wall-clock, not just disk.
@@ -300,6 +316,10 @@ const addMaterial = asyncHandler(async (req, res) => {
     owner: req.user._id,
     ownerName: req.user.name || "",
   });
+
+  // Teacher Journey (flag-gated, best-effort): a valid uploaded material (already passed
+  // secure upload validation above) awards the teacher XP once.
+  try { Promise.resolve(require("../services/teacherJourneyEvents").onMaterialUploaded(req.user._id, material._id)).catch(() => {}); } catch (_) { /* ignore */ }
 
   // Post-process the PDF in the BACKGROUND so the upload response is instant and
   // the material is usable meanwhile. First (optionally) compress it if the
@@ -362,6 +382,14 @@ const viewMaterial = asyncHandler(async (req, res) => {
   const loaded = await loadForRead(req, res);
   if (!loaded) return;
   const { material, abs } = loaded;
+  // Teacher Journey (flag-gated, best-effort): a REAL student opening the material in
+  // the viewer records a distinct viewer; the teacher earns "useful material" XP once
+  // the material reaches 3 distinct students. Never the teacher's own account.
+  try {
+    if (req.user.role === "student" && material.owner && String(req.user._id) !== String(material.owner)) {
+      Promise.resolve(require("../services/teacherJourneyEvents").onMaterialViewed({ material, ownerId: material.owner, studentId: req.user._id })).catch(() => {});
+    }
+  } catch (_) { /* ignore */ }
   // sendFile (not createReadStream) so the response honours Range requests.
   // pdf.js asks for byte ranges and renders the first pages while the rest of
   // a large file is still on the wire; piping the whole stream forced the

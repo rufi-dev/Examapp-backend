@@ -1,0 +1,48 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+
+jobs:
+  test-and-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install (reproducible)
+        run: npm ci
+      - name: Test suite
+        run: npm test
+      - name: Backend static/lint gate
+        run: npm run lint
+      - name: Production audit gate (exact fingerprint; critical always fails, high needs a reviewed unexpired exact exception)
+        run: npm run audit:ci
+      - name: SBOM (CycloneDX)
+        run: npm sbom --omit=dev --sbom-format=cyclonedx > sbom.cdx.json && node -e "const b=require('./sbom.cdx.json'); if(b.bomFormat!=='CycloneDX') process.exit(1); console.log('components', (b.components||[]).length)"
+
+  container-smoke:
+    # CR-110/CR-113/CR-115 disposable container gate. Builds the REAL Node-22 image
+    # (npm ci --omit=dev), boots it in LINUX against a throwaway Mongo, and — because
+    # this is a POSIX host — runs the FULL graceful-shutdown assertions the smoke skips
+    # on Windows: migration-faithful preparation (real session/token/email/attempt-result
+    # migrations + read-only verify, EXACT exit codes), exact /healthz, exactly-one worker
+    # start, then SIGTERM → one worker stop + HTTP listener CLOSED + Mongoose disconnect +
+    # clean exit 0 within the bounded deadline. This job is the deploy-adjacent POSIX proof.
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports: [ "27017:27017" ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t examopia-backend:ci .
+      - name: Smoke (engines, exact refusal, migration-faithful prep, /healthz, POSIX graceful shutdown)
+        run: |
+          docker run --rm --network host \
+            -e SMOKE_MONGO_URI="mongodb://127.0.0.1:27017/smoke_test" \
+            examopia-backend:ci node scripts/containerSmoke.cjs

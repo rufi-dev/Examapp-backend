@@ -3,5 +3,7 @@ node_modules
 *.log
 # Runtime data — never commit (uploaded PDFs, study materials, WhatsApp sessions)
 uploads/
+examPdfs/
 materials/
 .wwebjs_auth/
+sbom.cdx.json

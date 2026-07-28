@@ -9,6 +9,12 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    environment:
+      # AUD-013 CR-067: the PRIVATE exam-PDF store MUST live on a persistent
+      # volume (below), never the container's writable layer — otherwise a
+      # rebuild/recreate would erase every migrated exam PDF. The startup
+      # preflight refuses a non-absolute EXAM_PDF_DIR in production.
+      EXAM_PDF_DIR: /app/examPdfs
     # tini as PID 1 reaps zombie Chromium processes and forwards signals so the
     # browser shuts down cleanly (avoids stale profile locks on restart).
     init: true
@@ -17,9 +23,29 @@ services:
     expose:
       - "5000" # internal only; Caddy is the public entrypoint
     volumes:
-      - uploads:/app/uploads # persist uploaded PDFs across rebuilds
+      - uploads:/app/uploads # legacy public uploads (kept until migration relocates them)
+      - exampdfs:/app/examPdfs # AUD-013 CR-067: persist PRIVATE exam PDFs across rebuilds
       - materials:/app/materials # persist study materials across rebuilds
       - wa_auth:/app/.wwebjs_auth # persist the linked WhatsApp session
+    networks:
+      - web
+
+  # AUD-017: mutating scheduled work is isolated from HTTP replicas. Leases and
+  # idempotency still make multiple worker replicas safe.
+  worker:
+    build: .
+    command: ["node", "worker.js"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      EXAM_PDF_DIR: /app/examPdfs
+      RUN_BACKGROUND_JOBS: "false"
+      WHATSAPP_WEB_ENABLED: "false"
+    init: true
+    volumes:
+      - uploads:/app/uploads
+      - exampdfs:/app/examPdfs
+      - materials:/app/materials
     networks:
       - web
 
@@ -46,6 +72,7 @@ networks:
 
 volumes:
   uploads:
+  exampdfs:
   materials:
   wa_auth:
   caddy_data:

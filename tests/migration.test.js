@@ -4,7 +4,7 @@
  * idempotent re-run. Spawns the migration as a child process (real offline run).
  */
 const path = require("path");
-const { execFileSync } = require("child_process");
+const { execFile } = require("child_process");
 const mongoose = require("mongoose");
 const { MongoMemoryServer } = require("mongodb-memory-server");
 const Result = require("../models/resultModel");
@@ -50,11 +50,26 @@ async function main() {
 
   await mongoose.disconnect();
 
-  const runMigration = () => execFileSync(
-    "node", ["scripts/backfillAttemptId.js", "--apply"],
-    { cwd: BE, env: { ...process.env, MONGO_URI: uri, MIGRATION_TS: new Date().toISOString() }, encoding: "utf8" }
-  );
-  const out = runMigration();
+  // This process owns the in-memory mongod. A synchronous child blocks Node's
+  // event loop and can stop mongodb-memory-server's piped output from draining,
+  // deadlocking the migration on Windows. Keep the owner event loop alive while
+  // the real offline migration runs in its child process.
+  const runMigration = () => new Promise((resolve, reject) => {
+    execFile(
+      "node",
+      ["scripts/backfillAttemptId.js", "--apply"],
+      { cwd: BE, env: { ...process.env, MONGO_URI: uri, MIGRATION_TS: new Date().toISOString() }, encoding: "utf8" },
+      (error, stdout, stderr) => {
+        if (error) {
+          error.message += `\nstdout:\n${stdout}\nstderr:\n${stderr}`;
+          reject(error);
+        } else {
+          resolve(stdout);
+        }
+      }
+    );
+  });
+  const out = await runMigration();
   console.log(out.split("\n").filter((l) => /^\d\)|summary|===/.test(l)).map((l) => "    " + l).join("\n"));
 
   await mongoose.connect(uri);
@@ -75,7 +90,7 @@ async function main() {
   ok("migration built uniq_result_attempt index",
     (await Result.collection.indexes()).some((i) => i.name === "uniq_result_attempt"));
 
-  runMigration(); // idempotent re-run
+  await runMigration(); // idempotent re-run
   ok("idempotent re-run: legacy pair still single Result", (await Result.countDocuments({ userId: u1, examId: e1 })) === 1);
 
   await mongoose.disconnect();

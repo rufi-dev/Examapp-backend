@@ -47,12 +47,15 @@ const classSchema = Schema(
       type: Boolean,
       default: false,
     },
-    exams: [
-      {
-        type: Schema.Types.ObjectId,
-        ref: "Exam",
-      },
-    ],
+    deletedAt: { type: Date, default: null, index: true },
+    deletedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
+    // Scalar summary only. The authoritative relationship is Exam.class; the
+    // former unbounded `exams[]` compatibility array is removed by migration.
+    examCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     tag: {
       type: Schema.Types.ObjectId,
       ref: "Tag",

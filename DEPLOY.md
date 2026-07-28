@@ -2,8 +2,8 @@
 
 Architecture:
 
-- **Frontend** → Vercel (`https://sinaqriyaziyyat.vercel.app`), auto-built from the `Examapp-frontend` repo.
-- **Backend** → Hetzner Cloud VPS, running in Docker behind Caddy (automatic HTTPS).
+- **Frontend** → Cloudflare Worker (Static Assets) at `https://examopia.com`.
+- **Backend** → Hetzner Cloud VPS (`https://api.examopia.com`), running in Docker behind Caddy (automatic HTTPS).
 - **Database** → MongoDB Atlas.
 
 The frontend is HTTPS, so the backend must be HTTPS too (browsers block HTTPS→HTTP
@@ -41,9 +41,9 @@ nano .env        # fill in real values (see below)
 Key values in `.env`:
 - `MONGO_URI` — your Atlas connection string.
 - `SITE_ADDRESS` — `<SERVER_IP>.sslip.io`, e.g. `5.75.1.2.sslip.io` (no `https://`).
-- `FRONTEND_URL` — `https://sinaqriyaziyyat.vercel.app`.
+- `FRONTEND_URL` — `https://examopia.com`.
 - `JWT_SECRET`, `CRYPTR_KEY` — long random strings (`openssl rand -hex 32`).
-- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, email SMTP vars, `STRIPE_KEY`.
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, email SMTP vars. (Payments/Stripe were removed — no `STRIPE_KEY` is used.)
 
 ### 1.5 Launch
 ```bash
@@ -75,15 +75,15 @@ less strict). Otherwise the backend can't connect to the database.
 4. Deploy. `vercel.json` rewrites all paths to `index.html` so client-side routes
    (refresh / deep links) work.
 
-The CORS allowlist in `server.js` already permits `https://sinaqriyaziyyat.vercel.app`.
-If you add a custom domain on Vercel, add it to that allowlist too.
+The CORS allowlist already permits `https://examopia.com` and `https://www.examopia.com`
+(see `config/corsOptions.js`). Add any additional custom domain to that allowlist too.
 
 ---
 
 ## 3. Google OAuth
 
 In Google Cloud Console → Credentials → your OAuth client:
-- **Authorized JavaScript origins**: add `https://sinaqriyaziyyat.vercel.app`.
+- **Authorized JavaScript origins**: add `https://examopia.com`.
 
 ---
 

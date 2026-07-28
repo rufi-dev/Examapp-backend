@@ -1110,6 +1110,7 @@ const extractQuestions = asyncHandler(async (req, res) => {
     }
   }
 
+  if (req.aiCredit) req.aiCredit.usable(); // CR-122: usable extracted questions
   res.status(200).json({
     success: true,
     questions: finalQuestions,
@@ -1360,6 +1361,9 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
   });
   res.flushHeaders?.();
   const sse = (event, data) => {
+    // CR-122: the authoritative `done` event is the ONLY usable-output signal for
+    // an SSE AI action — mark the credit reservation committable exactly here.
+    if (event === "done" && req.aiCredit) req.aiCredit.usable();
     try {
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     } catch {
@@ -2277,6 +2281,7 @@ const generateQuestions = asyncHandler(async (req, res) => {
   }
   await logGenerationUsage(req, { cost, questions });
   await rememberExamPrompt(req, prompt);
+  if (req.aiCredit) req.aiCredit.usable(); // CR-122
   res.json({ questions, cost, issues, verified });
 });
 
@@ -2300,6 +2305,9 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
   });
   res.flushHeaders?.();
   const sse = (event, data) => {
+    // CR-122: the authoritative `done` event is the ONLY usable-output signal for
+    // an SSE AI action — mark the credit reservation committable exactly here.
+    if (event === "done" && req.aiCredit) req.aiCredit.usable();
     try {
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     } catch {
@@ -2502,6 +2510,7 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
   // An edited description sent from the rewrite panel becomes the exam's
   // description from here on.
   await rememberExamPrompt(req, examPrompt);
+  if (req.aiCredit) req.aiCredit.usable(); // CR-122
   res.json({ question: fresh, cost, issues, verified });
 });
 
@@ -3006,6 +3015,7 @@ const chatAssistant = asyncHandler(async (req, res) => {
     console.error("chat usage log failed:", e?.message);
   }
 
+  if (req.aiCredit) req.aiCredit.usable(); // CR-122
   res.json({ reply: out.text, cost: out.cost, changed: !!out.changed });
 });
 
@@ -3046,6 +3056,7 @@ const transcribeAudio = asyncHandler(async (req, res) => {
     res.status(r.status || 502);
     throw new Error(data?.error?.message || "Səs tanınmadı");
   }
+  if (req.aiCredit) req.aiCredit.usable(); // CR-122
   res.json({ text: data.text || "" });
 });
 
@@ -3085,6 +3096,7 @@ const realtimeToken = asyncHandler(async (req, res) => {
     res.status(r.status || 502);
     throw new Error(data?.error?.message || "Realtime sessiya alınmadı");
   }
+  if (req.aiCredit) req.aiCredit.usable(); // CR-122: usable realtime session token
   res.json({ token: data?.value, expires_at: data?.expires_at });
 });
 

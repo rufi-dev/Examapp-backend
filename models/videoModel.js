@@ -22,5 +22,9 @@ const videoSchema = Schema(
   },
   { timestamps: true }
 );
+videoSchema.index(
+  { createdAt: -1, _id: -1 },
+  { name: "page_createdAt_desc" }
+);
 
 module.exports = mongoose.model("Video", videoSchema);

@@ -1,0 +1,167 @@
+{
+  "$schema": "audit-exceptions@2",
+  "note": "Production HIGH advisory exceptions (exact fingerprint: package + sorted HIGH advisory ids + sorted node paths). Critical is never exceptable.",
+  "exceptions": [
+    {
+      "package": "archiver",
+      "severity": "high",
+      "ids": [
+        "GHSA-3jxr-9vmj-r5cp",
+        "GHSA-mh99-v99m-4gvg"
+      ],
+      "paths": [
+        "node_modules/archiver",
+        "node_modules/whatsapp-web.js/node_modules/archiver"
+      ],
+      "reason": "UNREACHABLE vulnerable call path: the minimatch/brace-expansion ReDoS (GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg) is exposed only through archiver file-globbing on caller-supplied patterns. exceljs writes an XLSX buffer with FIXED internal part names (never archiver.glob on user input); whatsapp-web.js is default-OFF. No patched exceljs (4.4.0 latest) or archiver release exists.",
+      "owner": "platform-maintainer",
+      "control": "Not a resource-bound issue but call-path unreachability: exceljs never passes user patterns to archiver.glob. Defense-in-depth: exceljs export bounded (rows/questions/cells/output) with tests; whatsapp-web.js WHATSAPP_WEB_ENABLED=false by default (installed 1.34.7).",
+      "expires": "2026-10-27"
+    },
+    {
+      "package": "archiver-utils",
+      "severity": "high",
+      "ids": [
+        "GHSA-3jxr-9vmj-r5cp",
+        "GHSA-mh99-v99m-4gvg"
+      ],
+      "paths": [
+        "node_modules/archiver-utils",
+        "node_modules/whatsapp-web.js/node_modules/archiver-utils",
+        "node_modules/zip-stream/node_modules/archiver-utils"
+      ],
+      "reason": "UNREACHABLE vulnerable call path: the minimatch/brace-expansion ReDoS (GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg) is exposed only through archiver file-globbing on caller-supplied patterns. exceljs writes an XLSX buffer with FIXED internal part names (never archiver.glob on user input); whatsapp-web.js is default-OFF. No patched exceljs (4.4.0 latest) or archiver release exists.",
+      "owner": "platform-maintainer",
+      "control": "Not a resource-bound issue but call-path unreachability: exceljs never passes user patterns to archiver.glob. Defense-in-depth: exceljs export bounded (rows/questions/cells/output) with tests; whatsapp-web.js WHATSAPP_WEB_ENABLED=false by default (installed 1.34.7).",
+      "expires": "2026-10-27"
+    },
+    {
+      "package": "brace-expansion",
+      "severity": "high",
+      "ids": [
+        "GHSA-3jxr-9vmj-r5cp",
+        "GHSA-mh99-v99m-4gvg"
+      ],
+      "paths": [
+        "node_modules/brace-expansion",
+        "node_modules/glob/node_modules/brace-expansion",
+        "node_modules/readdir-glob/node_modules/brace-expansion"
+      ],
+      "reason": "UNREACHABLE vulnerable call path: the minimatch/brace-expansion ReDoS (GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg) is exposed only through archiver file-globbing on caller-supplied patterns. exceljs writes an XLSX buffer with FIXED internal part names (never archiver.glob on user input); whatsapp-web.js is default-OFF. No patched exceljs (4.4.0 latest) or archiver release exists.",
+      "owner": "platform-maintainer",
+      "control": "Not a resource-bound issue but call-path unreachability: exceljs never passes user patterns to archiver.glob. Defense-in-depth: exceljs export bounded (rows/questions/cells/output) with tests; whatsapp-web.js WHATSAPP_WEB_ENABLED=false by default (installed 1.34.7).",
+      "expires": "2026-10-27"
+    },
+    {
+      "package": "exceljs",
+      "severity": "high",
+      "ids": [
+        "GHSA-3jxr-9vmj-r5cp",
+        "GHSA-mh99-v99m-4gvg"
+      ],
+      "paths": [
+        "node_modules/exceljs"
+      ],
+      "reason": "UNREACHABLE vulnerable call path: the minimatch/brace-expansion ReDoS (GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg) is exposed only through archiver file-globbing on caller-supplied patterns. exceljs writes an XLSX buffer with FIXED internal part names (never archiver.glob on user input); whatsapp-web.js is default-OFF. No patched exceljs (4.4.0 latest) or archiver release exists.",
+      "owner": "platform-maintainer",
+      "control": "Not a resource-bound issue but call-path unreachability: exceljs never passes user patterns to archiver.glob. Defense-in-depth: exceljs export bounded (rows/questions/cells/output) with tests; whatsapp-web.js WHATSAPP_WEB_ENABLED=false by default (installed 1.34.7).",
+      "expires": "2026-10-27"
+    },
+    {
+      "package": "glob",
+      "severity": "high",
+      "ids": [
+        "GHSA-3jxr-9vmj-r5cp",
+        "GHSA-mh99-v99m-4gvg"
+      ],
+      "paths": [
+        "node_modules/archiver-utils/node_modules/glob",
+        "node_modules/glob",
+        "node_modules/rimraf/node_modules/glob",
+        "node_modules/zip-stream/node_modules/glob"
+      ],
+      "reason": "UNREACHABLE vulnerable call path: the minimatch/brace-expansion ReDoS (GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg) is exposed only through archiver file-globbing on caller-supplied patterns. exceljs writes an XLSX buffer with FIXED internal part names (never archiver.glob on user input); whatsapp-web.js is default-OFF. No patched exceljs (4.4.0 latest) or archiver release exists.",
+      "owner": "platform-maintainer",
+      "control": "Not a resource-bound issue but call-path unreachability: exceljs never passes user patterns to archiver.glob. Defense-in-depth: exceljs export bounded (rows/questions/cells/output) with tests; whatsapp-web.js WHATSAPP_WEB_ENABLED=false by default (installed 1.34.7).",
+      "expires": "2026-10-27"
+    },
+    {
+      "package": "minimatch",
+      "severity": "high",
+      "ids": [
+        "GHSA-3jxr-9vmj-r5cp",
+        "GHSA-mh99-v99m-4gvg"
+      ],
+      "paths": [
+        "node_modules/glob/node_modules/minimatch",
+        "node_modules/minimatch",
+        "node_modules/readdir-glob/node_modules/minimatch"
+      ],
+      "reason": "UNREACHABLE vulnerable call path: the minimatch/brace-expansion ReDoS (GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg) is exposed only through archiver file-globbing on caller-supplied patterns. exceljs writes an XLSX buffer with FIXED internal part names (never archiver.glob on user input); whatsapp-web.js is default-OFF. No patched exceljs (4.4.0 latest) or archiver release exists.",
+      "owner": "platform-maintainer",
+      "control": "Not a resource-bound issue but call-path unreachability: exceljs never passes user patterns to archiver.glob. Defense-in-depth: exceljs export bounded (rows/questions/cells/output) with tests; whatsapp-web.js WHATSAPP_WEB_ENABLED=false by default (installed 1.34.7).",
+      "expires": "2026-10-27"
+    },
+    {
+      "package": "readdir-glob",
+      "severity": "high",
+      "ids": [
+        "GHSA-3jxr-9vmj-r5cp",
+        "GHSA-mh99-v99m-4gvg"
+      ],
+      "paths": [
+        "node_modules/readdir-glob"
+      ],
+      "reason": "UNREACHABLE vulnerable call path: the minimatch/brace-expansion ReDoS (GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg) is exposed only through archiver file-globbing on caller-supplied patterns. exceljs writes an XLSX buffer with FIXED internal part names (never archiver.glob on user input); whatsapp-web.js is default-OFF. No patched exceljs (4.4.0 latest) or archiver release exists.",
+      "owner": "platform-maintainer",
+      "control": "Not a resource-bound issue but call-path unreachability: exceljs never passes user patterns to archiver.glob. Defense-in-depth: exceljs export bounded (rows/questions/cells/output) with tests; whatsapp-web.js WHATSAPP_WEB_ENABLED=false by default (installed 1.34.7).",
+      "expires": "2026-10-27"
+    },
+    {
+      "package": "rimraf",
+      "severity": "high",
+      "ids": [
+        "GHSA-3jxr-9vmj-r5cp",
+        "GHSA-mh99-v99m-4gvg"
+      ],
+      "paths": [
+        "node_modules/rimraf"
+      ],
+      "reason": "UNREACHABLE vulnerable call path: the minimatch/brace-expansion ReDoS (GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg) is exposed only through archiver file-globbing on caller-supplied patterns. exceljs writes an XLSX buffer with FIXED internal part names (never archiver.glob on user input); whatsapp-web.js is default-OFF. No patched exceljs (4.4.0 latest) or archiver release exists.",
+      "owner": "platform-maintainer",
+      "control": "Not a resource-bound issue but call-path unreachability: exceljs never passes user patterns to archiver.glob. Defense-in-depth: exceljs export bounded (rows/questions/cells/output) with tests; whatsapp-web.js WHATSAPP_WEB_ENABLED=false by default (installed 1.34.7).",
+      "expires": "2026-10-27"
+    },
+    {
+      "package": "whatsapp-web.js",
+      "severity": "high",
+      "ids": [
+        "GHSA-3jxr-9vmj-r5cp",
+        "GHSA-mh99-v99m-4gvg"
+      ],
+      "paths": [
+        "node_modules/whatsapp-web.js"
+      ],
+      "reason": "UNREACHABLE vulnerable call path: the minimatch/brace-expansion ReDoS (GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg) is exposed only through archiver file-globbing on caller-supplied patterns. exceljs writes an XLSX buffer with FIXED internal part names (never archiver.glob on user input); whatsapp-web.js is default-OFF. No patched exceljs (4.4.0 latest) or archiver release exists.",
+      "owner": "platform-maintainer",
+      "control": "Not a resource-bound issue but call-path unreachability: exceljs never passes user patterns to archiver.glob. Defense-in-depth: exceljs export bounded (rows/questions/cells/output) with tests; whatsapp-web.js WHATSAPP_WEB_ENABLED=false by default (installed 1.34.7).",
+      "expires": "2026-10-27"
+    },
+    {
+      "package": "zip-stream",
+      "severity": "high",
+      "ids": [
+        "GHSA-3jxr-9vmj-r5cp",
+        "GHSA-mh99-v99m-4gvg"
+      ],
+      "paths": [
+        "node_modules/whatsapp-web.js/node_modules/zip-stream",
+        "node_modules/zip-stream"
+      ],
+      "reason": "UNREACHABLE vulnerable call path: the minimatch/brace-expansion ReDoS (GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg) is exposed only through archiver file-globbing on caller-supplied patterns. exceljs writes an XLSX buffer with FIXED internal part names (never archiver.glob on user input); whatsapp-web.js is default-OFF. No patched exceljs (4.4.0 latest) or archiver release exists.",
+      "owner": "platform-maintainer",
+      "control": "Not a resource-bound issue but call-path unreachability: exceljs never passes user patterns to archiver.glob. Defense-in-depth: exceljs export bounded (rows/questions/cells/output) with tests; whatsapp-web.js WHATSAPP_WEB_ENABLED=false by default (installed 1.34.7).",
+      "expires": "2026-10-27"
+    }
+  ]
+}
