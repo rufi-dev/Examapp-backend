@@ -1,7 +1,9 @@
 # Backend (Express) image for Hetzner.
 # AUD-012: current supported LTS (Node 22 "Jod") — Node 18 is EOL, and
-# express-handlebars 9 requires Node >=22.22.2. node:22-alpine tracks the latest 22.x.
-FROM node:22-alpine
+# Node 24-alpine (satisfies express-handlebars 9's >=22.22.2). Pinned to match the
+# dev + CI toolchain (npm 11) so the committed lockfile installs identically everywhere
+# — avoids the npm-10/11 resolver skew that otherwise breaks `npm ci` on a clean build.
+FROM node:24-alpine
 
 WORKDIR /app
 
