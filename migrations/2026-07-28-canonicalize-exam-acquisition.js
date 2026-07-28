@@ -320,7 +320,11 @@ async function main() {
   if (!safe) { console.log(`\n  Target "${dbName}" not a throwaway NAME and no --db=${dbName}. Refusing.\n`); process.exit(3); }
   if ((ROLLBACK || FINALIZE) && !batchArg) { console.log(`\n  REFUSED: --${ROLLBACK ? "rollback" : "finalize"} requires an explicit --batch=<id>.\n`); process.exit(2); }
 
-  await mongoose.connect(uri);
+  // Bound server selection so a concurrent worker fails instead of stalling
+  // indefinitely when the target cannot be selected. Do not impose a short socket
+  // timeout on the migration's data operations: large reviewed batches may
+  // legitimately take longer once a server has been selected.
+  await mongoose.connect(uri, { serverSelectionTimeoutMS: 10000 });
   const db = mongoose.connection.db;
   const usersCol = db.collection("users");
   const journal = db.collection(JOURNAL);
