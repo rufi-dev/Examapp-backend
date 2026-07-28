@@ -68,19 +68,27 @@ async function main() {
   ok("burst state stayed bounded (no crash; dedup/limit active)", true);
   await new Promise((r) => server.close(r));
 
-  // ── host-config consistency ──
-  const FE = path.resolve(__dirname, "../../Frontend");
-  const headersFile = fs.readFileSync(path.join(FE, "public/_headers"), "utf8");
-
-  const REQUIRED = ["X-Content-Type-Options", "X-Frame-Options", "Referrer-Policy", "Permissions-Policy", "Strict-Transport-Security", "Content-Security-Policy"];
-  for (const h of REQUIRED) {
-    ok(`_headers declares ${h}`, new RegExp(h + ":", "i").test(headersFile));
+  // ── host-config consistency (CROSS-REPO) ──
+  // Reads the Frontend repo's Cloudflare `public/_headers`. This only exists when the
+  // two repos are checked out side by side (local dev + `release:local`). In the
+  // backend-only CI checkout the sibling Frontend/ is absent, so SKIP this section
+  // rather than crash — the frontend's own CI + the hosted-edge verification (AUD-019)
+  // assert the deployed headers there.
+  const headersPath = path.resolve(__dirname, "../../Frontend/public/_headers");
+  if (!fs.existsSync(headersPath)) {
+    console.log("  ⚠ host-config consistency SKIPPED — sibling Frontend/ not present in this checkout (runs under release:local + frontend CI).");
+  } else {
+    const headersFile = fs.readFileSync(headersPath, "utf8");
+    const REQUIRED = ["X-Content-Type-Options", "X-Frame-Options", "Referrer-Policy", "Permissions-Policy", "Strict-Transport-Security", "Content-Security-Policy"];
+    for (const h of REQUIRED) {
+      ok(`_headers declares ${h}`, new RegExp(h + ":", "i").test(headersFile));
+    }
+    ok("CSP is enforcing, not report-only", !/Content-Security-Policy-Report-Only:/i.test(headersFile));
+    ok("CSP includes a report-uri", /report-uri https:\/\/api\.examopia\.com\/api\/csp-report/.test(headersFile));
+    ok("CSP forbids object content and unsafe eval", /object-src 'none'/.test(headersFile) && !/'unsafe-eval'/.test(headersFile));
+    ok("removed payment provider is not allow-listed", !/stripe\.com/i.test(headersFile));
+    ok("nosniff is exact", /X-Content-Type-Options:\s*nosniff/i.test(headersFile));
   }
-  ok("CSP is enforcing, not report-only", !/Content-Security-Policy-Report-Only:/i.test(headersFile));
-  ok("CSP includes a report-uri", /report-uri https:\/\/api\.examopia\.com\/api\/csp-report/.test(headersFile));
-  ok("CSP forbids object content and unsafe eval", /object-src 'none'/.test(headersFile) && !/'unsafe-eval'/.test(headersFile));
-  ok("removed payment provider is not allow-listed", !/stripe\.com/i.test(headersFile));
-  ok("nosniff is exact", /X-Content-Type-Options:\s*nosniff/i.test(headersFile));
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
