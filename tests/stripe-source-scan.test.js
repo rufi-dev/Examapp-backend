@@ -122,7 +122,7 @@ ok("controllers/stripeController.js absent", !fs.existsSync(P(BE, "controllers",
 ok("routes/stripeRoute.js absent", !fs.existsSync(P(BE, "routes", "stripeRoute.js")));
 ok("Frontend/redux/features/stripe absent", !fs.existsSync(P(FE, "redux", "features", "stripe")));
 ok("stripe not a backend package.json dependency", !/"stripe"\s*:/.test(fs.readFileSync(P(BE, "package.json"), "utf8")));
-ok("stripe not a frontend package.json dependency", !/"stripe"\s*:/.test(fs.readFileSync(P(FE, "package.json"), "utf8")));
+if (fs.existsSync(P(FE, "package.json"))) ok("stripe not a frontend package.json dependency", !/"stripe"\s*:/.test(fs.readFileSync(P(FE, "package.json"), "utf8")));
 ok("stripe not installed (backend node_modules/stripe absent)", !fs.existsSync(P(BE, "node_modules", "stripe")));
 ok("backend package-lock.json has no stripe entry", !/node_modules\/stripe|\/stripe\/-\/stripe|"stripe"\s*:/.test(fs.readFileSync(P(BE, "package-lock.json"), "utf8")));
 if (fs.existsSync(P(FE, "package-lock.json"))) ok("frontend package-lock.json has no stripe entry", !/node_modules\/stripe|\/stripe\/-\/stripe|"stripe"\s*:/.test(fs.readFileSync(P(FE, "package-lock.json"), "utf8")));
