@@ -68,10 +68,12 @@ const EMPTY = { publishedExams: 0, publishedQuestions: 0, completedAttempts: 0, 
  * 60-day boundary for distinct active weeks.
  */
 async function computeActivityMetrics(teacherId, now = new Date()) {
-  const publishedExams = await Exam.countDocuments({ owner: teacherId, activeVersionId: { $ne: null } });
-  const publishedQuestions = await publishedQuestionCount(teacherId);
-  const materials = await materialMetrics(teacherId);
-  const ownedIds = await Exam.find({ owner: teacherId }).distinct("_id"); // bounded per teacher
+  const [publishedExams, publishedQuestions, materials, ownedIds] = await Promise.all([
+    Exam.countDocuments({ owner: teacherId, activeVersionId: { $ne: null } }),
+    publishedQuestionCount(teacherId),
+    materialMetrics(teacherId),
+    Exam.find({ owner: teacherId }).distinct("_id"), // bounded per teacher
+  ]);
   if (!ownedIds.length) return { ...EMPTY, publishedExams, publishedQuestions, ...materials };
 
   // Real student ids among those who attempted the teacher's exams (bounded).
@@ -86,21 +88,25 @@ async function computeActivityMetrics(teacherId, now = new Date()) {
   }
 
   const windowStart = new Date(now.getTime() - 60 * 86400000);
-  const [agg] = await Result.aggregate([
-    { $match: { examId: { $in: ownedIds }, userId: { $in: realStudentIds }, attemptId: { $exists: true } } },
-    { $group: { _id: "$attemptId", userId: { $first: "$userId" }, examId: { $first: "$examId" }, createdAt: { $first: "$createdAt" } } },
-    { $facet: {
-      total: [{ $count: "n" }],
-      students: [{ $group: { _id: "$userId" } }, { $count: "n" }],
-      exams: [{ $group: { _id: "$examId" } }, { $count: "n" }],
-      days: [{ $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "UTC" } } } }],
-      weeks: [{ $match: { createdAt: { $gte: windowStart } } }, { $group: { _id: { y: { $isoWeekYear: "$createdAt" }, w: { $isoWeek: "$createdAt" } } } }, { $count: "n" }],
-    } },
+  const [aggregateRows, pubDays] = await Promise.all([
+    Result.aggregate([
+      { $match: { examId: { $in: ownedIds }, userId: { $in: realStudentIds }, attemptId: { $exists: true } } },
+      { $group: { _id: "$attemptId", userId: { $first: "$userId" }, examId: { $first: "$examId" }, createdAt: { $first: "$createdAt" } } },
+      { $facet: {
+        total: [{ $count: "n" }],
+        students: [{ $group: { _id: "$userId" } }, { $count: "n" }],
+        exams: [{ $group: { _id: "$examId" } }, { $count: "n" }],
+        days: [{ $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "UTC" } } } }],
+        weeks: [{ $match: { createdAt: { $gte: windowStart } } }, { $group: { _id: { y: { $isoWeekYear: "$createdAt" }, w: { $isoWeek: "$createdAt" } } } }, { $count: "n" }],
+      } },
+    ]),
+    publishDays(teacherId),
   ]);
+  const [agg] = aggregateRows;
   const first = (a) => (a && a.length ? a[0].n : 0);
   const completedAttempts = first(agg.total);
   const completionDays = new Set((agg.days || []).map((d) => d._id));
-  for (const d of await publishDays(teacherId)) completionDays.add(d);
+  for (const d of pubDays) completionDays.add(d);
 
   const distinctRealStudents = first(agg.students);
   return {
@@ -123,13 +129,15 @@ async function computeActivityMetrics(teacherId, now = new Date()) {
  * All draft/self/duplicate-proof and computed from the source of truth.
  */
 async function metricsFor(teacherId, now = new Date()) {
-  const activity = await computeActivityMetrics(teacherId, now);
   // Lazy requires avoid a config/require cycle at module load.
   const xpSvc = require("./teacherXpService");
   const referralSvc = require("./teacherReferralService");
-  const lifetimeXp = await xpSvc.total(teacherId).catch(() => 0);
-  const qualifiedReferrals = await referralSvc.qualifiedCount(teacherId).catch(() => 0);
-  const aiGenerations = await aiGenerationCount(teacherId).catch(() => 0);
+  const [activity, lifetimeXp, qualifiedReferrals, aiGenerations] = await Promise.all([
+    computeActivityMetrics(teacherId, now),
+    xpSvc.total(teacherId).catch(() => 0),
+    referralSvc.qualifiedCount(teacherId).catch(() => 0),
+    aiGenerationCount(teacherId).catch(() => 0),
+  ]);
   return { ...activity, lifetimeXp, qualifiedReferrals, aiGenerations };
 }
 

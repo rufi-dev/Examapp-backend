@@ -43,14 +43,19 @@ const getMyJourney = asyncHandler(async (req, res) => {
   // CR-128#5: an admin never participates in /me and never gets an AI period.
   if (u.role !== "teacher") { res.status(403); return res.json({ code: "teacher_only" }); }
   const level = levelOf(u);
-  const credits = await creditSvc.snapshot(u._id, level);
-  // ONE server-authoritative metrics read (activity + lifetime XP + referrals + AI).
-  const metrics = await activitySvc.metricsFor(u._id);
+  // Credits and activity are independent. Loading them together keeps the first
+  // Journey render bounded by the slower branch instead of the sum of both.
+  const [credits, metrics] = await Promise.all([
+    creditSvc.snapshot(u._id, level),
+    activitySvc.metricsFor(u._id),
+  ]);
   const elig = eligibility.evaluate({ currentLevel: level, metrics });
-  // Derive missions + achievements from real data (server-authoritative; may award the
-  // onboarding-chain bonus / grant achievements idempotently).
-  const missionResult = await missionSvc.progressFor(u._id, u);
-  const achievements = await achievementSvc.evaluate(u._id, metrics);
+  // Reuse the metrics snapshot for missions. Calling progressFor without it used to
+  // execute the full exam/result aggregation a second time for every /me request.
+  const [missionResult, achievements] = await Promise.all([
+    missionSvc.progressFor(u._id, u, { activity: metrics }),
+    achievementSvc.evaluate(u._id, metrics),
+  ]);
   res.status(200).json({
     enabled: true,
     level,
@@ -126,7 +131,7 @@ const getXpRules = asyncHandler(async (req, res) => {
   const { allowanceFor } = require("../config/teacherSuccess/allowances");
   const levels = levelsCfg.LEVELS.map((l) => ({ level: l, az: levelsCfg.LABELS[l].az, ai: allowanceFor(l) }));
   // Anti-fraud note is server-copy too, so the onboarding claim matches the rules.
-  res.status(200).json({ activities, levels, integrity: "Süni təkrar, dublikat hesablar və özünə dəvətlər sayılmır." });
+  res.status(200).json({ activities, levels, integrity: "XP yalnız real tədris işinə verilir — süni təkrar və saxta hesablar sayılmır." });
 });
 
 // POST /api/teacher-success/admin/xp-correct — audited XP correction (signed). ADMIN.
