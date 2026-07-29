@@ -33,6 +33,12 @@ const materialSchema = Schema(
     kind: { type: String, enum: ["pdf", "image"], required: true },
     mimeType: { type: String, default: "" },
     sizeBytes: { type: Number, default: 0 },
+    pdfOptimizationStatus: {
+      type: String,
+      enum: ["pending", "ready", "failed"],
+      default: "pending",
+    },
+    pdfOptimizedAt: { type: Date, default: null },
 
     // Audience. EMPTY = shared with all of this teacher's students; otherwise
     // only the listed classes see it.

@@ -8,6 +8,10 @@ const { notifyEnrollment } = require("../helper/telegram");
 const { convertOfficeToPdf, isOfficeFile } = require("../utils/officeToPdf");
 const { enqueueConversion } = require("../utils/convertQueue");
 const { pageLimit, withCursor, pageResult, wantsEnvelope } = require("../utils/cursorPagination");
+const {
+  ensureMaterialPdfOptimized,
+  recoverInterruptedPdfOptimization,
+} = require("../utils/materialPdfOptimize");
 
 // Office documents are capped tighter than PDFs: every one of them costs a
 // LibreOffice process, not just disk.
@@ -20,36 +24,6 @@ const MATERIALS_DIR = path.join(process.cwd(), "materials");
 if (!fs.existsSync(MATERIALS_DIR)) fs.mkdirSync(MATERIALS_DIR, { recursive: true });
 
 const { execFile } = require("child_process");
-
-// Web-optimise (linearize) a PDF IN PLACE so pdf.js can paint page 1 from the
-// first bytes over an HTTP range request, instead of downloading the whole file
-// first (a 150MB test bank otherwise showed only a progress bar until every byte
-// landed). qpdf writes a reordered copy with a linearization hint table into a
-// temp file, then atomically replaces the original. Best-effort: on ANY failure
-// the original is left untouched. qpdf exits 3 on warnings but still produces a
-// valid file, so only a real error or a missing/empty output aborts the swap.
-const linearizePdf = (abs) =>
-  new Promise((resolve) => {
-    const tmp = `${abs}.lin.tmp`;
-    execFile("qpdf", ["--linearize", "--", abs, tmp], { timeout: 240000 }, (err) => {
-      try {
-        const ok = !err || err.code === 3;
-        if (!ok || !fs.existsSync(tmp) || fs.statSync(tmp).size === 0) {
-          if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
-          return resolve(false);
-        }
-        fs.renameSync(tmp, abs); // atomic on the same filesystem
-        resolve(true);
-      } catch {
-        try {
-          if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
-        } catch {
-          /* ignore */
-        }
-        resolve(false);
-      }
-    });
-  });
 
 // Optionally shrink a PDF with Ghostscript when the teacher chose "compressed"
 // at upload. The /ebook preset downsamples images to 150 dpi — visibly the same
@@ -108,6 +82,44 @@ const compressPdf = (abs) => {
   compressChain = compressChain.then(run, run);
   return compressChain;
 };
+
+// One file has one preparation pipeline. An upload can be opened immediately
+// after the API returns; without this shared promise the read could race the
+// background compression/linearization and PDF.js would parse the slow original.
+const materialPdfJobs = new Map();
+function prepareMaterialPdf(abs, materialId, { compress = false } = {}) {
+  const key = path.resolve(abs);
+  if (materialPdfJobs.has(key)) return materialPdfJobs.get(key);
+
+  const job = (async () => {
+    if (compress) await compressPdf(key);
+    const result = await ensureMaterialPdfOptimized(key);
+    let sizeBytes = 0;
+    try {
+      sizeBytes = fs.statSync(key).size;
+    } catch {
+      // The read endpoint will return its normal not-found response.
+    }
+    if (materialId) {
+      await Material.updateOne(
+        { _id: materialId },
+        {
+          sizeBytes,
+          pdfOptimizationStatus: result.ok ? "ready" : "failed",
+          pdfOptimizedAt: result.ok ? new Date() : null,
+        }
+      );
+    }
+    return result;
+  })()
+    .catch(() => ({ ok: false, changed: false }))
+    .finally(() => {
+      if (materialPdfJobs.get(key) === job) materialPdfJobs.delete(key);
+    });
+
+  materialPdfJobs.set(key, job);
+  return job;
+}
 
 const IMAGE_MIME = /^image\/(png|jpe?g|webp|gif|heic|heif)$/i;
 
@@ -308,6 +320,7 @@ const addMaterial = asyncHandler(async (req, res) => {
     kind,
     mimeType,
     sizeBytes,
+    pdfOptimizationStatus: kind === "pdf" ? "pending" : "ready",
     classes: classIds,
     class: null,
     // Checkboxes arrive as the string "true" from multipart form data.
@@ -328,7 +341,7 @@ const addMaterial = asyncHandler(async (req, res) => {
   if (kind === "pdf") {
     const abs = path.join(MATERIALS_DIR, path.basename(storedPath));
     const wantCompress = String(req.body.compress) === "true";
-    (async () => {
+    const postProcess = (async () => {
       if (wantCompress) {
         try {
           await compressPdf(abs);
@@ -336,16 +349,33 @@ const addMaterial = asyncHandler(async (req, res) => {
           console.warn("material compress error:", e?.message);
         }
       }
-      const done = await linearizePdf(abs);
+      const done = (await ensureMaterialPdfOptimized(abs)).ok;
       if (!done) console.warn("material linearize skipped:", material._id.toString());
       // Always refresh the stored size — compression and/or linearization both
       // change it, and the card/info dialog should show the real number.
       try {
-        await Material.updateOne({ _id: material._id }, { sizeBytes: fs.statSync(abs).size });
+        await Material.updateOne(
+          { _id: material._id },
+          {
+            sizeBytes: fs.statSync(abs).size,
+            pdfOptimizationStatus: done ? "ready" : "failed",
+            pdfOptimizedAt: done ? new Date() : null,
+          }
+        );
       } catch {
         /* non-fatal */
       }
-    })().catch((e) => console.warn("material post-process error:", e?.message));
+      return { ok: done, changed: done };
+    })().catch((e) => {
+      console.warn("material post-process error:", e?.message);
+      return { ok: false, changed: false };
+    });
+    materialPdfJobs.set(path.resolve(abs), postProcess);
+    postProcess.finally(() => {
+      if (materialPdfJobs.get(path.resolve(abs)) === postProcess) {
+        materialPdfJobs.delete(path.resolve(abs));
+      }
+    });
   }
 
   const populated = await Material.findById(material._id)
@@ -367,10 +397,28 @@ async function loadForRead(req, res) {
     return null;
   }
   const abs = path.join(MATERIALS_DIR, material.fileName);
+  if (abs.startsWith(MATERIALS_DIR)) {
+    recoverInterruptedPdfOptimization(abs);
+  }
   // Defensive: never let a crafted fileName escape the materials dir.
   if (!abs.startsWith(MATERIALS_DIR) || !fs.existsSync(abs)) {
     res.status(404).json({ message: "Fayl tapılmadı" });
     return null;
+  }
+  if (
+    material.kind === "pdf" &&
+    !["ready", "failed"].includes(material.pdfOptimizationStatus)
+  ) {
+    const optimized = await prepareMaterialPdf(abs, material._id);
+    await Material.updateOne(
+      { _id: material._id },
+      {
+        sizeBytes: fs.statSync(abs).size,
+        pdfOptimizationStatus: optimized.ok ? "ready" : "failed",
+        pdfOptimizedAt: optimized.ok ? new Date() : null,
+      }
+    );
+    material.pdfOptimizationStatus = optimized.ok ? "ready" : "failed";
   }
   return { material, abs };
 }
@@ -741,9 +789,19 @@ const getSharedFile = asyncHandler(async (req, res) => {
     }
   }
   const abs = path.join(MATERIALS_DIR, material.fileName);
+  if (abs.startsWith(MATERIALS_DIR)) {
+    recoverInterruptedPdfOptimization(abs);
+  }
   if (!abs.startsWith(MATERIALS_DIR) || !fs.existsSync(abs)) {
     res.status(404);
     throw new Error("Fayl tapılmadı");
+  }
+  if (
+    material.kind === "pdf" &&
+    !["ready", "failed"].includes(material.pdfOptimizationStatus)
+  ) {
+    const optimized = await prepareMaterialPdf(abs, material._id);
+    material.pdfOptimizationStatus = optimized.ok ? "ready" : "failed";
   }
   // Range requests only ever arrive as follow-ups to a read that was already
   // counted, so counting them again would multiply one reader into dozens.
