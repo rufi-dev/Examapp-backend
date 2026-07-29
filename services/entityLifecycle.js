@@ -7,6 +7,9 @@ const Exam = require("../models/examModel");
 const Enrollment = require("../models/enrollmentModel");
 const Material = require("../models/materialModel");
 const Video = require("../models/videoModel");
+const Attempt = require("../models/attemptModel");
+const Result = require("../models/resultModel");
+const Token = require("../models/tokenModel");
 const { withMongoTransaction } = require("./mongoUnitOfWork");
 const { httpError } = require("../utils/appError");
 
@@ -130,8 +133,51 @@ async function archiveTag(tagId, actorId) {
   });
 }
 
+// HARD delete (physical removal) — the pre-remediation admin "delete" behaviour,
+// but done as a CLEAN transactional cascade so nothing is left orphaned. Removes,
+// in one transaction: the user's own attempts/results, their enrollments (as
+// student OR teacher), the content they OWN (classes / exams / materials / videos)
+// and the attempts/results taken on those owned exams, plus their sessions and
+// auth tokens — and finally the user document(s). IRREVERSIBLE (no deletedAt shell
+// is kept, unlike archiveUsers). The caller is responsible for authorization and
+// for not passing the actor's own id.
+async function hardDeleteUsers(userIds) {
+  const ids = [...new Set(userIds.map(String))];
+  if (!ids.length) return { deleted: 0 };
+  return withMongoTransaction(async (session) => {
+    const s = session || null;
+    const ownedClassIds = await Class.find({ owner: { $in: ids } }).distinct("_id").session(s);
+    const ownedExamIds = await Exam.find({ owner: { $in: ids } }).distinct("_id").session(s);
+
+    // Attempts/results authored BY the user, or taken ON an exam the user owns.
+    const attemptResultFilter = ownedExamIds.length
+      ? { $or: [{ userId: { $in: ids } }, { examId: { $in: ownedExamIds } }] }
+      : { userId: { $in: ids } };
+    await Attempt.deleteMany(attemptResultFilter, opts(session));
+    await Result.deleteMany(attemptResultFilter, opts(session));
+
+    // Enrollments where the user is the student, the teacher, or in a class they own.
+    const enrollFilter = [{ student: { $in: ids } }, { teacher: { $in: ids } }];
+    if (ownedClassIds.length) enrollFilter.push({ class: { $in: ownedClassIds } });
+    await Enrollment.deleteMany({ $or: enrollFilter }, opts(session));
+
+    // Content the user owns.
+    await Material.deleteMany({ owner: { $in: ids } }, opts(session));
+    await Video.deleteMany({ owner: { $in: ids } }, opts(session));
+    if (ownedExamIds.length) await Exam.deleteMany({ _id: { $in: ownedExamIds } }, opts(session));
+    if (ownedClassIds.length) await Class.deleteMany({ _id: { $in: ownedClassIds } }, opts(session));
+
+    // Auth records.
+    await Session.deleteMany({ userId: { $in: ids } }, opts(session));
+    await Token.deleteMany({ userId: { $in: ids } }, opts(session));
+
+    const { deletedCount } = await User.deleteMany({ _id: { $in: ids } }, opts(session));
+    return { deleted: deletedCount || 0 };
+  });
+}
+
 function deletionBatchId() {
   return `delete-${Date.now().toString(36)}-${crypto.randomUUID()}`;
 }
 
-module.exports = { archiveUsers, archiveClass, archiveTag, deletionBatchId };
+module.exports = { archiveUsers, hardDeleteUsers, archiveClass, archiveTag, deletionBatchId };

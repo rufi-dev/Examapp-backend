@@ -37,7 +37,7 @@ const crypto = require("crypto");
 const Token = require("../models/tokenModel");
 const Cryptr = require("cryptr");
 const { OAuth2Client } = require("google-auth-library");
-const { archiveUsers } = require("../services/entityLifecycle");
+const { hardDeleteUsers } = require("../services/entityLifecycle");
 const { pageLimit, withCursor, pageResult, wantsEnvelope } = require("../utils/cursorPagination");
 
 const cryptr = new Cryptr(process.env.CRYPTR_KEY);
@@ -663,7 +663,14 @@ const deleteUser = asyncHandler(async (req, res) => {
     throw new Error("User not found!");
   }
 
-  await archiveUsers([user._id], req.user._id);
+  // Never let an admin permanently delete their own account.
+  if (String(user._id) === String(req.user._id)) {
+    res.status(400);
+    throw new Error("Öz hesabınızı silə bilməzsiniz");
+  }
+
+  // HARD delete (physical removal) + clean cascade of the account's data.
+  await hardDeleteUsers([user._id]);
 
   res.status(200).json({
     message: "User removed successfully",
@@ -758,8 +765,8 @@ const bulkUsers = asyncHandler(async (req, res) => {
   }
 
   if (action === "delete") {
-    const { archived } = await archiveUsers(targets, req.user._id);
-    return res.json({ action, count: archived, ids: targets });
+    const { deleted } = await hardDeleteUsers(targets);
+    return res.json({ action, count: deleted, ids: targets });
   }
 
   if (action === "role") {

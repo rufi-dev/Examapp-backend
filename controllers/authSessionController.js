@@ -12,8 +12,16 @@ const metrics = require("../utils/authMetrics");
 // so it cannot name the narrow-path refresh cookie — the refresh cookie uses
 // `__Secure-` (host-only via omitted Domain + narrow Path); the root-path
 // rollback cookie uses `__Host-` (host-only guaranteed, Path=/).
-const REFRESH_COOKIE = "__Secure-exq_rt"; // Path=/api/users/refresh
-const ROLLBACK_COOKIE = "__Host-exq_sess"; // Path=/
+// Local HTTP development (localhost:5173 → localhost:5000) cannot use the
+// __Secure-/__Host- cookie prefixes or the Secure attribute: browsers reject those
+// over plain http, so the refresh cookie would never store and EVERY reload would
+// look logged out (bouncing to the login page). In development ONLY we fall back to
+// unprefixed, non-Secure names; production AND tests are unchanged and keep the
+// hardened Secure-prefixed cookies. httpOnly + sameSite are preserved in all modes.
+const DEV_HTTP_COOKIES = process.env.NODE_ENV === "development";
+const REFRESH_COOKIE = DEV_HTTP_COOKIES ? "exq_rt" : "__Secure-exq_rt"; // Path=/api/users/refresh
+const ROLLBACK_COOKIE = DEV_HTTP_COOKIES ? "exq_sess" : "__Host-exq_sess"; // Path=/
+const COOKIE_SECURE = !DEV_HTTP_COOKIES;
 const LEGACY_COOKIE = "token";
 const REFRESH_PATH = "/api/users/refresh";
 
@@ -65,7 +73,7 @@ function setRefreshCookie(res, refreshToken, refreshExpiresAt, absoluteExpiresAt
   const deadline = Math.min(new Date(refreshExpiresAt).getTime(), new Date(absoluteExpiresAt).getTime());
   const maxAge = Math.max(0, deadline - Date.now());
   res.cookie(REFRESH_COOKIE, refreshToken, {
-    path: REFRESH_PATH, httpOnly: true, secure: true, sameSite: "lax", maxAge,
+    path: REFRESH_PATH, httpOnly: true, secure: COOKIE_SECURE, sameSite: "lax", maxAge,
   });
 }
 
@@ -113,7 +121,7 @@ function issueRollbackForUser(req, res, user) {
   const maxAge = Math.max(0, decoded.exp * 1000 - Date.now());
   clearAuthCookies(res);
   res.cookie(ROLLBACK_COOKIE, token, {
-    path: "/", httpOnly: true, secure: true, sameSite: "lax", maxAge,
+    path: "/", httpOnly: true, secure: COOKIE_SECURE, sameSite: "lax", maxAge,
   });
   return null; // cookie-only: nothing sensitive in the JSON body
 }
