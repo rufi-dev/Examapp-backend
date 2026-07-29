@@ -677,6 +677,38 @@ const deleteUser = asyncHandler(async (req, res) => {
   });
 });
 
+// POST /api/users/impersonate/:id — ADMIN "log in as" a user. Issues a REAL
+// session/token for the TARGET (so the admin's browser acts as that user) and
+// returns the same identity DTO login does. The client then hard-reloads and
+// re-bootstraps as the target from the freshly-set session cookie. Audited;
+// cannot target a deleted account or the admin's own account.
+const impersonateUser = asyncHandler(async (req, res) => {
+  const target = await User.findById(req.params.id);
+  if (!target || target.deletedAt) {
+    res.status(404);
+    throw new Error("User not found!");
+  }
+  if (String(target._id) === String(req.user._id)) {
+    res.status(400);
+    throw new Error("Öz hesabınıza daxil ola bilməzsiniz");
+  }
+  // Audit trail (stderr survives redeploy + is captured in the deploy logs).
+  console.error(`[IMPERSONATE] admin ${req.user._id} logged in as user ${target._id} (${target.role})`);
+
+  const token = await issueLoginToken(req, res, target);
+  const { _id, name, email, phone, bio, photo, role, teacherApproval, isVerified, userAgent } = target;
+  const journeyEnabled = isJourneyEnabled();
+  res.status(200).json({
+    _id, name, email, phone, bio, photo, role, teacherApproval, isVerified, userAgent, token,
+    teacherSuccessJourneyEnabled: journeyEnabled,
+    ...(journeyEnabled && role === "teacher"
+      ? { teacherLevel: target.teacherLevel || "spark", journeyWelcomeSeen: !!target.journeyWelcomeSeenAt }
+      : {}),
+    capabilities: [...capabilitiesFor(target, { journeyEnabled })],
+    impersonated: true,
+  });
+});
+
 // Class ids the teacher owns (for scoping their students).
 async function ownedClassIds(userId) {
   return Class.find({ owner: userId }).distinct("_id");
@@ -1410,6 +1442,7 @@ module.exports = {
   getUsers,
   updateUser,
   deleteUser,
+  impersonateUser,
   loginStatus,
   upgradeUser,
   sendVerificationEmail,
