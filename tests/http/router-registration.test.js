@@ -75,9 +75,13 @@ ok("user GET /getUsers is teacherOnly", gatedBy(userRouter, "get", "/getUsers", 
 ok("user PATCH /bulk is adminOnly", gatedBy(userRouter, "patch", "/bulk", adminOnly));
 ok("user POST /upgradeUser is adminOnly", gatedBy(userRouter, "post", "/upgradeUser", adminOnly));
 
-// ── achivementRoute: mutations moved to adminOnly (AUD-005), read stays public ──
-ok("ach POST /addAchivement is adminOnly", gatedBy(achRouter, "post", "/addAchivement", adminOnly));
-ok("ach DELETE /deleteAchivement/:achivementId is adminOnly", gatedBy(achRouter, "delete", "/deleteAchivement/:achivementId", adminOnly));
+// ── achivementRoute (teacher testimonials): approved teachers/admins may add
+//    their own story (teacherOnly); delete is protect-only with an owner-or-admin
+//    check in the controller; read stays public ──
+ok("ach POST /addAchivement is teacherOnly (approved teacher or admin)", gatedBy(achRouter, "post", "/addAchivement", teacherOnly));
+ok("ach POST /addAchivement is protected", gatedBy(achRouter, "post", "/addAchivement", protect));
+ok("ach DELETE /deleteAchivement/:achivementId is protect (owner-or-admin enforced in controller)", gatedBy(achRouter, "delete", "/deleteAchivement/:achivementId", protect));
+ok("ach DELETE /deleteAchivement/:achivementId is NOT gated by adminOnly (teachers delete their own)", !gatedBy(achRouter, "delete", "/deleteAchivement/:achivementId", adminOnly));
 ok("ach GET /getAchivements is NOT gated by teacherOnly/adminOnly (public read)", !gatedBy(achRouter, "get", "/getAchivements", teacherOnly) && !gatedBy(achRouter, "get", "/getAchivements", adminOnly));
 
 console.log(`\n${passed} passed, ${failed} failed`);

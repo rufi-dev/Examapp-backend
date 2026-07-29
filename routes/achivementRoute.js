@@ -1,15 +1,17 @@
 const express = require('express')
 const { addAchivement, getAchivements, deleteAchivement } = require("../controllers/achivementController")
-const { adminOnly, protect } = require("../middleware/authMiddleware")
+const { teacherOnly, protect } = require("../middleware/authMiddleware")
 const router = express.Router()
 
-// Achivement — these are GLOBAL, unscoped platform records (public gallery via
-// getAchivements; the model has no owner field). AUD-005: global content
-// management is an ADMIN capability, not a per-teacher one — any teacher could
-// otherwise create or delete ANY achievement. Mutations are admin-only; reads
-// stay public.
-router.post('/addAchivement', protect, adminOnly, addAchivement)
+// Achivement — the PUBLIC "Uğurlarımız" testimonial gallery (read via
+// getAchivements; reads stay public). Each story now records its `owner`, so:
+//  - Add: any APPROVED teacher (or admin) may submit their own success story;
+//    it appears instantly (teacherOnly derives the capability on the server,
+//    never from the request body).
+//  - Delete: authenticated only; the controller then enforces owner-or-admin,
+//    so a teacher can remove ONLY their own story while an admin removes any.
+router.post('/addAchivement', protect, teacherOnly, addAchivement)
 router.get('/getAchivements', getAchivements)
-router.delete('/deleteAchivement/:achivementId', protect, adminOnly, deleteAchivement)
+router.delete('/deleteAchivement/:achivementId', protect, deleteAchivement)
 
 module.exports = router

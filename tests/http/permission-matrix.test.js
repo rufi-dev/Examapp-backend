@@ -99,21 +99,40 @@ async function main() {
     ok(`adminOnly: ${name} → ${adminExpect[name]}`, r.status === adminExpect[name]);
   }
 
-  // ── achievements: mutations are admin-only; a teacher can no longer touch
-  //    global content. Reads stay public. (End-to-end on the REAL router.) ──
+  // ── achievements (teacher testimonials): an APPROVED teacher may share their
+  //    own success story (appears instantly); removal is owner-or-admin. Reads
+  //    stay public. (End-to-end on the REAL router.) ──
+  // A legacy, ownerless record — only an admin may remove it.
   const seed = await Achivement.create({ title: "T", about: "a", photo: "p", size: "s" });
-  // approved teacher — highest teacher authority — must be DENIED the mutation.
-  const teacherAdd = await request(server, { method: "POST", path: "/api/achievements/addAchivement", token: tok(approved), body: { title: "X", about: "a", photo: "p", size: "s" } });
-  ok("achievements: approved teacher CANNOT create (401)", teacherAdd.status === 401);
-  const teacherDel = await request(server, { method: "DELETE", path: `/api/achievements/deleteAchivement/${seed._id}`, token: tok(approved) });
-  ok("achievements: approved teacher CANNOT delete (401)", teacherDel.status === 401);
+
+  // A pending teacher has no capability → cannot create.
+  const pendingAdd = await request(server, { method: "POST", path: "/api/achievements/addAchivement", token: tok(pending), body: { title: "X", about: "a", photo: "p", size: "s" } });
+  ok("achievements: pending teacher CANNOT create (403)", pendingAdd.status === 403);
+  // A student cannot create.
+  const studentAdd = await request(server, { method: "POST", path: "/api/achievements/addAchivement", token: tok(student), body: { title: "X", about: "a", photo: "p", size: "s" } });
+  ok("achievements: student CANNOT create (401)", studentAdd.status === 401);
+
+  // An approved teacher CAN create their own story (owner recorded).
+  const teacherAdd = await request(server, { method: "POST", path: "/api/achievements/addAchivement", token: tok(approved), body: { title: "Mine", about: "a", photo: "p", size: "s" } });
+  ok("achievements: approved teacher CAN create (200)", teacherAdd.status === 200);
+  const mine = await Achivement.findOne({ title: "Mine" });
+  ok("achievements: created story records the teacher as owner", mine && String(mine.owner) === String(approved._id));
+
+  // A teacher CANNOT delete someone else's / a legacy (ownerless) record.
+  const teacherDelOther = await request(server, { method: "DELETE", path: `/api/achievements/deleteAchivement/${seed._id}`, token: tok(approved) });
+  ok("achievements: teacher CANNOT delete a story they don't own (403)", teacherDelOther.status === 403);
   ok("achievements: teacher's denied delete did NOT remove the record", await Achivement.countDocuments({ _id: seed._id }) === 1);
 
-  // admin can manage global content.
+  // A teacher CAN delete their OWN story.
+  const teacherDelOwn = await request(server, { method: "DELETE", path: `/api/achievements/deleteAchivement/${mine._id}`, token: tok(approved) });
+  ok("achievements: teacher CAN delete their own story (200)", teacherDelOwn.status === 200);
+  ok("achievements: own story was removed", await Achivement.countDocuments({ _id: mine._id }) === 0);
+
+  // admin can manage ANY story, including the legacy ownerless seed.
   const adminAdd = await request(server, { method: "POST", path: "/api/achievements/addAchivement", token: tok(admin), body: { title: "X", about: "a", photo: "p", size: "s" } });
   ok("achievements: admin CAN create (200/201)", adminAdd.status === 200 || adminAdd.status === 201);
   const adminDel = await request(server, { method: "DELETE", path: `/api/achievements/deleteAchivement/${seed._id}`, token: tok(admin) });
-  ok("achievements: admin CAN delete (200)", adminDel.status === 200);
+  ok("achievements: admin CAN delete any (200)", adminDel.status === 200);
 
   // reads remain public — even anonymous.
   const anonRead = await request(server, { method: "GET", path: "/api/achievements/getAchivements" });

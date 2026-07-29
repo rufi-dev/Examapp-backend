@@ -16,6 +16,19 @@ const achivementSchema = Schema({
     },
     size: {
         type: String
+    },
+    // Who submitted this success story. Absent on the historical admin-created
+    // global records; set to the teacher/admin who adds one going forward. Used
+    // to (a) show the author as a testimonial byline and (b) let a teacher remove
+    // ONLY their own story (admins remove any).
+    owner: {
+        type: Schema.Types.ObjectId,
+        ref: "User"
+    },
+    // Denormalised author name so the public gallery renders the byline without
+    // populating (and without leaking anything else about the user).
+    ownerName: {
+        type: String
     }
 },
     {
