@@ -109,7 +109,9 @@ async function main() {
     ok("refresh: rotates the refresh cookie", !!rt1 && rt1 !== rt0);
 
     const grace = await request(server, { method: "POST", path: "/api/users/refresh", cookie: `__Secure-exq_rt=${rt0}` });
-    ok("refresh: replaying the previous cookie within grace ⇒ 409", grace.status === 409);
+    const replayedRt = cookieVal(grace.setCookie, "__Secure-exq_rt");
+    ok("refresh: previous cookie within grace replays the exact rotation response",
+      grace.status === 200 && grace.body.token === ref1.body.token && replayedRt === rt1);
 
     const noc = await request(server, { method: "POST", path: "/api/users/refresh" });
     ok("refresh: no cookie ⇒ 401 reauthenticate", noc.status === 401 && noc.body.error === "reauthenticate");

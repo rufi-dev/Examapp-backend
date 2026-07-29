@@ -21,6 +21,17 @@ const sessionSchema = new Schema({
   createdAt: { type: Date, required: true },
   lastUsedAt: { type: Date },
   lastRotatedAt: { type: Date }, // drives the grace window
+  // Short-lived ENCRYPTED idempotency record for the last successful rotation.
+  // If a hard reload loses the HTTP response after the server committed, the
+  // immediately-previous cookie can receive the exact same response without a
+  // second rotation. No plaintext refresh secret is stored in MongoDB.
+  rotationReplay: {
+    consumedGen: { type: Number },
+    consumedHash: { type: String },
+    responseCipher: { type: String },
+    expiresAt: { type: Date },
+    _id: false,
+  },
   refreshExpiresAt: { type: Date, required: true }, // sliding inactivity deadline
   absoluteExpiresAt: { type: Date, required: true }, // immutable hard cap
   revokedAt: { type: Date, default: null },

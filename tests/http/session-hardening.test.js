@@ -4,6 +4,7 @@
  * Complements session-core.test.js (which covers the happy/precedence paths).
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || "test-secret-aud002-hardening";
+process.env.CRYPTR_KEY = process.env.CRYPTR_KEY || "test-cryptr-aud002-hardening";
 
 const path = require("path");
 const jwt = require("jsonwebtoken");

@@ -1,6 +1,7 @@
 const Session = require("../models/sessionModel");
 const User = require("../models/userModel");
 const PendingSecurityAction = require("../models/pendingSecurityActionModel");
+const Cryptr = require("cryptr");
 const { params } = require("../config/featureFlags");
 const { recordDebug } = require("../utils/debugLog");
 const {
@@ -17,6 +18,41 @@ const {
 // and cookies. Only activates on the flagged path.
 
 const nowDate = () => new Date();
+
+function replayCrypt() {
+  return new Cryptr(process.env.CRYPTR_KEY);
+}
+
+function sealRotationReplay(payload) {
+  return replayCrypt().encrypt(JSON.stringify(payload));
+}
+
+function openRotationReplay(session, parsed, presentedHash, now) {
+  const replay = session.rotationReplay;
+  if (
+    !replay
+    || replay.consumedGen !== parsed.gen
+    || replay.consumedHash !== presentedHash
+    || !replay.expiresAt
+    || new Date(replay.expiresAt).getTime() < now
+    || typeof replay.responseCipher !== "string"
+  ) return null;
+
+  try {
+    const payload = JSON.parse(replayCrypt().decrypt(replay.responseCipher));
+    const replayed = parseRefreshToken(payload.refreshToken);
+    if (
+      !replayed
+      || replayed.sid !== String(session._id)
+      || replayed.gen !== session.refreshGen
+      || hashSecret(replayed.secret) !== session.refreshHash
+      || typeof payload.accessToken !== "string"
+    ) return null;
+    return payload;
+  } catch (_) {
+    return null;
+  }
+}
 
 // A monitored security event. Written to TWO independent channels so a failure
 // of one is still observable (CR-009): (1) the DebugLog DB (survives redeploy,
@@ -93,6 +129,24 @@ async function refreshSession(rawRefreshToken) {
 
     // case 6 — epoch-fenced happy-path CAS (single-document aggregation pipeline)
     const newSec = newSecret();
+    const nextGen = parsed.gen + 1;
+    const accessToken = generateAccessToken(user._id, userSv, parsed.sid, params.ACCESS_TTL_MS);
+    const refreshToken = buildRefreshToken(parsed.sid, nextGen, newSec);
+    const replayPayload = {
+      accessToken,
+      refreshToken,
+      refreshExpiresAt: new Date(Math.min(
+        now + params.REFRESH_SLIDING_MS,
+        session.absoluteExpiresAt.getTime()
+      )),
+      absoluteExpiresAt: session.absoluteExpiresAt,
+    };
+    const rotationReplay = {
+      consumedGen: parsed.gen,
+      consumedHash: presentedHash,
+      responseCipher: sealRotationReplay(replayPayload),
+      expiresAt: new Date(now + params.GRACE_WINDOW_MS),
+    };
     const rotated = await Session.findOneAndUpdate(
       {
         _id: parsed.sid,
@@ -110,6 +164,7 @@ async function refreshSession(rawRefreshToken) {
             refreshGen: { $add: ["$refreshGen", 1] },
             lastUsedAt: new Date(now),
             lastRotatedAt: new Date(now),
+            rotationReplay,
             refreshExpiresAt: { $min: [new Date(now + params.REFRESH_SLIDING_MS), "$absoluteExpiresAt"] },
             usedRefreshHashes: {
               $slice: [
@@ -123,8 +178,6 @@ async function refreshSession(rawRefreshToken) {
       { new: true }
     );
     if (rotated) {
-      const accessToken = generateAccessToken(user._id, userSv, parsed.sid, params.ACCESS_TTL_MS);
-      const refreshToken = buildRefreshToken(parsed.sid, rotated.refreshGen, newSec);
       return {
         status: 200, outcome: "rotated", accessToken, refreshToken, sid: parsed.sid,
         userId: String(user._id), refreshExpiresAt: rotated.refreshExpiresAt, absoluteExpiresAt: rotated.absoluteExpiresAt,
@@ -146,6 +199,19 @@ async function refreshSession(rawRefreshToken) {
     if (ringEntry) {
       const withinGrace = now - new Date(cur.lastRotatedAt).getTime() <= params.GRACE_WINDOW_MS;
       if (parsed.gen === cur.refreshGen - 1 && withinGrace) {
+        const replay = openRotationReplay(cur, parsed, presentedHash, now);
+        if (replay) {
+          return {
+            status: 200,
+            outcome: "rotation_replayed",
+            accessToken: replay.accessToken,
+            refreshToken: replay.refreshToken,
+            sid: parsed.sid,
+            userId: String(cur.userId),
+            refreshExpiresAt: replay.refreshExpiresAt,
+            absoluteExpiresAt: replay.absoluteExpiresAt,
+          };
+        }
         return { status: 409, outcome: "grace_409" }; // case 7 — strict, no mutation
       }
       // case 8 — authenticated ancestor replay = theft (concurrency-idempotent,

@@ -2,13 +2,14 @@
  * AUD-002 session-model core regression. SERVICE/MODEL integration (NOT full
  * HTTP-stack): drives services/sessionService against in-memory Mongo for the
  * happy path + precedence — epoch-fenced rotation, the failed-CAS precedence,
- * strict-409 grace with no leapfrog, ancestor-replay theft, the reset/logout-all/
+ * idempotent grace replay with no leapfrog, ancestor-replay theft, the reset/logout-all/
  * change-password epoch fence, and the outbox. Failure-safety and concurrency
  * (CR-007..CR-014) live in session-hardening.test.js; HTTP flag/status/cookie
  * contracts are still an open coverage gap (documented in FIX_RESULTS).
  * Test IDs: AUD-002-T1..T13.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || "test-secret-aud002-core";
+process.env.CRYPTR_KEY = process.env.CRYPTR_KEY || "test-cryptr-aud002-core";
 
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
@@ -99,18 +100,33 @@ async function main() {
     ok("T5 session NOT revoked (no sid-guess DoS)", !sess.revokedAt);
   }
 
-  // T6 — immediately-previous within grace ⇒ strict 409, NO mutation, no leapfrog
+  // T6 — immediately-previous within grace replays the exact prior response.
+  // This recovers a hard reload that lost the first response without rotating
+  // again or permitting the rejected leapfrog behavior.
   {
     const u = await mkUser();
     const s = await svc.createSession(u, {});
     const r1 = await svc.refreshSession(s.refreshToken); // gen0 -> gen1 (lastRotatedAt = now)
     const g1 = await svc.refreshSession(s.refreshToken); // present gen0, within grace
-    ok("T6 grace ⇒ 409, no rotation", g1.status === 409 && g1.outcome === "grace_409");
+    ok("T6 grace ⇒ exact idempotent response replay", g1.status === 200
+      && g1.outcome === "rotation_replayed"
+      && g1.refreshToken === r1.refreshToken
+      && g1.accessToken === r1.accessToken);
     const afterFirst = await Session.findById(s.sid);
-    ok("T6 generation unchanged after grace 409", afterFirst.refreshGen === 1);
+    ok("T6 generation unchanged after replay", afterFirst.refreshGen === 1);
     const g2 = await svc.refreshSession(s.refreshToken); // present the SAME old token again
     const afterSecond = await Session.findById(s.sid);
-    ok("T6 NO leapfrog — old token cannot advance the generation", g2.status === 409 && afterSecond.refreshGen === 1);
+    ok("T6 NO leapfrog — repeated replay cannot advance the generation",
+      g2.status === 200 && g2.refreshToken === r1.refreshToken && afterSecond.refreshGen === 1);
+    ok("T6 replay payload is encrypted at rest",
+      !String(afterSecond.rotationReplay?.responseCipher || "").includes(r1.refreshToken));
+    await Session.updateOne(
+      { _id: s.sid },
+      { $set: { "rotationReplay.responseCipher": "corrupt" } }
+    );
+    const failClosed = await svc.refreshSession(s.refreshToken);
+    ok("T6 corrupt replay record fails closed to 409 without rotating",
+      failClosed.status === 409 && (await Session.findById(s.sid)).refreshGen === 1);
   }
 
   // T7 — immediately-previous OUTSIDE grace ⇒ theft (403), not 409
@@ -182,12 +198,15 @@ async function main() {
     const s = await svc.createSession(u, {});
     await User.deleteOne({ _id: u._id });
     ok("T12 deleted user ⇒ 401 user", (await svc.refreshSession(s.refreshToken)).outcome === "user_401");
-    // two concurrent CURRENT-token requests ⇒ exactly one 200, the other 409
+    // Two concurrent CURRENT-token requests: one rotates, the other receives
+    // the exact idempotent replay. Both succeed with one live refresh secret.
     const u2 = await mkUser();
     const s2 = await svc.createSession(u2, {});
     const [a, b] = await Promise.all([svc.refreshSession(s2.refreshToken), svc.refreshSession(s2.refreshToken)]);
-    const codes = [a.status, b.status].sort();
-    ok("T12 concurrent current-token ⇒ one 200 + one 409", codes[0] === 200 && codes[1] === 409);
+    ok("T12 concurrent current-token ⇒ two 200s with one identical rotation",
+      a.status === 200 && b.status === 200
+      && a.refreshToken === b.refreshToken
+      && a.accessToken === b.accessToken);
   }
 
   // T13 — outbox enqueue is idempotent on the key
