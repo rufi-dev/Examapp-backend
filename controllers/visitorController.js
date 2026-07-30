@@ -6,6 +6,15 @@ const VisitorSession = require("../models/visitorSessionModel");
 const MAX_JOURNEY = 60;
 const clip = (v, n) => (typeof v === "string" ? v.slice(0, n) : undefined);
 
+// IPs whose visits are NOT recorded (the owner's own address, office, etc.) so
+// the analytics reflect real visitors, not us. Built-in default plus anything in
+// TRACK_EXCLUDE_IPS (comma-separated) in the env.
+const EXCLUDED_IPS = new Set(
+  ["188.92.22.147", ...String(process.env.TRACK_EXCLUDE_IPS || "").split(",")]
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
+
 /*
  * Public ingest. The site posts a small JSON payload (as text/plain, so no CORS
  * preflight) on every page view and periodically while the tab is open. We upsert
@@ -30,6 +39,9 @@ const track = asyncHandler(async (req, res) => {
 
   const now = new Date();
   const clientIp = clip(d.ip, 64);
+  // Silently drop our own traffic (matched on the client-reported IP or the
+  // server-observed one) so we never track ourselves.
+  if (EXCLUDED_IPS.has(clientIp) || EXCLUDED_IPS.has(req.ip)) return res.sendStatus(204);
   const path = clip(d.path, 300);
 
   const set = { lastActivity: now };
