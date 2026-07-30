@@ -10,7 +10,7 @@ const clip = (v, n) => (typeof v === "string" ? v.slice(0, n) : undefined);
 // the analytics reflect real visitors, not us. Built-in default plus anything in
 // TRACK_EXCLUDE_IPS (comma-separated) in the env.
 const EXCLUDED_IPS = new Set(
-  ["188.92.22.147", ...String(process.env.TRACK_EXCLUDE_IPS || "").split(",")]
+  ["188.92.22.147", "84.15.216.173", ...String(process.env.TRACK_EXCLUDE_IPS || "").split(",")]
     .map((s) => s.trim())
     .filter(Boolean)
 );
