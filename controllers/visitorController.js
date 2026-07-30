@@ -16,6 +16,54 @@ const EXCLUDED_IPS = new Set(
     .filter(Boolean)
 );
 
+// ── Datacenter / bot exclusion ───────────────────────────────────────────────
+// Ad platforms (Meta) and clouds crawl every new link from their DATA CENTERS to
+// build previews and review ads — they'd otherwise inflate the counts and wreck
+// the bounce/conversion math. We drop them by IP range (real users come from
+// residential ISPs, not these blocks) plus obvious crawler user agents.
+const DC_CIDRS = [
+  // Meta / Facebook (AS32934)
+  "31.13.24.0/21", "31.13.64.0/18", "66.220.144.0/20", "66.220.152.0/21",
+  "69.63.176.0/20", "69.171.224.0/19", "173.252.64.0/18", "157.240.0.0/16",
+  "129.134.0.0/16", "204.15.20.0/22", "179.60.192.0/22", "185.60.216.0/22",
+  "57.141.0.0/16", "102.132.96.0/20",
+  // AWS us-west-2 (Oregon) aggregates — where the observed review crawlers ran
+  "18.236.0.0/14", "34.208.0.0/12", "35.80.0.0/12", "44.192.0.0/10",
+  "52.32.0.0/11", "54.68.0.0/14", "54.184.0.0/13",
+  // GCP / Azure aggregates commonly used by crawlers
+  "34.64.0.0/10", "35.184.0.0/13", "20.0.0.0/8",
+];
+const DC_V6_PREFIXES = ["2a03:2880:"]; // Meta IPv6
+const CRAWLER_UA = /facebookexternalhit|facebookcatalog|meta-externalagent|(^|[^a-z])bot([^a-z]|$)|crawler|spider|slurp|bingpreview|whatsapp|telegrambot|headlesschrome|python-requests|axios\//i;
+
+const ipToLong = (ip) => {
+  const p = ip.split(".");
+  if (p.length !== 4) return null;
+  let n = 0;
+  for (const o of p) {
+    const v = Number(o);
+    if (!Number.isInteger(v) || v < 0 || v > 255) return null;
+    n = n * 256 + v;
+  }
+  return n >>> 0;
+};
+const inCidr = (ip, cidr) => {
+  const [range, bitsStr] = cidr.split("/");
+  const bits = Number(bitsStr);
+  const ipL = ipToLong(ip);
+  const rangeL = ipToLong(range);
+  if (ipL === null || rangeL === null) return false;
+  const mask = bits === 0 ? 0 : (~((1 << (32 - bits)) - 1)) >>> 0;
+  return (ipL & mask) === (rangeL & mask);
+};
+const normalizeIp = (ip) => (ip ? String(ip).replace(/^::ffff:/i, "").toLowerCase() : "");
+function isDatacenterIp(rawIp) {
+  const ip = normalizeIp(rawIp);
+  if (!ip) return false;
+  if (ip.includes(":")) return DC_V6_PREFIXES.some((p) => ip.startsWith(p));
+  return DC_CIDRS.some((c) => inCidr(ip, c));
+}
+
 /*
  * Public ingest. The site posts a small JSON payload (as text/plain, so no CORS
  * preflight) on every page view and periodically while the tab is open. We upsert
@@ -43,6 +91,11 @@ const track = asyncHandler(async (req, res) => {
   // Silently drop our own traffic (matched on the client-reported IP or the
   // server-observed one) so we never track ourselves.
   if (EXCLUDED_IPS.has(clientIp) || EXCLUDED_IPS.has(req.ip)) return res.sendStatus(204);
+  // Drop ad-platform / cloud crawlers (Meta ad-review, link previews, scanners)
+  // so the counts reflect real humans, not bots.
+  if (isDatacenterIp(clientIp) || isDatacenterIp(req.ip) || CRAWLER_UA.test(d.ua || "")) {
+    return res.sendStatus(204);
+  }
   const path = clip(d.path, 300);
 
   const set = { lastActivity: now };
@@ -201,4 +254,4 @@ const listVisitors = asyncHandler(async (req, res) => {
   res.status(200).json({ page, limit, total, order: order === 1 ? "asc" : "desc", rows: withUsers });
 });
 
-module.exports = { track, listVisitors };
+module.exports = { track, listVisitors, isDatacenterIp };
