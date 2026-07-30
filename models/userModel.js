@@ -232,6 +232,11 @@ const userSchema = Schema(
         // This teacher's OWN random, non-sequential share code (/register?ref=<code>).
         // Uniqueness is enforced by a migration-owned partial unique index.
         referralCode: { type: String, default: null },
+        // IPs for the admin directory: the address this account signed up from,
+        // and its most recent one (refreshed on authenticated activity, throttled).
+        // Also used to match a registered user to an anonymous visitor row by IP.
+        signupIp: { type: String },
+        lastIp: { type: String, index: true },
         // Marketing acquisition — WHERE this account came from, captured ONCE at
         // sign-up from the visitor tracker's first-touch data (utm_source / ?ref /
         // referring site). Powers the "came from an ad/campaign" badge in the admin

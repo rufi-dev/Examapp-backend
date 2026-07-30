@@ -1,5 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const VisitorSession = require("../models/visitorSessionModel");
+const User = require("../models/userModel");
 
 // Keep a visit's journey and payload bounded so one abusive client can't bloat a
 // document. Older journey entries are dropped (we keep the most recent 60).
@@ -102,7 +103,29 @@ const listVisitors = asyncHandler(async (req, res) => {
     VisitorSession.estimatedDocumentCount(),
   ]);
 
-  res.status(200).json({ page, limit, total, order: order === 1 ? "asc" : "desc", rows });
+  // Detect which visits belong to a REGISTERED user by matching the visit IP
+  // against users' signup/last IP. One query for the whole page; a shared IP can
+  // map to several accounts, so we attach the list. `registered` = a real user.
+  const ips = [...new Set(rows.map((r) => r.ip).filter(Boolean))];
+  const byIp = {};
+  if (ips.length) {
+    const users = await User.find({ $or: [{ lastIp: { $in: ips } }, { signupIp: { $in: ips } }] })
+      .select("name lastIp signupIp")
+      .lean();
+    for (const u of users) {
+      for (const ip of [u.lastIp, u.signupIp]) {
+        if (!ip) continue;
+        if (!byIp[ip]) byIp[ip] = new Set();
+        byIp[ip].add(u.name);
+      }
+    }
+  }
+  const withUsers = rows.map((r) => ({
+    ...r,
+    registeredUsers: r.ip && byIp[r.ip] ? [...byIp[r.ip]] : [],
+  }));
+
+  res.status(200).json({ page, limit, total, order: order === 1 ? "asc" : "desc", rows: withUsers });
 });
 
 module.exports = { track, listVisitors };

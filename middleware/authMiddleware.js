@@ -93,7 +93,12 @@ const protect = asyncHandler(async (req, res, next) => {
     // request never pays for an extra write (this runs on every API call).
     const TEN_MIN = 10 * 60 * 1000;
     if (!user.lastActiveAt || Date.now() - new Date(user.lastActiveAt).getTime() > TEN_MIN) {
-      User.updateOne({ _id: user._id }, { $set: { lastActiveAt: new Date() } }).catch(() => {});
+      // Same throttled write also refreshes the user's current IP for the admin
+      // directory (and visitor↔user matching). req.ip is the real client IP
+      // (trust proxy is on behind Caddy).
+      const patch = { lastActiveAt: new Date() };
+      if (req.ip) patch.lastIp = req.ip;
+      User.updateOne({ _id: user._id }, { $set: patch }).catch(() => {});
     }
 
     req.user = user;

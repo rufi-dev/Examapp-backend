@@ -140,6 +140,8 @@ const registerUser = asyncHandler(async (req, res) => {
       onboarded: true, // role + profile chosen at sign-up, so don't re-prompt
       userAgent,
       isVerified: true,
+      signupIp: req.ip,
+      lastIp: req.ip,
       // Where this account came from (first-touch), for the admin "from an ad"
       // badge. Client-supplied but harmless: it only labels a marketing source.
       acquisition: cleanAcquisition(req.body.acquisition),
