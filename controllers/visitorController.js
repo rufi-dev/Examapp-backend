@@ -82,13 +82,15 @@ const listVisitors = asyncHandler(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
   const skip = (page - 1) * limit;
+  // Latest visit first by default; ?order=asc flips to oldest first.
+  const order = req.query.order === "asc" ? 1 : -1;
 
   const [rows, total] = await Promise.all([
-    VisitorSession.find({}).sort({ lastActivity: -1 }).skip(skip).limit(limit).lean(),
+    VisitorSession.find({}).sort({ lastActivity: order }).skip(skip).limit(limit).lean(),
     VisitorSession.estimatedDocumentCount(),
   ]);
 
-  res.status(200).json({ page, limit, total, rows });
+  res.status(200).json({ page, limit, total, order: order === 1 ? "asc" : "desc", rows });
 });
 
 module.exports = { track, listVisitors };
