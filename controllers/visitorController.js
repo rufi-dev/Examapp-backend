@@ -94,9 +94,32 @@ const track = asyncHandler(async (req, res) => {
   return res.sendStatus(204);
 });
 
+// Map a source category to a filter on the stored affiliate/referrer/campaign.
+// Aligns with the badge classifier so "Instagram" catches ig / instagram.com /
+// l.instagram.com etc. "direct" = no meaningful source.
+const SOURCE_PATTERNS = {
+  instagram: "instagram|igsh|(^|[^a-z])ig([^a-z]|$)",
+  facebook: "facebook|fbclid|(^|[^a-z])fb([^a-z]|$)",
+  google: "google|gclid",
+  tiktok: "tiktok",
+  youtube: "youtube|youtu\\.be",
+};
+function sourceFilter(cat) {
+  if (!cat) return null;
+  if (cat === "direct") {
+    return { $or: [{ affiliate: { $in: [null, "", "(direct)"] } }, { affiliate: { $exists: false } }] };
+  }
+  const p = SOURCE_PATTERNS[cat];
+  const rx = p ? { $regex: p, $options: "i" } : { $regex: String(cat).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" };
+  return { $or: [{ affiliate: rx }, { referrer: rx }, { campaign: rx }] };
+}
+
 /*
- * Admin list. Newest activity first, paginated. Returns the rows plus totals so
- * the page can show "showing X of N".
+ * Admin list. Newest activity first, paginated, with optional filters:
+ *   ?source=instagram|facebook|google|tiktok|youtube|direct
+ *   ?unique=1   collapse to ONE row per IP (the latest) — hides the same device
+ *   ?from=YYYY-MM-DD&to=YYYY-MM-DD   date range on last activity
+ * Returns the rows plus totals so the page can show "showing X of N".
  */
 const listVisitors = asyncHandler(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -105,10 +128,42 @@ const listVisitors = asyncHandler(async (req, res) => {
   // Latest visit first by default; ?order=asc flips to oldest first.
   const order = req.query.order === "asc" ? 1 : -1;
 
-  const [rows, total] = await Promise.all([
-    VisitorSession.find({}).sort({ lastActivity: order }).skip(skip).limit(limit).lean(),
-    VisitorSession.estimatedDocumentCount(),
-  ]);
+  // Build the filter: date range + source category.
+  const filter = {};
+  const from = req.query.from ? new Date(req.query.from) : null;
+  const to = req.query.to ? new Date(new Date(req.query.to).setHours(23, 59, 59, 999)) : null;
+  if ((from && !isNaN(from)) || (to && !isNaN(to))) {
+    filter.lastActivity = {};
+    if (from && !isNaN(from)) filter.lastActivity.$gte = from;
+    if (to && !isNaN(to)) filter.lastActivity.$lte = to;
+  }
+  const srcF = sourceFilter(req.query.source);
+  if (srcF) Object.assign(filter, srcF);
+
+  const unique = req.query.unique === "1" || req.query.unique === "true";
+
+  let rows, total;
+  if (unique) {
+    // One row per IP: the most recent visit for each. Rows without an IP collapse
+    // under a single null bucket.
+    const base = [
+      { $match: filter },
+      { $sort: { lastActivity: -1 } },
+      { $group: { _id: "$ip", doc: { $first: "$$ROOT" } } },
+      { $replaceRoot: { newRoot: "$doc" } },
+    ];
+    const [countAgg, pageRows] = await Promise.all([
+      VisitorSession.aggregate([...base, { $count: "n" }]),
+      VisitorSession.aggregate([...base, { $sort: { lastActivity: order } }, { $skip: skip }, { $limit: limit }]),
+    ]);
+    total = countAgg[0]?.n || 0;
+    rows = pageRows;
+  } else {
+    [rows, total] = await Promise.all([
+      VisitorSession.find(filter).sort({ lastActivity: order }).skip(skip).limit(limit).lean(),
+      VisitorSession.countDocuments(filter),
+    ]);
+  }
 
   // Detect which visits belong to a REGISTERED user by matching the visit IP
   // against users' signup/last IP. One query for the whole page; a shared IP can
