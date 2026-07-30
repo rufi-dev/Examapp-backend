@@ -39,6 +39,7 @@ const Cryptr = require("cryptr");
 const { OAuth2Client } = require("google-auth-library");
 const { hardDeleteUsers } = require("../services/entityLifecycle");
 const { pageLimit, withCursor, pageResult, wantsEnvelope } = require("../utils/cursorPagination");
+const VisitorSession = require("../models/visitorSessionModel");
 
 // Sanitise the client-supplied first-touch acquisition into a bounded shape.
 // Returns undefined when there is nothing meaningful to store (organic/direct).
@@ -819,6 +820,31 @@ const getUsers = asyncHandler(async (req, res) => {
       u.teachers = ids
         ? [...ids].map((id) => ({ _id: id, name: nameOf.get(id) || "—" }))
         : [];
+    });
+  }
+
+  // "Came from" — link each account to its earliest tagged visitor session with
+  // a real source, so the directory shows where a user arrived from even if they
+  // signed up before acquisition was captured at register (as long as they've
+  // since browsed while logged in, which stamps their id on the session).
+  if (users.length) {
+    const ids = users.map((u) => u._id);
+    const sessions = await VisitorSession.find({
+      userId: { $in: ids },
+      affiliate: { $exists: true, $nin: [null, "", "(direct)"] },
+    })
+      .sort({ firstSeen: 1 })
+      .select("userId affiliate campaign")
+      .lean();
+    const srcOf = new Map();
+    for (const s of sessions) {
+      const key = String(s.userId);
+      if (!srcOf.has(key)) srcOf.set(key, { source: s.affiliate, campaign: s.campaign || "" });
+    }
+    users.forEach((u) => {
+      if (!u.acquisition?.source && srcOf.has(String(u._id))) {
+        u.acquisitionMatched = srcOf.get(String(u._id));
+      }
     });
   }
 

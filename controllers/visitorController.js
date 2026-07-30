@@ -53,6 +53,13 @@ const track = asyncHandler(async (req, res) => {
   if (d.device) set.device = clip(d.device, 120);
   if (d.ua) set.userAgent = clip(d.ua, 400);
   if (d.event === "page_view" && path) set.lastPage = path;
+  // Reliable visit↔account link: the browser sends the logged-in user's id/name.
+  // Set (not setOnInsert) so an anonymous visit that later logs in gets stamped.
+  const uid = clip(d.uid, 40);
+  if (uid && /^[a-f0-9]{24}$/i.test(uid)) {
+    set.userId = uid;
+    if (d.uname) set.userName = clip(d.uname, 120);
+  }
 
   const setOnInsert = {
     firstSeen: now,
@@ -120,10 +127,12 @@ const listVisitors = asyncHandler(async (req, res) => {
       }
     }
   }
-  const withUsers = rows.map((r) => ({
-    ...r,
-    registeredUsers: r.ip && byIp[r.ip] ? [...byIp[r.ip]] : [],
-  }));
+  const withUsers = rows.map((r) => {
+    const names = new Set();
+    if (r.userName) names.add(r.userName); // explicit (logged-in) — most reliable
+    if (r.ip && byIp[r.ip]) byIp[r.ip].forEach((n) => names.add(n)); // IP match
+    return { ...r, registeredUsers: [...names] };
+  });
 
   res.status(200).json({ page, limit, total, order: order === 1 ? "asc" : "desc", rows: withUsers });
 });

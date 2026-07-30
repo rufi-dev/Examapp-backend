@@ -12,6 +12,12 @@ const visitorSessionSchema = new Schema(
   {
     sessionId: { type: String, required: true, unique: true, index: true },
 
+    // Set the moment a logged-in user is seen browsing this visit (the browser
+    // sends its own id/name). The reliable link between a visit and an account —
+    // no IP guessing. Absent for anonymous visits.
+    userId: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    userName: { type: String },
+
     // Where from
     ip: String,
     country: String,
