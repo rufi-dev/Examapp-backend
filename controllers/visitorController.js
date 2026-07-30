@@ -53,6 +53,15 @@ const track = asyncHandler(async (req, res) => {
   if (d.device) set.device = clip(d.device, 120);
   if (d.ua) set.userAgent = clip(d.ua, 400);
   if (d.event === "page_view" && path) set.lastPage = path;
+
+  // Render-timing funnel. "open" = HTML loaded (early script, before the bundle);
+  // "page_view" = the app painted. The gap between them is the pre-render bounce.
+  if (d.event === "open") set.opened = true;
+  if (d.event === "page_view") {
+    set.rendered = true;
+    const rm = Number(d.render_ms);
+    if (Number.isFinite(rm) && rm >= 0) set.renderMs = Math.min(Math.round(rm), 600000);
+  }
   // Reliable visit↔account link: the browser sends the logged-in user's id/name.
   // Set (not setOnInsert) so an anonymous visit that later logs in gets stamped.
   const uid = clip(d.uid, 40);

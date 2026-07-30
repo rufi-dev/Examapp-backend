@@ -32,6 +32,14 @@ const visitorSessionSchema = new Schema(
     pageViews: { type: Number, default: 0 },
     durationSeconds: { type: Number, default: 0 }, // active time on site
 
+    // Render-timing funnel: `opened` = the HTML loaded (fired by an early script
+    // before the app bundle); `rendered` = the app actually painted (first
+    // page_view). opened && !rendered ⇒ they bounced BEFORE the page rendered.
+    // renderMs = ms from page open to first render.
+    opened: { type: Boolean, default: false },
+    rendered: { type: Boolean, default: false },
+    renderMs: { type: Number },
+
     // Who (coarse)
     device: String,
     userAgent: String,
