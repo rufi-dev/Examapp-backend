@@ -232,6 +232,18 @@ const userSchema = Schema(
         // This teacher's OWN random, non-sequential share code (/register?ref=<code>).
         // Uniqueness is enforced by a migration-owned partial unique index.
         referralCode: { type: String, default: null },
+        // Marketing acquisition — WHERE this account came from, captured ONCE at
+        // sign-up from the visitor tracker's first-touch data (utm_source / ?ref /
+        // referring site). Powers the "came from an ad/campaign" badge in the admin
+        // user list. Absent for accounts created before this existed / organic.
+        acquisition: {
+            source: { type: String },   // e.g. "instagram", "facebook", "google", "(direct)"
+            medium: { type: String },   // utm_medium
+            campaign: { type: String }, // utm_campaign
+            referrer: { type: String },
+            landing: { type: String },  // first page of the visit
+            at: { type: Date },
+        },
         // Teacher Journey (flag-gated): when the teacher first saw the full-page
         // Journey welcome. Stamped once via POST /teacher-success/welcome-seen so the
         // welcome shows once automatically yet stays reachable later. Absent = never.

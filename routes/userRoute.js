@@ -1,5 +1,5 @@
 const express = require('express')
-const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage } = require('../controllers/userController')
+const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage } = require('../controllers/userController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
 const { refreshHandler, logoutAllHandler, requireSessionFlag } = require('../controllers/authSessionController')
 const { csrfProtect } = require('../middleware/csrf')
@@ -28,6 +28,8 @@ router.patch('/updateUser', protect, updateUser)
 router.delete('/deleteUser/:id', protect, adminOnly, deleteUser)
 // ADMIN "log in as" a user (impersonation). Issues the target's session; audited.
 router.post('/impersonate/:id', protect, adminOnly, impersonateUser)
+// ADMIN edits any user's phone number (phone only — never role/identity).
+router.patch('/:id/phone', protect, adminOnly, setUserPhone)
 router.get('/getUsers', protect, teacherOnly, getUsers)
 // Admin directory extras: batch role/delete, and one call for everything about
 // a single teacher (their classes, students and created exams).

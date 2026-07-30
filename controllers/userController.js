@@ -40,6 +40,24 @@ const { OAuth2Client } = require("google-auth-library");
 const { hardDeleteUsers } = require("../services/entityLifecycle");
 const { pageLimit, withCursor, pageResult, wantsEnvelope } = require("../utils/cursorPagination");
 
+// Sanitise the client-supplied first-touch acquisition into a bounded shape.
+// Returns undefined when there is nothing meaningful to store (organic/direct).
+function cleanAcquisition(a) {
+  if (!a || typeof a !== "object") return undefined;
+  const s = (v, n) => (typeof v === "string" && v.trim() ? v.trim().slice(0, n) : undefined);
+  const out = {
+    source: s(a.source, 120),
+    medium: s(a.medium, 120),
+    campaign: s(a.campaign, 200),
+    referrer: s(a.referrer, 400),
+    landing: s(a.landing, 300),
+  };
+  const meaningful = out.source && out.source !== "(direct)";
+  if (!meaningful && !out.campaign && !out.referrer) return undefined;
+  out.at = new Date();
+  return out;
+}
+
 const cryptr = new Cryptr(process.env.CRYPTR_KEY);
 
 const client = new OAuth2Client(
@@ -122,6 +140,9 @@ const registerUser = asyncHandler(async (req, res) => {
       onboarded: true, // role + profile chosen at sign-up, so don't re-prompt
       userAgent,
       isVerified: true,
+      // Where this account came from (first-touch), for the admin "from an ad"
+      // badge. Client-supplied but harmless: it only labels a marketing source.
+      acquisition: cleanAcquisition(req.body.acquisition),
     });
 
     // AUD-002 (CR-011): unified issuance — legacy off, session/rollback on.
@@ -677,6 +698,25 @@ const deleteUser = asyncHandler(async (req, res) => {
   });
 });
 
+// PATCH /api/users/:id/phone — ADMIN sets any user's phone number. Focused on
+// phone only so this endpoint can never silently change roles, capabilities or
+// identity. Basic format check (>= 7 digits) mirrors the sign-up rule.
+const setUserPhone = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.params.id);
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found!");
+  }
+  const phone = typeof req.body.phone === "string" ? req.body.phone.trim() : "";
+  if (!phone || phone.replace(/\D/g, "").length < 7) {
+    res.status(400);
+    throw new Error("Telefon nömrəsi düzgün deyil");
+  }
+  user.phone = phone.slice(0, 40);
+  await user.save();
+  res.status(200).json({ _id: user._id, phone: user.phone, message: "Telefon nömrəsi yeniləndi" });
+});
+
 // POST /api/users/impersonate/:id — ADMIN "log in as" a user. Issues a REAL
 // session/token for the TARGET (so the admin's browser acts as that user) and
 // returns the same identity DTO login does. The client then hard-reloads and
@@ -1206,6 +1246,7 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
       photo: picture,
       userAgent,
       isVerified: true,
+      acquisition: cleanAcquisition(req.body.acquisition),
     });
 
     if (newUser) {
@@ -1442,6 +1483,7 @@ module.exports = {
   getUsers,
   updateUser,
   deleteUser,
+  setUserPhone,
   impersonateUser,
   loginStatus,
   upgradeUser,
