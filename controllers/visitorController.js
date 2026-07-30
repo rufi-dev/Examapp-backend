@@ -27,9 +27,12 @@ const DC_CIDRS = [
   "69.63.176.0/20", "69.171.224.0/19", "173.252.64.0/18", "157.240.0.0/16",
   "129.134.0.0/16", "204.15.20.0/22", "179.60.192.0/22", "185.60.216.0/22",
   "57.141.0.0/16", "102.132.96.0/20",
-  // AWS us-west-2 (Oregon) aggregates — where the observed review crawlers ran
-  "18.236.0.0/14", "34.208.0.0/12", "35.80.0.0/12", "44.192.0.0/10",
-  "52.32.0.0/11", "54.68.0.0/14", "54.184.0.0/13",
+  // AWS (Amazon owns 3.0.0.0/8 outright) + the us-west-2 / us-east-1 blocks the
+  // observed ad-review crawlers run from.
+  "3.0.0.0/8", "13.52.0.0/16", "18.236.0.0/14", "18.244.0.0/15",
+  "34.208.0.0/12", "35.80.0.0/12", "44.192.0.0/10", "52.0.0.0/10",
+  "54.68.0.0/14", "54.144.0.0/12", "54.160.0.0/11", "54.184.0.0/13",
+  "54.200.0.0/13", "54.212.0.0/14", "100.20.0.0/14",
   // GCP / Azure aggregates commonly used by crawlers
   "34.64.0.0/10", "35.184.0.0/13", "20.0.0.0/8",
 ];
@@ -64,6 +67,20 @@ function isDatacenterIp(rawIp) {
   return DC_CIDRS.some((c) => inCidr(ip, c));
 }
 
+// Behavioural catch that doesn't depend on IP lists: Instagram is a MOBILE-ONLY
+// app, so a real Instagram-ad click is never on a desktop browser. A DESKTOP
+// visit claiming an Instagram source is therefore Meta's ad-review crawler.
+function looksLikeAdCrawler(d) {
+  const ua = d && d.ua ? String(d.ua) : "";
+  if (!ua) return false;
+  const mobile = /Android|iPhone|iPad|iPod|Mobile|Instagram|FBAN|FBAV/i.test(ua);
+  if (mobile) return false;
+  const desktop = /Windows NT|Macintosh|Mac OS X|X11|Linux/i.test(ua);
+  const src = `${(d.affiliate || "")} ${(d.referrer || "")}`.toLowerCase();
+  const instagram = /instagram|(^|[^a-z])ig([^a-z]|$)/.test(src);
+  return desktop && instagram;
+}
+
 /*
  * Public ingest. The site posts a small JSON payload (as text/plain, so no CORS
  * preflight) on every page view and periodically while the tab is open. We upsert
@@ -93,7 +110,7 @@ const track = asyncHandler(async (req, res) => {
   if (EXCLUDED_IPS.has(clientIp) || EXCLUDED_IPS.has(req.ip)) return res.sendStatus(204);
   // Drop ad-platform / cloud crawlers (Meta ad-review, link previews, scanners)
   // so the counts reflect real humans, not bots.
-  if (isDatacenterIp(clientIp) || isDatacenterIp(req.ip) || CRAWLER_UA.test(d.ua || "")) {
+  if (isDatacenterIp(clientIp) || isDatacenterIp(req.ip) || CRAWLER_UA.test(d.ua || "") || looksLikeAdCrawler(d)) {
     return res.sendStatus(204);
   }
   const path = clip(d.path, 300);
@@ -254,4 +271,4 @@ const listVisitors = asyncHandler(async (req, res) => {
   res.status(200).json({ page, limit, total, order: order === 1 ? "asc" : "desc", rows: withUsers });
 });
 
-module.exports = { track, listVisitors, isDatacenterIp };
+module.exports = { track, listVisitors, isDatacenterIp, looksLikeAdCrawler };
