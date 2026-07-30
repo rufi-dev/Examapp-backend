@@ -171,6 +171,8 @@ app.get("/healthz", (req, res) => {
 app.use("/api/users", userRoute)
 app.use("/api/quiz", quizRoute)
 app.use("/api/achivement", achivementRoute)
+// Public visitor analytics ingest (POST) + admin visitor list (GET).
+app.use("/api/track", require("./routes/visitorRoute"))
 // Payments (Stripe) removed — all exams are free. The paid-exam control remains
 // in the builder as a disabled "coming soon" placeholder; price is enforced to 0
 // server-side (addExam/editExam). The defensive Permissions-Policy: payment=()
