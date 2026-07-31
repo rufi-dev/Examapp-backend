@@ -145,6 +145,27 @@ async function reward({ referralId, rewardKey, now = new Date() }) {
   return { ok: false, code: "not_qualified", state: ref.state };
 }
 
+// ADMIN override accept: mark a referral rewarded from ANY non-rewarded state
+// (pending / qualified / held / revoked / rejected), bypassing auto-qualification,
+// and grant the referrer their credit ONCE (idempotent per referee — the same XP
+// award a natural qualification grants). For manual admin control.
+async function adminAccept({ referralId, actorId, rewardKey, now = new Date() }) {
+  const ref = await TeacherReferral.findById(referralId);
+  if (!ref) return { ok: false, code: "not_found" };
+  if (ref.state === "rewarded") return { ok: true, state: "rewarded", idempotent: true };
+  const updated = await TeacherReferral.findOneAndUpdate(
+    { _id: referralId, state: { $ne: "rewarded" } },
+    { $set: { state: "rewarded", rewardedAt: now, rewardKey: rewardKey || null, qualifiedAt: ref.qualifiedAt || now, reviewer: actorId || ref.reviewer || null } },
+    { new: true }
+  );
+  if (!updated) {
+    const r = await TeacherReferral.findById(referralId);
+    return { ok: true, idempotent: true, state: r ? r.state : "unknown" };
+  }
+  try { Promise.resolve(require("./teacherJourneyEvents").onReferralQualified(updated.referrerId, updated.refereeId, now)).catch(() => {}); } catch (_) { /* ignore */ }
+  return { ok: true, state: "rewarded", accepted: true };
+}
+
 // Revoke a reward. Idempotent CAS. Never removes core creation access.
 async function revoke({ referralId, reason, actorId, now = new Date() }) {
   const ref = await TeacherReferral.findById(referralId);
@@ -162,5 +183,5 @@ async function qualifiedCount(referrerId) {
 
 module.exports = {
   generateCode, assessRisk, assessQualification, bind, reconcilePendingBindings,
-  qualify, qualifyReferee, reward, revoke, qualifiedCount,
+  qualify, qualifyReferee, reward, adminAccept, revoke, qualifiedCount,
 };

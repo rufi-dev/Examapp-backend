@@ -169,7 +169,23 @@ const getMyReferral = asyncHandler(async (req, res) => {
   // Absolute share URL (CR-125#8) from the validated FRONTEND_URL, no trailing slash.
   const base = (process.env.FRONTEND_URL || "").replace(/\/+$/, "");
   const link = `${base}/register?ref=${encodeURIComponent(u.referralCode)}`;
-  res.status(200).json({ code: u.referralCode, link, counts: { qualified, pending, held } });
+
+  // The people this teacher invited, each with a simple status they can read:
+  // Waiting (pending/qualified/held) · Accepted (rewarded) · Declined (revoked/rejected).
+  const mine = await TeacherReferral.find({ referrerId: u._id }).sort({ createdAt: -1 }).limit(100).lean();
+  const referees = mine.length
+    ? await User.find({ _id: { $in: mine.map((m) => m.refereeId) } }).select("name createdAt").lean()
+    : [];
+  const nameOf = new Map(referees.map((x) => [String(x._id), x.name]));
+  const displayStatus = (s) =>
+    s === "rewarded" ? "accepted" : s === "revoked" || s === "rejected" ? "declined" : "waiting";
+  const invitees = mine.map((m) => ({
+    name: nameOf.get(String(m.refereeId)) || "—",
+    status: displayStatus(m.state),
+    at: m.createdAt,
+  }));
+
+  res.status(200).json({ code: u.referralCode, link, counts: { qualified, pending, held }, invitees });
 });
 
 // POST /api/teacher-success/upgrade-request — request the next level.
@@ -324,15 +340,36 @@ const adminListReferrals = asyncHandler(async (req, res) => {
   if (req.query.state) { if (!REFERRAL_STATES.has(req.query.state)) { res.status(400); return res.json({ code: "bad_state" }); } base.state = req.query.state; }
   const { q, limit } = pageQuery(req, base);
   const referrals = await TeacherReferral.find(q).sort({ createdAt: -1 }).limit(limit).lean();
-  res.status(200).json({ referrals, nextCursor: nextCursor(referrals) });
+
+  // Attach BASIC (non-private) details for who invited whom: the referrer's name
+  // and the referee's name/email/phone/join date. Never exams/classes (private).
+  const ids = [...new Set(referrals.flatMap((r) => [String(r.referrerId), String(r.refereeId)]))];
+  const users = ids.length
+    ? await User.find({ _id: { $in: ids } }).select("name email phone createdAt role").lean()
+    : [];
+  const byId = new Map(users.map((u) => [String(u._id), u]));
+  const view = referrals.map((r) => {
+    const referrer = byId.get(String(r.referrerId));
+    const referee = byId.get(String(r.refereeId));
+    return {
+      ...r,
+      referrer: referrer ? { _id: referrer._id, name: referrer.name } : null,
+      referee: referee
+        ? { _id: referee._id, name: referee.name, email: referee.email, phone: referee.phone, createdAt: referee.createdAt }
+        : null,
+    };
+  });
+  res.status(200).json({ referrals: view, nextCursor: nextCursor(referrals) });
 });
 
-// POST /admin/referral/:id/review { action: reward|revoke|reject, reason }
+// POST /admin/referral/:id/review { action: accept|reward|revoke, reason }
 const adminReviewReferral = asyncHandler(async (req, res) => {
   const { action, reason } = req.body;
   const id = req.params.id;
   let r;
-  if (action === "reward") r = await referralSvc.reward({ referralId: id, rewardKey: req.body.rewardKey || idempotencyKey() });
+  // accept = admin override (works on a pending referral) + credits the referrer.
+  if (action === "accept") r = await referralSvc.adminAccept({ referralId: id, actorId: req.user._id, rewardKey: req.body.rewardKey || idempotencyKey() });
+  else if (action === "reward") r = await referralSvc.reward({ referralId: id, rewardKey: req.body.rewardKey || idempotencyKey() });
   else if (action === "revoke") r = await referralSvc.revoke({ referralId: id, reason, actorId: req.user._id });
   else { res.status(400); throw new Error("bad_action"); }
   res.status(r.ok ? 200 : 400).json(r);
