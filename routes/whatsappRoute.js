@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
-const { protect, teacherOnly } = require("../middleware/authMiddleware");
+const { protect, teacherOnly, adminOnly } = require("../middleware/authMiddleware");
+const { sendAdminUserMessage } = require("../controllers/whatsappController");
 const User = require("../models/userModel");
 const {
   getStatusFor,
@@ -16,6 +17,16 @@ const {
 // links their own WhatsApp number and picks their own notify group; nobody
 // else's session is touched.
 const oid = (req) => String(req.user._id);
+
+// Direct support outreach from the logged-in ADMIN's connected WhatsApp.
+// The controller resolves the selected user's phone server-side; the client
+// cannot turn this into an arbitrary-number sending endpoint.
+router.post(
+  "/admin/users/:userId/message",
+  protect,
+  adminOnly,
+  sendAdminUserMessage
+);
 
 router.get("/status", protect, teacherOnly, (req, res) => {
   res.json(getStatusFor(oid(req)));

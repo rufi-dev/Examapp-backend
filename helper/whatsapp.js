@@ -254,17 +254,15 @@ async function logoutFor(ownerId) {
 // "<id>@g.us"). Returns true on success.
 async function sendForOwner(ownerId, chatId, text) {
   const s = getSession(ownerId);
-  console.log(
-    `[WHATSAPP][DEBUG] sendForOwner ${ownerId} chatId=${chatId} ready=${s.ready} hasClient=${!!s.client}`
-  );
   if (!s.ready || !s.client || !chatId) return false;
   try {
     await s.client.sendMessage(chatId, text);
-    console.log(`[WHATSAPP][DEBUG] sendForOwner ${ownerId} -> OK to ${chatId}`);
+    console.log(`[WHATSAPP] message sent for owner ${ownerId}`);
     return true;
-  } catch (e) {
-    console.error(`[WHATSAPP] ${ownerId} send failed to ${chatId}:`, e.message);
-    console.error(e.stack);
+  } catch {
+    // Do not log the destination, message, or upstream error: WhatsApp errors
+    // can echo phone numbers and message metadata.
+    console.error(`[WHATSAPP] message send failed for owner ${ownerId}`);
     return false;
   }
 }
@@ -278,16 +276,14 @@ async function sendMessageFor(ownerId, phone, text) {
   if (!digits) return false;
   const s = getSession(ownerId);
   let chatId = `${digits}@c.us`;
-  console.log(`[WHATSAPP][DEBUG] sendMessageFor ${ownerId} phone=${phone} digits=${digits} ready=${s.ready}`);
   try {
     if (s.ready && s.client && typeof s.client.getNumberId === "function") {
       const wid = await s.client.getNumberId(digits);
-      console.log(`[WHATSAPP][DEBUG] getNumberId(${digits}) ->`, wid && wid._serialized ? wid._serialized : wid);
       if (wid && wid._serialized) chatId = wid._serialized;
-      else console.warn(`[WHATSAPP] ${ownerId} ${digits} is not on WhatsApp`);
+      else console.warn(`[WHATSAPP] recipient is not registered on WhatsApp (owner ${ownerId})`);
     }
-  } catch (e) {
-    console.warn(`[WHATSAPP] ${ownerId} getNumberId failed (${digits}):`, e.message);
+  } catch {
+    console.warn(`[WHATSAPP] recipient lookup failed for owner ${ownerId}`);
   }
   return sendForOwner(ownerId, chatId, text);
 }
