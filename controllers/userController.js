@@ -4,6 +4,7 @@ const { usedBytes, quotaFor } = require("../middleware/uploadLimit");
 const Enrollment = require("../models/enrollmentModel");
 const Class = require("../models/classModel");
 const Exam = require("../models/examModel");
+const Result = require("../models/resultModel");
 const bcrypt = require("bcryptjs");
 const { generateToken, hashToken, getToken, validatePassword, normalizeEmail } = require("../utils/index");
 const { recordDebug } = require("../utils/debugLog");
@@ -600,10 +601,6 @@ const getUserById = asyncHandler(async (req, res) => {
   const user = await User.findById(id)
     .select("-password")
     .populate({ path: "exams", select: "-password -pdf" })
-    .populate({
-      path: "results",
-      populate: { path: "examId", select: "-password -pdf" },
-    })
     .exec();
 
   if (!user) {
@@ -611,7 +608,16 @@ const getUserById = asyncHandler(async (req, res) => {
     throw new Error("User not found!");
   }
 
-  res.status(200).json(user);
+  // Results live in their own collection keyed by userId — there is no `results`
+  // path on the User schema, so populating it threw a StrictPopulateError (500).
+  // Fetch them directly and attach the fields the profile renders.
+  const results = await Result.find({ userId: id })
+    .select("earnPoints attemptOrdinal createdAt examId")
+    .populate({ path: "examId", select: "name" })
+    .sort({ createdAt: 1 })
+    .lean();
+
+  res.status(200).json({ ...user.toObject(), results });
 });
 
 // Update User
