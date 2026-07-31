@@ -4090,7 +4090,11 @@ const deleteExamForever = asyncHandler(async (req, res) => {
 // The Trash listing: archived exams the caller owns (admins see all), newest
 // first, with the auto-purge date so the UI can show a countdown.
 const getArchivedExams = asyncHandler(async (req, res) => {
-  const filter = { deletedAt: { $ne: null } };
+  // Only exams that are archived but NOT yet permanently purged. `purgeExam`
+  // keeps `deletedAt` set on the tombstone it leaves behind (Results/Attempts
+  // integrity), so without the `purgedAt: null` guard a "delete forever" exam
+  // would keep reappearing in the Trash after every refresh.
+  const filter = { deletedAt: { $ne: null }, purgedAt: null };
   if (!isAdminUser(req.user)) filter.owner = req.user._id;
   const exams = await Exam.find(filter)
     .sort({ deletedAt: -1 })
