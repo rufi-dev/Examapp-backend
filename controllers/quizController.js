@@ -1333,6 +1333,13 @@ const getAllClasses = asyncHandler(async (req, res) => {
     };
   }
   const classes = await Class.find(filter).sort({ createdAt: -1 }).lean();
+  // ADMIN only: attach the creator's name so the class card can show who made it.
+  if (isAdminUser(req.user) && classes.length) {
+    const ownerIds = [...new Set(classes.map((c) => String(c.owner)).filter(Boolean))];
+    const owners = ownerIds.length ? await User.find({ _id: { $in: ownerIds } }).select("name").lean() : [];
+    const nameOf = new Map(owners.map((u) => [String(u._id), u.name]));
+    classes.forEach((c) => { c.ownerName = nameOf.get(String(c.owner)) || null; });
+  }
   const canManage = (c) =>
     isAdminUser(req.user) || (c.owner && String(c.owner) === String(req.user._id));
   // Only the owning teacher (or admin) keeps the join code per class.
