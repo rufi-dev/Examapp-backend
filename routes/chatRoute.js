@@ -6,6 +6,7 @@ const {
   nudge,
   listConversations,
   startConversation,
+  contactAdmin,
   getMessages,
   sendMessage,
 } = require("../controllers/chatController");
@@ -21,6 +22,9 @@ router.post("/conversations/:id/nudge", protect, nudge);
 // My conversations, and starting a new one (admin-initiated support chat).
 router.get("/conversations", protect, listConversations);
 router.post("/conversations", protect, adminOnly, startConversation);
+
+// Any staff member (teacher) opening a chat with the admin themselves.
+router.post("/contact-admin", protect, contactAdmin);
 
 // A single thread: read (marks incoming as read) and send. Participant-only,
 // enforced in the controller — so a teacher can reply but only in their own

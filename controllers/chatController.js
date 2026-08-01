@@ -142,6 +142,45 @@ const startConversation = asyncHandler(async (req, res) => {
   });
 });
 
+// Teacher-facing entry: open (or re-open) a conversation with the admin so any
+// staff member can reach support without the admin starting it first. Picks the
+// primary (oldest) admin when there is more than one.
+const contactAdmin = asyncHandler(async (req, res) => {
+  const admin = await User.findOne({ role: "admin" })
+    .sort({ createdAt: 1 })
+    .select("name role photo")
+    .lean();
+  if (!admin) throw httpError(404, "no_admin", "Admin tapılmadı.");
+  if (String(admin._id) === String(req.user._id))
+    throw httpError(400, "self_chat", "Siz adminsiniz.");
+
+  const key = Conversation.keyFor(req.user._id, admin._id);
+  let conv = await Conversation.findOne({ key });
+  if (!conv) {
+    conv = await Conversation.create({
+      participants: [req.user._id, admin._id],
+      key,
+      createdBy: req.user._id,
+    });
+  }
+
+  const presence = await presenceMapFor([admin._id]);
+  res.status(201).json({
+    _id: conv._id,
+    peer: {
+      _id: admin._id,
+      name: admin.name,
+      role: admin.role,
+      photo: admin.photo || "",
+      online: isFresh(presence.get(String(admin._id))),
+    },
+    lastMessageText: conv.lastMessageText || "",
+    lastMessageAt: conv.lastMessageAt,
+    lastMessageFrom: conv.lastMessageFrom,
+    unread: 0,
+  });
+});
+
 // Load a thread (participant-only) and mark my incoming messages read. `after`
 // lets the client poll for only-new messages so payloads stay tiny.
 const getMessages = asyncHandler(async (req, res) => {
@@ -204,4 +243,4 @@ const sendMessage = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { ping, nudge, listConversations, startConversation, getMessages, sendMessage };
+module.exports = { ping, nudge, listConversations, startConversation, contactAdmin, getMessages, sendMessage };
