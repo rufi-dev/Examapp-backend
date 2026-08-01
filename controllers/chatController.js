@@ -199,6 +199,23 @@ const getMessages = asyncHandler(async (req, res) => {
     { $set: { readAt: new Date() } }
   );
 
+  // Read watermark for MY sent messages: the latest time the peer read one of
+  // them. The incremental (`after`) fetch never re-sends my old messages, so
+  // this is how my client learns they were read — every message I sent at or
+  // before this instant is "read". Computed globally for the thread, so it stays
+  // correct no matter which slice of messages this response carries.
+  const readAgg = await Message.aggregate([
+    {
+      $match: {
+        conversation: conv._id,
+        from: new mongoose.Types.ObjectId(String(req.user._id)),
+        readAt: { $ne: null },
+      },
+    },
+    { $group: { _id: null, maxRead: { $max: "$readAt" } } },
+  ]);
+  const readWatermark = readAgg[0]?.maxRead || null;
+
   const peerId = conv.participants.find((p) => String(p) !== String(req.user._id));
   const presence = await presenceMapFor([peerId]);
   res.json({
@@ -211,6 +228,7 @@ const getMessages = asyncHandler(async (req, res) => {
       readAt: m.readAt,
     })),
     peerOnline: isFresh(presence.get(String(peerId))),
+    readWatermark,
   });
 });
 
