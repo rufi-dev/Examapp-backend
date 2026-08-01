@@ -16,6 +16,17 @@ const NUDGE_TTL_MS = 2 * 60 * 1000;
 
 const isFresh = (d) => !!d && Date.now() - new Date(d).getTime() < ONLINE_WINDOW_MS;
 
+// Only accept image URLs on our own Cloudinary host (matches the frontend upload
+// and the img-src CSP) — the client cannot inject an arbitrary remote URL.
+function isCloudinaryUrl(u) {
+  try {
+    const url = new URL(u);
+    return url.protocol === "https:" && url.hostname === "res.cloudinary.com";
+  } catch {
+    return false;
+  }
+}
+
 // Online state for a set of user ids in one query.
 async function presenceMapFor(ids) {
   const clean = ids.filter(Boolean);
@@ -224,6 +235,7 @@ const getMessages = asyncHandler(async (req, res) => {
       from: m.from,
       to: m.to,
       text: m.text,
+      imageUrl: m.imageUrl || "",
       createdAt: m.createdAt,
       readAt: m.readAt,
     })),
@@ -236,17 +248,19 @@ const getMessages = asyncHandler(async (req, res) => {
 // onto the conversation so the list can render without a per-row lookup.
 const sendMessage = asyncHandler(async (req, res) => {
   const text = typeof req.body.text === "string" ? req.body.text.trim() : "";
-  if (!text) throw httpError(400, "empty", "Mesaj boşdur.");
+  const imageUrl = typeof req.body.imageUrl === "string" ? req.body.imageUrl.trim() : "";
   if (text.length > MAX_TEXT) throw httpError(400, "too_long", "Mesaj çox uzundur.");
+  if (imageUrl && !isCloudinaryUrl(imageUrl)) throw httpError(400, "bad_image", "Şəkil qəbul edilmədi.");
+  if (!text && !imageUrl) throw httpError(400, "empty", "Mesaj boşdur.");
 
   const conv = await Conversation.findById(req.params.id);
   if (!conv || !conv.participants.some((p) => String(p) === String(req.user._id)))
     throw httpError(404, "conversation_not_found", "Söhbət tapılmadı.");
 
   const to = conv.participants.find((p) => String(p) !== String(req.user._id));
-  const msg = await Message.create({ conversation: conv._id, from: req.user._id, to, text });
+  const msg = await Message.create({ conversation: conv._id, from: req.user._id, to, text, imageUrl });
 
-  conv.lastMessageText = text.slice(0, 200);
+  conv.lastMessageText = text ? text.slice(0, 200) : "📷 Şəkil";
   conv.lastMessageAt = msg.createdAt;
   conv.lastMessageFrom = req.user._id;
   await conv.save();
@@ -256,6 +270,7 @@ const sendMessage = asyncHandler(async (req, res) => {
     from: msg.from,
     to: msg.to,
     text: msg.text,
+    imageUrl: msg.imageUrl || "",
     createdAt: msg.createdAt,
     readAt: msg.readAt,
   });

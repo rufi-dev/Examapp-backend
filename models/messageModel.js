@@ -8,7 +8,9 @@ const messageSchema = Schema(
     conversation: { type: Schema.Types.ObjectId, ref: "Conversation", required: true },
     from: { type: Schema.Types.ObjectId, ref: "User", required: true },
     to: { type: Schema.Types.ObjectId, ref: "User", required: true },
-    text: { type: String, required: true, trim: true, maxlength: 4000 },
+    // Text and/or an image — at least one is present (enforced in the controller).
+    text: { type: String, default: "", trim: true, maxlength: 4000 },
+    imageUrl: { type: String, default: "" },
     readAt: { type: Date, default: null },
   },
   { timestamps: true }
