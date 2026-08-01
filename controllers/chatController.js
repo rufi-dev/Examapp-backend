@@ -1,0 +1,177 @@
+const asyncHandler = require("express-async-handler");
+const mongoose = require("mongoose");
+const Conversation = require("../models/conversationModel");
+const Message = require("../models/messageModel");
+const Presence = require("../models/presenceModel");
+const User = require("../models/userModel");
+const { httpError } = require("../utils/appError");
+
+// A user counts as "online" if their last heartbeat is within this window. The
+// client pings every ~30s, so 75s tolerates one dropped ping without flicker.
+const ONLINE_WINDOW_MS = 75 * 1000;
+const MAX_TEXT = 4000;
+
+const isFresh = (d) => !!d && Date.now() - new Date(d).getTime() < ONLINE_WINDOW_MS;
+
+// Online state for a set of user ids in one query.
+async function presenceMapFor(ids) {
+  const clean = ids.filter(Boolean);
+  if (!clean.length) return new Map();
+  const rows = await Presence.find({ user: { $in: clean } }).select("user lastSeenAt").lean();
+  return new Map(rows.map((r) => [String(r.user), r.lastSeenAt]));
+}
+
+const otherParticipant = (conv, meId) =>
+  conv.participants.find((p) => String(p._id || p) !== String(meId));
+
+// Heartbeat: mark me present and return my total unread so a single call keeps
+// both the presence signal and the badge fresh.
+const ping = asyncHandler(async (req, res) => {
+  await Presence.updateOne(
+    { user: req.user._id },
+    { $set: { lastSeenAt: new Date() } },
+    { upsert: true }
+  );
+  const unread = await Message.countDocuments({ to: req.user._id, readAt: null });
+  res.json({ ok: true, unread });
+});
+
+// My conversations, newest activity first, each with the peer, their online
+// state and my unread count in that thread.
+const listConversations = asyncHandler(async (req, res) => {
+  const me = req.user._id;
+  const convs = await Conversation.find({ participants: me })
+    .sort({ lastMessageAt: -1, updatedAt: -1 })
+    .populate("participants", "name role photo")
+    .lean();
+
+  const peerIds = convs.map((c) => otherParticipant(c, me)).filter(Boolean).map((p) => p._id);
+  const presence = await presenceMapFor(peerIds);
+
+  const unreadRows = await Message.aggregate([
+    { $match: { to: new mongoose.Types.ObjectId(String(me)), readAt: null } },
+    { $group: { _id: "$conversation", n: { $sum: 1 } } },
+  ]);
+  const unreadMap = new Map(unreadRows.map((r) => [String(r._id), r.n]));
+
+  res.json(
+    convs.map((c) => {
+      const peer = otherParticipant(c, me) || {};
+      return {
+        _id: c._id,
+        peer: {
+          _id: peer._id,
+          name: peer.name || "İstifadəçi",
+          role: peer.role,
+          photo: peer.photo || "",
+          online: isFresh(presence.get(String(peer._id))),
+        },
+        lastMessageText: c.lastMessageText || "",
+        lastMessageAt: c.lastMessageAt,
+        lastMessageFrom: c.lastMessageFrom,
+        unread: unreadMap.get(String(c._id)) || 0,
+      };
+    })
+  );
+});
+
+// Start (or re-open) a conversation with a user. Only admins may OPEN one; the
+// pair key means a repeat "connect" returns the SAME conversation, never a dup.
+const startConversation = asyncHandler(async (req, res) => {
+  const otherId = req.body.userId;
+  if (!mongoose.isValidObjectId(otherId)) throw httpError(400, "bad_user", "İstifadəçi seçilməyib.");
+  if (String(otherId) === String(req.user._id)) throw httpError(400, "self_chat", "Özünüzlə söhbət olmaz.");
+
+  const other = await User.findById(otherId).select("name role photo").lean();
+  if (!other) throw httpError(404, "user_not_found", "İstifadəçi tapılmadı.");
+
+  const key = Conversation.keyFor(req.user._id, otherId);
+  let conv = await Conversation.findOne({ key });
+  if (!conv) {
+    conv = await Conversation.create({
+      participants: [req.user._id, otherId],
+      key,
+      createdBy: req.user._id,
+    });
+  }
+
+  const presence = await presenceMapFor([otherId]);
+  res.status(201).json({
+    _id: conv._id,
+    peer: {
+      _id: other._id,
+      name: other.name,
+      role: other.role,
+      photo: other.photo || "",
+      online: isFresh(presence.get(String(otherId))),
+    },
+    lastMessageText: conv.lastMessageText || "",
+    lastMessageAt: conv.lastMessageAt,
+    lastMessageFrom: conv.lastMessageFrom,
+    unread: 0,
+  });
+});
+
+// Load a thread (participant-only) and mark my incoming messages read. `after`
+// lets the client poll for only-new messages so payloads stay tiny.
+const getMessages = asyncHandler(async (req, res) => {
+  const conv = await Conversation.findById(req.params.id).lean();
+  if (!conv || !conv.participants.some((p) => String(p) === String(req.user._id)))
+    throw httpError(404, "conversation_not_found", "Söhbət tapılmadı.");
+
+  const after = req.query.after ? new Date(req.query.after) : null;
+  const filter = { conversation: conv._id };
+  if (after && !Number.isNaN(after.getTime())) filter.createdAt = { $gt: after };
+
+  const messages = await Message.find(filter).sort({ createdAt: 1 }).limit(500).lean();
+
+  await Message.updateMany(
+    { conversation: conv._id, to: req.user._id, readAt: null },
+    { $set: { readAt: new Date() } }
+  );
+
+  const peerId = conv.participants.find((p) => String(p) !== String(req.user._id));
+  const presence = await presenceMapFor([peerId]);
+  res.json({
+    messages: messages.map((m) => ({
+      _id: m._id,
+      from: m.from,
+      to: m.to,
+      text: m.text,
+      createdAt: m.createdAt,
+      readAt: m.readAt,
+    })),
+    peerOnline: isFresh(presence.get(String(peerId))),
+  });
+});
+
+// Send a message (participant-only), and denormalise the last-message preview
+// onto the conversation so the list can render without a per-row lookup.
+const sendMessage = asyncHandler(async (req, res) => {
+  const text = typeof req.body.text === "string" ? req.body.text.trim() : "";
+  if (!text) throw httpError(400, "empty", "Mesaj boşdur.");
+  if (text.length > MAX_TEXT) throw httpError(400, "too_long", "Mesaj çox uzundur.");
+
+  const conv = await Conversation.findById(req.params.id);
+  if (!conv || !conv.participants.some((p) => String(p) === String(req.user._id)))
+    throw httpError(404, "conversation_not_found", "Söhbət tapılmadı.");
+
+  const to = conv.participants.find((p) => String(p) !== String(req.user._id));
+  const msg = await Message.create({ conversation: conv._id, from: req.user._id, to, text });
+
+  conv.lastMessageText = text.slice(0, 200);
+  conv.lastMessageAt = msg.createdAt;
+  conv.lastMessageFrom = req.user._id;
+  await conv.save();
+
+  res.status(201).json({
+    _id: msg._id,
+    from: msg.from,
+    to: msg.to,
+    text: msg.text,
+    createdAt: msg.createdAt,
+    readAt: msg.readAt,
+  });
+});
+
+module.exports = { ping, listConversations, startConversation, getMessages, sendMessage };

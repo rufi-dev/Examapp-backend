@@ -184,6 +184,7 @@ app.use("/api/materials", materialRoute)
 // Teacher Success Journey — every route is flag-gated (404 when off), so mounting
 // the router unconditionally is safe: a flag-off deployment exposes nothing.
 app.use("/api/teacher-success", require("./routes/teacherSuccessRoute"))
+app.use("/api/chat", require("./routes/chatRoute"))
 app.use("/api/health", healthRoute)
 // AUD-013 CR-057: NOTHING under uploads/ is public anymore. Exam PDFs moved to
 // PRIVATE key storage (examPdfs/) served only by the authorized byte-stream
