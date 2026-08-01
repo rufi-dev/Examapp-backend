@@ -12,6 +12,11 @@ const conversationSchema = Schema(
     lastMessageAt: { type: Date, default: null, index: true },
     lastMessageFrom: { type: Schema.Types.ObjectId, ref: "User", default: null },
     createdBy: { type: Schema.Types.ObjectId, ref: "User" },
+    // "Open this thread on the other person's screen now" nudge. The target's
+    // heartbeat picks it up (within one interval) and force-opens the widget,
+    // then it is cleared so it fires once.
+    nudgeFor: { type: Schema.Types.ObjectId, ref: "User", default: null, index: true },
+    nudgeAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

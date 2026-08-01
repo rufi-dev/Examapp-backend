@@ -10,6 +10,9 @@ const { httpError } = require("../utils/appError");
 // client pings every ~30s, so 75s tolerates one dropped ping without flicker.
 const ONLINE_WINDOW_MS = 75 * 1000;
 const MAX_TEXT = 4000;
+// A nudge is a "right now" action; if the target isn't around to pick it up
+// within a couple of minutes it is stale and ignored.
+const NUDGE_TTL_MS = 2 * 60 * 1000;
 
 const isFresh = (d) => !!d && Date.now() - new Date(d).getTime() < ONLINE_WINDOW_MS;
 
@@ -33,7 +36,34 @@ const ping = asyncHandler(async (req, res) => {
     { upsert: true }
   );
   const unread = await Message.countDocuments({ to: req.user._id, readAt: null });
-  res.json({ ok: true, unread });
+
+  // Did someone ask us to pop a specific thread open? Return it once, then clear.
+  let openConversationId = null;
+  const nudged = await Conversation.findOne({
+    nudgeFor: req.user._id,
+    nudgeAt: { $gt: new Date(Date.now() - NUDGE_TTL_MS) },
+  })
+    .sort({ nudgeAt: -1 })
+    .select("_id");
+  if (nudged) {
+    openConversationId = nudged._id;
+    await Conversation.updateOne({ _id: nudged._id }, { $set: { nudgeFor: null } });
+  }
+
+  res.json({ ok: true, unread, openConversationId });
+});
+
+// "Open this conversation on the other person's screen now." Sets a one-shot
+// flag the target's next heartbeat consumes. Participant-only.
+const nudge = asyncHandler(async (req, res) => {
+  const conv = await Conversation.findById(req.params.id);
+  if (!conv || !conv.participants.some((p) => String(p) === String(req.user._id)))
+    throw httpError(404, "conversation_not_found", "Söhbət tapılmadı.");
+  const target = conv.participants.find((p) => String(p) !== String(req.user._id));
+  conv.nudgeFor = target;
+  conv.nudgeAt = new Date();
+  await conv.save();
+  res.json({ ok: true });
 });
 
 // My conversations, newest activity first, each with the peer, their online
@@ -174,4 +204,4 @@ const sendMessage = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { ping, listConversations, startConversation, getMessages, sendMessage };
+module.exports = { ping, nudge, listConversations, startConversation, getMessages, sendMessage };
