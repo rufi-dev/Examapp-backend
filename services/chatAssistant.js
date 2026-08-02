@@ -13,9 +13,12 @@ function getClient() {
   return _client;
 }
 
-// Global switch: on only when explicitly enabled AND a key exists.
+// Global switch: on only when explicitly enabled AND some provider key exists.
 function isChatAiEnabled() {
-  return process.env.CHAT_AI_ENABLED === "true" && !!process.env.ANTHROPIC_API_KEY;
+  return (
+    process.env.CHAT_AI_ENABLED === "true" &&
+    (!!process.env.OPENAI_API_KEY || !!process.env.ANTHROPIC_API_KEY)
+  );
 }
 
 const SYSTEM_PROMPT = `Sən Examopia-nın (examopia.com) dəstək köməkçisisən. Examopia müəllimlər üçün onlayn imtahan/test platformasıdır — müəllim imtahan yaradır, şagirdlər onlayn həll edir, nəticə avtomatik çıxır. Platforma PULSUZDUR və interfeys Azərbaycan dilindədir.
@@ -67,21 +70,52 @@ function buildHistory(messages, adminId) {
   return merged;
 }
 
-// Generate a support reply text, or null if unavailable / nothing to say.
-async function generateSupportReply(messages, adminId) {
-  const client = getClient();
-  if (!client) return null;
-  const history = buildHistory(messages, adminId);
-  if (!history.length || history[history.length - 1].role !== "user") return null;
+// ChatGPT (OpenAI) — preferred for the support chat: strong, low-hallucination,
+// good conversational quality. Model is env-overridable.
+async function replyWithOpenAI(history) {
+  const model = process.env.CHAT_SUPPORT_MODEL || "gpt-4.1";
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: "system", content: SYSTEM_PROMPT }, ...history],
+      max_tokens: 700,
+      temperature: 0.4,
+    }),
+  });
+  const data = await r.json();
+  if (!r.ok || data?.error) {
+    throw new Error(data?.error?.message || `OpenAI ${r.status}`);
+  }
+  return (data.choices?.[0]?.message?.content || "").trim();
+}
 
-  const model = process.env.CHAT_SUPPORT_MODEL || "claude-haiku-4-5-20251001";
+// Anthropic fallback (used only if there is no OpenAI key).
+async function replyWithAnthropic(history) {
+  const client = getClient();
+  if (!client) return "";
+  const model = process.env.CHAT_SUPPORT_MODEL_FALLBACK || "claude-haiku-4-5-20251001";
   const msg = await client.messages.create({
     model,
     max_tokens: 700,
     system: SYSTEM_PROMPT,
     messages: history,
   });
-  const text = (msg.content || []).map((b) => b.text).filter(Boolean).join("").trim();
+  return (msg.content || []).map((b) => b.text).filter(Boolean).join("").trim();
+}
+
+// Generate a support reply text, or null if unavailable / nothing to say.
+async function generateSupportReply(messages, adminId) {
+  const history = buildHistory(messages, adminId);
+  if (!history.length || history[history.length - 1].role !== "user") return null;
+
+  let text = "";
+  if (process.env.OPENAI_API_KEY) text = await replyWithOpenAI(history);
+  else text = await replyWithAnthropic(history);
   return text || null;
 }
 
