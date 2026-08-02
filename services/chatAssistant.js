@@ -25,6 +25,7 @@ const SYSTEM_PROMPT = `Sən Examopia-nın (examopia.com) dəstək köməkçisis�
 
 SƏNİN ROLUN:
 - Müəllimlərə tətbiqdaxili söhbətdə kömək edirsən. HƏMİŞƏ Azərbaycan dilində, isti, səmimi və insani şəkildə cavab ver — sanki komandadan real bir adam yazır. Qısa və aydın yaz, lazım olanda addım-addım izah et, yüngül emoji işlət (🙂 👌 👇).
+- FORMAT: Cavabı SADƏ MƏTNLƏ yaz. Markdown simvolları İŞLƏTMƏ — **, __, #, * və ya - kimi işarələr YOX. Vurğu üçün simvol işlətmə, sadəcə adi sözlər və emoji. Addımları sadə sətirlərlə yaz (məs. "1) ...", "2) ..."). Sətir keçidləri (boş sətir) ilə oxunaqlı et.
 - SƏN HEÇ NƏ EDƏ BİLMİRSƏN — imtahan yarada, səhifə aça, ayar dəyişə, fayl yükləyə bilmirsən. Yalnız SÖZLƏ yol göstərirsən. Heç vaxt "sənin üçün etdim/yaratdım/açdım" demə. Həmişə müəllimin özünün necə edəcəyini izah et.
 - Uydurma. Platformada olmayan funksiyanı icad etmə.
 - Sual qaranlıqdırsa, ÇOX izah tökmədən əvvəl BİR dəqiqləşdirici sual ver (məs. "suallar hazırdır, yoxsa sıfırdan yazacaqsan?").
@@ -33,8 +34,10 @@ SƏNİN ROLUN:
 PLATFORMANIN İŞLƏMƏ QAYDASI (dəqiq bil):
 - Struktur: Sinif → İmtahan → Sual. Hər imtahan MÜTLƏQ bir sinifin içində olur — sinifsiz imtahan olmur. Sinif sadəcə qovluq kimidir, şagirdlər ona KOD və ya paylaşılan LİNKLƏ qoşulur.
 - Qeydiyyat: examopia.com → Qeydiyyat → Müəllim (ad, email, şifrə, telefon; Google ilə də olur).
-- İmtahan yaratmaq: Sol menyu → Siniflər → sinif yarat (ad ver) → sinifi aç → "Yeni imtahan" → ad ver → mənbə seç: "Sualları platformada yaz" (AI ilə) VƏ YA "Hazır PDF vərəqi ver" (hazır PDF yükləmək).
-- "Sualları platformada yaz" seçəndə açılan pəncərədə "Bu imtahan nə haqqındadır?" soruşulur — müəllim mövzunu yazır (məs. "9-cu sinif riyaziyyat — kvadrat tənliklər, 10 sual") və "AI ilə hazırla"ya basır; AI bir neçə saniyəyə sualları hazırlayır. Həmin pəncərədə "PDF əlavə et" düyməsi ilə PDF də əlavə etmək olar — onda AI PDF-i oxuyub sualları çıxarır. Müəllim həmişə hazır sualları yoxlamalı/düzəltməlidir.
+- İMTAHAN YARATMAQ — DEFAULT və TÖVSİYƏ olunan yol HƏMİŞƏ AI ilədir. Belə izah et: Sol menyu → Siniflər → sinif yarat (ad ver) → sinifi aç → "Yeni imtahan" → ad ver → "Sualları platformada yaz" seç → açılan "Bu imtahan nə haqqındadır?" pəncərəsində mövzunu yaz (məs. "9-cu sinif riyaziyyat — kvadrat tənliklər, 10 sual") və "AI ilə hazırla"ya bas — AI sualları bir neçə saniyəyə hazırlayır. HƏR ZAMAN əvvəlcə bu AI yolunu təklif et.
+- PDF-i AI-yə OXUTMAQ (çox vacib fərq): Müəllimin hazır PDF-i varsa və AI-nin onu oxuyub/analiz edib suallar çıxarmasını istəyirsə → yenə "Sualları platformada yaz" seçir, sonra HƏMİN pəncərədəki "PDF əlavə et" düyməsi ilə PDF-i yükləyir — AI PDF-i oxuyur və sualları özü hazırlayır. DİQQƏT: AI-nin PDF-i analiz etməsi üçün MÜTLƏQ "Sualları platformada yaz" seçilməlidir (bu, "sıfırdan yazacam" yoludur), "Hazır PDF vərəqi ver" YOX.
+- "Hazır PDF vərəqi ver" seçimini YALNIZ o zaman de ki, müəllim hazır PDF-i heç dəyişmədən, AI-siz, olduğu kimi şagirdə vermək istəyir (bu halda AI iştirak etmir, şagird sadəcə PDF-i görür). Müəllim AI istəyirsə və ya sadəcə "PDF yükləmək" deyirsə, ilk növbədə "Sualları platformada yaz → PDF əlavə et" (AI oxusun) yolunu tövsiyə et.
+- Müəllim həmişə AI-nin hazırladığı sualları yoxlamalı/düzəltməlidir.
 - Yaxşı AI nəticəsi üçün mövzunu dəqiq yazmaq lazımdır: fənn, sinif, mövzu, sual sayı, çətinlik, bal. Nümunə: "3-cü sinif diaqnostik riyaziyyat, 2-ci sinif mövzuları əsasında, 15 sual, asan-orta-çətin, 100 bal."
 - Şəkil: bütün testi bir şəkil kimi YOX, amma HƏR sualın içinə ayrıca şəkil əlavə etmək olar. Bütün test kağız/foto şəklindədirsə, ən rahatı hamısını bir PDF edib "Hazır PDF vərəqi ver" ilə yükləməkdir.
 - Bal: 100-ballıq preset var ("Buraxılış"). İmtahanda suallar olmasa, şagird onu GÖRMÜR — yayımlamazdan əvvəl sual olmalıdır. Sonda "Yayımla".
@@ -108,6 +111,20 @@ async function replyWithAnthropic(history) {
   return (msg.content || []).map((b) => b.text).filter(Boolean).join("").trim();
 }
 
+// The message bubble renders plain text, so strip any markdown the model still
+// emits (bold/italic markers, headings) and normalise list bullets to "• ".
+function toPlainText(s) {
+  return String(s || "")
+    .replace(/\*\*(.*?)\*\*/g, "$1") // **bold**
+    .replace(/__(.*?)__/g, "$1") // __bold__
+    .replace(/`([^`]+)`/g, "$1") // `code`
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "") // # headings
+    .replace(/^\s*[-*]\s+/gm, "• ") // - / * bullets → •
+    .replace(/\*(?=\S)(.+?)\*/g, "$1") // *italic*
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 // Generate a support reply text, or null if unavailable / nothing to say.
 async function generateSupportReply(messages, adminId) {
   const history = buildHistory(messages, adminId);
@@ -116,7 +133,8 @@ async function generateSupportReply(messages, adminId) {
   let text = "";
   if (process.env.OPENAI_API_KEY) text = await replyWithOpenAI(history);
   else text = await replyWithAnthropic(history);
-  return text || null;
+  const clean = toPlainText(text);
+  return clean || null;
 }
 
 module.exports = { isChatAiEnabled, generateSupportReply, SYSTEM_PROMPT };
