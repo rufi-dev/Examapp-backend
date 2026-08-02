@@ -83,8 +83,9 @@ const listConversations = asyncHandler(async (req, res) => {
   const me = req.user._id;
   const convs = await Conversation.find({ participants: me })
     .sort({ lastMessageAt: -1, updatedAt: -1 })
-    .populate("participants", "name role photo")
+    .populate("participants", "name role photo phone")
     .lean();
+  const isAdmin = req.user.role === "admin";
 
   const peerIds = convs.map((c) => otherParticipant(c, me)).filter(Boolean).map((p) => p._id);
   const presence = await presenceMapFor(peerIds);
@@ -106,6 +107,9 @@ const listConversations = asyncHandler(async (req, res) => {
           role: peer.role,
           photo: peer.photo || "",
           online: isFresh(presence.get(String(peer._id))),
+          // Only admins get the other side's phone (to WhatsApp the teacher);
+          // teachers never receive the admin's number this way.
+          ...(isAdmin ? { phone: peer.phone || "" } : {}),
         },
         lastMessageText: c.lastMessageText || "",
         lastMessageAt: c.lastMessageAt,
@@ -123,7 +127,7 @@ const startConversation = asyncHandler(async (req, res) => {
   if (!mongoose.isValidObjectId(otherId)) throw httpError(400, "bad_user", "İstifadəçi seçilməyib.");
   if (String(otherId) === String(req.user._id)) throw httpError(400, "self_chat", "Özünüzlə söhbət olmaz.");
 
-  const other = await User.findById(otherId).select("name role photo").lean();
+  const other = await User.findById(otherId).select("name role photo phone").lean();
   if (!other) throw httpError(404, "user_not_found", "İstifadəçi tapılmadı.");
 
   const key = Conversation.keyFor(req.user._id, otherId);
@@ -145,6 +149,7 @@ const startConversation = asyncHandler(async (req, res) => {
       role: other.role,
       photo: other.photo || "",
       online: isFresh(presence.get(String(otherId))),
+      phone: other.phone || "", // requester is always an admin here
     },
     lastMessageText: conv.lastMessageText || "",
     lastMessageAt: conv.lastMessageAt,
