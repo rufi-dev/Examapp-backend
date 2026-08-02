@@ -192,6 +192,58 @@ const contactAdmin = asyncHandler(async (req, res) => {
   });
 });
 
+const firstName = (s) => String(s || "").trim().split(/\s+/)[0] || "";
+
+// The admin's personal hello. Written to read like a real person typed it, not a
+// broadcast — greets by name and signs off with the admin's own first name.
+const welcomeText = (teacher, admin) =>
+  `Salam ${firstName(teacher)} 👋 Mən ${firstName(admin)}, Examopia-nı quran komandadanam. ` +
+  `Aramıza qoşulduğun üçün ürəkdən təşəkkür edirəm! İmtahan hazırlayarkən nəsə qarışıq gəlsə, ` +
+  `ya da istənilən sualın-problemin olsa, çəkinmədən birbaşa buradan mənə yaz — həmişə kömək ` +
+  `etməyə hazıram. Uğurlar! 🙌`;
+
+// One-time welcome: when a teacher first lands in the app, drop a personal
+// message from the admin into a chat with them, so they know they can reach out.
+// Atomically claims `chatWelcomedAt` so concurrent calls send it exactly once.
+const welcome = asyncHandler(async (req, res) => {
+  const claimed = await User.findOneAndUpdate(
+    { _id: req.user._id, role: { $ne: "admin" }, chatWelcomedAt: null },
+    { $set: { chatWelcomedAt: new Date() } },
+    { new: false }
+  ).select("name");
+  if (!claimed) return res.json({ ok: true, sent: false });
+
+  const admin = await User.findOne({ role: "admin" })
+    .sort({ createdAt: 1 })
+    .select("name")
+    .lean();
+  if (!admin) return res.json({ ok: true, sent: false });
+
+  const key = Conversation.keyFor(admin._id, req.user._id);
+  let conv = await Conversation.findOne({ key });
+  if (!conv) {
+    conv = await Conversation.create({
+      participants: [admin._id, req.user._id],
+      key,
+      createdBy: admin._id,
+    });
+  }
+
+  const text = welcomeText(claimed.name, admin.name);
+  const msg = await Message.create({
+    conversation: conv._id,
+    from: admin._id,
+    to: req.user._id,
+    text,
+  });
+  conv.lastMessageText = text.slice(0, 200);
+  conv.lastMessageAt = msg.createdAt;
+  conv.lastMessageFrom = admin._id;
+  await conv.save();
+
+  res.json({ ok: true, sent: true });
+});
+
 // Load a thread (participant-only) and mark my incoming messages read. `after`
 // lets the client poll for only-new messages so payloads stay tiny.
 const getMessages = asyncHandler(async (req, res) => {
@@ -276,4 +328,4 @@ const sendMessage = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { ping, nudge, listConversations, startConversation, contactAdmin, getMessages, sendMessage };
+module.exports = { ping, nudge, welcome, listConversations, startConversation, contactAdmin, getMessages, sendMessage };

@@ -92,6 +92,12 @@ const userSchema = Schema(
             type: Boolean,
             default: false,
         },
+        // Set once the admin's personal welcome chat message has been sent to
+        // this user, so it is never sent twice.
+        chatWelcomedAt: {
+            type: Date,
+            default: null,
+        },
         role: {
             type: String,
             default: "student",

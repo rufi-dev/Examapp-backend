@@ -4,6 +4,7 @@ const { protect, adminOnly } = require("../middleware/authMiddleware");
 const {
   ping,
   nudge,
+  welcome,
   listConversations,
   startConversation,
   contactAdmin,
@@ -25,6 +26,10 @@ router.post("/conversations", protect, adminOnly, startConversation);
 
 // Any staff member (teacher) opening a chat with the admin themselves.
 router.post("/contact-admin", protect, contactAdmin);
+
+// One-time personal welcome from the admin, fired when a teacher first lands
+// in the app (idempotent server-side).
+router.post("/welcome", protect, welcome);
 
 // A single thread: read (marks incoming as read) and send. Participant-only,
 // enforced in the controller — so a teacher can reply but only in their own
