@@ -176,6 +176,7 @@ const registerUser = asyncHandler(async (req, res) => {
         isVerified,
         userAgent,
         grade,
+        createdAt,
       } = user;
       res.status(201).json({
         _id,
@@ -194,6 +195,7 @@ const registerUser = asyncHandler(async (req, res) => {
         isVerified,
         userAgent,
         grade,
+        createdAt,
         token,
       });
     } else {
@@ -296,6 +298,7 @@ const loginUser = asyncHandler(async (req, res) => {
         teacherApproval,
         isVerified,
         userAgent,
+        createdAt,
       } = user;
 
       res.status(200).json({
@@ -309,6 +312,7 @@ const loginUser = asyncHandler(async (req, res) => {
         teacherApproval, // AUD-005 (CR-046): every identity DTO carries capability state
         isVerified,
         userAgent,
+        createdAt,
         token,
         // Teacher Success Journey — the login DTO carries the same trusted signals
         // as getUser so the header/card render immediately (no getUser round-trip).
@@ -530,6 +534,7 @@ const getUser = asyncHandler(async (req, res) => {
         hideAssistant,
         assistantEnabled,
         teacherLevel,
+        createdAt,
       } = user;
 
       // Teacher Success Journey — the frontend learns the enabled state from THIS
@@ -557,6 +562,10 @@ const getUser = asyncHandler(async (req, res) => {
         whatsappOptIn,
         whatsappGroupJoined,
         grade,
+        // Account age — the onboarding gate uses this to grandfather users who
+        // signed up BEFORE the gate shipped (they keep working as-is); only new
+        // signups are forced to complete phone (+ grade for students).
+        createdAt,
         hideAssistant,
         assistantEnabled,
         teacherSuccessJourneyEnabled: journeyEnabled,
@@ -1307,6 +1316,7 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
         teacherApproval,
         isVerified,
         userAgent,
+        createdAt,
       } = newUser;
       res.status(201).json({
         _id,
@@ -1319,6 +1329,7 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
         teacherApproval, // AUD-005 (CR-046): Google new-user DTO carries capability state
         isVerified,
         userAgent,
+        createdAt,
         token,
       });
     }
@@ -1339,7 +1350,7 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
     // historical 1-day flag-off cookie expiry.
     const token = await issueLoginToken(req, res, user, { expires: new Date(Date.now() + 1000 * 86400) });
 
-    const { _id, name, email, phone, bio, photo, role, teacherApproval, isVerified, userAgent } =
+    const { _id, name, email, phone, bio, photo, role, teacherApproval, isVerified, userAgent, createdAt } =
       user;
     res.status(200).json({
       _id,
@@ -1352,6 +1363,7 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
       teacherApproval, // AUD-005 (CR-046): Google existing-user DTO carries capability state
       isVerified,
       userAgent,
+      createdAt,
       token,
     });
   }

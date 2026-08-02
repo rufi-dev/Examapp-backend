@@ -49,6 +49,11 @@ const ping = asyncHandler(async (req, res) => {
   );
   const unread = await Message.countDocuments({ to: req.user._id, readAt: null });
 
+  // Reliable welcome: a capable teacher whose account has aged past the delay and
+  // who was never welcomed gets it here — surviving short sessions / reloads that
+  // the client-side timer misses. No-op for everyone else. Best-effort.
+  maybeSendWelcome(req.user._id).catch(() => {});
+
   // Did someone ask us to pop a specific thread open? Return it once, then clear.
   let openConversationId = null;
   const nudged = await Conversation.findOne({
@@ -210,6 +215,66 @@ const welcomeText = (teacher, admin) =>
   `ya da istənilən sualın-problemin olsa, çəkinmədən birbaşa buradan mənə yaz — həmişə kömək ` +
   `etməyə hazıram. Uğurlar! 🙌`;
 
+// Post the admin's welcome into a (created-if-needed) chat with the teacher.
+// The caller is responsible for having ATOMICALLY claimed `chatWelcomedAt` first
+// (so this only ever runs once per teacher). Returns true if a message was sent.
+async function deliverWelcome(teacherId, teacherName) {
+  const admin = await User.findOne({ role: "admin" })
+    .sort({ createdAt: 1 })
+    .select("name")
+    .lean();
+  if (!admin) return false;
+
+  const key = Conversation.keyFor(admin._id, teacherId);
+  let conv = await Conversation.findOne({ key });
+  if (!conv) {
+    conv = await Conversation.create({
+      participants: [admin._id, teacherId],
+      key,
+      createdBy: admin._id,
+    });
+  }
+
+  const text = welcomeText(teacherName, admin.name);
+  const msg = await Message.create({
+    conversation: conv._id,
+    from: admin._id,
+    to: teacherId,
+    text,
+  });
+  conv.lastMessageText = text.slice(0, 200);
+  conv.lastMessageAt = msg.createdAt;
+  conv.lastMessageFrom = admin._id;
+  await conv.save();
+  return true;
+}
+
+// The welcome is DELAYED (feels human, not an instant autoresponder) but must be
+// RELIABLE — it can't depend on a teacher keeping one page open for a full minute.
+// Both the explicit /welcome call and the heartbeat below only fire it once the
+// account is at least this old, and both claim `chatWelcomedAt` atomically. A
+// teacher who left before it fired simply gets it on their next visit's heartbeat.
+const WELCOME_DELAY_MS = 60 * 1000;
+
+// Atomically claim + send the welcome to a CAPABLE teacher whose account has
+// aged past the delay. No-op (returns false) for anyone already welcomed, not a
+// capable teacher, or too new. Safe to call on every heartbeat.
+async function maybeSendWelcome(userId) {
+  const claimed = await User.findOneAndUpdate(
+    {
+      _id: userId,
+      role: "teacher",
+      teacherApproval: { $in: ["approved", "approved_legacy"] },
+      chatWelcomedAt: null,
+      createdAt: { $lte: new Date(Date.now() - WELCOME_DELAY_MS) },
+    },
+    { $set: { chatWelcomedAt: new Date() } },
+    { new: false }
+  ).select("name");
+  if (!claimed) return false;
+  return deliverWelcome(claimed._id, claimed.name);
+}
+
 // One-time welcome: when a teacher first lands in the app, drop a personal
 // message from the admin into a chat with them, so they know they can reach out.
 // Atomically claims `chatWelcomedAt` so concurrent calls send it exactly once.
@@ -221,35 +286,8 @@ const welcome = asyncHandler(async (req, res) => {
   ).select("name");
   if (!claimed) return res.json({ ok: true, sent: false });
 
-  const admin = await User.findOne({ role: "admin" })
-    .sort({ createdAt: 1 })
-    .select("name")
-    .lean();
-  if (!admin) return res.json({ ok: true, sent: false });
-
-  const key = Conversation.keyFor(admin._id, req.user._id);
-  let conv = await Conversation.findOne({ key });
-  if (!conv) {
-    conv = await Conversation.create({
-      participants: [admin._id, req.user._id],
-      key,
-      createdBy: admin._id,
-    });
-  }
-
-  const text = welcomeText(claimed.name, admin.name);
-  const msg = await Message.create({
-    conversation: conv._id,
-    from: admin._id,
-    to: req.user._id,
-    text,
-  });
-  conv.lastMessageText = text.slice(0, 200);
-  conv.lastMessageAt = msg.createdAt;
-  conv.lastMessageFrom = admin._id;
-  await conv.save();
-
-  res.json({ ok: true, sent: true });
+  const sent = await deliverWelcome(claimed._id, claimed.name);
+  res.json({ ok: true, sent });
 });
 
 // Load a thread (participant-only) and mark my incoming messages read. `after`

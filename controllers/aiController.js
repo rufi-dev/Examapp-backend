@@ -894,6 +894,7 @@ DİQQƏTLƏ YOXLA VƏ DÜZƏLT:
 5. DISTRAKTORLAR: yanlış variantlar aydın yanlış, amma inandırıcı olmalıdır. Təkrarlanan, boş və ya açıq-aşkar absurd variantları düzəlt.
 6. AÇIQ suallar (Co/Cd): "openAnswers" düzgün və tam olmalıdır — şagirdin yaza biləcəyi bütün formalar. Cavab səhvdirsə düzəlt.
 6a. ⛔ AÇIQ-UÇLU AÇIQ SUALI DÜZƏLT: Əgər bir açıq (Co) sualın ÇOX SAYDA fərqli düzgün cavabı ola bilərsə (məs. «bir yer bildirən isim yaz», «şəxs bildirən söz yaz», «bir nümunə göstər»), bu SƏHVDİR — sadalanan 3-4 cavabdan başqasını yazan şagird haqsız yerə səhv sayılır. Bunu DÜZƏLT: tipi «Cm» et, sualı saxla və 4-5 variant qur (biri düzgün — mövcud openAnswers-dən birini götür), "correct"-ə düzgün indeksi yaz, "openAnswers"-i boşalt. (Sualın cavabı əslən yeganədirsə — hesablanmış ədəd, konkret termin — Co qalsın.)
+6b. ⛔ TƏSVİR/MÜNASİBƏT CAVABLI AÇIQ SUALI DÜZƏLT: Əgər bir açıq (Co) sualın cavabı bir ANLAYIŞ, MÜNASİBƏT, BƏRABƏRSİZLİK və ya CÜMLƏdirsə (məs. openAnswers = ["diskriminant < 0","diskriminant mənfidir","D<0","mənfi"], ya da sual «...necədir?», «nə baş verir?», «necə dəyişir?» şəklindədir), bu SƏHVDİR — şagird eyni fikri onlarla cür yazır və hərfbəhərf uyğun gəlmir. Bunu DÜZƏLT: tipi «Cm» et, mövcud cavabı düzgün variant kimi saxla və məntiqli 4-5 variant qur (məs. «Mənfi (D<0)», «Sıfır (D=0)», «Müsbət (D>0)», «Müəyyən deyil»), "correct"-ə düzgün indeksi yaz, "openAnswers"-i boşalt. Co yalnız hamının EYNİ yazacağı ədəd/tək termin/tarix/yığcam düstur üçün qalır.
 7. UYĞUNLUQ (Cma): hər nömrənin düzgün hərfi olmalıdır; nömrələnmiş və hərflənmiş siyahılar sualın "text" hissəsində tam görünməlidir.
 8. DİL və AYDINLIQ: sual birmənalı olmalıdır. İki cür başa düşülən sualı dəqiqləşdir.
 9. Sual ARTIQ DÜZGÜNDÜRSƏ, ona TOXUNMA — yalnız real səhvləri düzəlt.
@@ -1576,6 +1577,8 @@ QAYDALAR:
 - AÇIQ SUALIN CAVABI — BURADA ÇOX SƏHV EDİLİR:
   Şagird cavabı KLAVİATURA ilə yazır və cavab hərfbəhərf uyğun gəlməlidir. Ona görə açıq sual YALNIZ o zaman uyğundur ki, cavabın QISA və BİR MƏNALI yazılışı olsun.
   ⛔ ƏN VACİB QAYDA — AÇIQ-UÇLU (çoxcavablı) SUAL YARATMA: Əgər sualın ÇOX SAYDA fərqli düzgün cavabı ola bilərsə, onu AÇIQ (Co) ETMƏ. Nümunələr (BUNLARI Co ETMƏ): «bir yer bildirən isim yaz», «şəxs bildirən söz yaz», «konkret ismə bir nümunə göstər», «bir sifət de», «bir heyvan adı yaz». Belə suallarda minlərlə düzgün cavab var — sən yalnız 3-nü sadalayırsan, «beach/office/tree» yazan şagird HAQSIZ yerə səhv sayılır. Bunun əvəzinə: sualı ÇOXSEÇİMLİ (Cm) et və 4-5 variant ver (biri düzgün), VƏ YA sualı elə dəyiş ki, cavab BİRMƏNALI olsun (məs. «'kitab' sözünün cəm forması» → yeganə cavab). Açıq sual (Co) YALNIZ cavabı YEGANƏ və dəqiq müəyyən olan hallar üçündür: hesablanmış ədəd, konkret termin/tərif, tarixi tarix/ad, sualın birmənalı tələb etdiyi TƏK söz. Şübhə varsa — Co yox, Cm seç.
+  ⛔ İKİNCİ HAL — CAVABI TƏSVİR/MÜNASİBƏT/BƏRABƏRSİZLİK OLAN SUAL DA Co OLMAMALIDIR: cavab bir ANLAYIŞ, MÜNASİBƏT, BƏRABƏRSİZLİK və ya CÜMLƏ ilə ifadə olunursa (məs. «diskriminant mənfidir», «D < 0», «sıfırdan kiçikdir», «artır», «azalır», «dəyişmir», «tərs mütənasibdir») — bu, TƏK sözlü/ədədli olsa belə, şagird onu ONLARLA fərqli cür yazır («D<0», «mənfi», «mənfidir», «0-dan kiçik», «sıfırdan aşağı»...) və hərfbəhərf uyğun gəlmir. Xüsusən «necədir?», «nə baş verir?», «necə dəyişir?», «hansı haldadır?», «nə olur?» kimi soruşan suallar TƏSVİR istəyir → BUNLARI Co ETMƏ, «Cm» et. Nümunə: «Kvadrat tənliyin kökləri həqiqi olmadıqda diskriminant necədir?» → Cm, variantlar: «Mənfi (D<0)», «Sıfır (D=0)», «Müsbət (D>0)», «Müəyyən deyil». Yəni cavab bir SÖZ olsa da, əgər onu müxtəlif cür ifadə etmək olarsa → Co yox, Cm.
+  QAYDA SADƏ: Co-nu YALNIZ hamının EYNİ cür yazacağı bir işarə üçün seçː konkret ƏDƏD, konkret TƏK termin/söz, tarix/ad, yığcam düstur. Cavab bir izah, münasibət, bərabərsizlik və ya bir neçə sözlük ifadədirsə — HƏMİŞƏ Cm.
   • ƏN YAXŞI açıq cavab — bir ƏDƏD (məs. 8, 50.24, -3) və ya qısa düstur (məs. x^2, cos(x), 2*a+b).
   • Sual nə soruşursa, cavab O OLSUN. «Dairənin sahəsini tapın (r=4)» sualının cavabı ƏDƏDdir (50.24), düstur deyil. «Sahənin düsturunu yazın» sualının cavabı düsturdur.
   • CÜMLƏ İLƏ CAVAB YAZMA. «uzunluğun və enin cəmini 2-yə vurmaq» kimi cavab qəbuledilməzdir — şagird onu eyni sözlərlə yaza bilməz. Belə hallarda sualı AÇIQ etmə: TIP "Cm" et və variantları ver.
@@ -1610,7 +1613,7 @@ QAYDALAR:
 - Oxu mətni (reading) yalnız istənildikdə əlavə et. İstənilsə, onu "reading" tipli AYRICA element kimi ver: bütün mətn "text" sahəsində, abzaslar iki yeni sətirlə (\\n\\n) ayrılsın, başlıq varsa "title"-də. Sonra o mətnə aid suallar ayrıca elementlər kimi gəlsin. choices=[], correct=[], pairs=[], openAnswer="".
 - FORMATLAMA: oxu mətnində lazım gələndə Markdown işlət — **qalın** vacib terminlər/yarımbaşlıqlar üçün, *maili* xüsusi adlar/vurğu/xarici sözlər üçün. Abzas hərfi/nömrəsi olan mətndə həmin işarəni qalın ver (məs. "**A.** Octopuses exhibit…"). Formatı YALNIZ məna daşıdıqda işlət, hər cümləni qalınlaşdırma. HTML teqi YAZMA — yalnız ** və * işarələri.
 - SIRALAMA: hər oxu mətnindən DƏRHAL SONRA ona aid suallar gəlsin. Bir mətnin summary/sentence-completion CLOZE tapşırığı varsa, onu həmin mətnin adi suallarından SONRA ayrıca "reading" bloku kimi ver — belə ki heç bir mətn "0 sual" ilə qalmır.
-- OXU MƏTNİNİN UZUNLUĞU: akademik/IELTS oxu mətni UZUN və çoxabzaslı olsun — təxminən 700–900 söz (ən azı 500), 4–6 abzas. Qısa (100–300 sözlük) mətn IELTS deyil.
+- OXU MƏTNİNİN UZUNLUĞU: akademik/IELTS oxu mətni UZUN və çoxabzaslı olsun — təxminən 700–900 söz (ən azı 550), 4–6 abzas. Qısa (100–300 sözlük) mətn IELTS deyil.
 - SUAL SAYI: müəllim konkret say/tip deyibsə DƏQİQ ona əməl et — "6 True/False/Not Given" = tam 6 AYRICA sual (hər ifadə bir Cm), hamısını bir suala yığma.
 - BOŞLUQ DOLDURMA mətnləri — "boşluqları doldur", "gap-fill", "fill in the blanks", həmçinin IELTS-in "summary completion", "sentence completion", "note completion", "table/flow-chart completion" tapşırıqları: HƏR belə tapşırığı AYRICA "reading" tipli element kimi ver (məs. xülasə/cümlə mətni "text" sahəsində), və boşluqları həmin mətnin İÇİNDƏ [[düzgün cavab]] kimi yaz — bir neçə qəbul olunan cavab varsa [[cavab|alternativ]]. Düzgün cavab HƏMİŞƏ mötərizənin içində qalır. ÇOX VACİB: bu boşluqlar üçün AYRICA sual (nə "Co"/açıq cavab, nə çoxseçim) YARATMA — mətnin özü qiymətləndirilir, hər boşluq 1 baldır. Yəni "Complete the summary…" kimi tapşırıq gələndə onu sual yox, [[...]] boşluqları olan "reading" mətni kimi qaytar. Boşluq istənilməyən adi mətndə mötərizə işlətmə.
   DÜZGÜN NÜMUNƏ (summary/sentence completion → boşluqlu "reading"):
@@ -2112,13 +2115,19 @@ const buildPassagePrompt = (userPrompt, k, n, prevTitles) =>
 // blanks. Returns human-readable issue strings (empty = clean).
 const wordCountOf = (s) => String(s || "").trim().split(/\s+/).filter(Boolean).length;
 const isClozeReading = (q) => !!q && q.type === "reading" && /\[\[[^\]]*\]\]/.test(q.text || "");
+// Single source of truth for academic/IELTS reading passage length. TARGET is the
+// ideal band the prompts ask for; MIN is the floor the validator (and the retry
+// nudge) enforce — keep them consistent so a passage the prompt promised can't
+// slip past the gate.
+const IELTS_PASSAGE_TARGET_WORDS = "700–900";
+const IELTS_PASSAGE_MIN_WORDS = 550;
 const validatePassageStructure = (items, k) => {
   const out = [];
   const passage = items.find((q) => q.type === "reading" && !isClozeReading(q));
   if (!passage) out.push(`Passage ${k}: oxu mətni yoxdur`);
   else {
     const w = wordCountOf(passage.text);
-    if (w < 450) out.push(`Passage ${k}: mətn qısadır (${w} söz)`);
+    if (w < IELTS_PASSAGE_MIN_WORDS) out.push(`Passage ${k}: mətn qısadır (${w} söz)`);
   }
   const scored = items.filter((q) => q.type !== "reading" || isClozeReading(q)).length;
   if (scored < 4) out.push(`Passage ${k}: az sual (${scored})`);
@@ -2169,7 +2178,7 @@ async function runMultiPassage({ prompt, preset, model, n, signal, onProvider, o
     if (struct.length) {
       onStatus?.(`Mətn ${k}/${n} yenidən yazılır…`);
       const retry = await runGeneration({
-        prompt: `${passagePrompt}\n\n[QEYD: əvvəlki cəhd naqis idi (qısa mətn və ya az sual). Mətni ƏN AZI 700 söz, 4–6 abzas yaz və tam sual dəstini ver.]`,
+        prompt: `${passagePrompt}\n\n[QEYD: əvvəlki cəhd naqis idi (qısa mətn və ya az sual). Mətni ƏN AZI ${IELTS_PASSAGE_MIN_WORDS} söz (ideal ${IELTS_PASSAGE_TARGET_WORDS}), 4–6 abzas yaz və tam sual dəstini ver.]`,
         preset,
         model,
         signal,
@@ -2436,12 +2445,18 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
   }
 
   const hasInstr = !!(instructions && String(instructions).trim());
-  // Two very different jobs. WITH an instruction it is a SURGICAL edit — apply
-  // only what was asked and keep the rest byte-for-byte. WITHOUT one it is a
-  // fresh, deliberately-different variant of the same question.
+  // The MODEL decides how to treat the instruction — we don't keyword-match it.
+  // It reads the teacher's request and chooses: apply a specific edit surgically,
+  // OR (for a vague "find and fix / improve / check") diagnose and fix the
+  // problems itself. With no instruction it writes a fresh variant.
   const ask = [
     hasInstr
-      ? "Aşağıdakı imtahan sualına YALNIZ müəllimin göstərişindəki dəyişikliyi et — başqa HEÇ NƏYİ dəyişmə. YALNIZ BİR sual qaytar."
+      ? [
+          "Aşağıdakı imtahan sualını müəllimin istəyinə uyğun yenidən işlə. Müəllimin istəyini ÖZÜN oxu və qərar ver:",
+          "• Müəllim KONKRET bir dəyişiklik deyibsə (məs. «6-nı 8 et», «tək seçim et», «C variantını dəyiş») → YALNIZ onu tətbiq et, sualın qalan hissəsini (mətn, variantlar, düzgün cavab, tip) OLDUĞU KİMİ saxla; sualı «yaxşılaşdırmağa» çalışma.",
+          "• Müəllim ÜMUMİ / qeyri-dəqiq bir şey deyibsə (məs. «problemi tap və düzəlt», «yoxla», «yaxşılaşdır», «bu düzgün deyil») və ya nəyin düzələcəyi aydın deyilsə → sualdakı problem(lər)i ÖZÜN müəyyən et və düzəlt (səhv/işarələnməmiş cavab; çoxmənalı açıq sualı Cm et; zəif variantlar; məzmuna uyğun olmayan tip). Sualın mövzusunu saxla, onu tamam başqa suala çevirmə.",
+          "YALNIZ BİR sual qaytar.",
+        ].join("\n")
       : "Aşağıdakı imtahan sualının yerinə eyni mövzuda, eyni çətinlikdə YENİ, FƏRQLİ bir sual yaz. YALNIZ BİR sual qaytar.",
     "",
     "MÖVCUD SUAL (JSON):",
@@ -2450,20 +2465,17 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     examPrompt ? `İMTAHANIN ÜMUMİ TƏSVİRİ: ${String(examPrompt).slice(0, 500)}` : "",
     "",
     hasInstr
-      ? `MÜƏLLİMİN GÖSTƏRİŞİ (yalnız bunu tətbiq et): ${String(instructions).trim().slice(0, 1000)}`
+      ? `MÜƏLLİMİN İSTƏYİ: ${String(instructions).trim().slice(0, 1000)}`
       : "GÖSTƏRİŞ YOXDUR: eyni mövzuda, eyni çətinlikdə, TAMAMİLƏ BAŞQA bir sual yaz.",
     "",
     "QAYDALAR:",
     "- Dəqiq 1 sual qaytar (questions massivində bir element).",
+    // A rewritten question must always be COMPLETE and self-consistent.
+    "- ⛔ SUAL TAM VƏ DÜZGÜN OLMALIDIR: sən sualın müəllifisən — DÜZGÜN CAVABI BİLİRSƏN və MÜTLƏQ qeyd et. Tək/çox seçim (Cm/Cs) → 'correct' massivinə düzgün variant(lar)ın indeksini yaz (BOŞ BURAXMA). Açıq (Co/Cd) → 'openAnswers'-i doldur. Uyğunluq (Cma) → 'pairs' düzgün olsun. TİPİ DƏYİŞƏNDƏ (məs. açıq → tək seçim) yeni tipin BÜTÜN sahələrini tam doldur, düzgün cavabı İŞARƏLƏMƏDƏN sual qaytarma. Tək seçimə çevirəndə məntiqli 4 variant qur (biri düzgün) və düzgün olanın indeksini 'correct'-ə yaz.",
+    "- Açıq (Co) YALNIZ birmənalı, hamının eyni yazacağı qısa cavab üçündür (ədəd, tək termin, düstur). Cavab çoxmənalı / təsvir / münasibətdirsə → 'Cm' et və düzgün variantı işarələ.",
     ...(hasInstr
-      ? [
-          "- ÇOX VACİB: YALNIZ göstərişdə deyilən dəyişikliyi et. Sualın qalan hissəsini — mətni, BÜTÜN variantları (choices), düzgün cavabı (correct/openAnswers/pairs) və tipini — OLDUĞU KİMİ, sözbəsöz SAXLA. Göstərişə aid olmayan heç bir sözü, rəqəmi, düsturu və ya variantı dəyişmə, yenidən ifadə etmə, yerini dəyişmə.",
-          "- Sualı \"yaxşılaşdırmağa\" çalışma, sinonimlə əvəz etmə — yalnız istənən düzəlişi et.",
-          "- Yalnız göstəriş açıq şəkildə tələb edərsə sualın tipini dəyiş (məs. açıq → çox seçim).",
-          "- Oxu mətni (reading) olarsa: mətni və [[cavab]] boşluqlarını olduğu kimi saxla, yalnız göstərişi tətbiq et.",
-        ]
+      ? []
       : [
-          "- Göstərişdə başqa cür deyilməyibsə, mövzu və fənn eyni qalsın.",
           "- Köhnə sualı təkrarlama — yeni sual fərqli olsun.",
           "- Verilən element OXU MƏTNİDİRSƏ (type=\"reading\"): dəqiq 1 \"reading\" elementi qaytar — mətni yenidən yaz, məqsədini və uzunluğunu təxminən saxla, abzasları \\n\\n ilə ayır. Mətndə [[cavab]] boşluqları varsa, cloze formatını saxla və boşluqları yenə [[cavab]] (və ya [[cavab|alternativ]]) kimi mətnin içində ver.",
         ]),
@@ -2489,18 +2501,34 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
   }
 
   // A SURGICAL edit must not be second-guessed by the AI reviewer — it would
-  // rewrite exactly the parts the teacher asked to keep. Only fresh variants
-  // (no instruction) get the review/answer-audit pass.
+  // rewrite exactly the parts the teacher asked to keep. Fresh variants AND
+  // audit ("find and fix") requests get the review/answer-audit pass, which
+  // catches an unmarked correct answer or an un-guessable open question.
   let fresh = generated[0];
   let issues = [];
   let verified = false;
   let reviewCost = null;
   if (!hasInstr) {
+    // Fresh variant: full correctness review (may improve the content freely).
     const v = await verifyAndFix({ questions: generated, prompt: ask, preset: req.body?.preset, model: req.body?.model });
     fresh = (v.questions || [])[0] || fresh;
     issues = v.issues;
     verified = v.rounds > 0 && v.issues.length === 0;
     reviewCost = v.reviewCost;
+  } else {
+    // Instructed edit: the model already decided how to act. We DON'T re-review
+    // the content (that would undo a surgical edit) — but we DO run the
+    // deterministic STRUCTURAL check, and only if the result is actually invalid
+    // (e.g. a type change that left no correct answer) do we let the reviewer
+    // repair it. This is validity enforcement, not intent-guessing.
+    const structIssues = auditQuestions(generated, { requireAnswers: true });
+    if (structIssues.length) {
+      const v = await verifyAndFix({ questions: generated, prompt: ask, preset: req.body?.preset, model: req.body?.model });
+      fresh = (v.questions || [])[0] || fresh;
+      issues = v.issues;
+      verified = v.issues.length === 0;
+      reviewCost = v.reviewCost;
+    }
   }
   if (!fresh) {
     res.status(502);
