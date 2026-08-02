@@ -5,6 +5,7 @@ const Message = require("../models/messageModel");
 const Presence = require("../models/presenceModel");
 const User = require("../models/userModel");
 const { httpError } = require("../utils/appError");
+const { isChatAiEnabled, generateSupportReply } = require("../services/chatAssistant");
 
 // A user counts as "online" if their last heartbeat is within this window. The
 // client pings every ~30s, so 75s tolerates one dropped ping without flicker.
@@ -115,6 +116,7 @@ const listConversations = asyncHandler(async (req, res) => {
         lastMessageAt: c.lastMessageAt,
         lastMessageFrom: c.lastMessageFrom,
         unread: unreadMap.get(String(c._id)) || 0,
+        aiPaused: !!c.aiPaused,
       };
     })
   );
@@ -155,6 +157,7 @@ const startConversation = asyncHandler(async (req, res) => {
     lastMessageAt: conv.lastMessageAt,
     lastMessageFrom: conv.lastMessageFrom,
     unread: 0,
+    aiPaused: !!conv.aiPaused,
   });
 });
 
@@ -298,6 +301,7 @@ const getMessages = asyncHandler(async (req, res) => {
     })),
     peerOnline: isFresh(presence.get(String(peerId))),
     readWatermark,
+    aiPaused: !!conv.aiPaused,
   });
 });
 
@@ -331,6 +335,61 @@ const sendMessage = asyncHandler(async (req, res) => {
     createdAt: msg.createdAt,
     readAt: msg.readAt,
   });
+
+  // After replying to the sender, maybe let the AI answer for the admin. Only
+  // when a NON-admin (teacher) wrote, the recipient is the admin, AI is globally
+  // enabled and this thread isn't under human control. Fire-and-forget.
+  if (req.user.role !== "admin" && !conv.aiPaused && isChatAiEnabled()) {
+    maybeAiReply(String(conv._id), String(to)).catch(() => {});
+  }
 });
 
-module.exports = { ping, nudge, welcome, listConversations, startConversation, contactAdmin, getMessages, sendMessage };
+// Generate + post the AI's reply as the admin, if still appropriate. Guarded so
+// it never loops (AI writes as the admin; it only fires on a teacher's message)
+// and never double-answers if a human/AI reply already landed.
+async function maybeAiReply(conversationId, adminId) {
+  const conv = await Conversation.findById(conversationId);
+  if (!conv || conv.aiPaused) return;
+  const admin = await User.findById(adminId).select("role").lean();
+  if (!admin || admin.role !== "admin") return; // only speak FOR an admin
+
+  const recent = await Message.find({ conversation: conv._id })
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .lean();
+  recent.reverse();
+  if (!recent.length) return;
+  // If the last message is no longer the teacher's, someone already replied.
+  if (String(recent[recent.length - 1].from) === String(adminId)) return;
+
+  const reply = await generateSupportReply(recent, adminId);
+  if (!reply) return;
+
+  // Re-check the pause flag right before posting (admin may have taken over).
+  const fresh = await Conversation.findById(conversationId);
+  if (!fresh || fresh.aiPaused) return;
+
+  const to = conv.participants.find((p) => String(p) !== String(adminId));
+  const aiMsg = await Message.create({
+    conversation: conv._id,
+    from: adminId,
+    to,
+    text: reply,
+  });
+  fresh.lastMessageText = reply.slice(0, 200);
+  fresh.lastMessageAt = aiMsg.createdAt;
+  fresh.lastMessageFrom = adminId;
+  await fresh.save();
+}
+
+// Toggle "human control" for a thread (admin only): pause/resume the AI reply.
+const setConversationAi = asyncHandler(async (req, res) => {
+  const conv = await Conversation.findById(req.params.id);
+  if (!conv || !conv.participants.some((p) => String(p) === String(req.user._id)))
+    throw httpError(404, "conversation_not_found", "Söhbət tapılmadı.");
+  conv.aiPaused = !!req.body.paused;
+  await conv.save();
+  res.json({ ok: true, aiPaused: conv.aiPaused });
+});
+
+module.exports = { ping, nudge, welcome, listConversations, startConversation, contactAdmin, getMessages, sendMessage, setConversationAi };

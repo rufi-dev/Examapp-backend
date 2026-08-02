@@ -10,6 +10,7 @@ const {
   contactAdmin,
   getMessages,
   sendMessage,
+  setConversationAi,
 } = require("../controllers/chatController");
 
 // Presence heartbeat + unread badge (any logged-in user; the widget itself is
@@ -19,6 +20,9 @@ router.post("/ping", protect, ping);
 // Force-open a thread on the other participant's screen (picked up by their
 // next heartbeat). Participant-only.
 router.post("/conversations/:id/nudge", protect, nudge);
+
+// Pause/resume the AI auto-reply for a thread — "human control" (admin only).
+router.post("/conversations/:id/ai", protect, adminOnly, setConversationAi);
 
 // My conversations, and starting a new one (admin-initiated support chat).
 router.get("/conversations", protect, listConversations);

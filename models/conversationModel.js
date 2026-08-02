@@ -17,6 +17,9 @@ const conversationSchema = Schema(
     // then it is cleared so it fires once.
     nudgeFor: { type: Schema.Types.ObjectId, ref: "User", default: null, index: true },
     nudgeAt: { type: Date, default: null },
+    // When true, the AI support auto-reply is paused for this thread so the
+    // admin can answer by hand ("human control"). Toggle it back to resume AI.
+    aiPaused: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
