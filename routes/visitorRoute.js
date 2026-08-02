@@ -1,5 +1,5 @@
 const express = require("express");
-const { track, listVisitors } = require("../controllers/visitorController");
+const { track, listVisitors, growth } = require("../controllers/visitorController");
 const { protect, adminOnly } = require("../middleware/authMiddleware");
 const router = express.Router();
 
@@ -14,5 +14,8 @@ router.post(
 
 // GET /api/track — ADMIN only: the visitor list behind the "Ziyarətçilər" page.
 router.get("/", protect, adminOnly, listVisitors);
+
+// GET /api/track/growth — ADMIN only: daily platform growth for the analytics page.
+router.get("/growth", protect, adminOnly, growth);
 
 module.exports = router;

@@ -1,6 +1,8 @@
 const asyncHandler = require("express-async-handler");
 const VisitorSession = require("../models/visitorSessionModel");
 const User = require("../models/userModel");
+const Class = require("../models/classModel");
+const Exam = require("../models/examModel");
 
 // Keep a visit's journey and payload bounded so one abusive client can't bloat a
 // document. Older journey entries are dropped (we keep the most recent 60).
@@ -276,4 +278,111 @@ const listVisitors = asyncHandler(async (req, res) => {
   res.status(200).json({ page, limit, total, order: order === 1 ? "asc" : "desc", rows: withUsers });
 });
 
-module.exports = { track, listVisitors, isDatacenterIp, looksLikeAdCrawler };
+// Platform growth analytics: daily new registrations (by role), classes, and
+// exams (created vs "ready" = has questions), over a date range. Days are
+// bucketed in AZERBAIJAN time (UTC+4) so a day matches the admin's clock.
+const AZ_TZ = "+04:00";
+const dayKey = (s) => String(s || "").slice(0, 10);
+
+// Every yyyy-mm-dd from `fromKey` to `toKey` inclusive (as AZT calendar days).
+function dayRange(fromKey, toKey) {
+  const out = [];
+  let d = new Date(`${fromKey}T12:00:00.000${AZ_TZ}`);
+  const end = new Date(`${toKey}T12:00:00.000${AZ_TZ}`);
+  let guard = 0;
+  while (d <= end && guard < 800) {
+    out.push(
+      new Date(d.getTime() + 4 * 3600 * 1000).toISOString().slice(0, 10) // shift to AZT then take the date
+    );
+    d = new Date(d.getTime() + 24 * 3600 * 1000);
+    guard += 1;
+  }
+  return out;
+}
+
+const growth = asyncHandler(async (req, res) => {
+  const today = new Date(new Date().getTime() + 4 * 3600 * 1000).toISOString().slice(0, 10);
+  const fromKey = req.query.from ? dayKey(req.query.from) : dayKey(new Date(Date.now() - 29 * 864e5).toISOString());
+  const toKey = req.query.to ? dayKey(req.query.to) : today;
+  const from = new Date(`${fromKey}T00:00:00.000${AZ_TZ}`);
+  const to = new Date(`${toKey}T23:59:59.999${AZ_TZ}`);
+
+  const bucket = { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: AZ_TZ } };
+
+  const [usersByDay, classesByDay, examsByDay, totals] = await Promise.all([
+    User.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to } } },
+      { $group: { _id: { d: bucket, role: "$role" }, n: { $sum: 1 } } },
+    ]),
+    Class.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to }, deletedAt: null } },
+      { $group: { _id: bucket, n: { $sum: 1 } } },
+    ]),
+    Exam.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to }, deletedAt: null } },
+      { $lookup: { from: "questions", localField: "questions", foreignField: "_id", as: "q" } },
+      {
+        $project: {
+          d: bucket,
+          ready: {
+            $gt: [{ $size: { $ifNull: [{ $arrayElemAt: ["$q.correctAnswers", 0] }, []] } }, 0],
+          },
+        },
+      },
+      { $group: { _id: "$d", created: { $sum: 1 }, ready: { $sum: { $cond: ["$ready", 1, 0] } } } },
+    ]),
+    (async () => {
+      const [users, teachers, students, classes, exams] = await Promise.all([
+        User.countDocuments({}),
+        User.countDocuments({ role: "teacher" }),
+        User.countDocuments({ role: "student" }),
+        Class.countDocuments({ deletedAt: null }),
+        Exam.countDocuments({ deletedAt: null }),
+      ]);
+      // Ready exams overall (has questions).
+      const readyAgg = await Exam.aggregate([
+        { $match: { deletedAt: null } },
+        { $lookup: { from: "questions", localField: "questions", foreignField: "_id", as: "q" } },
+        { $project: { ready: { $gt: [{ $size: { $ifNull: [{ $arrayElemAt: ["$q.correctAnswers", 0] }, []] } }, 0] } } },
+        { $match: { ready: true } },
+        { $count: "n" },
+      ]);
+      return { users, teachers, students, classes, exams, examsReady: readyAgg[0]?.n || 0 };
+    })(),
+  ]);
+
+  const days = dayRange(fromKey, toKey);
+  const zero = () => days.map(() => 0);
+  const idx = new Map(days.map((d, i) => [d, i]));
+  const series = {
+    teachers: zero(),
+    students: zero(),
+    users: zero(),
+    classes: zero(),
+    examsCreated: zero(),
+    examsReady: zero(),
+  };
+
+  usersByDay.forEach((r) => {
+    const i = idx.get(r._id.d);
+    if (i == null) return;
+    series.users[i] += r.n;
+    if (r._id.role === "teacher") series.teachers[i] += r.n;
+    if (r._id.role === "student") series.students[i] += r.n;
+  });
+  classesByDay.forEach((r) => {
+    const i = idx.get(r._id);
+    if (i != null) series.classes[i] = r.n;
+  });
+  examsByDay.forEach((r) => {
+    const i = idx.get(r._id);
+    if (i != null) {
+      series.examsCreated[i] = r.created;
+      series.examsReady[i] = r.ready;
+    }
+  });
+
+  res.json({ from: fromKey, to: toKey, days, series, totals });
+});
+
+module.exports = { track, listVisitors, growth, isDatacenterIp, looksLikeAdCrawler };
