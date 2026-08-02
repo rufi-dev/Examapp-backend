@@ -137,8 +137,10 @@ const assignableStudents = asyncHandler(async (req, res) => {
 
   let candidates;
   if (isAdmin(req.user)) {
+    // Admins may also add teachers to a class (e.g. so a teacher can take a
+    // diagnostic themselves); teachers adding others stays students-only below.
     candidates = await User.find({
-      role: { $in: ["student", "suspended"] },
+      role: { $in: ["student", "suspended", "teacher"] },
       _id: { $nin: enrolledIds },
     })
       .select("name email photo")
@@ -178,11 +180,17 @@ const addStudentToClass = asyncHandler(async (req, res) => {
   const student = await User.findById(studentId);
   if (!student) {
     res.status(404);
-    throw new Error("Tələbə tapılmadı");
+    throw new Error("İstifadəçi tapılmadı");
   }
-  if (!["student", "suspended"].includes(student.role)) {
+  // Admins may add teachers too; teachers may only add students/suspended.
+  const allowedRoles = isAdmin(req.user)
+    ? ["student", "suspended", "teacher"]
+    : ["student", "suspended"];
+  if (!allowedRoles.includes(student.role)) {
     res.status(400);
-    throw new Error("Yalnız tələbə əlavə edilə bilər");
+    throw new Error(
+      isAdmin(req.user) ? "Bu istifadəçi əlavə edilə bilməz" : "Yalnız tələbə əlavə edilə bilər"
+    );
   }
 
   if (!isAdmin(req.user)) {
