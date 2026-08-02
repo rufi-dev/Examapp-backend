@@ -340,7 +340,9 @@ const sendMessage = asyncHandler(async (req, res) => {
   // when a NON-admin (teacher) wrote, the recipient is the admin, AI is globally
   // enabled and this thread isn't under human control. Fire-and-forget.
   if (req.user.role !== "admin" && !conv.aiPaused && isChatAiEnabled()) {
-    maybeAiReply(String(conv._id), String(to)).catch(() => {});
+    maybeAiReply(String(conv._id), String(to)).catch((e) =>
+      console.error("[CHAT-AI] maybeAiReply error:", e && e.message)
+    );
   }
 });
 
@@ -351,7 +353,10 @@ async function maybeAiReply(conversationId, adminId) {
   const conv = await Conversation.findById(conversationId);
   if (!conv || conv.aiPaused) return;
   const admin = await User.findById(adminId).select("role").lean();
-  if (!admin || admin.role !== "admin") return; // only speak FOR an admin
+  if (!admin || admin.role !== "admin") {
+    console.warn("[CHAT-AI] skip: recipient is not an admin", conversationId);
+    return; // only speak FOR an admin
+  }
 
   const recent = await Message.find({ conversation: conv._id })
     .sort({ createdAt: -1 })
@@ -363,7 +368,10 @@ async function maybeAiReply(conversationId, adminId) {
   if (String(recent[recent.length - 1].from) === String(adminId)) return;
 
   const reply = await generateSupportReply(recent, adminId);
-  if (!reply) return;
+  if (!reply) {
+    console.warn("[CHAT-AI] no reply generated for", conversationId);
+    return;
+  }
 
   // Re-check the pause flag right before posting (admin may have taken over).
   const fresh = await Conversation.findById(conversationId);

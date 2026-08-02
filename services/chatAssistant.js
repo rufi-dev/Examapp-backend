@@ -125,14 +125,30 @@ function toPlainText(s) {
     .trim();
 }
 
-// Generate a support reply text, or null if unavailable / nothing to say.
+// Generate a support reply text, or null if unavailable / nothing to say. Tries
+// OpenAI first, falls back to Anthropic on any OpenAI error (rate limit, outage),
+// and logs failures so silent non-replies are visible.
 async function generateSupportReply(messages, adminId) {
   const history = buildHistory(messages, adminId);
   if (!history.length || history[history.length - 1].role !== "user") return null;
 
   let text = "";
-  if (process.env.OPENAI_API_KEY) text = await replyWithOpenAI(history);
-  else text = await replyWithAnthropic(history);
+  if (process.env.OPENAI_API_KEY) {
+    try {
+      text = await replyWithOpenAI(history);
+    } catch (e) {
+      console.error("[CHAT-AI] OpenAI reply failed:", e.message);
+      if (process.env.ANTHROPIC_API_KEY) {
+        try {
+          text = await replyWithAnthropic(history);
+        } catch (e2) {
+          console.error("[CHAT-AI] Anthropic fallback failed:", e2.message);
+        }
+      }
+    }
+  } else {
+    text = await replyWithAnthropic(history);
+  }
   const clean = toPlainText(text);
   return clean || null;
 }
