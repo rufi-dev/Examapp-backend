@@ -528,6 +528,7 @@ const getUser = asyncHandler(async (req, res) => {
         whatsappGroupJoined,
         grade,
         hideAssistant,
+        assistantEnabled,
         teacherLevel,
       } = user;
 
@@ -557,6 +558,7 @@ const getUser = asyncHandler(async (req, res) => {
         whatsappGroupJoined,
         grade,
         hideAssistant,
+        assistantEnabled,
         teacherSuccessJourneyEnabled: journeyEnabled,
         ...(journeyEnabled && role === "teacher" ? { teacherLevel: teacherLevel || "spark", journeyWelcomeSeen: !!user.journeyWelcomeSeenAt } : {}),
         // CR-124: the SERVER-derived capability set the frontend route tree gates
@@ -642,6 +644,10 @@ const updateUser = asyncHandler(async (req, res) => {
     if (typeof req.body.hideAssistant === "boolean") {
       user.hideAssistant = req.body.hideAssistant;
     }
+    // Opt in/out of the AI assistant (staff preference; off by default).
+    if (typeof req.body.assistantEnabled === "boolean") {
+      user.assistantEnabled = req.body.assistantEnabled;
+    }
     // Grade ("Sinif") — only when the client sends a non-empty value.
     if (typeof req.body.grade === "string" && req.body.grade.trim()) {
       user.grade = req.body.grade.trim();
@@ -677,6 +683,7 @@ const updateUser = asyncHandler(async (req, res) => {
       whatsappOptIn: updatedUser.whatsappOptIn,
       grade: updatedUser.grade,
       hideAssistant: updatedUser.hideAssistant,
+      assistantEnabled: updatedUser.assistantEnabled,
     });
   } else {
     res.status(404);

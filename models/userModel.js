@@ -92,6 +92,11 @@ const userSchema = Schema(
             type: Boolean,
             default: false,
         },
+        // AI assistant robot is OFF by default; users opt in from Profile.
+        assistantEnabled: {
+            type: Boolean,
+            default: false,
+        },
         // Set once the admin's personal welcome chat message has been sent to
         // this user, so it is never sent twice.
         chatWelcomedAt: {
