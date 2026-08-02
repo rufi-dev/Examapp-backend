@@ -1279,7 +1279,7 @@ const getClassesByTag = asyncHandler(async (req, res) => {
   }
 
   try {
-    let filter = { tag: tagId };
+    let filter = { tag: tagId, deletedAt: null };
     if (!isAdminUser(req.user)) {
       // Own classes OR classes in this tag the user is approved-enrolled in.
       const classIds = await approvedClassIds(req.user._id);
@@ -1320,11 +1320,14 @@ const getClassesByTag = asyncHandler(async (req, res) => {
 // browsed directly. Admin → all; otherwise the user's OWN classes plus any
 // class they are approved-enrolled in. Mirrors getClassesByTag minus the tag.
 const getAllClasses = asyncHandler(async (req, res) => {
-  let filter = {};
+  // Exclude soft-deleted classes (deleteClass sets deletedAt) — otherwise a
+  // deleted class keeps showing in the list and re-deleting it 404s.
+  let filter = { deletedAt: null };
   if (!isAdminUser(req.user)) {
     const classIds = await approvedClassIds(req.user._id);
     // Owned, approved-enrolled, OR public (requireCode:false) classes.
     filter = {
+      deletedAt: null,
       $or: [
         { owner: req.user._id },
         { _id: { $in: classIds } },
