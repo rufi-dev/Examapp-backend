@@ -207,10 +207,15 @@ const listVisitors = asyncHandler(async (req, res) => {
   // Latest visit first by default; ?order=asc flips to oldest first.
   const order = req.query.order === "asc" ? 1 : -1;
 
-  // Build the filter: date range + source category.
+  // Build the filter: date range + source category. Dates arrive as yyyy-mm-dd
+  // and mean AZERBAIJAN (UTC+4) days — otherwise, after local midnight, a visit
+  // falls into the previous UTC day and "today" would miss it. Anchor the day
+  // boundaries to +04:00 so the range matches what the admin sees on the clock.
+  const AZ = "+04:00";
+  const day = (s) => String(s || "").slice(0, 10); // yyyy-mm-dd
   const filter = {};
-  const from = req.query.from ? new Date(req.query.from) : null;
-  const to = req.query.to ? new Date(new Date(req.query.to).setHours(23, 59, 59, 999)) : null;
+  const from = req.query.from ? new Date(`${day(req.query.from)}T00:00:00.000${AZ}`) : null;
+  const to = req.query.to ? new Date(`${day(req.query.to)}T23:59:59.999${AZ}`) : null;
   if ((from && !isNaN(from)) || (to && !isNaN(to))) {
     filter.lastActivity = {};
     if (from && !isNaN(from)) filter.lastActivity.$gte = from;
