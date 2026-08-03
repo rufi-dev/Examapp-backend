@@ -62,6 +62,11 @@ const inCidr = (ip, cidr) => {
   return (ipL & mask) === (rangeL & mask);
 };
 const normalizeIp = (ip) => (ip ? String(ip).replace(/^::ffff:/i, "").toLowerCase() : "");
+
+// Localhost / loopback — a developer or the admin hitting the site locally, never
+// a real visitor. Matches ::1, 127.x.x.x, ::ffff:127.x, 0.0.0.0 and "localhost".
+const LOCAL_IP_RE = /^(::1$|::ffff:127\.|127\.|localhost$|0\.0\.0\.0$)/i;
+const isLocalIp = (ip) => LOCAL_IP_RE.test(String(ip || "").trim());
 function isDatacenterIp(rawIp) {
   const ip = normalizeIp(rawIp);
   if (!ip) return false;
@@ -110,6 +115,8 @@ const track = asyncHandler(async (req, res) => {
   // Silently drop our own traffic (matched on the client-reported IP or the
   // server-observed one) so we never track ourselves.
   if (EXCLUDED_IPS.has(clientIp) || EXCLUDED_IPS.has(req.ip)) return res.sendStatus(204);
+  // Drop localhost / loopback (a dev or the admin running the site locally).
+  if (isLocalIp(clientIp) || isLocalIp(req.ip)) return res.sendStatus(204);
   // Drop ad-platform / cloud crawlers (Meta ad-review, link previews, scanners)
   // so the counts reflect real humans, not bots.
   if (isDatacenterIp(clientIp) || isDatacenterIp(req.ip) || CRAWLER_UA.test(d.ua || "") || looksLikeAdCrawler(d)) {
@@ -225,6 +232,7 @@ const listVisitors = asyncHandler(async (req, res) => {
   }
   const srcF = sourceFilter(req.query.source);
   if (srcF) Object.assign(filter, srcF);
+  filter.ip = { $not: LOCAL_IP_RE }; // hide localhost/loopback visits from analytics
 
   const unique = req.query.unique === "1" || req.query.unique === "true";
 
@@ -400,6 +408,7 @@ const hourly = asyncHandler(async (req, res) => {
   }
   const srcF = sourceFilter(req.query.source);
   if (srcF) Object.assign(filter, srcF);
+  filter.ip = { $not: LOCAL_IP_RE }; // hide localhost/loopback visits from analytics
   const unique = req.query.unique === "1" || req.query.unique === "true";
 
   // Hour of day (0–23) anchored to Azerbaijan time.
