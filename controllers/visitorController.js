@@ -385,4 +385,45 @@ const growth = asyncHandler(async (req, res) => {
   res.json({ from: fromKey, to: toKey, days, series, totals });
 });
 
-module.exports = { track, listVisitors, growth, isDatacenterIp, looksLikeAdCrawler };
+// GET /api/track/hourly — ADMIN only: visitor counts by HOUR OF DAY (0–23) in
+// Azerbaijan time, over the selected date range. `?unique=1` counts DISTINCT IPs
+// per hour instead of total visits; `?source=` filters by acquisition category.
+const hourly = asyncHandler(async (req, res) => {
+  const day = (s) => String(s || "").slice(0, 10);
+  const filter = {};
+  const from = req.query.from ? new Date(`${day(req.query.from)}T00:00:00.000${AZ_TZ}`) : null;
+  const to = req.query.to ? new Date(`${day(req.query.to)}T23:59:59.999${AZ_TZ}`) : null;
+  if ((from && !isNaN(from)) || (to && !isNaN(to))) {
+    filter.lastActivity = {};
+    if (from && !isNaN(from)) filter.lastActivity.$gte = from;
+    if (to && !isNaN(to)) filter.lastActivity.$lte = to;
+  }
+  const srcF = sourceFilter(req.query.source);
+  if (srcF) Object.assign(filter, srcF);
+  const unique = req.query.unique === "1" || req.query.unique === "true";
+
+  // Hour of day (0–23) anchored to Azerbaijan time.
+  const hourExpr = {
+    $toInt: { $dateToString: { format: "%H", date: "$lastActivity", timezone: AZ_TZ } },
+  };
+
+  const agg = unique
+    ? await VisitorSession.aggregate([
+        { $match: filter },
+        // one entry per (hour, ip) so a returning IP counts once per hour...
+        { $group: { _id: { h: hourExpr, ip: { $ifNull: ["$ip", "—"] } } } },
+        { $group: { _id: "$_id.h", count: { $sum: 1 } } },
+      ])
+    : await VisitorSession.aggregate([
+        { $match: filter },
+        { $group: { _id: hourExpr, count: { $sum: 1 } } },
+      ]);
+
+  const map = new Map(agg.map((r) => [r._id, r.count]));
+  const hours = Array.from({ length: 24 }, (_, h) => ({ hour: h, count: map.get(h) || 0 }));
+  const totalHits = hours.reduce((s, x) => s + x.count, 0);
+  const peak = hours.reduce((best, x) => (x.count > best.count ? x : best), { hour: 0, count: 0 });
+  res.json({ hours, total: totalHits, peakHour: peak.hour, unique });
+});
+
+module.exports = { track, listVisitors, growth, hourly, isDatacenterIp, looksLikeAdCrawler };
