@@ -1465,10 +1465,14 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     }
   }, 15000);
 
+  let streamedCount = 0;
   const mkOnText = () => {
     const streamer = makeQuestionStreamer();
     return (full) => {
-      for (const q of streamer(full)) sse("question", q);
+      for (const q of streamer(full)) {
+        sse("question", q);
+        streamedCount += 1;
+      }
     };
   };
 
@@ -1529,6 +1533,13 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
       `AI extract (${usedProvider}) returned 0 questions; full length=${(result.full || "").length}, head=`,
       (result.full || "").slice(0, 200)
     );
+  }
+  // If nothing streamed during extraction (the OpenAI runner returns the whole
+  // paper at once), push the extracted questions NOW so the teacher sees them
+  // immediately instead of watching a spinner through the slow answer phase.
+  // `done` still sends the finalized (answered) set at the end.
+  if (streamedCount === 0 && extracted.length) {
+    for (const q of extracted) sse("question", q);
   }
   const extractCost =
     result.openaiCost ||
