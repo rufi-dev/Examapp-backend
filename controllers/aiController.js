@@ -1089,6 +1089,23 @@ async function applyAnswerMode({ questions, mode, preset, model, signal, onStatu
   return { questions, issues: null, reviewCost: null, rounds: 0, mode: m };
 }
 
+// The AI reads a PDF INLINE; Claude caps a document at ~32MB (and 100 pages), so
+// a whole textbook fails at the model with an opaque 500. Reject an oversized
+// file up front with a clear, actionable 413 instead. (Page-count is enforced by
+// the provider; size is the cheap pre-check that catches the common "uploaded a
+// 70MB book" case.)
+const MAX_EXTRACT_PDF_MB = 32;
+function assertPdfExtractable(file, res) {
+  const bytes = file.size || (file.buffer ? file.buffer.length : 0);
+  if (bytes > MAX_EXTRACT_PDF_MB * 1024 * 1024) {
+    res.status(413);
+    throw new Error(
+      `PDF çox böyükdür (${Math.round(bytes / (1024 * 1024))} MB). Maksimum ${MAX_EXTRACT_PDF_MB} MB. ` +
+        "Böyük kitabı fəsillərə bölün və ya yalnız lazımi səhifələri ayırıb yükləyin."
+    );
+  }
+}
+
 const extractQuestions = asyncHandler(async (req, res) => {
   if (!req.file || !req.file.buffer || !req.file.buffer.length) {
     res.status(400);
@@ -1098,6 +1115,7 @@ const extractQuestions = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("Yalnız PDF fayl dəstəklənir");
   }
+  assertPdfExtractable(req.file, res);
 
   const base64 = req.file.buffer.toString("base64");
   // The builder sends the model id it picked. An OpenAI id routes to OpenAI;
@@ -1407,6 +1425,7 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("Yalnız PDF fayl dəstəklənir");
   }
+  assertPdfExtractable(req.file, res);
   const base64 = req.file.buffer.toString("base64");
   // The builder sends the model id it picked. An OpenAI id routes to OpenAI;
   // "gemini"/"claude" keep working as the plain provider names they always were.
