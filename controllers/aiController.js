@@ -1457,13 +1457,17 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
       /* client gone */
     }
   };
+  // Keepalive: an immediate flush confirms the stream is live, then a frequent
+  // ping keeps mobile networks/proxies from dropping the connection during a long
+  // non-streaming (OpenAI) wait — a drop surfaced to the client as "Failed to fetch".
+  res.write(": ok\n\n");
   const hb = setInterval(() => {
     try {
       res.write(": ping\n\n");
     } catch {
       /* ignore */
     }
-  }, 15000);
+  }, 7000);
 
   let streamedCount = 0;
   const mkOnText = () => {
@@ -2422,13 +2426,16 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
       /* client gone */
     }
   };
+  // Keepalive: immediate flush + frequent ping so mobile networks don't drop the
+  // stream mid-generation ("Failed to fetch" on the client).
+  res.write(": ok\n\n");
   const hb = setInterval(() => {
     try {
       res.write(": ping\n\n");
     } catch {
       /* ignore */
     }
-  }, 15000);
+  }, 7000);
 
   // Cancelling in the browser only closed the socket; the provider kept
   // generating and kept billing for output nobody would read. The upstream
