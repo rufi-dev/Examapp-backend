@@ -1,5 +1,5 @@
 const express = require('express')
-const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage } = require('../controllers/userController')
+const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, markAppInstalled } = require('../controllers/userController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
 const { refreshHandler, logoutAllHandler, requireSessionFlag } = require('../controllers/authSessionController')
 const { csrfProtect } = require('../middleware/csrf')
@@ -21,6 +21,10 @@ router.get('/logout', logoutUser)
 // /logoutAll uses a Bearer access token, so csrfProtect passes it through.
 router.post('/refresh', requireSessionFlag, csrfProtect, refreshHandler)
 router.post('/logoutAll', requireSessionFlag, csrfProtect, protect, logoutAllHandler)
+
+// PWA install signal: the client posts this the first time a signed-in user
+// opens the site as an installed app (standalone). Idempotent; any teacher/user.
+router.post('/app-installed', protect, markAppInstalled)
 
 router.get('/getUser', protect, getUser)
 router.get('/getUserById/:id', protect, teacherOnly, getUserById)

@@ -4,6 +4,7 @@ const {
   adminOnly,
   teacherOnly,
   verifiedOnly,
+  requireCompleteProfile,
 } = require("../middleware/authMiddleware");
 const {
   serverTime,
@@ -50,7 +51,9 @@ const {
   addClass,
   getClass,
   getExamTagandClass,
-  getResultsByExam
+  getResultsByExam,
+  getPendingReviews,
+  gradeManualAnswer
 } = require("../controllers/quizController");
 const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions, generateQuestionsStream, transcribeAudio, realtimeToken, listAiModels, regenerateQuestion } = require("../controllers/aiController");
 const { aiRateLimit, aiBudgetGuard } = require("../middleware/aiLimit");
@@ -183,7 +186,7 @@ router.get("/getTags", protect, getTags);
 router.post("/addExam/:classId", protect, requireCapability("exam:create:own"), formFieldsOnly.single("pdf"), addExam);
 
 // ---- enrollment (class membership) ----
-router.post("/enroll", protect, verifiedOnly, joinClass);
+router.post("/enroll", protect, verifiedOnly, requireCompleteProfile, joinClass);
 router.get("/myEnrollments", protect, myEnrollments);
 router.delete("/leaveClass/:classId", protect, leaveClass);
 router.get("/teacher/requests", protect, teacherOnly, teacherRequests);
@@ -200,6 +203,10 @@ router.get("/exam/:examId/pdf/stream", protect, streamExamPdf);
 router.post("/uploadPdf", protect, requireCapability("exam:create:own"), pdfUpload.single("file"), uploadPdf);
 router.get("/getExamTagandClass/:examId", protect, getExamTagandClass);
 router.get("/getResultsByExam/:examId", protect, requireCapability("results:view:own"), getResultsByExam);
+// Manual grading (MANUAL_GRADING_ENABLED): the teacher's grading queue for an exam,
+// and the per-answer verdict submit. Both no-op / 403 when the flag is off.
+router.get("/exam/:examId/pending-reviews", protect, requireCapability("results:view:own"), getPendingReviews);
+router.patch("/result/:resultId/grade", protect, teacherOnly, gradeManualAnswer);
 router.get("/getExamsByClass/:classId", protect, getExamsByClass);
 router.get("/getClassesByTag/:tagId", protect, getClassesByTag);
 router.get("/getClasses", protect, getAllClasses);
@@ -226,7 +233,7 @@ router.delete("/deleteTag/:tagId", protect, requireCapability("exam:manage:own")
 router.patch("/editTag/:tagId", protect, requireCapability("exam:manage:own"), editTag);
 router.patch("/editClass/:classId", protect, requireCapability("class:manage:own"), editClass);
 router.patch("/setExamHidden/:examId", protect, requireCapability("exam:manage:own"), setExamHidden);
-router.post("/exam/:examId/start", protect, startAttempt);
+router.post("/exam/:examId/start", protect, requireCompleteProfile, startAttempt);
 router.post("/exam/:examId/autosave", protect, autosaveAttempt);
 router.get("/exam/:examId/attemptStatus", protect, attemptStatus);
 // Live exam watch — owner/admin sees who is currently writing + their progress.

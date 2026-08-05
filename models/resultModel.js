@@ -138,6 +138,44 @@ const resultSchema = Schema(
       type: Date,
       default: null,
     },
+    // ── Manual grading (MANUAL_GRADING_ENABLED) ──────────────────────────────
+    // True while this result still has ≥1 manual question the teacher hasn't
+    // graded. `earnPoints` is provisional until it flips false.
+    pendingReview: {
+      type: Boolean,
+      default: false,
+    },
+    // The auto-graded points at submit (manual questions counted 0). Immutable
+    // base: earnPoints = autoEarnPoints + Σ awardedPoints of graded manual items,
+    // so re-grading never double-counts the auto part.
+    autoEarnPoints: {
+      type: Number,
+      default: null,
+    },
+    // Per manual-graded question: the teacher's verdict + points. `index` is the
+    // question's position in the frozen paper; `maxPoints` is its point value.
+    manualItems: [
+      {
+        _id: false,
+        index: { type: Number },
+        type: { type: String },
+        verdict: {
+          type: String,
+          enum: ["pending", "correct", "wrong", "partial"],
+          default: "pending",
+        },
+        awardedPoints: { type: Number, default: 0 },
+        maxPoints: { type: Number, default: 0 },
+        gradedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
+        gradedAt: { type: Date, default: null },
+        comment: { type: String, default: "" },
+      },
+    ],
+    // When the last pending manual item was graded (pendingReview → false).
+    reviewCompletedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,

@@ -123,6 +123,60 @@ eq(
   ["bad-matching-label"]
 );
 
+// Open-ended / subjective short-answers can never be typed to match exactly, so
+// they are flagged for conversion to single-choice. Concrete answers are not.
+eq(
+  "open-ended: 'which books... write briefly'",
+  codes(
+    [{ type: "Co", text: "Vətənpərvərliklə bağlı hansı kitabları oxumaq faydalıdır? Qısaca yazın.", openAnswers: ["Milli tarix və qəhrəmanlar haqqında kitablar"] }],
+    { requireAnswers: true }
+  ),
+  ["open-ended-answer"]
+);
+eq(
+  "open-ended: 'what consequences' with a joined-concept answer",
+  codes(
+    [{ type: "Co", text: "Amazon meşələrində yaşıllığın azaldılması nə nəticələrə səbəb olur?", openAnswers: ["Bioloji müxtəlifliyin azalması və iqlim dəyişikliyi"] }],
+    { requireAnswers: true }
+  ),
+  ["open-ended-answer"]
+);
+eq(
+  "open-ended: 'which examples do you know'",
+  codes(
+    [{ type: "Co", text: "Vətənpərvərliklə bağlı hansı qəhrəmanlıq nümunələrini bilirsiniz? Sadə və qısa qeyd edin.", openAnswers: ["Şəhidlik və qəhrəmanlıq"] }],
+    { requireAnswers: true }
+  ),
+  ["open-ended-answer"]
+);
+// A manually-graded open question is INTENTIONALLY open — never flagged.
+eq(
+  "manualGrade open question is NOT flagged",
+  codes(
+    [{ type: "Co", text: "Vətənpərvərliklə bağlı hansı kitabları oxumaq faydalıdır? Qısaca yazın.", openAnswers: [], manualGrade: true }],
+    { requireAnswers: true }
+  ),
+  []
+);
+// A concrete numeric short-answer is fine even when the prompt says "write it".
+eq(
+  "concrete number answer is NOT flagged",
+  codes([{ type: "Co", text: "Dairənin sahəsini hesablayın (r=4). Nəticəni yazın.", openAnswers: ["50.24"] }], { requireAnswers: true }),
+  []
+);
+// A short formula answer is fine.
+eq(
+  "short formula answer is NOT flagged",
+  codes([{ type: "Co", text: "Suyun kimyəvi formulunu yazın.", openAnswers: ["H2O"] }], { requireAnswers: true }),
+  []
+);
+// A single/short-term answer is fine even with a descriptive-sounding prompt.
+eq(
+  "two-word term answer is NOT flagged",
+  codes([{ type: "Co", text: "Atomun mərkəzində nə yerləşir?", openAnswers: ["atom nüvəsi"] }], { requireAnswers: true }),
+  []
+);
+
 // Extraction mode: an unmarked answer is expected, not a defect.
 eq("extraction leaves answers to the teacher", codes([Q({ correct: [] })], { requireAnswers: false }), []);
 // A figure question excuses empty text.

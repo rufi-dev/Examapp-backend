@@ -28,7 +28,9 @@ const {
   sanitizeQuestionItem,
   startAttempt,
   addResult,
+  gradeManualAnswer,
 } = require("../controllers/quizController");
+const { _setForTest } = require("../config/featureFlags");
 
 let passed = 0;
 let failed = 0;
@@ -218,6 +220,58 @@ async function partC() {
     await runAttempt([FIX.readingBlock, FIX.listeningBlock], P, [rd, rd]), 0);
 }
 
+// ===================== Part D — manual grading (MANUAL_GRADING_ENABLED) ======
+// A manualGrade open question is held out of the auto score, the result is
+// pendingReview with a provisional score, and the teacher's verdict recomputes it.
+async function partD() {
+  console.log("\nPart D — manual grading (flag on):");
+  _setForTest({ flags: { MANUAL_GRADING_ENABLED: true } });
+  try {
+    const owner = await User.create({ name: "T", email: `mt${Date.now()}_${seq++}@e.com`, password: "xxxxxxxx", role: "teacher", teacherApproval: "approved", isVerified: true });
+    const exam = await Exam.create({
+      name: "Manual", owner: owner._id, duration: 600, price: 0, totalMarks: 100, passingMarks: 50,
+      mode: "structured", class: new mongoose.Types.ObjectId(), typePoints: { Cm: 10, Co: 10 },
+    });
+    const correctAnswers = [
+      { type: "Cm", text: "1+1?", choices: [{ text: "2" }, { text: "3" }], correct: [0] },
+      { type: "Co", text: "Fikrini yaz.", manualGrade: true }, // no auto answer key
+    ];
+    const q = await Question.create({ exam: exam._id, correctAnswers });
+    exam.questions = q._id;
+    await exam.save();
+    const student = await User.create({ name: "S", email: `ms${Date.now()}_${seq++}@e.com`, password: "xxxxxxxx", role: "student", isVerified: true });
+    student.exams.push(exam._id);
+    await student.save();
+    const started = await call(startAttempt, { examId: String(exam._id) }, {}, student._id);
+    const attemptId = started.body.attemptId;
+    await call(addResult, { examId: String(exam._id) }, {
+      attemptId,
+      selectedAnswers: [ { type: "Cm", answer: 0 }, { type: "Co", answer: "mənim fikrim budur" } ],
+    }, student._id);
+
+    const result = await Result.findOne({ attemptId });
+    eq("auto-only score before grading → 10 (manual Co excluded)", result.earnPoints, 10);
+    eq("pendingReview set", result.pendingReview, true);
+    eq("autoEarnPoints base = 10", result.autoEarnPoints, 10);
+    eq("one manual item pending", (result.manualItems || []).filter((m) => m.verdict === "pending").length, 1);
+
+    // Teacher awards partial 6 of 10 on the manual question → 10 + 6 = 16, done.
+    await call(gradeManualAnswer, { resultId: String(result._id) }, { index: 1, verdict: "partial", awardedPoints: 6 }, owner._id);
+    const after = await Result.findById(result._id);
+    eq("recomputed score = 10 + 6 = 16", after.earnPoints, 16);
+    eq("pendingReview cleared after grading", after.pendingReview, false);
+
+    // A student may NOT grade (authorization fails closed).
+    let denied = false;
+    try {
+      await call(gradeManualAnswer, { resultId: String(result._id) }, { index: 1, verdict: "correct" }, student._id);
+    } catch (_) { denied = true; }
+    eq("student cannot grade (403)", denied, true);
+  } finally {
+    _setForTest({ flags: { MANUAL_GRADING_ENABLED: false } });
+  }
+}
+
 async function main() {
   const mem = await MongoMemoryServer.create();
   await mongoose.connect(mem.getUri());
@@ -228,6 +282,7 @@ async function main() {
   partA();
   partB();
   await partC();
+  await partD();
 
   await mongoose.disconnect();
   await mem.stop();

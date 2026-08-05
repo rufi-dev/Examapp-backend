@@ -1114,6 +1114,7 @@ function sanitizeQuestionItem(q) {
   if (q.blanks !== undefined) out.blanks = q.blanks; // open: number of answer boxes
   if (q.inline) out.inline = true; // inline gap-fill (text already anonymised)
   if (q.gapfill) out.gapfill = true; // gap-fill reading / cloze (scored passage)
+  if (q.manualGrade) out.manualGrade = true; // open, teacher-graded (no auto-score)
   if (Array.isArray(q.table)) {
     // "Complete the table": send the grid layout + static cell text, but STRIP
     // every cell's answer key (it lives in blankAnswers, which is never sent).
@@ -1740,9 +1741,24 @@ function resultVisibility(exam, user) {
 function applyResultVisibility(result, vis) {
   const obj = typeof result.toObject === "function" ? result.toObject() : { ...result };
   obj.visibility = vis;
+  // Manual grading: the student may see which of their questions are still
+  // awaiting a teacher (pendingReview) and, once graded, the verdict + points —
+  // but never the internal grader identity. When the score is hidden, hide the
+  // provisional manual details with it.
+  if (Array.isArray(obj.manualItems)) {
+    obj.manualItems = obj.manualItems.map(({ gradedBy, ...rest }) => rest);
+  }
   if (!vis.canSeeScore) {
     obj.earnPoints = null;
     obj.correctAnswersByType = null;
+    obj.autoEarnPoints = null;
+    if (Array.isArray(obj.manualItems)) {
+      obj.manualItems = obj.manualItems.map((m) => ({
+        index: m.index,
+        type: m.type,
+        verdict: m.verdict,
+      }));
+    }
   }
   if (!vis.canSeeAnswers) {
     obj.correctAnswers = null;
@@ -2709,7 +2725,26 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
   const counts = { Cm: 0, Cs: 0, Co: 0, Cd: 0, Cma: 0, Cmu: 0 };
   let earnedPoints = 0;
   let wrongCount = 0;
+  // Manual grading (MANUAL_GRADING_ENABLED): a question flagged `manualGrade` is
+  // NOT auto-scored — it earns 0 now and is recorded as pending so the teacher can
+  // grade it by hand later. It never counts as correct and never triggers negative
+  // marking. Flag OFF ⇒ manualGrade is ignored and every question auto-grades.
+  const manualGradingOn = require("../config/featureFlags").flags.MANUAL_GRADING_ENABLED;
+  const manualItems = [];
   correct.forEach((ca, i) => {
+    if (manualGradingOn && ca && ca.manualGrade && ca.type !== "reading") {
+      const s = sel[i];
+      if (isAnswered(s)) {
+        manualItems.push({
+          index: i,
+          type: ca.type,
+          verdict: "pending",
+          awardedPoints: 0,
+          maxPoints: points[i] || 0,
+        });
+      }
+      return;
+    }
     const s = sel[i];
     if (!isAnswered(s)) return;
     const frac = evaluate(ca, s, src.partialCredit);
@@ -2721,6 +2756,7 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
       wrongCount += 1;
     }
   });
+  const hasPendingReview = manualItems.length > 0;
 
   if (src.negativeMarking && (src.wrongPerPenalty || 0) > 0) {
     // "One correct's worth" = the average points of a question in the penalized
@@ -2756,6 +2792,12 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
     // store answered-question count in the misleading legacy field.
     attempts: attempt.attemptOrdinal ?? 1,
     earnPoints: earnedPoints,
+    // Manual grading: the score is provisional while any manual question is
+    // pending. autoEarnPoints is the immutable auto-graded base the teacher's
+    // awarded points are added onto (see the grade endpoint).
+    ...(hasPendingReview
+      ? { pendingReview: true, autoEarnPoints: earnedPoints, manualItems }
+      : {}),
     violations: Math.max(attempt.violations || 0, Number(violations) || 0),
     terminated: isTerminated,
     selectedAnswers: sel.map((a) => ({
@@ -3710,6 +3752,119 @@ const reviewByResult = asyncHandler(async (req, res) => {
   res.status(200).json(view);
 });
 
+// ── Manual grading (MANUAL_GRADING_ENABLED) ────────────────────────────────
+// A teacher owns the review of every result for an exam they published. Reuses
+// the reviewByResult authorization: for a versioned result authorize against the
+// FROZEN version author, for a legacy result the live exam owner.
+async function loadResultForTeacher(req, res, resultId, user) {
+  const result = await Result.findById(resultId)
+    .populate({ path: "examId", populate: { path: "questions" } })
+    .populate("userId", "name email phone");
+  if (!result) {
+    res.status(404);
+    throw new Error("No Result Found!");
+  }
+  const frozen = result.examVersionId
+    ? await ExamVersion.findById(result.examVersionId).lean()
+    : null;
+  if (result.examVersionId && !frozen) {
+    res.status(409);
+    throw new Error("İmtahan versiyası tapılmadı");
+  }
+  const isAdmin = user.role === "admin";
+  let teacherAuthed = false;
+  if (user.role === "teacher" && isStaffUser(user)) {
+    const authority = frozen ? frozen.author : (result.examId && result.examId.owner);
+    teacherAuthed = authority != null && String(authority) === String(user._id);
+  }
+  if (!isAdmin && !teacherAuthed) {
+    res.status(403);
+    throw new Error("Bu nəticəyə icazəniz yoxdur");
+  }
+  return { result, frozen };
+}
+
+// GET /exam/:examId/pending-reviews — the teacher's grading queue.
+const getPendingReviews = asyncHandler(async (req, res) => {
+  const { flags } = require("../config/featureFlags");
+  if (!flags.MANUAL_GRADING_ENABLED) return res.status(200).json([]);
+  const { examId } = req.params;
+  const exam = await Exam.findById(examId);
+  if (!exam) {
+    res.status(404);
+    throw new Error("No Exam Found!");
+  }
+  if (!isAdminUser(req.user) && exam.owner && String(exam.owner) !== String(req.user._id)) {
+    res.status(403);
+    throw new Error("Bu imtahanın nəticələri sizə aid deyil");
+  }
+  const rows = await Result.find({ examId, pendingReview: true })
+    .sort({ createdAt: 1, _id: 1 })
+    .select("userId examId manualItems earnPoints autoEarnPoints createdAt pendingReview")
+    .populate("userId", "name email");
+  res.status(200).json(rows);
+});
+
+// PATCH /result/:resultId/grade — record ONE verdict for a manual question.
+// Recomputes earnPoints = autoEarnPoints + Σ awarded, flips pendingReview off when
+// the last one is graded. Never re-runs scoreAndCreateResult (which refuses to
+// overwrite an authoritative Result).
+const gradeManualAnswer = asyncHandler(async (req, res) => {
+  const { flags } = require("../config/featureFlags");
+  if (!flags.MANUAL_GRADING_ENABLED) {
+    res.status(403);
+    throw new Error("Manual grading is not enabled");
+  }
+  const user = await User.findById(req.user._id);
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found!");
+  }
+  const { resultId } = req.params;
+  const { result } = await loadResultForTeacher(req, res, resultId, user);
+
+  const index = Number(req.body?.index);
+  const verdict = String(req.body?.verdict || "");
+  if (!["correct", "wrong", "partial"].includes(verdict)) {
+    res.status(400);
+    throw new Error("verdict must be correct, wrong or partial");
+  }
+  const item = (result.manualItems || []).find((m) => Number(m.index) === index);
+  if (!item) {
+    res.status(400);
+    throw new Error("Bu sual əl ilə yoxlanılmır");
+  }
+  const maxPoints = Number(item.maxPoints) || 0;
+  let awarded;
+  if (verdict === "correct") awarded = maxPoints;
+  else if (verdict === "wrong") awarded = 0;
+  else awarded = Math.min(maxPoints, Math.max(0, Number(req.body?.awardedPoints) || 0));
+
+  item.verdict = verdict;
+  item.awardedPoints = Math.round(awarded * 100) / 100;
+  item.gradedBy = user._id;
+  item.gradedAt = new Date();
+
+  const base = Number(result.autoEarnPoints) || 0;
+  const manualSum = (result.manualItems || [])
+    .filter((m) => m.verdict && m.verdict !== "pending")
+    .reduce((s, m) => s + (Number(m.awardedPoints) || 0), 0);
+  result.earnPoints = result.terminated ? 0 : Math.round((base + manualSum) * 100) / 100;
+
+  const stillPending = (result.manualItems || []).some((m) => !m.verdict || m.verdict === "pending");
+  const justCompleted = result.pendingReview && !stillPending;
+  result.pendingReview = stillPending;
+  if (justCompleted) result.reviewCompletedAt = new Date();
+  await result.save();
+
+  res.status(200).json({
+    _id: result._id,
+    earnPoints: result.earnPoints,
+    pendingReview: result.pendingReview,
+    manualItems: (result.manualItems || []).map(({ gradedBy, ...rest }) => rest),
+  });
+});
+
 const editExam = asyncHandler(async (req, res) => {
   const { examId } = req.params;
   const {
@@ -4445,6 +4600,8 @@ module.exports = {
   streamExamPdf,
   getExamTagandClass,
   getResultsByExam,
+  getPendingReviews,
+  gradeManualAnswer,
   // Exported for unit tests (pure scoring / sanitisation helpers):
   isCorrectAnswer,
   sanitizeQuestionItem,

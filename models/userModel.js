@@ -161,6 +161,16 @@ const userSchema = Schema(
             type: Date,
             index: true,
         },
+        // PWA install signal: set true the first time this user opens the site as
+        // an installed app (standalone display mode). Lets the admin see adoption.
+        appInstalled: {
+            type: Boolean,
+            default: false,
+        },
+        appInstalledAt: {
+            type: Date,
+            default: null,
+        },
         // Per-teacher storage allowance for uploaded materials, in bytes.
         // Unset means the platform default (UPLOAD_QUOTA_BYTES, 4GB); an admin
         // raises it for the accounts that genuinely need more.

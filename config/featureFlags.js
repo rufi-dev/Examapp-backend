@@ -24,6 +24,13 @@ const flags = {
   // accepted. Phase 2: ON — `resolveSessionUser` rejects EVERY token without a
   // valid `exp` (including `sv`-bearing Phase-0 tokens), closing CR-003.
   REQUIRE_EXP_TOKENS: truthy(process.env.REQUIRE_EXP_TOKENS),
+
+  // Teacher manual grading. OFF is a no-op: the scoring loop never skips a
+  // question, no result carries a review state, and the AI strips any manualGrade
+  // flag (falling back to converting unmatchable open questions to single-choice).
+  // ON ⇒ questions flagged `manualGrade` are held for the teacher to grade
+  // (Doğru / Yanlış / qismən) instead of auto-scoring. Defaults OFF.
+  MANUAL_GRADING_ENABLED: truthy(process.env.MANUAL_GRADING_ENABLED),
 };
 
 // Proposed values from the ADR §2.0 decision table, kept in ONE place so a

@@ -157,6 +157,37 @@ const verifiedOnly = asyncHandler(async (req, res, next) => {
   }
 });
 
+// Server-side onboarding gate. A signed-up account created AFTER the gate shipped
+// must have a real phone (+ a grade for students) before it can DO anything that
+// matters — join a class or start an exam. The client has a matching
+// ProfileCompletionGate, but that is only UX; this is the enforcement, so a Google
+// signup that skipped the form (phone defaults to "+994", no grade) can NEVER act.
+// Pre-gate accounts are grandfathered (createdAt missing/older ⇒ allowed), so
+// long-time users are never locked out. Must match the frontend GATE_SINCE.
+const ONBOARD_GATE_SINCE = 1785670907000; // 2026-08-02 (Azerbaijan time)
+const hasValidPhone = (p) => String(p || "").replace(/\D/g, "").length >= 9;
+function profileIncomplete(user) {
+  if (!user) return false;
+  const created = user.createdAt ? new Date(user.createdAt).getTime() : 0;
+  if (!created || created < ONBOARD_GATE_SINCE) return false; // grandfathered
+  const noPhone = !hasValidPhone(user.phone);
+  const noGrade = user.role === "student" && !String(user.grade || "").trim();
+  return noPhone || noGrade;
+}
+const requireCompleteProfile = asyncHandler(async (req, res, next) => {
+  if (profileIncomplete(req.user)) {
+    res.status(403);
+    return res.json({
+      reason: "incomplete_profile",
+      message:
+        req.user.role === "student"
+          ? "Davam etmək üçün profilini tamamla (telefon və sinif)."
+          : "Davam etmək üçün telefon nömrəni əlavə et.",
+    });
+  }
+  next();
+});
+
 // Attaches req.user when a valid token is present and carries on regardless.
 //
 // For routes that serve BOTH signed-in and anonymous callers — a public share
@@ -172,4 +203,4 @@ const attachUser = asyncHandler(async (req, res, next) => {
   next();
 });
 
-module.exports = { protect, adminOnly, teacherOnly, verifiedOnly, attachUser, resolveSessionUser, hasTeacherCapability };
+module.exports = { protect, adminOnly, teacherOnly, verifiedOnly, requireCompleteProfile, attachUser, resolveSessionUser, hasTeacherCapability };

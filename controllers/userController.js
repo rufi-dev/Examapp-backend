@@ -1523,6 +1523,18 @@ const setUserStorage = asyncHandler(async (req, res) => {
   });
 });
 
+// POST /api/users/app-installed — the frontend calls this the first time the
+// signed-in user opens the site as an installed PWA (standalone display mode).
+// Idempotent: the timestamp is stamped once, so re-reports on later launches
+// don't overwrite it. Lets the admin directory show who installed the app.
+const markAppInstalled = asyncHandler(async (req, res) => {
+  await User.updateOne(
+    { _id: req.user._id, appInstalled: { $ne: true } },
+    { $set: { appInstalled: true, appInstalledAt: new Date() } }
+  );
+  res.json({ ok: true });
+});
+
 module.exports = {
   __setGoogleVerifyForTest, // test-only seam (rejects unless NODE_ENV==="test")
   getMyStorage,
@@ -1532,6 +1544,7 @@ module.exports = {
   registerUser,
   loginUser,
   logoutUser,
+  markAppInstalled,
   getUser,
   getUsers,
   updateUser,

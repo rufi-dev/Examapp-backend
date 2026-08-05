@@ -65,6 +65,11 @@ const questionSchema = Schema(
         // Open multi-blank: accepted answers per blank ([[...],[...]]). SERVER-
         // ONLY (the answer key — never sent to students).
         blankAnswers: { type: Schema.Types.Mixed, default: undefined },
+        // Manual grading (MANUAL_GRADING_ENABLED): when true this open question is
+        // NOT auto-scored — it is held for the teacher to grade by hand (Doğru /
+        // Yanlış / qismən). Frozen into the ExamVersion snapshot + contentHash like
+        // any question field, so the grade stays reproducible.
+        manualGrade: { type: Boolean, default: false },
         // Open "complete the table": an editable grid the student fills in place.
         // 2D array of cells { text, blank, colspan, rowspan, answers? }. Blank
         // cells (row-major) map 1:1 to `blanks`/`blankAnswers`, so scoring reuses

@@ -71,6 +71,11 @@ const EXTRACTION_SCHEMA = {
           // Open (Co): EVERY acceptable answer as its own array item (synonyms /
           // variants). Empty for non-open questions.
           openAnswers: { type: "array", items: { type: "string" } },
+          // Manual grading: true ONLY for a genuinely open question the TEACHER
+          // asked for whose answer can't be matched exactly (essay / "explain" /
+          // "give examples"). The teacher grades it by hand. false for everything
+          // else. Ignored unless manual grading is enabled server-side.
+          manualGrade: { type: "boolean" },
         },
         required: [
           "type",
@@ -83,6 +88,7 @@ const EXTRACTION_SCHEMA = {
           "hasFigure",
           "openAnswer",
           "openAnswers",
+          "manualGrade",
         ],
       },
     },
@@ -131,6 +137,7 @@ Rules:
   • A numbered list (1., 2., 3. …) that the student must pick from, with NO uppercase A–E answer variants → "Cs", NOT "Cm". Each numbered item becomes its own "choices" entry, IN ORDER, WITHOUT its number; "correct" holds the 0-based indexes (answer "2,5" over five items → correct: [1, 4]). Do not leave the items in "text". Use "Cs" even when you cannot tell how many are correct: the paper only shows A–E variants when exactly one answer is wanted, so a bare numbered list means "select every one that applies". "Cm" REQUIRES uppercase A–E variants to choose between.
   • A numbered list PLUS a separate lettered list (a., b., c. …) with NO uppercase A–E answer variants → "Cma", one "pairs" entry per number (answer "1b2d3c" → pairs 1→b, 2→d, 3→c).
   Reserve Co/Cd for answers a student genuinely writes out: a number, a word, a formula.
+- "manualGrade": ALWAYS false when extracting from a PDF (the teacher decides manual grading, not extraction).
 - MATCHING WITH ANSWER VARIANTS → CLOSED, NOT Cma: a question may say "Uyğunluğu müəyyən(ləşdir)in" yet PROVIDE lettered answer variants A–E that each encode a pairing (e.g. "A) 1 – a, b; 2 – d"  "B) 1 – a, c; 2 – b, e"). That is a CLOSED single-choice question: use type "Cm". Put the items being matched (the 1., 2., … list AND the a., b., c., … list) in "text", and put each A–E variant as a "choices" entry with its exact text (e.g. "1 – a, b; 2 – d"). Do NOT output "Cma"/pairs for these. Use "Cma" ONLY when the question gives NO answer variants and the student must build the pairing themselves. (The lowercase a., b., c. items belong in "text" — they are content to match, NOT the answer choices; only the uppercase A–E variants are choices.)
 - "pairs" — READ THIS CAREFULLY, IT IS THE MOST COMMONLY GOT WRONG. The app renders a Cma question as a BARE number→letter grid:
       1 →  A B C D E
@@ -289,10 +296,11 @@ const GEMINI_SCHEMA = {
           hasFigure: { type: "BOOLEAN" },
           openAnswer: { type: "STRING" },
           openAnswers: { type: "ARRAY", items: { type: "STRING" } },
+          manualGrade: { type: "BOOLEAN" },
         },
         required: [
           "type", "text", "title", "latex", "choices", "correct",
-          "pairs", "hasFigure", "openAnswer", "openAnswers",
+          "pairs", "hasFigure", "openAnswer", "openAnswers", "manualGrade",
         ],
       },
     },
@@ -732,6 +740,15 @@ const cleanQuestions = (list) =>
     const q = normaliseMatchingLetters(foldMatchingItemsIntoText(q0));
     if (!q || typeof q !== "object") return q;
     const out = { ...q };
+    // Manual grading: honor the flag ONLY when enabled, and only for open
+    // questions. Flag OFF ⇒ strip the field so behavior is exactly as before (the
+    // audit still flags an unmatchable open question for conversion to Cm).
+    if (require("../config/featureFlags").flags.MANUAL_GRADING_ENABLED) {
+      out.manualGrade = !!q.manualGrade && (q.type === "Co" || q.type === "Cd");
+      if (!out.manualGrade) delete out.manualGrade;
+    } else {
+      delete out.manualGrade;
+    }
     out.text = cleanText(q.text);
     if (typeof q.latex === "string") out.latex = fixMathEscapes(q.latex);
     if (typeof q.title === "string") out.title = cleanText(q.title);
@@ -789,6 +806,48 @@ const letterLabelsInText = (text) => {
   return labels;
 };
 
+// An open (Co) question is only fair when its answer has ONE exact spelling a
+// student can type: a number, a single term, a date, a short formula. When the
+// prompt invites an explanation, a list, or "give an example" — or the marked
+// answer is itself a multi-word phrase — no student can reproduce the exact
+// string, so the auto-grader marks even a perfect answer wrong. We flag those so
+// the verify pass rewrites them as single-choice (Cm). A concrete number/short
+// formula answer is NEVER flagged, so maths short-answers stay untouched.
+const OPEN_ENDED_QUESTION_RE =
+  /(sadala|izah\s*ed|şərh\s*ed|müzakirə|təsvir\s*ed|fikrin|fikriniz|fikrincə|nümunə|misal|qısaca\s*yaz|qısa\s*qeyd|öz\s*sözlər|nələr|nə\s*nəticə|nəticələrə\s*səbəb|nə\s*baş\s*ver|necə\s*dəyiş|nə\s*olur|necədir|barədə\s*yaz|haqqında\s*yaz|niyə|nə\s*üçün|qeyd\s*ed|bilirsiniz|bilirsən)/;
+
+const answerIsConcrete = (s) => {
+  const t = String(s ?? "").trim();
+  if (!t) return false;
+  // Pure number / date / range / percentage (2500, 3,14, 1941-1945, 50%).
+  if (/^[-+]?\d[\d.,:/%\s-]*$/.test(t)) return true;
+  // A short mathematical expression / formula (has an operator or LaTeX, few words).
+  if (/[=+\-*/^()$∙×÷√πθ]|\\[a-z]/i.test(t) && t.split(/\s+/).filter(Boolean).length <= 6) return true;
+  return false;
+};
+const wordCount = (s) => String(s ?? "").trim().split(/\s+/).filter(Boolean).length;
+
+const looksOpenEndedOpen = (q) => {
+  if (q?.type !== "Co") return false;
+  // A question the teacher grades by hand is MEANT to be open — not a defect.
+  if (q.manualGrade) return false;
+  const text = AUDIT_STRIP(q.text);
+  if (!text) return false;
+  const answers = [...(Array.isArray(q.openAnswers) ? q.openAnswers : []), q.openAnswer]
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean);
+  // Every accepted answer is a concrete value or a short (≤2-word) term → fair.
+  if (answers.length && answers.every((a) => answerIsConcrete(a) || wordCount(a) <= 2)) return false;
+  const subjective = OPEN_ENDED_QUESTION_RE.test(text);
+  // The marked answer is a multi-word phrase / joined concepts — unmatchable.
+  const phraseAnswer = answers.some(
+    (a) =>
+      !answerIsConcrete(a) &&
+      (wordCount(a) >= 4 || (/(^|\s)(və|həmçinin|eləcə)(\s|$)|[,;]/.test(a.toLowerCase()) && wordCount(a) >= 3))
+  );
+  return subjective || phraseAnswer;
+};
+
 const auditQuestions = (list, { requireAnswers = false } = {}) => {
   const issues = [];
   const add = (index, code, detail) => issues.push({ index, code, detail });
@@ -837,8 +896,14 @@ const auditQuestions = (list, { requireAnswers = false } = {}) => {
         .map(AUDIT_STRIP)
         .filter(Boolean);
       if (AUDIT_STRIP(q.openAnswer)) answers.push(AUDIT_STRIP(q.openAnswer));
-      if (requireAnswers && !answers.length) add(i, "no-open-answer", "no accepted answer");
+      // A manually-graded open question is answerless BY DESIGN (the teacher marks
+      // it), so it is exempt from the "needs an answer key" and "open-ended" checks.
+      if (requireAnswers && !answers.length && !q.manualGrade) add(i, "no-open-answer", "no accepted answer");
       if (choices.length) add(i, "open-with-choices", "open question should have no choices");
+      // A subjective / multi-answer short-answer can never be matched exactly by a
+      // student — flag it so verify converts it to single-choice (Cm).
+      if (q.type === "Co" && looksOpenEndedOpen(q))
+        add(i, "open-ended-answer", "açıq-uçlu/çoxcavablı açıq sual — şagird cavabı dəqiq uyğunlaşdıra bilməz. Müəllim açıq sual istəyibsə manualGrade=true qoy; əks halda «Cm» çoxseçimli et (düzgün cavabı variant kimi saxla, 4-5 variant qur, openAnswers boşalt)");
     } else if (q.type === "Cma") {
       const pairs = Array.isArray(q.pairs) ? q.pairs : [];
       if (pairs.length < 2) add(i, "too-few-pairs", `only ${pairs.length} pair(s)`);
@@ -895,6 +960,7 @@ DİQQƏTLƏ YOXLA VƏ DÜZƏLT:
 6. AÇIQ suallar (Co/Cd): "openAnswers" düzgün və tam olmalıdır — şagirdin yaza biləcəyi bütün formalar. Cavab səhvdirsə düzəlt.
 6a. ⛔ AÇIQ-UÇLU AÇIQ SUALI DÜZƏLT: Əgər bir açıq (Co) sualın ÇOX SAYDA fərqli düzgün cavabı ola bilərsə (məs. «bir yer bildirən isim yaz», «şəxs bildirən söz yaz», «bir nümunə göstər»), bu SƏHVDİR — sadalanan 3-4 cavabdan başqasını yazan şagird haqsız yerə səhv sayılır. Bunu DÜZƏLT: tipi «Cm» et, sualı saxla və 4-5 variant qur (biri düzgün — mövcud openAnswers-dən birini götür), "correct"-ə düzgün indeksi yaz, "openAnswers"-i boşalt. (Sualın cavabı əslən yeganədirsə — hesablanmış ədəd, konkret termin — Co qalsın.)
 6b. ⛔ TƏSVİR/MÜNASİBƏT CAVABLI AÇIQ SUALI DÜZƏLT: Əgər bir açıq (Co) sualın cavabı bir ANLAYIŞ, MÜNASİBƏT, BƏRABƏRSİZLİK və ya CÜMLƏdirsə (məs. openAnswers = ["diskriminant < 0","diskriminant mənfidir","D<0","mənfi"], ya da sual «...necədir?», «nə baş verir?», «necə dəyişir?» şəklindədir), bu SƏHVDİR — şagird eyni fikri onlarla cür yazır və hərfbəhərf uyğun gəlmir. Bunu DÜZƏLT: tipi «Cm» et, mövcud cavabı düzgün variant kimi saxla və məntiqli 4-5 variant qur (məs. «Mənfi (D<0)», «Sıfır (D=0)», «Müsbət (D>0)», «Müəyyən deyil»), "correct"-ə düzgün indeksi yaz, "openAnswers"-i boşalt. Co yalnız hamının EYNİ yazacağı ədəd/tək termin/tarix/yığcam düstur üçün qalır.
+6c. ƏL İLƏ YOXLAMA (manualGrade): əgər İLK TAPŞIRIQ müəllimin AÇIQ/yazılı/inşa/geniş cavablı sual istədiyini göstərirsə və cavab avtomatik yoxlana bilmirsə — 6a/6b-dəki kimi Cm-ə çevirmək əvəzinə sualı açıq (Co/Cd) saxla və manualGrade=true qoy (müəllim əl ilə yoxlayacaq). Müəllim açıq sual istəməyibsə, 6a/6b qaydası qalır: Cm-ə çevir, manualGrade=false.
 7. UYĞUNLUQ (Cma): hər nömrənin düzgün hərfi olmalıdır; nömrələnmiş və hərflənmiş siyahılar sualın "text" hissəsində tam görünməlidir.
 8. DİL və AYDINLIQ: sual birmənalı olmalıdır. İki cür başa düşülən sualı dəqiqləşdir.
 9. Sual ARTIQ DÜZGÜNDÜRSƏ, ona TOXUNMA — yalnız real səhvləri düzəlt.
@@ -1607,6 +1673,7 @@ QAYDALAR:
   HƏRFLƏR: yalnız ingilis əlifbasının hərflərini işlət — a, b, c, d, e. Azərbaycan əlifbasına məxsus ç, ə, ğ, ı, ö, ş, ü hərflərini uyğunluq etiketi kimi İSTİFADƏ ETMƏ (proqram onları tanımır).
 - Uyğunluq sualından SONRA gələn suallarda "1 nömrəli səs", "2-ci variant" kimi əvvəlki sualın nömrələrinə İSTİNAD ETMƏ — hər sual öz-özünə tam başa düşülən olmalıdır.
 - Açıq sualı (Co) YALNIZ şagirdin əslən yazdığı cavablar üçün işlət: rəqəm, söz, düstur. Seçim və ya uyğunluq cavabını heç vaxt mətn kimi yazma.
+- "manualGrade" (əl ilə yoxlama): standart olaraq HƏMİŞƏ false. YALNIZ bir halda true et: müəllim açıq/yazılı/inşa/geniş cavablı suallar XÜSUSİ istəyibsə VƏ cavab avtomatik dəqiq yoxlana bilmirsə (izahlı, çoxcavablı, "izah et", "nümunələr göstər"). O zaman sualı Co/Cd saxla, manualGrade=true qoy — openAnswer/openAnswers boş qala bilər (müəllim əl ilə yoxlayacaq). Müəllim açıq sual İSTƏMƏYİBSƏ, avtomatik yoxlana bilməyən açıq sualı yuxarıdakı qaydaya görə «Cm»-ə çevir və manualGrade=false saxla.
 - Riyazi ifadələr üçün "latex" sahəsindən istifadə et. Sual mətnini BÜTÖVLÜKDƏ $...$ içinə ALMA — yalnız həqiqi düstur/ifadə $...$ ilə yazılır; adi cümlə heç vaxt.
 - Dırnaq işarəsi lazımdırsa adi " işlət — \\" kimi qaçış simvolu YAZMA.
 - Şəkil/qrafik tələb edən sual YARATMA (hasFigure həmişə false). Mümkün qədər mətnlə həll olunan suallar yarat.
@@ -2554,8 +2621,12 @@ MÜHÜM: Heç vaxt "bu fənn üçün imtahan yarada bilmərəm" DEMƏ — istən
 
 QAYDALAR:
 - Cavabları HƏMİŞƏ Azərbaycan dilində, qısa, aydın və mümkünsə addım-addım ver.
+- ÜSLUB — İNSANİ VƏ İSTİ: Köməksevər, enerjili bir həmkar kimi danış. Quru/robot olma; "sən" deyə müraciət et, təbii, canlı cümlələr qur, yerində 1 emoji işlət (çox yox). Müəllimin işini dəyərləndir və ruhlandır.
+- SATIŞ/İTƏLƏYİCİ OL: Hər cavabın sonunda növbəti addımı FƏAL təklif et və hərəkətə ruhlandır — məs: "Gəl indi yaradaq? 💪", "Cəmi 2 dəqiqəlik işdir!", "Hazırsan, başlayaq?". İstifadəçi bir iş görməli olanda onu yumşaq itələ, sonra "Alındı? 😊" / "İşlədi?" kimi izlə. Təzyiq etmə — bir aydın çağırış kifayətdir.
 - FORMAT: Cavabı oxunaqlı et. Sadə suala 1-2 cümlə ilə cavab ver — siyahı işlətmə. LAKİN bir neçə element sadalayanda (siniflər, imtahanlar, addımlar) Markdown istifadə et: nömrəli siyahı (1. 2. 3.) və ya "- " ilə tire siyahı, vacib sözlər üçün **qalın**. Hər elementi ayrı sətirdə yaz. Cədvəl istifadə etmə.
+- DÜYMƏ ADLARI DƏQİQ: Yönləndirəndə ƏSL düymə/bölmə adlarını işlət ki, istifadəçi tez tapsın. Sol menyu: **İcmal**, **Siniflər**, **İmtahanlarım**, **Nəticələrim**, **Dərs materialları** (admin: **İstifadəçilər**, **Nəticələr**, **Analitika**). İmtahan yaratmaq — sinfin içində **İmtahan əlavə et** düyməsi. Builder-də: **Sual əlavə et**, **AI ilə yaz** / **AI ilə düzəlt**, **Yadda saxla**, **Şagird kimi sına**. Uydurma ad işlətmə.
 - Yalnız Examopia və müəllim işləri ilə bağlı suallara kömək et. Mövzudan kənar suallarda nəzakətlə platformaya yönləndir.
+- YALNIZ mövcud funksiyalardan danış: imtahan/sınaq, sinif, nəticə/analitika, dərs materialları. "Dərs yolu", "dərslər" və ya buna bənzər HAZIRLANMAQDA olan funksiyalar barədə HEÇ NƏ demə və təklif etmə; soruşulsa qısaca "hələ hazır deyil, tezliklə əlavə olunacaq 🙂" de və detala girmə.
 - Dəqiq bilmədiyin funksiyanı UYDURMA — düzgün bölməyə yönləndir və ya dəstəklə əlaqə saxlamağı təklif et.
 
 PLATFORMA BİLİKLƏRİ:
