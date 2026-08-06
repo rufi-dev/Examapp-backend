@@ -171,6 +171,21 @@ const userSchema = Schema(
             type: Date,
             default: null,
         },
+        // Web Push: one subscription per device the user enabled notifications on.
+        // Presence of any entry = the user opted into push notifications.
+        push: [
+            {
+                endpoint: { type: String },
+                keys: { p256dh: String, auth: String },
+                ua: String,
+                at: { type: Date, default: Date.now },
+            },
+        ],
+        // First time the user opted into push (for the admin directory).
+        pushSubscribedAt: {
+            type: Date,
+            default: null,
+        },
         // Per-teacher storage allowance for uploaded materials, in bytes.
         // Unset means the platform default (UPLOAD_QUOTA_BYTES, 4GB); an admin
         // raises it for the accounts that genuinely need more.

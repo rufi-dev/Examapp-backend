@@ -1,5 +1,5 @@
 const express = require('express')
-const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, markAppInstalled } = require('../controllers/userController')
+const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush } = require('../controllers/userController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
 const { refreshHandler, logoutAllHandler, requireSessionFlag } = require('../controllers/authSessionController')
 const { csrfProtect } = require('../middleware/csrf')
@@ -25,6 +25,12 @@ router.post('/logoutAll', requireSessionFlag, csrfProtect, protect, logoutAllHan
 // PWA install signal: the client posts this the first time a signed-in user
 // opens the site as an installed app (standalone). Idempotent; any teacher/user.
 router.post('/app-installed', protect, markAppInstalled)
+
+// Web Push opt-in: the browser fetches the VAPID public key, then the signed-in
+// user subscribes THIS device so they can receive notifications on their phone.
+router.get('/push/public-key', protect, getPushPublicKey)
+router.post('/push/subscribe', protect, subscribePush)
+router.post('/push/unsubscribe', protect, unsubscribePush)
 
 router.get('/getUser', protect, getUser)
 router.get('/getUserById/:id', protect, teacherOnly, getUserById)

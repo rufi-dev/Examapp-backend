@@ -801,6 +801,14 @@ const getUsers = asyncHandler(async (req, res) => {
   const page = pageResult(usersPlus, limit);
   const users = page.items;
 
+  // Push-notification opt-in: expose a boolean + first-opt-in date for the admin
+  // directory, and NEVER leak the raw subscription keys to the client.
+  users.forEach((u) => {
+    u.pushEnabled = Array.isArray(u.push) && u.push.length > 0;
+    if (u.pushEnabled) u.pushAt = u.pushSubscribedAt || u.push[u.push.length - 1]?.at || null;
+    delete u.push;
+  });
+
   // For the admin directory, attach each student's teacher(s) so the list can
   // answer "whose student is this?" without a request per row. A student can
   // belong to several teachers (one per class they joined), so this is a list.
@@ -1535,6 +1543,52 @@ const markAppInstalled = asyncHandler(async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Web Push opt-in ─────────────────────────────────────────────────────────
+// GET /api/users/push/public-key — the VAPID public key the browser needs to
+// create a subscription. Public by design (the private key stays on the server).
+const getPushPublicKey = asyncHandler(async (req, res) => {
+  const { isConfigured, publicKey } = require("../config/webPush");
+  if (!isConfigured()) {
+    res.status(503);
+    throw new Error("Push bildirişləri hələ konfiqurasiya olunmayıb");
+  }
+  res.json({ key: publicKey() });
+});
+
+// POST /api/users/push/subscribe — store THIS device's push subscription so the
+// user can receive notifications on their phone. Idempotent per endpoint
+// (re-subscribing just refreshes it); pushSubscribedAt is stamped on first opt-in.
+const subscribePush = asyncHandler(async (req, res) => {
+  const { endpoint, keys } = req.body || {};
+  if (!endpoint || !keys || !keys.p256dh || !keys.auth) {
+    res.status(400);
+    throw new Error("Yanlış abunə məlumatı");
+  }
+  const entry = {
+    endpoint,
+    keys: { p256dh: keys.p256dh, auth: keys.auth },
+    ua: String(req.get("user-agent") || "").slice(0, 300),
+    at: new Date(),
+  };
+  // Refresh any existing entry for this exact device, then add the current one.
+  await User.updateOne({ _id: req.user._id }, { $pull: { push: { endpoint } } });
+  await User.updateOne({ _id: req.user._id }, { $push: { push: entry } });
+  await User.updateOne(
+    { _id: req.user._id, pushSubscribedAt: null },
+    { $set: { pushSubscribedAt: new Date() } }
+  );
+  res.json({ ok: true });
+});
+
+// POST /api/users/push/unsubscribe — drop this device's subscription.
+const unsubscribePush = asyncHandler(async (req, res) => {
+  const { endpoint } = req.body || {};
+  if (endpoint) {
+    await User.updateOne({ _id: req.user._id }, { $pull: { push: { endpoint } } });
+  }
+  res.json({ ok: true });
+});
+
 module.exports = {
   __setGoogleVerifyForTest, // test-only seam (rejects unless NODE_ENV==="test")
   getMyStorage,
@@ -1545,6 +1599,9 @@ module.exports = {
   loginUser,
   logoutUser,
   markAppInstalled,
+  getPushPublicKey,
+  subscribePush,
+  unsubscribePush,
   getUser,
   getUsers,
   updateUser,
