@@ -95,7 +95,7 @@ const firstName = (name) => String(name || "").trim().split(/\s+/)[0] || "";
 // offers to help. Mirror of the frontend manual scripts.
 function outreachMessage(u, stuck) {
   const fn = firstName(u.name);
-  const n = fn ? ` ${fn}` : "";
+  const n = fn ? ` ${fn} müəllim` : " müəllim";
   if (stuck.hasEmptyExam)
     return `Salam${n} 🙂 Examopia komandasından yazıram. Gördüm ki, imtahan yaratmağa başlamısınız, amma sual əlavə etməmisiniz. Nə oldu? Hansı hissə çətin gəldi, nədə ilişdiniz? İstəsəniz, birlikdə edə bilərik — kömək etməkdən məmnun olaram 🌷`;
   if (stuck.hasEmptyClass)
