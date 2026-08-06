@@ -10,7 +10,8 @@ const wa = require("../helper/whatsapp");
 // class, or nothing at all) and hasn't been contacted yet is in the queue —
 // whether they registered long ago (backlog) or just now. The watcher sends ONE
 // warm WhatsApp at a time (from the admin's LINKED number, first name only,
-// tailored to how far they got), newest registrations first, with these rules
+// tailored to how far they got), EARLIEST registration first (whoever has been
+// waiting longest goes first — first-come-first-served), with these rules
 // applying to EVERYONE:
 //
 //   • Only during working hours 09:00–21:00 (Asia/Baku). Nothing after 9pm or
@@ -166,7 +167,7 @@ async function runOutreachSweep(now = new Date()) {
 
   const candidates = await User.find(waitingQuery(now))
     .select("_id name phone createdAt outreachAttempts")
-    .sort({ createdAt: -1 }) // newest registrations first
+    .sort({ createdAt: 1 }) // earliest registration first (longest-waiting served first)
     .limit(ATTEMPTS_PER_SWEEP * 6)
     .lean();
   if (!candidates.length) return { drained: true };
