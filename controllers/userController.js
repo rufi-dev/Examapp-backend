@@ -1726,30 +1726,55 @@ const unsubscribePush = asyncHandler(async (req, res) => {
 // GET /api/users/outreach/status — is the watcher on, since when, and is there a
 // linked+ready admin WhatsApp session to actually send from?
 const getOutreachStatus = asyncHandler(async (req, res) => {
-  const { getSettings, WATCH_MINUTES } = require("../jobs/autoOutreach");
+  const { getSettings, waitingCount, withinHours, GAP_MIN, DAY_START, DAY_END } = require("../jobs/autoOutreach");
   const wa = require("../helper/whatsapp");
   const settings = await getSettings();
   const admins = await User.find({ role: "admin" }).select("_id").lean();
   const senderId = wa.firstReadyOwner(admins.map((a) => a._id));
+  // Queue depth is a bit heavier (stuck check over all uncontacted teachers) —
+  // best-effort so it never blocks the toggle state.
+  let waiting = null;
+  try {
+    if (settings.enabled) waiting = await waitingCount();
+  } catch {
+    waiting = null;
+  }
   res.json({
     enabled: settings.enabled,
-    since: settings.since,
     whatsappLinked: !!senderId,
-    watchMinutes: WATCH_MINUTES,
+    withinHours: withinHours(new Date()),
+    dayStart: DAY_START,
+    dayEnd: DAY_END,
+    gapMin: GAP_MIN,
+    waiting,
   });
 });
 
 // POST /api/users/outreach/toggle — flip the watcher on/off. Turning it ON only
 // watches registrations from now forward (never the historical backlog).
 const toggleOutreach = asyncHandler(async (req, res) => {
-  const { getSettings, setEnabled } = require("../jobs/autoOutreach");
+  const { getSettings, setEnabled, waitingCount, withinHours, GAP_MIN, DAY_START, DAY_END } = require("../jobs/autoOutreach");
   const wa = require("../helper/whatsapp");
   const current = await getSettings();
   const next = typeof req.body?.enabled === "boolean" ? req.body.enabled : !current.enabled;
   const settings = await setEnabled(next);
   const admins = await User.find({ role: "admin" }).select("_id").lean();
   const senderId = wa.firstReadyOwner(admins.map((a) => a._id));
-  res.json({ enabled: settings.enabled, since: settings.since, whatsappLinked: !!senderId });
+  let waiting = null;
+  try {
+    if (settings.enabled) waiting = await waitingCount();
+  } catch {
+    waiting = null;
+  }
+  res.json({
+    enabled: settings.enabled,
+    whatsappLinked: !!senderId,
+    withinHours: withinHours(new Date()),
+    dayStart: DAY_START,
+    dayEnd: DAY_END,
+    gapMin: GAP_MIN,
+    waiting,
+  });
 });
 
 module.exports = {

@@ -274,6 +274,10 @@ const userSchema = Schema(
         },
         outreachAt: { type: Date, default: null },
         outreachReason: { type: String, default: null }, // sent | no_whatsapp | failed
+        // Transient send failures are retried a few times before being marked
+        // terminally "failed", so a momentary glitch never silently drops a
+        // teacher from the waiting list.
+        outreachAttempts: { type: Number, default: 0 },
 
         // ── Teacher Success Journey (ADR Backend/docs/adr/Teacher-Success-Journey.md) ──
         // Minimal, bounded fields only (D15 — no unbounded arrays on User).
