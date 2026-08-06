@@ -10,9 +10,9 @@ const wa = require("../helper/whatsapp");
 // class, or nothing at all) and hasn't been contacted yet is in the queue —
 // whether they registered long ago (backlog) or just now. The watcher sends ONE
 // warm WhatsApp at a time (from the admin's LINKED number, first name only,
-// tailored to how far they got), EARLIEST registration first (whoever has been
-// waiting longest goes first — first-come-first-served), with these rules
-// applying to EVERYONE:
+// tailored to how far they got). Order: NEW signups (registered after the
+// watcher was switched on) go first, oldest-of-them first (FIFO); then the
+// EXISTING backlog, newest-first (LIFO). These rules apply to EVERYONE:
 //
 //   • Only during working hours 09:00–21:00 (Asia/Baku). Nothing after 9pm or
 //     before 9am — for new and existing alike.
@@ -30,6 +30,10 @@ const wa = require("../helper/whatsapp");
 
 const ENABLED_KEY = "autoOutreachEnabled";
 const LAST_SENT_KEY = "autoOutreachLastSentAt";
+// Boundary between "new signups" and "existing backlog": stamped once when the
+// watcher is first switched on. Registered AFTER it = a new signup we started
+// watching live; BEFORE it = pre-existing backlog.
+const SINCE_KEY = "autoOutreachSince";
 
 const WATCH_MINUTES = Number(process.env.OUTREACH_WATCH_MINUTES) || 10; // new-signup grace
 const GAP_MIN = Number(process.env.OUTREACH_GAP_MIN) || 10; // minutes between sends
@@ -57,18 +61,27 @@ const withinHours = (now) => {
 };
 
 async function getSettings() {
-  const [enabled, lastSent] = await Promise.all([
+  const [enabled, lastSent, since] = await Promise.all([
     AppSetting.findOne({ key: ENABLED_KEY }).lean(),
     AppSetting.findOne({ key: LAST_SENT_KEY }).lean(),
+    AppSetting.findOne({ key: SINCE_KEY }).lean(),
   ]);
   return {
     enabled: !!(enabled && enabled.value),
     lastSentAt: lastSent && lastSent.value ? new Date(lastSent.value) : null,
+    since: since && since.value ? new Date(since.value) : null,
   };
 }
 
-async function setEnabled(on) {
+async function setEnabled(on, now = new Date()) {
   await AppSetting.updateOne({ key: ENABLED_KEY }, { $set: { value: !!on } }, { upsert: true });
+  if (on) {
+    // Stamp the new/existing boundary ONCE, on first enable, and keep it stable.
+    const existing = await AppSetting.findOne({ key: SINCE_KEY }).lean();
+    if (!existing || !existing.value) {
+      await AppSetting.updateOne({ key: SINCE_KEY }, { $set: { value: now } }, { upsert: true });
+    }
+  }
   return getSettings();
 }
 
@@ -155,7 +168,7 @@ async function waitingCount(now = new Date()) {
 
 // One sweep. Idempotent, bounded, safe on an interval.
 async function runOutreachSweep(now = new Date()) {
-  const { enabled, lastSentAt } = await getSettings();
+  const { enabled, lastSentAt, since } = await getSettings();
   if (!enabled) return { skipped: "disabled" };
 
   const admins = await User.find({ role: "admin" }).select("_id").lean();
@@ -165,11 +178,23 @@ async function runOutreachSweep(now = new Date()) {
   if (!withinHours(now)) return { skipped: "outside_hours", hour: localHour(now) };
   if (lastSentAt && now.getTime() - lastSentAt.getTime() < GAP_MIN * 60 * 1000) return { skipped: "gap" };
 
-  const candidates = await User.find(waitingQuery(now))
-    .select("_id name phone createdAt outreachAttempts")
-    .sort({ createdAt: 1 }) // earliest registration first (longest-waiting served first)
-    .limit(ATTEMPTS_PER_SWEEP * 6)
-    .lean();
+  // Build the ordered queue: NEW signups (registered after the watcher started)
+  // first, oldest-of-them first (FIFO); then the EXISTING backlog, newest-first
+  // (LIFO). Everyone is still past the grace window (createdAt <= graceCutoff).
+  const graceCutoff = new Date(now.getTime() - WATCH_MINUTES * 60 * 1000);
+  const base = { role: "teacher", phone: { $nin: [null, ""] }, outreachStatus: { $in: [null] } };
+  const sel = "_id name phone createdAt outreachAttempts";
+  const cap = ATTEMPTS_PER_SWEEP * 6;
+  let candidates;
+  if (since) {
+    const [fresh, backlog] = await Promise.all([
+      User.find({ ...base, createdAt: { $gte: since, $lte: graceCutoff } }).select(sel).sort({ createdAt: 1 }).limit(cap).lean(),
+      User.find({ ...base, createdAt: { $lt: since, $lte: graceCutoff } }).select(sel).sort({ createdAt: -1 }).limit(cap).lean(),
+    ]);
+    candidates = [...fresh, ...backlog];
+  } else {
+    candidates = await User.find({ ...base, createdAt: { $lte: graceCutoff } }).select(sel).sort({ createdAt: -1 }).limit(cap).lean();
+  }
   if (!candidates.length) return { drained: true };
 
   const stuckMap = await stuckStateForOwners(candidates.map((c) => c._id));
