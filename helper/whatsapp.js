@@ -74,6 +74,20 @@ function liveCount() {
   return n;
 }
 
+// True once a teacher has a session profile on disk — i.e. they have actually
+// been through the "Connect WhatsApp" flow (LocalAuth writes session-<ownerId>
+// on first initialize). Used to keep the new-exam notifier from EVER creating a
+// fresh Chromium profile for a teacher who never opted in: booting one on every
+// exam creation wrote a ~100 MB dead profile per exam-owner and ballooned the
+// wa_auth volume. The notifier now only re-wakes a profile that already exists.
+function hasPersistedSession(ownerId) {
+  try {
+    return fs.existsSync(path.join(AUTH_ROOT, `session-${String(ownerId)}`));
+  } catch {
+    return false;
+  }
+}
+
 // LocalAuth with clientId=ownerId persists to .wwebjs_auth/session-<ownerId>.
 function clearStaleLocks(ownerId) {
   const dir = path.join(AUTH_ROOT, `session-${ownerId}`);
@@ -329,7 +343,11 @@ async function notifyStudentsNewExam(examId, opts = {}) {
 
     const s = getSession(ownerId);
     if (!s.ready) {
-      initFor(ownerId); // lazily boot the owner's session for next time
+      // Only re-wake an ALREADY-linked teacher (their profile is on disk).
+      // Never create a new Chromium profile here — a teacher who never opted
+      // into WhatsApp must not get one spun up (and left behind) just because
+      // they created an exam. They link on demand from the dashboard.
+      if (hasPersistedSession(ownerId)) initFor(ownerId);
       return skip(`owner ${ownerId} WhatsApp not linked/ready`);
     }
 

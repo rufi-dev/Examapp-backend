@@ -230,6 +230,37 @@ const userSchema = Schema(
             select: false,
             default: undefined,
         },
+        // ── Paid packages (Pulsuz / Pro / Premium) ──────────────────────────
+        // A COMMERCIAL tier, entirely separate from `teacherLevel` below. Plan
+        // limits (classes/students/exam creations) are enforced by explicit
+        // checks in the controllers (helper/planLimits.js), NEVER via the
+        // capability system. A missing `plan` is treated as "free" everywhere,
+        // so existing accounts are grandfathered without a migration.
+        plan: {
+            type: String,
+            enum: ["free", "pro", "premium"],
+            default: "free",
+        },
+        planSince: { type: Date, default: null },
+        // Pro/Premium term end; null = free / no expiry. Enforcement of expiry is
+        // a follow-up — for now it is informational + admin-managed.
+        planExpiresAt: { type: Date, default: null },
+        planSource: { type: String, enum: ["admin", "migration"], default: "migration" },
+        // Set when an admin downgrades a PAID teacher back to free, so they stay
+        // visible in a "downgraded" panel (not silently gone from the list).
+        // Cleared when they upgrade to a paid plan again.
+        planDowngradedAt: { type: Date, default: null },
+        // Decrementing LIFETIME exam-creation allowance for the free tier: each
+        // successful create decrements it, and deleting an exam does NOT restore
+        // it. `null` = not yet initialised → lazily set to the free cap on the
+        // first post-launch create (so past exams never count — grandfathering).
+        // Pro/Premium ignore this field (unlimited).
+        examCreatesLeft: { type: Number, default: null },
+        // AI credit balance (Phase 2 currency). Managed manually for now — admins
+        // grant it and teachers buy top-ups; consumption wires in when AI metering
+        // is enabled. Simple integer balance, never negative.
+        aiCredits: { type: Number, default: 0, min: 0 },
+
         // ── Teacher Success Journey (ADR Backend/docs/adr/Teacher-Success-Journey.md) ──
         // Minimal, bounded fields only (D15 — no unbounded arrays on User).
         // A growth LEVEL is recognition, NEVER a security role: it must never be

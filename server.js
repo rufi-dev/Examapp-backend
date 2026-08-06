@@ -185,6 +185,7 @@ app.use("/api/materials", materialRoute)
 // the router unconditionally is safe: a flag-off deployment exposes nothing.
 app.use("/api/teacher-success", require("./routes/teacherSuccessRoute"))
 app.use("/api/chat", require("./routes/chatRoute"))
+app.use("/api/plan", require("./routes/planRoute"))
 app.use("/api/health", healthRoute)
 // AUD-013 CR-057: NOTHING under uploads/ is public anymore. Exam PDFs moved to
 // PRIVATE key storage (examPdfs/) served only by the authorized byte-stream

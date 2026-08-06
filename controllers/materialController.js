@@ -5,6 +5,7 @@ const Material = require("../models/materialModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 const { notifyEnrollment } = require("../helper/telegram");
+const { hasStudentRoom } = require("../helper/planLimits");
 const { convertOfficeToPdf, isOfficeFile } = require("../utils/officeToPdf");
 const { enqueueConversion } = require("../utils/convertQueue");
 const { pageLimit, withCursor, pageResult, wantsEnvelope } = require("../utils/cursorPagination");
@@ -758,17 +759,29 @@ const joinFromShare = asyncHandler(async (req, res) => {
   const existing = await Enrollment.findOne({ student: req.user._id, class: cls._id });
   if (existing) {
     if (existing.status !== "approved") {
-      existing.status = "approved";
-      await existing.save();
+      // Only promote a waitlisted student if there is room — a share link must
+      // NOT bypass the owner's student cap.
+      if (await hasStudentRoom(cls.owner, req.user._id)) {
+        existing.status = "approved";
+        await existing.save();
+      } else {
+        return res.json({ joined: false, waitlisted: true, className: cls.name || "" });
+      }
     }
   } else {
+    // Plan gate (waitlist): with no room the student is enrolled as pending and
+    // sees the class locked until the teacher upgrades.
+    const room = await hasStudentRoom(cls.owner, req.user._id);
     await Enrollment.create({
       student: req.user._id,
       class: cls._id,
       teacher: cls.owner,
-      status: "approved",
+      status: room ? "approved" : "pending",
     });
-    notifyEnrollment(cls, req.user, false);
+    notifyEnrollment(cls, req.user, !room);
+    if (!room) {
+      return res.json({ joined: false, waitlisted: true, className: cls.name || "" });
+    }
   }
   res.json({ joined: true, className: cls.name || "" });
 });

@@ -14,6 +14,7 @@ const { notifyStudentsNewExam } = require("../helper/whatsapp");
 const { PRESETS } = require("../helper/examPresets");
 const { publishExam, resolveActiveVersionForStart, verifyIntegrity, VersionIntegrityError } = require("../helper/examVersion");
 const { computePointsPlan } = require("../helper/scoring");
+const { assertUnderClassCap, consumeExamCreate } = require("../helper/planLimits");
 const mongoose = require("mongoose");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
@@ -164,6 +165,11 @@ const addTag = asyncHandler(async (req, res) => {
 // Add Class
 const addClass = asyncHandler(async (req, res) => {
   const { name, level, coverImage } = req.body;
+
+  // Plan gate: block a NEW class once the teacher is at their tier's class cap
+  // (grandfathered — existing classes keep working). Thrown 402 propagates via
+  // asyncHandler; placed BEFORE the try below, whose catch collapses to a 500.
+  await assertUnderClassCap(req.user);
 
   try {
     // A class needs a label: a text name (preferred) or the legacy numeric level.
@@ -399,6 +405,10 @@ const addExam = asyncHandler(async (req, res) => {
     try {
       newExam = await withMongoTransaction(async (session) => {
         const opts = session ? { session } : {};
+        // Plan gate: decrement the free tier's lifetime exam-creation allowance
+        // (unlimited tiers/admins are a no-op). Inside the transaction so a
+        // failed create rolls the decrement back; throws 402 when exhausted.
+        await consumeExamCreate(req.user, session);
         const created = await Exam.create([examData], opts);
         const linked = await Class.updateOne(
           { _id: classId },
@@ -1324,19 +1334,34 @@ const getAllClasses = asyncHandler(async (req, res) => {
   // Exclude soft-deleted classes (deleteClass sets deletedAt) — otherwise a
   // deleted class keeps showing in the list and re-deleting it 404s.
   let filter = { deletedAt: null };
+  let waitlistedSet = new Set();
   if (!isAdminUser(req.user)) {
     const classIds = await approvedClassIds(req.user._id);
-    // Owned, approved-enrolled, OR public (requireCode:false) classes.
+    // Waitlisted (pending) classes: the student SEES them (locked) so they know
+    // they're queued until the teacher upgrades.
+    const pendingRows = await Enrollment.find({ student: req.user._id, status: "pending" })
+      .select("class")
+      .lean();
+    const pendingIds = pendingRows.map((r) => r.class);
+    waitlistedSet = new Set(pendingIds.map(String));
+    // Owned, approved-enrolled, waitlisted, OR public (requireCode:false) classes.
     filter = {
       deletedAt: null,
       $or: [
         { owner: req.user._id },
         { _id: { $in: classIds } },
+        { _id: { $in: pendingIds } },
         { requireCode: false },
       ],
     };
   }
   const classes = await Class.find(filter).sort({ createdAt: -1 }).lean();
+  // Flag the student's waitlisted classes so the UI can lock them.
+  if (waitlistedSet.size) {
+    classes.forEach((c) => {
+      if (waitlistedSet.has(String(c._id))) c.waitlisted = true;
+    });
+  }
   // ADMIN only: attach the creator's name so the class card can show who made it.
   if (isAdminUser(req.user) && classes.length) {
     const ownerIds = [...new Set(classes.map((c) => String(c.owner)).filter(Boolean))];

@@ -24,6 +24,8 @@ const sessionService = require("../services/sessionService");
 const { resolveAdminCapability, resolveApprovalAction, resolveSelfServiceCapability } = require("../services/teacherCapability");
 const { isJourneyEnabled } = require("../config/teacherSuccess/flag");
 const { capabilitiesFor } = require("../helper/teacherCapabilities");
+const { usageFor } = require("../helper/planLimits");
+const { normalizePlan, PLAN_IDS, planDef } = require("../config/plans");
 const teacherReferralService = require("../services/teacherReferralService");
 const { recordLoginResult } = require("../middleware/authLimit");
 const authMetrics = require("../utils/authMetrics");
@@ -139,6 +141,8 @@ const registerUser = asyncHandler(async (req, res) => {
       teacherApproval,
       teacherApprovalMeta: selfCap.teacherApprovalMeta || undefined,
       grade: role === "student" ? grade : undefined,
+      // Welcome AI credits (free plan bonus) so a new teacher can try AI at once.
+      aiCredits: role === "teacher" ? planDef("free").credits.welcome || 0 : 0,
       onboarded: true, // role + profile chosen at sign-up, so don't re-prompt
       userAgent,
       isVerified: true,
@@ -301,6 +305,10 @@ const loginUser = asyncHandler(async (req, res) => {
         createdAt,
       } = user;
 
+      // Plan + usage on the login DTO so the header plan badge renders immediately
+      // (the boot getUser only runs from a cold start, not right after login).
+      const loginUsage = role === "teacher" ? await usageFor(user) : null;
+
       res.status(200).json({
         _id,
         name,
@@ -314,6 +322,10 @@ const loginUser = asyncHandler(async (req, res) => {
         userAgent,
         createdAt,
         token,
+        plan: normalizePlan(user.plan),
+        planExpiresAt: user.planExpiresAt || null,
+        aiCredits: user.aiCredits || 0,
+        ...(loginUsage ? { usage: loginUsage } : {}),
         // Teacher Success Journey — the login DTO carries the same trusted signals
         // as getUser so the header/card render immediately (no getUser round-trip).
         teacherSuccessJourneyEnabled: isJourneyEnabled(),
@@ -405,6 +417,7 @@ const loginWithCode = asyncHandler(async (req, res) => {
 
     const { _id, name, phone, bio, photo, role, teacherApproval, isVerified, userAgent } =
       user;
+    const codeUsage = role === "teacher" ? await usageFor(user) : null;
     res.status(200).json({
       _id,
       name,
@@ -417,6 +430,10 @@ const loginWithCode = asyncHandler(async (req, res) => {
       isVerified,
       userAgent,
       token,
+      plan: normalizePlan(user.plan),
+      planExpiresAt: user.planExpiresAt || null,
+      aiCredits: user.aiCredits || 0,
+      ...(codeUsage ? { usage: codeUsage } : {}),
     });
   }
 });
@@ -534,6 +551,8 @@ const getUser = asyncHandler(async (req, res) => {
         hideAssistant,
         assistantEnabled,
         teacherLevel,
+        plan,
+        planExpiresAt,
         createdAt,
       } = user;
 
@@ -543,6 +562,9 @@ const getUser = asyncHandler(async (req, res) => {
       // expose the (recognition-only) level; live credit/allowance comes from the
       // dedicated Journey endpoint. NEVER a capability/authorization signal.
       const journeyEnabled = isJourneyEnabled();
+
+      // Paid plan + live usage vs limits (teachers only — students have no plan).
+      const planUsage = role === "teacher" ? await usageFor(user) : null;
 
       res.status(200).json({
         _id,
@@ -574,6 +596,11 @@ const getUser = asyncHandler(async (req, res) => {
         // on (never derived from teacherLevel). Reflects role + approval + flag —
         // a new Spark teacher gets safe own-scope; risky/admin stay gated.
         capabilities: [...capabilitiesFor(user, { journeyEnabled })],
+        // Paid packages (Pulsuz/Pro/Premium). Missing plan resolves to "free".
+        plan: normalizePlan(plan),
+        planExpiresAt: planExpiresAt || null,
+        aiCredits: user.aiCredits || 0,
+        ...(planUsage ? { usage: planUsage } : {}),
       });
     } else {
       res.status(404);
@@ -807,7 +834,60 @@ const getUsers = asyncHandler(async (req, res) => {
     u.pushEnabled = Array.isArray(u.push) && u.push.length > 0;
     if (u.pushEnabled) u.pushAt = u.pushSubscribedAt || u.push[u.push.length - 1]?.at || null;
     delete u.push;
+    // Paid plan for the admin directory (missing → "free" for grandfathered rows).
+    u.plan = normalizePlan(u.plan);
   });
+
+  // "Started but stuck": teachers who created an EXAM and left it empty (no
+  // questions AND no PDF), OR created a CLASS with no exams inside. Lets the
+  // admin reach out and help them finish setting up.
+  const teacherIds = users.filter((u) => u.role === "teacher").map((u) => u._id);
+  if (teacherIds.length) {
+    // Empty exams (no content).
+    const emptyExamRows = await Exam.aggregate([
+      { $match: { owner: { $in: teacherIds }, deletedAt: null } },
+      { $lookup: { from: "questions", localField: "questions", foreignField: "_id", as: "q" } },
+      {
+        $project: {
+          owner: 1,
+          qcount: { $size: { $ifNull: [{ $arrayElemAt: ["$q.correctAnswers", 0] }, []] } },
+          hasPdf: { $cond: [{ $ifNull: ["$pdf", false] }, true, false] },
+        },
+      },
+      { $match: { qcount: 0, hasPdf: false } },
+      { $group: { _id: "$owner", n: { $sum: 1 } } },
+    ]);
+    const emptyExamMap = new Map(emptyExamRows.map((r) => [String(r._id), r.n]));
+
+    // Empty classes (a class with no exams). Two cheap queries.
+    const tClasses = await Class.find({ owner: { $in: teacherIds }, deletedAt: null })
+      .select("owner")
+      .lean();
+    const withExams = new Set(
+      tClasses.length
+        ? (await Exam.find({ class: { $in: tClasses.map((c) => c._id) }, deletedAt: null }).distinct("class")).map(String)
+        : []
+    );
+    const emptyClassMap = new Map();
+    tClasses.forEach((c) => {
+      if (!withExams.has(String(c._id))) {
+        const k = String(c.owner);
+        emptyClassMap.set(k, (emptyClassMap.get(k) || 0) + 1);
+      }
+    });
+    // Teachers who created ANY class at all — those absent from this set just
+    // signed up and did nothing (no class, no exam).
+    const classOwners = new Set(tClasses.map((c) => String(c.owner)));
+
+    users.forEach((u) => {
+      if (u.role !== "teacher") return;
+      u.emptyExams = emptyExamMap.get(String(u._id)) || 0;
+      u.hasEmptyExam = u.emptyExams > 0;
+      u.emptyClasses = emptyClassMap.get(String(u._id)) || 0;
+      u.hasEmptyClass = u.emptyClasses > 0;
+      u.hasNoSetup = !classOwners.has(String(u._id)); // signed up, created nothing
+    });
+  }
 
   // For the admin directory, attach each student's teacher(s) so the list can
   // answer "whose student is this?" without a request per row. A student can
@@ -1531,6 +1611,91 @@ const setUserStorage = asyncHandler(async (req, res) => {
   });
 });
 
+// PATCH /api/users/:id/plan — admin sets a user's paid package (manual upgrade
+// flow: teacher pays offline, admin flips the plan here). Body: { plan, months?,
+// examCreatesLeft? }. `months` sets an expiry for paid tiers; `examCreatesLeft`
+// optionally overrides the free exam allowance (e.g. top up a stuck teacher).
+const setUserPlan = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.params.id).select(
+    "name email role plan planSince planExpiresAt planSource examCreatesLeft aiCredits"
+  );
+  if (!user) {
+    res.status(404);
+    throw new Error("İstifadəçi tapılmadı");
+  }
+  const { plan, months, examCreatesLeft } = req.body || {};
+  if (!PLAN_IDS.includes(plan)) {
+    res.status(400);
+    throw new Error("Yanlış paket");
+  }
+  const wasPaid = ["pro", "premium"].includes(normalizePlan(user.plan));
+  user.plan = plan;
+  user.planSource = "admin";
+  if (plan === "free") {
+    // Downgrade: keep them visible in the "downgraded" panel — stamp only when
+    // coming FROM a paid plan; keep planSince as the original subscribe date.
+    if (wasPaid) user.planDowngradedAt = new Date();
+    user.planExpiresAt = null;
+  } else {
+    user.planSince = new Date();
+    user.planDowngradedAt = null; // re-subscribed → no longer downgraded
+    const m = Number(months);
+    user.planExpiresAt =
+      Number.isFinite(m) && m > 0
+        ? new Date(Date.now() + m * 30 * 24 * 60 * 60 * 1000)
+        : null; // open-ended until an expiry is set
+    // Grant the plan's monthly AI credit allowance on activation/renewal
+    // (skip when the admin passes an explicit examCreatesLeft-only tweak? no —
+    // any plan set is an activation). Credits stack with the current balance.
+    const monthly = planDef(plan).credits?.monthly || 0;
+    if (monthly > 0) user.aiCredits = (user.aiCredits || 0) + monthly;
+  }
+  if (examCreatesLeft !== undefined) {
+    const n = Number(examCreatesLeft);
+    if (Number.isFinite(n) && n >= 0) user.examCreatesLeft = Math.round(n);
+  }
+  await user.save();
+  // Upgrading raises the student cap → let waitlisted students in automatically.
+  let promoted = 0;
+  if (plan !== "free") {
+    try {
+      promoted = await require("../helper/planLimits").promoteWaitlisted(user._id);
+    } catch (e) {
+      console.error("[PLAN] promoteWaitlisted failed:", e.message);
+    }
+  }
+  res.json({
+    _id: user._id,
+    name: user.name,
+    plan: user.plan,
+    planExpiresAt: user.planExpiresAt,
+    examCreatesLeft: user.examCreatesLeft,
+    aiCredits: user.aiCredits,
+    promoted,
+  });
+});
+
+// PATCH /api/users/:id/credits — admin adjusts a user's AI credit balance.
+// Body: { delta } (add/subtract) or { set } (absolute). Never goes below 0.
+const setUserCredits = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.params.id).select("name aiCredits");
+  if (!user) {
+    res.status(404);
+    throw new Error("İstifadəçi tapılmadı");
+  }
+  const { delta, set } = req.body || {};
+  let next = user.aiCredits || 0;
+  if (set !== undefined && Number.isFinite(Number(set))) next = Math.round(Number(set));
+  else if (Number.isFinite(Number(delta))) next += Math.round(Number(delta));
+  else {
+    res.status(400);
+    throw new Error("Kredit dəyəri yanlışdır");
+  }
+  user.aiCredits = Math.max(0, next);
+  await user.save();
+  res.json({ _id: user._id, name: user.name, aiCredits: user.aiCredits });
+});
+
 // POST /api/users/app-installed — the frontend calls this the first time the
 // signed-in user opens the site as an installed PWA (standalone display mode).
 // Idempotent: the timestamp is stamped once, so re-reports on later launches
@@ -1607,6 +1772,8 @@ module.exports = {
   updateUser,
   deleteUser,
   setUserPhone,
+  setUserPlan,
+  setUserCredits,
   impersonateUser,
   loginStatus,
   upgradeUser,

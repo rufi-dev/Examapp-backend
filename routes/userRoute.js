@@ -1,5 +1,5 @@
 const express = require('express')
-const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush } = require('../controllers/userController')
+const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush } = require('../controllers/userController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
 const { refreshHandler, logoutAllHandler, requireSessionFlag } = require('../controllers/authSessionController')
 const { csrfProtect } = require('../middleware/csrf')
@@ -51,6 +51,8 @@ router.get('/onboardingReport', protect, adminOnly, onboardingReport)
 // Storage allowance: a teacher sees their own, an admin raises anyone's.
 router.get('/storage', protect, teacherOnly, getMyStorage)
 router.patch('/:id/storage', protect, adminOnly, setUserStorage)
+router.patch('/:id/plan', protect, adminOnly, setUserPlan)
+router.patch('/:id/credits', protect, adminOnly, setUserCredits)
 
 router.get('/loginStatus', loginStatus)
 router.post('/upgradeUser', protect, adminOnly, upgradeUser)

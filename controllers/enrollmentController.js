@@ -3,6 +3,8 @@ const Enrollment = require("../models/enrollmentModel");
 const Class = require("../models/classModel");
 const User = require("../models/userModel");
 const { notifyEnrollment } = require("../helper/telegram");
+const { hasStudentRoom } = require("../helper/planLimits");
+const { httpError } = require("../utils/appError");
 
 const isAdmin = (u) => !!u && u.role === "admin";
 
@@ -37,30 +39,43 @@ const joinClass = asyncHandler(async (req, res) => {
     throw new Error("Bu kodla sinif tapılmadı");
   }
 
+  // Plan gate (waitlist model): the student cap belongs to the CLASS OWNER. When
+  // the owner has NO room, the student is still enrolled but as "pending"
+  // (waitlisted) — they reach their dashboard and SEE the class (locked), and
+  // the teacher sees them in requests and lets them in after upgrading.
+  const room = await hasStudentRoom(cls.owner, req.user._id);
+  // Student-facing: never reveal the teacher's plan/payment — just say it's full
+  // and to reach the teacher. (Out of respect for the teacher.)
+  const WAITLIST_MSG =
+    "Sinif hazırda doludur. Zəhmət olmasa müəlliminizlə əlaqə saxlayın — yer açılan kimi əlavə olunacaqsınız.";
+
   const existing = await Enrollment.findOne({ student: req.user._id, class: cls._id });
   if (existing) {
-    // Upgrade any legacy pending request to approved — the code is enough.
-    if (existing.status !== "approved") {
+    if (existing.status === "approved") {
+      return res.status(200).json({ status: "approved", classId: cls._id, message: "Siz artıq bu sinifə qoşulmusunuz" });
+    }
+    // Waitlisted before: promote now if there is room, else keep waiting.
+    if (room) {
       existing.status = "approved";
       await existing.save();
+      return res.status(200).json({ status: "approved", classId: cls._id, message: "Sinifə qoşuldunuz" });
     }
-    return res.status(200).json({
-      status: "approved",
-      classId: cls._id,
-      message: "Siz artıq bu sinifə qoşulmusunuz",
-    });
+    return res.status(200).json({ status: "pending", waitlisted: true, classId: cls._id, message: WAITLIST_MSG });
   }
 
   await Enrollment.create({
     student: req.user._id,
     class: cls._id,
     teacher: cls.owner,
-    status: "approved",
+    status: room ? "approved" : "pending",
   });
-  // Telegram: tell the class owner a student joined (fire-and-forget; gated by
-  // the owner's onJoin flag + class scope).
-  notifyEnrollment(cls, req.user, false);
-  res.status(201).json({ status: "approved", classId: cls._id, message: "Sinifə qoşuldunuz" });
+  if (room) {
+    notifyEnrollment(cls, req.user, false);
+    return res.status(201).json({ status: "approved", classId: cls._id, message: "Sinifə qoşuldunuz" });
+  }
+  // Waitlisted — tell the owner someone is waiting (fire-and-forget).
+  notifyEnrollment(cls, req.user, true);
+  res.status(201).json({ status: "pending", waitlisted: true, classId: cls._id, message: WAITLIST_MSG });
 });
 
 // The student's own enrollments (any status), with class info.
@@ -88,6 +103,7 @@ const teacherRequests = asyncHandler(async (req, res) => {
   const rows = await Enrollment.find({ class: { $in: classIds }, status: "pending" })
     .populate("student", "name email photo")
     .populate({ path: "class", select: "name level" })
+    .populate({ path: "teacher", select: "name" }) // admin view: whose class it is
     .sort({ createdAt: 1 })
     .lean();
   res.status(200).json(rows || []);
@@ -249,6 +265,16 @@ const decideEnrollment = asyncHandler(async (req, res) => {
   }
 
   if (action === "approve") {
+    // Can't let a waitlisted student in past the owner's cap — upgrade first.
+    const ownerId = enr.class?.owner || enr.teacher;
+    if (!(await hasStudentRoom(ownerId, enr.student))) {
+      throw httpError(
+        402,
+        "plan_limit",
+        "Şagird limiti dolub. Bu şagirdi qəbul etmək üçün paketi yüksəldin.",
+        { reason: "plan_limit", resource: "students" }
+      );
+    }
     enr.status = "approved";
     await enr.save();
     return res.status(200).json({ message: "Təsdiqləndi", status: "approved" });

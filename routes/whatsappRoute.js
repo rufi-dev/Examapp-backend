@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { protect, teacherOnly, adminOnly } = require("../middleware/authMiddleware");
+const { protect, adminOnly } = require("../middleware/authMiddleware");
 const { sendAdminUserMessage } = require("../controllers/whatsappController");
 const User = require("../models/userModel");
 const {
@@ -13,9 +13,10 @@ const {
   listGroupsFor,
 } = require("../helper/whatsapp");
 
-// Every endpoint is scoped to the LOGGED-IN teacher's own session. A teacher
-// links their own WhatsApp number and picks their own notify group; nobody
-// else's session is touched.
+// ADMIN-ONLY: WhatsApp linking is an admin surface (the /connections page is
+// hidden from teachers and gated to admins). Every endpoint is scoped to the
+// logged-in admin's own session — they link a number and pick the notify group;
+// nobody else's session is touched.
 const oid = (req) => String(req.user._id);
 
 // Direct support outreach from the logged-in ADMIN's connected WhatsApp.
@@ -28,23 +29,23 @@ router.post(
   sendAdminUserMessage
 );
 
-router.get("/status", protect, teacherOnly, (req, res) => {
+router.get("/status", protect, adminOnly, (req, res) => {
   res.json(getStatusFor(oid(req)));
 });
 
-router.get("/qr", protect, teacherOnly, (req, res) => {
+router.get("/qr", protect, adminOnly, (req, res) => {
   initFor(oid(req)); // lazily boot this teacher's session if not running
   res.json({ ...getStatusFor(oid(req)), qr: getQrFor(oid(req)) });
 });
 
-router.post("/logout", protect, teacherOnly, async (req, res) => {
+router.post("/logout", protect, adminOnly, async (req, res) => {
   await logoutFor(oid(req));
   res.json({ ok: true });
 });
 
 // Send a test message (to the given phone, or the caller's own) from this
 // teacher's linked number.
-router.post("/test", protect, teacherOnly, async (req, res) => {
+router.post("/test", protect, adminOnly, async (req, res) => {
   const phone = req.body?.phone || req.user?.phone;
   if (!phone) return res.status(400).json({ ok: false, message: "Telefon nömrəsi yoxdur" });
   const ok = await sendMessageFor(
@@ -57,7 +58,7 @@ router.post("/test", protect, teacherOnly, async (req, res) => {
 
 // Notification group for THIS teacher: list their groups, get/set the chosen one
 // (+ optional invite link), and send it a test. The choice lives on the user.
-router.get("/groups", protect, teacherOnly, async (req, res) => {
+router.get("/groups", protect, adminOnly, async (req, res) => {
   const me = await User.findById(req.user._id).select("whatsappGroupId whatsappInviteLink").lean();
   res.json({
     groups: await listGroupsFor(oid(req)),
@@ -66,7 +67,7 @@ router.get("/groups", protect, teacherOnly, async (req, res) => {
   });
 });
 
-router.post("/group", protect, teacherOnly, async (req, res) => {
+router.post("/group", protect, adminOnly, async (req, res) => {
   const update = {};
   if (req.body?.groupId !== undefined) update.whatsappGroupId = req.body.groupId || "";
   if (req.body?.inviteLink !== undefined) {
@@ -79,7 +80,7 @@ router.post("/group", protect, teacherOnly, async (req, res) => {
   res.json({ ok: true, selected: me?.whatsappGroupId || "", inviteLink: me?.whatsappInviteLink || "" });
 });
 
-router.post("/group/test", protect, teacherOnly, async (req, res) => {
+router.post("/group/test", protect, adminOnly, async (req, res) => {
   const me = await User.findById(req.user._id).select("whatsappGroupId").lean();
   const groupId = me?.whatsappGroupId || "";
   if (!groupId) return res.status(400).json({ ok: false, message: "Qrup seçilməyib" });
