@@ -387,6 +387,18 @@ mongoose
         track(setTimeout(healthTick, 90 * 1000))
         track(setInterval(healthTick, 5 * 60 * 1000))
 
+        // Auto-outreach watcher: every ~2 min, message NEW teachers who signed
+        // up but didn't finish setting up (empty exam/class or nothing) within
+        // the grace window, from the admin's linked WhatsApp. No-op unless an
+        // admin has switched it on AND has a linked+ready WhatsApp session, so
+        // this is cheap and safe to always schedule. Bounded per sweep.
+        const outreachTick = beat("auto-outreach", 2 * 60 * 1000, async () => {
+            try { await require("./jobs/autoOutreach").runOutreachSweep() }
+            catch (e) { console.warn("[OUTREACH] sweep error:", e && e.message) }
+        })
+        track(setTimeout(outreachTick, 60 * 1000))
+        track(setInterval(outreachTick, 2 * 60 * 1000))
+
         // Teacher Success Journey recovery worker (CR-122/CR-125) — ONLY when the
         // flag is on. Reclaims stale AI credit reservations (crash between reserve
         // and settle) and repairs deferred referral bindings. Idempotent + bounded;

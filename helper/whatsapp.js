@@ -302,6 +302,45 @@ async function sendMessageFor(ownerId, phone, text) {
   return sendForOwner(ownerId, chatId, text);
 }
 
+// Given candidate owner ids, return the first one whose WhatsApp session is
+// linked AND ready (client up). Used by the auto-outreach watcher to pick a
+// live admin session to send from; returns null if NONE are ready (→ the
+// watcher stops without sending, per "if wp isn't linked, don't try").
+function firstReadyOwner(ownerIds) {
+  for (const id of ownerIds || []) {
+    const s = sessions.get(String(id));
+    if (s && s.ready && s.client) return String(id);
+  }
+  return null;
+}
+
+// Send one outreach message, reporting WHY it didn't go through so the watcher
+// can act differently per outcome. Returns:
+//   "sent"        — delivered to WhatsApp
+//   "no_whatsapp" — number is not registered on WhatsApp (skip, don't retry)
+//   "not_ready"   — this owner's session isn't up (stop the sweep, retry later)
+//   "failed"      — lookup/send error (mark error, don't auto-retry)
+async function sendOutreachFor(ownerId, phone, text) {
+  const digits = toDigits(phone);
+  if (!digits) return "no_whatsapp";
+  const s = getSession(ownerId);
+  if (!s.ready || !s.client) return "not_ready";
+  let chatId = null;
+  try {
+    if (typeof s.client.getNumberId === "function") {
+      const wid = await s.client.getNumberId(digits);
+      if (wid && wid._serialized) chatId = wid._serialized;
+    } else {
+      chatId = `${digits}@c.us`;
+    }
+  } catch {
+    return "failed";
+  }
+  if (!chatId) return "no_whatsapp"; // number not on WhatsApp
+  const ok = await sendForOwner(ownerId, chatId, text);
+  return ok ? "sent" : "failed";
+}
+
 // List a teacher's WhatsApp groups so they can pick a notify group.
 async function listGroupsFor(ownerId) {
   const s = getSession(ownerId);
@@ -472,6 +511,8 @@ module.exports = {
   logoutFor,
   sendForOwner,
   sendMessageFor,
+  sendOutreachFor,
+  firstReadyOwner,
   listGroupsFor,
   notifyStudentsNewExam,
   toDigits,

@@ -26,6 +26,7 @@ const { isJourneyEnabled } = require("../config/teacherSuccess/flag");
 const { capabilitiesFor } = require("../helper/teacherCapabilities");
 const { usageFor } = require("../helper/planLimits");
 const { normalizePlan, PLAN_IDS, planDef } = require("../config/plans");
+const { stuckStateForOwners } = require("../helper/stuckTeachers");
 const teacherReferralService = require("../services/teacherReferralService");
 const { recordLoginResult } = require("../middleware/authLimit");
 const authMetrics = require("../utils/authMetrics");
@@ -843,49 +844,16 @@ const getUsers = asyncHandler(async (req, res) => {
   // admin reach out and help them finish setting up.
   const teacherIds = users.filter((u) => u.role === "teacher").map((u) => u._id);
   if (teacherIds.length) {
-    // Empty exams (no content).
-    const emptyExamRows = await Exam.aggregate([
-      { $match: { owner: { $in: teacherIds }, deletedAt: null } },
-      { $lookup: { from: "questions", localField: "questions", foreignField: "_id", as: "q" } },
-      {
-        $project: {
-          owner: 1,
-          qcount: { $size: { $ifNull: [{ $arrayElemAt: ["$q.correctAnswers", 0] }, []] } },
-          hasPdf: { $cond: [{ $ifNull: ["$pdf", false] }, true, false] },
-        },
-      },
-      { $match: { qcount: 0, hasPdf: false } },
-      { $group: { _id: "$owner", n: { $sum: 1 } } },
-    ]);
-    const emptyExamMap = new Map(emptyExamRows.map((r) => [String(r._id), r.n]));
-
-    // Empty classes (a class with no exams). Two cheap queries.
-    const tClasses = await Class.find({ owner: { $in: teacherIds }, deletedAt: null })
-      .select("owner")
-      .lean();
-    const withExams = new Set(
-      tClasses.length
-        ? (await Exam.find({ class: { $in: tClasses.map((c) => c._id) }, deletedAt: null }).distinct("class")).map(String)
-        : []
-    );
-    const emptyClassMap = new Map();
-    tClasses.forEach((c) => {
-      if (!withExams.has(String(c._id))) {
-        const k = String(c.owner);
-        emptyClassMap.set(k, (emptyClassMap.get(k) || 0) + 1);
-      }
-    });
-    // Teachers who created ANY class at all — those absent from this set just
-    // signed up and did nothing (no class, no exam).
-    const classOwners = new Set(tClasses.map((c) => String(c.owner)));
-
+    const stuckMap = await stuckStateForOwners(teacherIds);
     users.forEach((u) => {
       if (u.role !== "teacher") return;
-      u.emptyExams = emptyExamMap.get(String(u._id)) || 0;
-      u.hasEmptyExam = u.emptyExams > 0;
-      u.emptyClasses = emptyClassMap.get(String(u._id)) || 0;
-      u.hasEmptyClass = u.emptyClasses > 0;
-      u.hasNoSetup = !classOwners.has(String(u._id)); // signed up, created nothing
+      const st = stuckMap.get(String(u._id));
+      if (!st) return;
+      u.emptyExams = st.emptyExams;
+      u.hasEmptyExam = st.hasEmptyExam;
+      u.emptyClasses = st.emptyClasses;
+      u.hasEmptyClass = st.hasEmptyClass;
+      u.hasNoSetup = st.hasNoSetup; // signed up, created nothing
     });
   }
 
@@ -1754,6 +1722,36 @@ const unsubscribePush = asyncHandler(async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Auto-outreach watcher (admin) ────────────────────────────────────────────
+// GET /api/users/outreach/status — is the watcher on, since when, and is there a
+// linked+ready admin WhatsApp session to actually send from?
+const getOutreachStatus = asyncHandler(async (req, res) => {
+  const { getSettings, WATCH_MINUTES } = require("../jobs/autoOutreach");
+  const wa = require("../helper/whatsapp");
+  const settings = await getSettings();
+  const admins = await User.find({ role: "admin" }).select("_id").lean();
+  const senderId = wa.firstReadyOwner(admins.map((a) => a._id));
+  res.json({
+    enabled: settings.enabled,
+    since: settings.since,
+    whatsappLinked: !!senderId,
+    watchMinutes: WATCH_MINUTES,
+  });
+});
+
+// POST /api/users/outreach/toggle — flip the watcher on/off. Turning it ON only
+// watches registrations from now forward (never the historical backlog).
+const toggleOutreach = asyncHandler(async (req, res) => {
+  const { getSettings, setEnabled } = require("../jobs/autoOutreach");
+  const wa = require("../helper/whatsapp");
+  const current = await getSettings();
+  const next = typeof req.body?.enabled === "boolean" ? req.body.enabled : !current.enabled;
+  const settings = await setEnabled(next);
+  const admins = await User.find({ role: "admin" }).select("_id").lean();
+  const senderId = wa.firstReadyOwner(admins.map((a) => a._id));
+  res.json({ enabled: settings.enabled, since: settings.since, whatsappLinked: !!senderId });
+});
+
 module.exports = {
   __setGoogleVerifyForTest, // test-only seam (rejects unless NODE_ENV==="test")
   getMyStorage,
@@ -1789,4 +1787,6 @@ module.exports = {
   bulkUsers,
   teacherOverview,
   teacherOverviewExamDto,
+  getOutreachStatus,
+  toggleOutreach,
 };

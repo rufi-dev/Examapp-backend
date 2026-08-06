@@ -261,6 +261,20 @@ const userSchema = Schema(
         // is enabled. Simple integer balance, never negative.
         aiCredits: { type: Number, default: 0, min: 0 },
 
+        // ── Auto-outreach watcher (jobs/autoOutreach.js) ──────────────────────
+        // A new teacher who hasn't finished setting up within a grace window
+        // (empty exam / empty class / never started) gets ONE friendly WhatsApp
+        // from the admin's linked number. This records the terminal outcome so
+        // the same teacher is never messaged twice, and the admin table can show
+        // a sent / error / skipped marker. `null` = not yet contacted.
+        outreachStatus: {
+            type: String,
+            enum: ["sent", "failed", "skipped", null], // null = not yet contacted
+            default: null,
+        },
+        outreachAt: { type: Date, default: null },
+        outreachReason: { type: String, default: null }, // sent | no_whatsapp | failed
+
         // ── Teacher Success Journey (ADR Backend/docs/adr/Teacher-Success-Journey.md) ──
         // Minimal, bounded fields only (D15 — no unbounded arrays on User).
         // A growth LEVEL is recognition, NEVER a security role: it must never be
