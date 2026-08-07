@@ -1,5 +1,5 @@
 const express = require('express')
-const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush, getOutreachStatus, toggleOutreach } = require('../controllers/userController')
+const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush, getOutreachStatus, toggleOutreach, getSetupFunnel } = require('../controllers/userController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
 const { refreshHandler, logoutAllHandler, requireSessionFlag } = require('../controllers/authSessionController')
 const { csrfProtect } = require('../middleware/csrf')
@@ -45,6 +45,8 @@ router.get('/getUsers', protect, teacherOnly, getUsers)
 // above any '/:id' routes so they aren't swallowed by the param match.
 router.get('/outreach/status', protect, adminOnly, getOutreachStatus)
 router.post('/outreach/toggle', protect, adminOnly, toggleOutreach)
+// Admin analytics: teacher-setup funnel (current-state snapshot) for İnkişaf tab.
+router.get('/setup-funnel', protect, adminOnly, getSetupFunnel)
 // Admin directory extras: batch role/delete, and one call for everything about
 // a single teacher (their classes, students and created exams).
 router.patch('/bulk', protect, adminOnly, bulkUsers)

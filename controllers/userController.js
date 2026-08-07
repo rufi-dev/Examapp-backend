@@ -1777,8 +1777,69 @@ const toggleOutreach = asyncHandler(async (req, res) => {
   });
 });
 
+// GET /api/users/setup-funnel — admin analytics: how far each teacher has got in
+// setting up (a current-state snapshot for the İnkişaf tab). Categories can
+// overlap (a teacher may have both an empty exam and no students). "finished" =
+// fully set up (has a class, a ready exam, students, and no empty class/exam).
+const getSetupFunnel = asyncHandler(async (req, res) => {
+  const teachers = await User.find({ role: "teacher" }).select("_id").lean();
+  const ids = teachers.map((t) => t._id);
+  const total = ids.length;
+  if (!total) {
+    return res.json({ total: 0, finished: 0, notStarted: 0, emptyClass: 0, emptyExam: 0, noStudents: 0 });
+  }
+
+  const [stuckMap, classRows, contentExamRows, studentRows] = await Promise.all([
+    stuckStateForOwners(ids),
+    Class.aggregate([
+      { $match: { owner: { $in: ids }, deletedAt: null } },
+      { $group: { _id: "$owner", n: { $sum: 1 } } },
+    ]),
+    // Teachers with ≥1 exam that actually has content (questions OR a PDF).
+    Exam.aggregate([
+      { $match: { owner: { $in: ids }, deletedAt: null } },
+      { $lookup: { from: "questions", localField: "questions", foreignField: "_id", as: "q" } },
+      {
+        $project: {
+          owner: 1,
+          qcount: { $size: { $ifNull: [{ $arrayElemAt: ["$q.correctAnswers", 0] }, []] } },
+          hasPdf: { $cond: [{ $ifNull: ["$pdf", false] }, true, false] },
+        },
+      },
+      { $match: { $or: [{ qcount: { $gt: 0 } }, { hasPdf: true }] } },
+      { $group: { _id: "$owner", n: { $sum: 1 } } },
+    ]),
+    // Distinct approved students per teacher (Enrollment carries a denormalised teacher).
+    Enrollment.aggregate([
+      { $match: { status: "approved", teacher: { $in: ids } } },
+      { $group: { _id: "$teacher", s: { $addToSet: "$student" } } },
+      { $project: { n: { $size: "$s" } } },
+    ]),
+  ]);
+
+  const classCount = new Map(classRows.map((r) => [String(r._id), r.n]));
+  const hasContentExam = new Set(contentExamRows.map((r) => String(r._id)));
+  const studentCount = new Map(studentRows.map((r) => [String(r._id), r.n]));
+
+  const out = { total, finished: 0, notStarted: 0, emptyClass: 0, emptyExam: 0, noStudents: 0 };
+  ids.forEach((id) => {
+    const k = String(id);
+    const st = stuckMap.get(k) || {};
+    const classes = classCount.get(k) || 0;
+    const students = studentCount.get(k) || 0;
+    const content = hasContentExam.has(k);
+    if (st.hasNoSetup) out.notStarted += 1;
+    if (st.hasEmptyClass) out.emptyClass += 1;
+    if (st.hasEmptyExam) out.emptyExam += 1;
+    if (classes > 0 && students === 0) out.noStudents += 1;
+    if (classes > 0 && content && students > 0 && !st.hasEmptyClass && !st.hasEmptyExam) out.finished += 1;
+  });
+  res.json(out);
+});
+
 module.exports = {
   __setGoogleVerifyForTest, // test-only seam (rejects unless NODE_ENV==="test")
+  getSetupFunnel,
   getMyStorage,
   setUserStorage,
   markOnboardingStep,
