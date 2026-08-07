@@ -61,6 +61,18 @@ const withinHours = (now) => {
   return h >= DAY_START && h < DAY_END;
 };
 
+// UTC instant of the current Baku calendar day's midnight (UTC+4, no DST).
+function bakuMidnight(now) {
+  const d = new Date(now.getTime() + 4 * 3600 * 1000);
+  d.setUTCHours(0, 0, 0, 0);
+  return new Date(d.getTime() - 4 * 3600 * 1000);
+}
+
+// Real sends already made today (Baku) — for the daily cap + the admin status.
+async function sentTodayCount(now = new Date()) {
+  return User.countDocuments({ outreachStatus: "sent", outreachAt: { $gte: bakuMidnight(now) } });
+}
+
 async function getSettings() {
   const [enabled, lastSent, since] = await Promise.all([
     AppSetting.findOne({ key: ENABLED_KEY }).lean(),
@@ -180,10 +192,7 @@ async function runOutreachSweep(now = new Date()) {
   if (lastSentAt && now.getTime() - lastSentAt.getTime() < GAP_MIN * 60 * 1000) return { skipped: "gap" };
 
   // Hard daily cap: stop once DAILY_MAX real sends have gone out today (Baku).
-  const dayStartUtc = new Date(now.getTime() + 4 * 3600 * 1000);
-  dayStartUtc.setUTCHours(0, 0, 0, 0);
-  const bakuMidnight = new Date(dayStartUtc.getTime() - 4 * 3600 * 1000);
-  const sentToday = await User.countDocuments({ outreachStatus: "sent", outreachAt: { $gte: bakuMidnight } });
+  const sentToday = await sentTodayCount(now);
   if (sentToday >= DAILY_MAX) return { skipped: "daily_cap", sentToday };
 
   // Build the ordered queue: NEW signups (registered after the watcher started)
@@ -230,12 +239,14 @@ module.exports = {
   getSettings,
   setEnabled,
   waitingCount,
+  sentTodayCount,
   withinHours,
   outreachMessage,
   firstName,
   localHour,
   WATCH_MINUTES,
   GAP_MIN,
+  DAILY_MAX,
   DAY_START,
   DAY_END,
 };

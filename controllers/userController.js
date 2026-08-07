@@ -1726,7 +1726,7 @@ const unsubscribePush = asyncHandler(async (req, res) => {
 // GET /api/users/outreach/status — is the watcher on, since when, and is there a
 // linked+ready admin WhatsApp session to actually send from?
 const getOutreachStatus = asyncHandler(async (req, res) => {
-  const { getSettings, waitingCount, withinHours, GAP_MIN, DAY_START, DAY_END } = require("../jobs/autoOutreach");
+  const { getSettings, waitingCount, sentTodayCount, withinHours, GAP_MIN, DAILY_MAX, DAY_START, DAY_END } = require("../jobs/autoOutreach");
   const wa = require("../helper/whatsapp");
   const settings = await getSettings();
   const admins = await User.find({ role: "admin" }).select("_id").lean();
@@ -1739,6 +1739,12 @@ const getOutreachStatus = asyncHandler(async (req, res) => {
   } catch {
     waiting = null;
   }
+  let sentToday = null;
+  try {
+    sentToday = await sentTodayCount();
+  } catch {
+    sentToday = null;
+  }
   res.json({
     enabled: settings.enabled,
     whatsappLinked: !!senderId,
@@ -1746,6 +1752,9 @@ const getOutreachStatus = asyncHandler(async (req, res) => {
     dayStart: DAY_START,
     dayEnd: DAY_END,
     gapMin: GAP_MIN,
+    dailyMax: DAILY_MAX,
+    sentToday,
+    lastSentAt: settings.lastSentAt,
     waiting,
   });
 });
