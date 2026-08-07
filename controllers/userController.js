@@ -1789,7 +1789,7 @@ const getSetupFunnel = asyncHandler(async (req, res) => {
     return res.json({ total: 0, finished: 0, notStarted: 0, emptyClass: 0, emptyExam: 0, noStudents: 0 });
   }
 
-  const [stuckMap, classRows, contentExamRows, studentRows] = await Promise.all([
+  const [stuckMap, classRows, contentExamRows, studentRows, planRows] = await Promise.all([
     stuckStateForOwners(ids),
     Class.aggregate([
       { $match: { owner: { $in: ids }, deletedAt: null } },
@@ -1815,13 +1815,19 @@ const getSetupFunnel = asyncHandler(async (req, res) => {
       { $group: { _id: "$teacher", s: { $addToSet: "$student" } } },
       { $project: { n: { $size: "$s" } } },
     ]),
+    User.aggregate([{ $match: { role: "teacher" } }, { $group: { _id: "$plan", n: { $sum: 1 } } }]),
   ]);
 
   const classCount = new Map(classRows.map((r) => [String(r._id), r.n]));
   const hasContentExam = new Set(contentExamRows.map((r) => String(r._id)));
   const studentCount = new Map(studentRows.map((r) => [String(r._id), r.n]));
+  const plans = { free: 0, pro: 0, premium: 0 };
+  planRows.forEach((r) => {
+    const p = normalizePlan(r._id);
+    if (plans[p] != null) plans[p] += r.n;
+  });
 
-  const out = { total, finished: 0, notStarted: 0, emptyClass: 0, emptyExam: 0, noStudents: 0 };
+  const out = { total, plans, finished: 0, readyNoStudents: 0, notStarted: 0, emptyClass: 0, emptyExam: 0, noStudents: 0 };
   ids.forEach((id) => {
     const k = String(id);
     const st = stuckMap.get(k) || {};
@@ -1832,6 +1838,8 @@ const getSetupFunnel = asyncHandler(async (req, res) => {
     if (st.hasEmptyClass) out.emptyClass += 1;
     if (st.hasEmptyExam) out.emptyExam += 1;
     if (classes > 0 && students === 0) out.noStudents += 1;
+    // Built a class + a ready exam but never invited anyone — one step from active.
+    if (classes > 0 && content && students === 0) out.readyNoStudents += 1;
     if (classes > 0 && content && students > 0 && !st.hasEmptyClass && !st.hasEmptyExam) out.finished += 1;
   });
   res.json(out);
