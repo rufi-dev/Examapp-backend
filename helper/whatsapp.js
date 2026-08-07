@@ -141,6 +141,10 @@ function initFor(ownerId) {
     puppeteer: {
       headless: true,
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      // Give Chromium room on a small server: a session RESTORE after a restart
+      // can exceed the default and fail with "Runtime.callFunctionOn timed out",
+      // which left the QR stuck. A longer protocol timeout survives that.
+      protocolTimeout: Number(process.env.WHATSAPP_PROTOCOL_TIMEOUT || 120000),
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",

@@ -36,7 +36,8 @@ const LAST_SENT_KEY = "autoOutreachLastSentAt";
 const SINCE_KEY = "autoOutreachSince";
 
 const WATCH_MINUTES = Number(process.env.OUTREACH_WATCH_MINUTES) || 10; // new-signup grace
-const GAP_MIN = Number(process.env.OUTREACH_GAP_MIN) || 10; // minutes between sends
+const GAP_MIN = Number(process.env.OUTREACH_GAP_MIN) || 30; // minutes between sends (gentle, ban-safe)
+const DAILY_MAX = Number(process.env.OUTREACH_DAILY_MAX) || 25; // hard cap of real sends per calendar day (Baku)
 const DAY_START = Number(process.env.OUTREACH_DAY_START) || 9; // 09:00 inclusive
 const DAY_END = Number(process.env.OUTREACH_DAY_END) || 21; // 21:00 exclusive (9pm)
 const TZ = process.env.OUTREACH_TZ || "Asia/Baku";
@@ -177,6 +178,13 @@ async function runOutreachSweep(now = new Date()) {
 
   if (!withinHours(now)) return { skipped: "outside_hours", hour: localHour(now) };
   if (lastSentAt && now.getTime() - lastSentAt.getTime() < GAP_MIN * 60 * 1000) return { skipped: "gap" };
+
+  // Hard daily cap: stop once DAILY_MAX real sends have gone out today (Baku).
+  const dayStartUtc = new Date(now.getTime() + 4 * 3600 * 1000);
+  dayStartUtc.setUTCHours(0, 0, 0, 0);
+  const bakuMidnight = new Date(dayStartUtc.getTime() - 4 * 3600 * 1000);
+  const sentToday = await User.countDocuments({ outreachStatus: "sent", outreachAt: { $gte: bakuMidnight } });
+  if (sentToday >= DAILY_MAX) return { skipped: "daily_cap", sentToday };
 
   // Build the ordered queue: NEW signups (registered after the watcher started)
   // first, oldest-of-them first (FIFO); then the EXISTING backlog, newest-first
