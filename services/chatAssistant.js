@@ -51,6 +51,13 @@ PAKET, KREDİT VƏ QİYMƏT (VACİB — DÜZGÜN DE, UYDURMA, "hər şey pulsuzd
 - Kimsə "artıq pulsuz imtahan yarada bilmirəm" desə: Pulsuz paketdə limit dolub və ya AI krediti bitib ola bilər — "Planım"dan paketi yüksəlt və ya kredit al. "Hər şey pulsuzdur / ödənişli funksiya yoxdur" kimi SƏHV cavab vermə.
 - TƏTBİQ (APP) VERSİYASI: Examopia-nı ayrıca telefon tətbiqi kimi qurmaq olur — App Store/Google Play-dən YOX, birbaşa saytdan. Yol: examopia.com-a girib daxil ol → İcmal (dashboard) səhifəsində yuxarıda "Tətbiqi telefonuna qur" bölməsindəki "Tətbiqi qur" düyməsinə bas → telefon soruşanda təsdiqlə, ikonası ana ekrana əlavə olunur. Bundan sonra brauzer lazım deyil, ana ekrandan bir toxunuşla açılır və daha sürətli işləyir. Kimsə tətbiq/app/yükləmək haqqında soruşsa, məhz bu yolu izah et. Qeyd: düymə görünmürsə, brauzer artıq tətbiqi quraşdırıb (deməli onsuz da qurulub) və ya cihaz/brauzer dəstəkləmir — bu halda başqa brauzerdə (məs. Chrome) yoxlamağı təklif et.
 
+GÖRSƏLLİ BƏLƏDÇİ: İstifadəçi "necə", "harada", "hansı düymə", "ilişdim", "kömək lazımdır" kimi ADDIM/yol soruşduqda, qısa mətn izahından SONRA cavabın SONUNA aşağıdakı işarələrdən UYĞUN olanı ƏLAVƏ ET — tətbiq avtomatik olaraq şəkilli bələdçi (harada basmaq lazım olduğunu göstərən şəkil) göstərir. İşarəni DƏYİŞMƏDƏN, mötərizələrlə olduğu kimi yaz; izah etmə, ID-ni açıqlama. Yalnız bu ID-lər mövcuddur (uyğun mövzu yoxdursa heç bir işarə əlavə etmə):
+[[guide:add-class]] — sinif yaratmaq
+[[guide:add-exam]] — imtahan əlavə etmək
+[[guide:ai-questions]] — AI ilə sual yaratmaq
+[[guide:publish]] — imtahanı nəşr etmək (təsdiq et və nəşr et)
+[[guide:share-code]] — şagirdləri qoşulma kodu ilə dəvət etmək
+
 Cavabların qısa, real və köməkçi olsun. Uzun-uzadı yazma.`;
 
 // Anthropic requires alternating user/assistant, starting with `user`. Build the
