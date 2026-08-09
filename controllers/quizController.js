@@ -288,6 +288,7 @@ const addExam = asyncHandler(async (req, res) => {
     antiCheat,
     partialCredit,
     shuffleOptions,
+    shuffleQuestions,
     studentSolutionPhotos,
     coverImage,
     pdf,
@@ -391,6 +392,7 @@ const addExam = asyncHandler(async (req, res) => {
       antiCheat: antiCheat === "true" || antiCheat === true,
       partialCredit: partialCredit === "true" || partialCredit === true,
       shuffleOptions: shuffleOptions === "true" || shuffleOptions === true,
+      shuffleQuestions: shuffleQuestions === "true" || shuffleQuestions === true,
       studentSolutionPhotos: studentSolutionPhotos === "true" || studentSolutionPhotos === true,
       coverImage: typeof coverImage === "string" ? coverImage : "",
       videoLink,
@@ -1107,6 +1109,56 @@ function buildOptionOrder(correctAnswers) {
     }
   });
   return Object.keys(order).length ? order : undefined;
+}
+
+// Per-student QUESTION order, BLOCK-SAFE. Returns questionOrder[displayPos] =
+// canonicalIndex, or undefined if there's nothing to shuffle. Reading/listening
+// passages keep their governed questions grouped and their block boundaries fixed
+// (so the runner still pages sections correctly); we only shuffle WITHIN each
+// segment — a standalone run of questions, or a passage's governed questions
+// (passage itself stays first). For a plain (block-less) exam this is a full shuffle.
+function buildQuestionOrder(correctAnswers) {
+  const list = Array.isArray(correctAnswers) ? correctAnswers : [];
+  const n = list.length;
+  if (n < 2) return undefined;
+  const isBlock = (it) => !!it && it.type === "reading";
+  const isPassage = (it) => isBlock(it) && !it.gapfill;
+  const order = [];
+  let moved = false;
+  const pushShuffled = (indices, keepFirst) => {
+    if (keepFirst != null) order.push(keepFirst);
+    const sh = shuffled(indices);
+    if (sh.some((v, k) => v !== indices[k])) moved = true;
+    for (const v of sh) order.push(v);
+  };
+  let i = 0;
+  while (i < n) {
+    if (isBlock(list[i])) {
+      if (list[i].gapfill) {
+        order.push(i);
+        i += 1;
+        continue;
+      }
+      const cov = Number(list[i].covers) || 0;
+      let q = i + 1;
+      let c = 0;
+      while (q < n && !isPassage(list[q]) && (cov === 0 || c < cov)) {
+        q += 1;
+        c += 1;
+      }
+      const gov = [];
+      for (let k = i + 1; k < q; k += 1) gov.push(k);
+      pushShuffled(gov, i); // passage first, its questions shuffled
+      i = q;
+      continue;
+    }
+    const start = i;
+    while (i < n && !isBlock(list[i])) i += 1;
+    const run = [];
+    for (let k = start; k < i; k += 1) run.push(k);
+    pushShuffled(run, null);
+  }
+  return moved && order.length === n ? order : undefined;
 }
 
 function sanitizeQuestionItem(q) {
@@ -1920,21 +1972,31 @@ const startAttempt = asyncHandler(async (req, res) => {
       // answer key (`correct`/`pairs`/`answer`) is never sent to the runner. When
       // options are shuffled, reorder each Cm/Cs question's choices by THIS
       // attempt's stored permutation (stable across resumes).
-      questions: boundQuestions.map((q, idx) => {
-        const item = sanitizeQuestionItem(q);
-        const perm = order && order[idx];
-        // Only apply the stored permutation when it still aligns with the current
-        // choices. If the question was edited mid-attempt (choice count changed),
-        // fall back to canonical order so picks can't map to stale indices.
-        if (
-          Array.isArray(perm) &&
-          Array.isArray(item.choices) &&
-          perm.length === item.choices.length
-        ) {
-          item.choices = perm.map((o) => item.choices[o]);
-        }
-        return item;
-      }),
+      // Per-student QUESTION order: send the questions in this attempt's display
+      // order (block-safe). optionOrder stays keyed by CANONICAL index, so look it
+      // up by the canonical index even after reordering. Falls back to canonical
+      // order if the stored permutation no longer matches the question count.
+      questions: (() => {
+        const qOrder =
+          Array.isArray(attempt.questionOrder) && attempt.questionOrder.length === boundQuestions.length
+            ? attempt.questionOrder
+            : boundQuestions.map((_, i) => i);
+        return qOrder.map((canonIdx) => {
+          const q = boundQuestions[canonIdx];
+          const item = sanitizeQuestionItem(q);
+          const perm = order && order[canonIdx];
+          // Only apply the stored choice permutation when it still aligns with the
+          // current choices (a mid-attempt edit that changed the count falls back).
+          if (
+            Array.isArray(perm) &&
+            Array.isArray(item.choices) &&
+            perm.length === item.choices.length
+          ) {
+            item.choices = perm.map((o) => item.choices[o]);
+          }
+          return item;
+        });
+      })(),
     };
   };
 
@@ -2058,11 +2120,15 @@ const startAttempt = asyncHandler(async (req, res) => {
   let expMs = now + (vDisplay.duration || 0) * 1000;
   if (exam.endDate) expMs = Math.min(expMs, new Date(exam.endDate).getTime());
   const expiresAt = new Date(expMs);
-  // Per-student choice shuffle over the FROZEN version's questions/rules.
+  // Per-student choice + question shuffle over the FROZEN version's questions/rules.
+  const structured = vGrading.mode === "structured";
   const optionOrder =
-    vGrading.shuffleOptions && vGrading.mode === "structured"
-      ? buildOptionOrder(vQuestions)
-      : undefined;
+    vGrading.shuffleOptions && structured ? buildOptionOrder(vQuestions) : undefined;
+  // Question shuffle is a DISPLAY setting (answers are de-shuffled to canonical for
+  // scoring), so it's read from the LIVE exam — NOT the frozen version — and is
+  // never part of the integrity hash. Enabling it takes effect on the next start.
+  const questionOrder =
+    exam.shuffleQuestions && structured ? buildQuestionOrder(vQuestions) : undefined;
   try {
     attempt = await Attempt.create({
       userId: user._id,
@@ -2072,6 +2138,7 @@ const startAttempt = asyncHandler(async (req, res) => {
       expiresAt,
       attemptOrdinal,
       ...(optionOrder ? { optionOrder } : {}),
+      ...(questionOrder ? { questionOrder } : {}),
     });
   } catch (e) {
     // The partial-unique index allows only ONE active (unsubmitted) attempt per
@@ -2725,6 +2792,21 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
   // (0 / unset = every question, the legacy behavior).
   const until = src.negMarkUntil > 0 ? Math.min(src.negMarkUntil, correct.length) : correct.length;
   let sel = Array.isArray(selectedAnswers) ? selectedAnswers : [];
+
+  // Per-student QUESTION shuffle: the student answered in DISPLAY order, so map the
+  // answers back to CANONICAL order FIRST (questionOrder[displayPos] = canonicalIdx)
+  // — everything below (option de-shuffle, scoring, the stored result) is canonical,
+  // so scoring and the review are unaffected by the shuffle.
+  if (Array.isArray(attempt.questionOrder) && attempt.questionOrder.length) {
+    const qperm = attempt.questionOrder;
+    const canonical = new Array(correct.length);
+    qperm.forEach((canonIdx, dispPos) => {
+      if (Number.isInteger(canonIdx) && canonIdx >= 0 && canonIdx < canonical.length) {
+        canonical[canonIdx] = sel[dispPos];
+      }
+    });
+    sel = canonical;
+  }
 
   // Per-student option shuffle: map the student's DISPLAY-order picks back to the
   // ORIGINAL choice indices (using this attempt's stored permutation), so scoring
@@ -4041,6 +4123,7 @@ const editExam = asyncHandler(async (req, res) => {
     antiCheat,
     partialCredit,
     shuffleOptions,
+    shuffleQuestions,
     studentSolutionPhotos,
     coverImage,
     pdfPath,
@@ -4074,6 +4157,7 @@ const editExam = asyncHandler(async (req, res) => {
       antiCheat: antiCheat === true || antiCheat === "true",
       partialCredit: partialCredit === true || partialCredit === "true",
       shuffleOptions: shuffleOptions === true || shuffleOptions === "true",
+      shuffleQuestions: shuffleQuestions === true || shuffleQuestions === "true",
       studentSolutionPhotos:
         studentSolutionPhotos === true || studentSolutionPhotos === "true",
     };
@@ -4686,6 +4770,7 @@ const serverTime = asyncHandler(async (req, res) => {
 
 module.exports = {
   serverTime,
+  buildQuestionOrder, // exported for tests
   addExam,
   getExamsByClass,
   addTag,

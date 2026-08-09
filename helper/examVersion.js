@@ -55,6 +55,10 @@ function canonicalContent({ questions, grading, reveal, display, pointsPlan, eva
       totalMarks: num(grading && grading.totalMarks, 0),
       passingMarks: num(grading && grading.passingMarks, 0),
       shuffleOptions: !!(grading && grading.shuffleOptions),
+      // NOTE: shuffleQuestions is deliberately NOT in the integrity hash — it only
+      // affects DISPLAY order (answers are mapped back to canonical before scoring),
+      // so it must not change a version's contentHash (that would break every
+      // existing version). startAttempt reads it from the live exam instead.
       mode: (grading && grading.mode) || "pdf",
     },
     reveal: {
@@ -93,6 +97,7 @@ function buildSnapshot(exam, questionDoc) {
     totalMarks: exam.totalMarks || 0,
     passingMarks: exam.passingMarks || 0,
     shuffleOptions: !!exam.shuffleOptions,
+    shuffleQuestions: !!exam.shuffleQuestions,
     mode: exam.mode || "pdf",
   };
   return {

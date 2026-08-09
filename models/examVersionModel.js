@@ -48,6 +48,7 @@ const examVersionSchema = new Schema(
       totalMarks: { type: Number, default: 0 },
       passingMarks: { type: Number, default: 0 },
       shuffleOptions: { type: Boolean, default: false },
+      shuffleQuestions: { type: Boolean, default: false },
       mode: { type: String, default: "pdf" },
     },
     // Reveal/review policy, frozen (so a later toggle can't retro-change what a

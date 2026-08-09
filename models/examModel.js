@@ -96,6 +96,11 @@ const examSchema = Schema({
     // permutation is stored on each Attempt so resume is stable and the server
     // can map the student's picks back to the original indices on submit.
     shuffleOptions: { type: Boolean, default: false },
+    // Per-student randomization of QUESTION order. Block-safe: reading/listening
+    // passages keep their governed questions grouped; the permutation is stored on
+    // each Attempt (stable on resume) and the answers are mapped back to canonical
+    // order on submit so scoring/review are unaffected.
+    shuffleQuestions: { type: Boolean, default: false },
     // When enabled, students may attach a photo of their worked solution to each
     // question during the exam (teachers review them per student afterwards).
     studentSolutionPhotos: { type: Boolean, default: false },

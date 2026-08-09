@@ -77,6 +77,10 @@ const attemptSchema = new Schema(
     // Generated once at start, reused on resume (stable order), and used at submit
     // to map the student's display-order picks back to original indices.
     optionOrder: { type: Schema.Types.Mixed, default: undefined },
+    // Per-attempt QUESTION display order (block-safe permutation): questionOrder
+    // [displayPos] = canonicalIndex. Generated once at start, reused on resume, and
+    // used at submit to map display-order answers back to canonical for scoring.
+    questionOrder: { type: [Number], default: undefined },
     // Latest autosaved DISPLAY-order selections (same shape the client would
     // submit). The browser pushes these periodically so that, if the student
     // never submits, the server-side finalizer can auto-submit THESE answers
