@@ -3254,13 +3254,38 @@ const autosaveAttempt = asyncHandler(async (req, res) => {
   return res.status(409).json({ ok: false, outcome: "closed", storedRevision, serverTime });
 });
 
+// Lightweight live-watch position heartbeat: the runner posts which question is
+// on screen (scroll position) every few seconds so the teacher's live view tracks
+// where each student is in ~real time. Deliberately does NOT touch answers or the
+// autosave revision machinery — it only stamps currentQuestion + lastSeenAt on the
+// caller's OWN in-flight attempt. Cheap enough to call frequently.
+const heartbeatAttempt = asyncHandler(async (req, res) => {
+  const { examId } = req.params;
+  const { attemptId, currentQuestion } = req.body;
+  if (!attemptId || !mongoose.Types.ObjectId.isValid(attemptId)) {
+    return res.status(200).json({ ok: false });
+  }
+  const set = { lastSeenAt: new Date() };
+  const cq = Number(currentQuestion);
+  if (Number.isFinite(cq) && cq > 0) set.currentQuestion = Math.floor(cq);
+  await Attempt.updateOne(
+    { _id: attemptId, userId: req.user._id, examId, submitted: false },
+    { $set: set }
+  );
+  return res.status(200).json({ ok: true });
+});
+
 // Live exam watch (owner/admin only): who is currently writing this exam, which
 // question they're on, progress, time, and live violations. The runner pushes a
 // heartbeat via autosave; this reads the active attempts.
 const LIVE_ACTIVE_MS = 30 * 1000; // heartbeat within 30s → "active"
 const getLiveAttempts = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const exam = await Exam.findById(examId).populate("questions");
+  // Polled every ~2s while a teacher watches, so keep it light: only the fields the
+  // live view needs (ownership + name + how many questions), not the full paper.
+  const exam = await Exam.findById(examId)
+    .select("name owner questions")
+    .populate({ path: "questions", select: "correctAnswers" });
   if (!exam) {
     res.status(404);
     throw new Error("Exam not found");
@@ -3282,12 +3307,18 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
     .lean();
   const students = attempts.map((a) => {
     const seen = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
+    // Per-question answered map so the teacher's live grid can light up exactly
+    // which questions this student has filled in (not just a running count).
+    const ans = Array.isArray(a.answers) ? a.answers : [];
+    const answered = [];
+    for (let i = 0; i < total; i++) answered.push(isAnswered(ans[i]));
     return {
       attemptId: a._id,
       name: a.userId?.name || "—",
       email: a.userId?.email || "",
       grade: a.userId?.grade || "",
       currentQuestion: a.currentQuestion || 0,
+      answered,
       answeredCount: a.answeredCount || 0,
       total,
       violations: a.violations || 0,
@@ -3601,6 +3632,31 @@ const getResultsByUser = asyncHandler(async (req, res) => {
 // STAFF ONLY (route is protect+teacherOnly). This returns RAW, unsanitized
 // results (full userId + examId, score + answers) with no per-viewer visibility
 // gating, so it MUST never be exposed on a student-reachable route.
+// Delete ONE result (owner of the exam, or admin). Mirrors getResultsByExam's
+// ownership rule. Removes only the graded Result row; the underlying attempt is
+// left intact (so try counts / audit history are unchanged).
+const deleteResult = asyncHandler(async (req, res) => {
+  const { resultId } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(resultId)) {
+    res.status(400);
+    throw new Error("Yanlış nəticə");
+  }
+  const result = await Result.findById(resultId);
+  if (!result) {
+    res.status(404);
+    throw new Error("Nəticə tapılmadı");
+  }
+  const exam = await Exam.findById(result.examId).select("owner");
+  // A teacher may only delete results for an exam they OWN (admins any). Legacy
+  // ownerless exams stay open during the transition, same as the read path.
+  if (!isAdminUser(req.user) && exam && exam.owner && String(exam.owner) !== String(req.user._id)) {
+    res.status(403);
+    throw new Error("Bu nəticə sizə aid deyil");
+  }
+  await Result.deleteOne({ _id: resultId });
+  res.status(200).json({ message: "Nəticə silindi", _id: resultId });
+});
+
 const getResultsByExam = asyncHandler(async (req, res) => {
   const { examId } = req.params;
   const exam = await Exam.findById(examId);
@@ -4598,6 +4654,7 @@ module.exports = {
   addResult,
   autosaveAttempt,
   getLiveAttempts,
+  heartbeatAttempt,
   finalizeExpiredAttempts,
   finalizeAttempt, // exported for CR-038 deterministic freeze tests
   republishExam, // exported for CR-034 publish tests
@@ -4625,6 +4682,7 @@ module.exports = {
   streamExamPdf,
   getExamTagandClass,
   getResultsByExam,
+  deleteResult,
   getPendingReviews,
   gradeManualAnswer,
   // Exported for unit tests (pure scoring / sanitisation helpers):

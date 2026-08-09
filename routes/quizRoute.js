@@ -31,6 +31,7 @@ const {
   addResult,
   autosaveAttempt,
   getLiveAttempts,
+  heartbeatAttempt,
   startAttempt,
   attemptStatus,
   reportViolation,
@@ -52,6 +53,7 @@ const {
   getClass,
   getExamTagandClass,
   getResultsByExam,
+  deleteResult,
   getPendingReviews,
   gradeManualAnswer
 } = require("../controllers/quizController");
@@ -203,6 +205,7 @@ router.get("/exam/:examId/pdf/stream", protect, streamExamPdf);
 router.post("/uploadPdf", protect, requireCapability("exam:create:own"), pdfUpload.single("file"), uploadPdf);
 router.get("/getExamTagandClass/:examId", protect, getExamTagandClass);
 router.get("/getResultsByExam/:examId", protect, requireCapability("results:view:own"), getResultsByExam);
+router.delete("/result/:resultId", protect, requireCapability("results:view:own"), deleteResult);
 // Manual grading (MANUAL_GRADING_ENABLED): the teacher's grading queue for an exam,
 // and the per-answer verdict submit. Both no-op / 403 when the flag is off.
 router.get("/exam/:examId/pending-reviews", protect, requireCapability("results:view:own"), getPendingReviews);
@@ -235,6 +238,7 @@ router.patch("/editClass/:classId", protect, requireCapability("class:manage:own
 router.patch("/setExamHidden/:examId", protect, requireCapability("exam:manage:own"), setExamHidden);
 router.post("/exam/:examId/start", protect, requireCompleteProfile, startAttempt);
 router.post("/exam/:examId/autosave", protect, autosaveAttempt);
+router.post("/exam/:examId/heartbeat", protect, heartbeatAttempt);
 router.get("/exam/:examId/attemptStatus", protect, attemptStatus);
 // Live exam watch — owner/admin sees who is currently writing + their progress.
 router.get("/exam/:examId/live", protect, getLiveAttempts);
