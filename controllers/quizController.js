@@ -3284,7 +3284,7 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   // Polled every ~2s while a teacher watches, so keep it light: only the fields the
   // live view needs (ownership + name + how many questions), not the full paper.
   const exam = await Exam.findById(examId)
-    .select("name owner questions")
+    .select("name owner questions totalMarks")
     .populate({ path: "questions", select: "correctAnswers" });
   if (!exam) {
     res.status(404);
@@ -3295,16 +3295,29 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   }
   const total = (exam.questions?.correctAnswers || []).length;
   const now = Date.now();
-  // Live attempts only: unsubmitted and not long-expired (the finalizer clears
-  // dead ones within a minute, but exclude clearly-past ones from the view).
+  // Active writers (unsubmitted, not long-expired) PLUS students who FINISHED
+  // during this session — they stay on the board as "finished" (with their score),
+  // instead of vanishing. Finished ones are kept for a few hours after submitting.
+  const FINISHED_WATCH_MS = 3 * 60 * 60 * 1000;
   const attempts = await Attempt.find({
     examId,
-    submitted: false,
-    expiresAt: { $gt: new Date(now - 2 * 60 * 1000) },
+    $or: [
+      { submitted: false, expiresAt: { $gt: new Date(now - 2 * 60 * 1000) } },
+      { submitted: true, updatedAt: { $gt: new Date(now - FINISHED_WATCH_MS) } },
+    ],
   })
     .populate("userId", "name email grade")
     .sort({ lastSeenAt: -1, startedAt: -1 })
     .lean();
+  // Pull the graded Result (score + result id + review state) for finished attempts.
+  const finishedIds = attempts.filter((a) => a.submitted).map((a) => a._id);
+  let resultBy = new Map();
+  if (finishedIds.length) {
+    const rows = await Result.find({ attemptId: { $in: finishedIds } })
+      .select("attemptId earnPoints pendingReview terminated createdAt")
+      .lean();
+    resultBy = new Map(rows.map((r) => [String(r.attemptId), r]));
+  }
   const students = attempts.map((a) => {
     const seen = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
     // Per-question answered map so the teacher's live grid can light up exactly
@@ -3312,6 +3325,8 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
     const ans = Array.isArray(a.answers) ? a.answers : [];
     const answered = [];
     for (let i = 0; i < total; i++) answered.push(isAnswered(ans[i]));
+    const finished = !!a.submitted;
+    const r = finished ? resultBy.get(String(a._id)) : null;
     return {
       attemptId: a._id,
       name: a.userId?.name || "—",
@@ -3322,17 +3337,32 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
       answeredCount: a.answeredCount || 0,
       total,
       violations: a.violations || 0,
-      terminated: !!a.terminated,
+      terminated: !!(a.terminated || (r && r.terminated)),
       startedAt: a.startedAt,
       expiresAt: a.expiresAt,
       lastSeenAt: a.lastSeenAt || null,
-      active: !!seen && now - seen < LIVE_ACTIVE_MS,
+      active: !finished && !!seen && now - seen < LIVE_ACTIVE_MS,
+      // Finished-student fields (null while still writing).
+      finished,
+      finishedAt: finished ? r?.createdAt || a.updatedAt || null : null,
+      score: r ? r.earnPoints : null,
+      resultId: r ? r._id : null,
+      pendingReview: r ? !!r.pendingReview : false,
     };
+  });
+  // Writers first (keep the last-seen order), then finished — highest score first
+  // so the finished section doubles as a live mini-leaderboard.
+  students.sort((x, y) => {
+    if (x.finished !== y.finished) return x.finished ? 1 : -1;
+    if (x.finished) return (y.score ?? -1) - (x.score ?? -1);
+    return 0;
   });
   res.status(200).json({
     examName: exam.name,
     total,
+    totalMarks: exam.totalMarks || 0,
     activeCount: students.filter((s) => s.active).length,
+    finishedCount: students.filter((s) => s.finished).length,
     serverNow: new Date(now),
     students,
   });
