@@ -2110,6 +2110,21 @@ const startAttempt = asyncHandler(async (req, res) => {
   const usedTryCount = Math.max(attemptCount, resultCount);
   const attemptOrdinal = usedTryCount + 1;
   const maxTry = exam.maxTry || 0;
+
+  // A PLAIN re-visit to an already-FINISHED exam (browser BACK, a re-clicked link,
+  // a stale bookmark) must NOT silently start a new attempt — that restarts the
+  // exam for the student and yanks them out of the teacher's live "finished" list.
+  // Only a DELIBERATE start/retake (start:true, set by the Başla button) begins a
+  // fresh attempt; otherwise return the finished result so the client shows it.
+  const explicitStart = req.body?.start === true || req.body?.start === "true";
+  if (!explicitStart && resultCount > 0) {
+    const last = await Result.findOne({ userId: user._id, examId })
+      .sort({ createdAt: -1 })
+      .select("_id attemptId")
+      .lean();
+    return res.status(200).json({ finished: true, attemptId: last?.attemptId || null });
+  }
+
   if (maxTry > 0 && usedTryCount >= maxTry)
     return res.status(403).json({ reason: "max_tries" });
 
