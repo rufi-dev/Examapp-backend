@@ -3295,90 +3295,115 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   }
   const total = (exam.questions?.correctAnswers || []).length;
   const now = Date.now();
-  // Active writers (unsubmitted, not long-expired) PLUS students who FINISHED
-  // during this session — they stay on the board as "finished" (with their score),
-  // instead of vanishing. Finished ones are kept for the school day after submitting.
-  const FINISHED_WATCH_MS = 12 * 60 * 60 * 1000;
-  const attempts = await Attempt.find({
+  const FINISHED_WATCH_MS = 12 * 60 * 60 * 1000; // keep finishers on the board a school day
+
+  const buildAnswered = (a) => {
+    const ans = a && Array.isArray(a.answers) ? a.answers : [];
+    const arr = [];
+    for (let i = 0; i < total; i++) arr.push(isAnswered(ans[i]));
+    return arr;
+  };
+  const uid = (u) => String((u && u._id) || u || ""); // works for a populated user OR a raw id
+
+  // ── Active writers: the CURRENT unsubmitted attempts (one per student). ──
+  const activeAttempts = await Attempt.find({
     examId,
-    $or: [
-      { submitted: false, expiresAt: { $gt: new Date(now - 2 * 60 * 1000) } },
-      { submitted: true, updatedAt: { $gt: new Date(now - FINISHED_WATCH_MS) } },
-    ],
+    submitted: false,
+    expiresAt: { $gt: new Date(now - 2 * 60 * 1000) },
   })
     .populate("userId", "name email grade")
     .sort({ lastSeenAt: -1, startedAt: -1 })
     .lean();
-  // Pull the graded Result (score + result id + review state) for finished
-  // attempts. Match by attemptId first; fall back to the student's LATEST result
-  // for this exam so a retake / an attempt whose result wasn't linked still shows a
-  // score instead of a blank dash.
-  const finishedAtts = attempts.filter((a) => a.submitted);
-  const finishedIds = finishedAtts.map((a) => a._id);
-  const finishedUserIds = finishedAtts.map((a) => a.userId).filter(Boolean);
-  const resultByAttempt = new Map();
-  const resultByUser = new Map();
-  if (finishedIds.length) {
-    const rows = await Result.find({
-      examId,
-      $or: [{ attemptId: { $in: finishedIds } }, { userId: { $in: finishedUserIds } }],
-    })
-      .select("attemptId userId earnPoints pendingReview terminated createdAt")
-      .sort({ createdAt: -1 })
-      .lean();
-    for (const row of rows) {
-      if (row.attemptId) resultByAttempt.set(String(row.attemptId), row);
-      const uk = String(row.userId);
-      if (!resultByUser.has(uk)) resultByUser.set(uk, row); // first seen = latest
-    }
-  }
-  const students = attempts.map((a) => {
+  const activeUserIds = new Set(activeAttempts.map((a) => uid(a.userId)));
+  const activeStudents = activeAttempts.map((a) => {
     const seen = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
-    // Per-question answered map so the teacher's live grid can light up exactly
-    // which questions this student has filled in (not just a running count).
-    const ans = Array.isArray(a.answers) ? a.answers : [];
-    const answered = [];
-    for (let i = 0; i < total; i++) answered.push(isAnswered(ans[i]));
-    const finished = !!a.submitted;
-    const r = finished
-      ? resultByAttempt.get(String(a._id)) || resultByUser.get(String(a.userId))
-      : null;
     return {
       attemptId: a._id,
       name: a.userId?.name || "—",
       email: a.userId?.email || "",
       grade: a.userId?.grade || "",
       currentQuestion: a.currentQuestion || 0,
-      answered,
+      answered: buildAnswered(a),
       answeredCount: a.answeredCount || 0,
       total,
       violations: a.violations || 0,
-      terminated: !!(a.terminated || (r && r.terminated)),
+      terminated: !!a.terminated,
       startedAt: a.startedAt,
       expiresAt: a.expiresAt,
       lastSeenAt: a.lastSeenAt || null,
-      active: !finished && !!seen && now - seen < LIVE_ACTIVE_MS,
-      // Finished-student fields (null while still writing).
-      finished,
-      finishedAt: finished ? r?.createdAt || a.updatedAt || null : null,
-      score: r ? r.earnPoints : null,
-      resultId: r ? r._id : null,
-      pendingReview: r ? !!r.pendingReview : false,
+      active: !!seen && now - seen < LIVE_ACTIVE_MS,
+      finished: false,
+      finishedAt: null,
+      score: null,
+      resultId: null,
+      pendingReview: false,
     };
   });
-  // Writers first (keep the last-seen order), then finished — highest score first
-  // so the finished section doubles as a live mini-leaderboard.
-  students.sort((x, y) => {
-    if (x.finished !== y.finished) return x.finished ? 1 : -1;
-    if (x.finished) return (y.score ?? -1) - (x.score ?? -1);
-    return 0;
+
+  // ── Finished: driven by RESULTS, not raw submitted attempts. A student is only
+  // "finished" once they have a graded Result — abandoned/superseded attempts (the
+  // previous run that gets frozen when a student restarts) have NO Result and must
+  // NOT show up as fake finishers. One card per student (their latest result), and
+  // anyone currently writing is shown only in the active section. ──
+  const resultRows = await Result.find({
+    examId,
+    createdAt: { $gt: new Date(now - FINISHED_WATCH_MS) },
+  })
+    .select("attemptId userId earnPoints pendingReview terminated violations createdAt")
+    .populate("userId", "name email grade")
+    .sort({ createdAt: -1 })
+    .lean();
+  const latestByUser = new Map();
+  for (const r of resultRows) {
+    const u = uid(r.userId);
+    if (activeUserIds.has(u)) continue; // they're writing now → active section
+    if (!latestByUser.has(u)) latestByUser.set(u, r); // first seen = latest (sorted desc)
+  }
+  const finList = [...latestByUser.values()];
+  // Pull each finisher's attempt for the answered count / start time.
+  const finAttemptIds = finList.map((r) => r.attemptId).filter(Boolean);
+  const attById = new Map(
+    (finAttemptIds.length
+      ? await Attempt.find({ _id: { $in: finAttemptIds } })
+          .select("answers answeredCount violations startedAt")
+          .lean()
+      : []
+    ).map((a) => [String(a._id), a])
+  );
+  const finishedStudents = finList.map((r) => {
+    const a = r.attemptId ? attById.get(String(r.attemptId)) : null;
+    return {
+      attemptId: r.attemptId || r._id,
+      name: r.userId?.name || "—",
+      email: r.userId?.email || "",
+      grade: r.userId?.grade || "",
+      currentQuestion: 0,
+      answered: buildAnswered(a),
+      answeredCount: a ? a.answeredCount || 0 : 0,
+      total,
+      violations: (r.violations != null ? r.violations : a?.violations) || 0,
+      terminated: !!r.terminated,
+      startedAt: a?.startedAt || null,
+      expiresAt: null,
+      lastSeenAt: null,
+      active: false,
+      finished: true,
+      finishedAt: r.createdAt,
+      score: typeof r.earnPoints === "number" ? r.earnPoints : null,
+      resultId: r._id,
+      pendingReview: !!r.pendingReview,
+    };
   });
+  // Finished section doubles as a live mini-leaderboard: highest score first.
+  finishedStudents.sort((x, y) => (y.score ?? -1) - (x.score ?? -1));
+
+  const students = [...activeStudents, ...finishedStudents];
   res.status(200).json({
     examName: exam.name,
     total,
     totalMarks: exam.totalMarks || 0,
-    activeCount: students.filter((s) => s.active).length,
-    finishedCount: students.filter((s) => s.finished).length,
+    activeCount: activeStudents.filter((s) => s.active).length,
+    finishedCount: finishedStudents.length,
     serverNow: new Date(now),
     students,
   });
