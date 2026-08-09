@@ -3297,8 +3297,8 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   const now = Date.now();
   // Active writers (unsubmitted, not long-expired) PLUS students who FINISHED
   // during this session — they stay on the board as "finished" (with their score),
-  // instead of vanishing. Finished ones are kept for a few hours after submitting.
-  const FINISHED_WATCH_MS = 3 * 60 * 60 * 1000;
+  // instead of vanishing. Finished ones are kept for the school day after submitting.
+  const FINISHED_WATCH_MS = 12 * 60 * 60 * 1000;
   const attempts = await Attempt.find({
     examId,
     $or: [
@@ -3309,14 +3309,28 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
     .populate("userId", "name email grade")
     .sort({ lastSeenAt: -1, startedAt: -1 })
     .lean();
-  // Pull the graded Result (score + result id + review state) for finished attempts.
-  const finishedIds = attempts.filter((a) => a.submitted).map((a) => a._id);
-  let resultBy = new Map();
+  // Pull the graded Result (score + result id + review state) for finished
+  // attempts. Match by attemptId first; fall back to the student's LATEST result
+  // for this exam so a retake / an attempt whose result wasn't linked still shows a
+  // score instead of a blank dash.
+  const finishedAtts = attempts.filter((a) => a.submitted);
+  const finishedIds = finishedAtts.map((a) => a._id);
+  const finishedUserIds = finishedAtts.map((a) => a.userId).filter(Boolean);
+  const resultByAttempt = new Map();
+  const resultByUser = new Map();
   if (finishedIds.length) {
-    const rows = await Result.find({ attemptId: { $in: finishedIds } })
-      .select("attemptId earnPoints pendingReview terminated createdAt")
+    const rows = await Result.find({
+      examId,
+      $or: [{ attemptId: { $in: finishedIds } }, { userId: { $in: finishedUserIds } }],
+    })
+      .select("attemptId userId earnPoints pendingReview terminated createdAt")
+      .sort({ createdAt: -1 })
       .lean();
-    resultBy = new Map(rows.map((r) => [String(r.attemptId), r]));
+    for (const row of rows) {
+      if (row.attemptId) resultByAttempt.set(String(row.attemptId), row);
+      const uk = String(row.userId);
+      if (!resultByUser.has(uk)) resultByUser.set(uk, row); // first seen = latest
+    }
   }
   const students = attempts.map((a) => {
     const seen = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
@@ -3326,7 +3340,9 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
     const answered = [];
     for (let i = 0; i < total; i++) answered.push(isAnswered(ans[i]));
     const finished = !!a.submitted;
-    const r = finished ? resultBy.get(String(a._id)) : null;
+    const r = finished
+      ? resultByAttempt.get(String(a._id)) || resultByUser.get(String(a.userId))
+      : null;
     return {
       attemptId: a._id,
       name: a.userId?.name || "—",
