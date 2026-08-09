@@ -3411,7 +3411,6 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
     .populate("userId", "name email grade")
     .sort({ lastSeenAt: -1, startedAt: -1 })
     .lean();
-  const activeUserIds = new Set(activeAttempts.map((a) => uid(a.userId)));
   const activeStudents = activeAttempts.map((a) => {
     const seen = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
     return {
@@ -3453,7 +3452,9 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   const latestByUser = new Map();
   for (const r of resultRows) {
     const u = uid(r.userId);
-    if (activeUserIds.has(u)) continue; // they're writing now → active section
+    // Keep a student's finished result even while they're RETAKING: they then show
+    // in BOTH sections — the new attempt under "Yazır" and their previous result
+    // under "Bitirənlər" — instead of the result card being replaced.
     if (!latestByUser.has(u)) latestByUser.set(u, r); // first seen = latest (sorted desc)
   }
   const finList = [...latestByUser.values()];
