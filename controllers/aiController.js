@@ -615,6 +615,33 @@ const unescapeQuotes = (t) => String(t ?? "").replace(/\\+(["'])/g, "$1");
 // around prose can be removed without touching a genuine formula.
 const looksLikeMath = (s) => /[\\^_{}]|\d\s*[+\-*/=]\s*\d/.test(s);
 
+// Count `$` DELIMITER tokens, ignoring `\$` literals and treating `$$` as one
+// token — so an odd result means a dropped closing `$` (unbalanced).
+const dollarDelims = (s) => {
+  const str = String(s ?? "");
+  let n = 0;
+  for (let i = 0; i < str.length; i += 1) {
+    if (str[i] === "\\" && str[i + 1] === "$") { i += 1; continue; }
+    if (str[i] === "$") { if (str[i + 1] === "$") i += 1; n += 1; }
+  }
+  return n;
+};
+
+// A field "leaks" LaTeX when it has an unbalanced `$` OR carries a bare LaTeX
+// command / sub-superscript OUTSIDE any `$...$` span — i.e. the student would see
+// raw source. Used by the audit so the agentic verify loop re-asks the model to
+// wrap/balance the math (and so `verified` is only true when the math is clean).
+const hasMathLeak = (s) => {
+  const str = String(s ?? "");
+  if (!str) return false;
+  if (dollarDelims(str) % 2 !== 0) return true; // dropped closing $
+  const outside = str
+    .replace(/\\\$/g, "")
+    .replace(/\$\$[\s\S]*?\$\$/g, "")
+    .replace(/\$[^$]*\$/g, "");
+  return /\\[a-zA-Z]{2,}|[_^]\{|[A-Za-z0-9][_^][A-Za-z0-9]/.test(outside);
+};
+
 const stripProseMath = (t) => {
   const s = String(t ?? "").trim();
   if (!(s.startsWith("$") && s.endsWith("$") && s.length > 2)) return t;
@@ -638,7 +665,32 @@ const fixMathEscapes = (t) =>
     .replace(/\f(?=[a-zA-Z])/g, "\\f")
     .replace(/\x08(?=[a-zA-Z])/g, "\\b")
     .replace(/\r(?=[a-zA-Z])/g, "\\r");
-const cleanText = (t) => (typeof t === "string" ? stripProseMath(fixMathEscapes(unescapeQuotes(t))) : t);
+// Azerbaijani Ə/ə is frequently mis-emitted/OCR'd as Greek theta (Θ/θ) — the
+// "ƏBOB → θBOB", "hərf → hθrf" bug. Inside a WORD (adjacent to a letter) a theta is
+// virtually always a mangled Ə, never a maths angle, so restore it; a standalone
+// angle "θ" is left alone, and math spans ($...$, where \theta is legitimate) are
+// never touched. Case follows the neighbouring letter (ƏBOB stays upper-case).
+const fixAzTheta = (s) => {
+  const str = String(s);
+  if (str.indexOf("θ") === -1 && str.indexOf("Θ") === -1) return str;
+  const fixProse = (p) =>
+    p
+      .replace(/(\p{L})[θΘ]/gu, (_m, a) => a + (/\p{Lu}/u.test(a) ? "Ə" : "ə"))
+      .replace(/[θΘ](\p{L})/gu, (_m, b) => (/\p{Lu}/u.test(b) ? "Ə" : "ə") + b);
+  const re = /\\\$|\$\$[\s\S]*?\$\$|\$[^$]*\$/g;
+  let out = "";
+  let last = 0;
+  let m;
+  while ((m = re.exec(str)) !== null) {
+    if (m.index > last) out += fixProse(str.slice(last, m.index));
+    out += m[0];
+    last = re.lastIndex;
+  }
+  if (last < str.length) out += fixProse(str.slice(last));
+  return out;
+};
+
+const cleanText = (t) => (typeof t === "string" ? fixAzTheta(stripProseMath(fixMathEscapes(unescapeQuotes(t)))) : t);
 
 // A matching question is rendered as a bare number→letter grid: nothing in
 // `pairs` reaches the student. When a model writes the items INTO pairs.left
@@ -861,9 +913,15 @@ const auditQuestions = (list, { requireAnswers = false } = {}) => {
     }
     const hasFig = !!q.hasFigure;
     if (!AUDIT_STRIP(q.text) && !hasFig) add(i, "empty-text", "question has no text");
+    // Math delimiters: flag unwrapped/unbalanced LaTeX so the verify loop re-asks
+    // the model to fix it (raw LaTeX must never reach a student).
+    if (hasMathLeak(q.text)) add(i, "math-delimiters", "unwrapped or unbalanced LaTeX in text — wrap every formula in $...$");
 
     const choices = Array.isArray(q.choices) ? q.choices : [];
     const texts = choices.map((c) => AUDIT_STRIP(c?.text ?? c));
+    choices.forEach((c, ci) => {
+      if (hasMathLeak(c?.text)) add(i, "math-delimiters", `unwrapped or unbalanced LaTeX in choice ${ci + 1} — wrap every formula in $...$`);
+    });
     const correct = Array.isArray(q.correct) ? q.correct : [];
 
     if (q.type === "Cm" || q.type === "Cs") {
@@ -963,8 +1021,9 @@ DİQQƏTLƏ YOXLA VƏ DÜZƏLT:
 6c. ƏL İLƏ YOXLAMA (manualGrade): əgər İLK TAPŞIRIQ müəllimin AÇIQ/yazılı/inşa/geniş cavablı sual istədiyini göstərirsə və cavab avtomatik yoxlana bilmirsə — 6a/6b-dəki kimi Cm-ə çevirmək əvəzinə sualı açıq (Co/Cd) saxla və manualGrade=true qoy (müəllim əl ilə yoxlayacaq). Müəllim açıq sual istəməyibsə, 6a/6b qaydası qalır: Cm-ə çevir, manualGrade=false.
 7. UYĞUNLUQ (Cma): hər nömrənin düzgün hərfi olmalıdır; nömrələnmiş və hərflənmiş siyahılar sualın "text" hissəsində tam görünməlidir.
 8. DİL və AYDINLIQ: sual birmənalı olmalıdır. İki cür başa düşülən sualı dəqiqləşdir.
-9. Sual ARTIQ DÜZGÜNDÜRSƏ, ona TOXUNMA — yalnız real səhvləri düzəlt.
-10. LANGUAGE: Preserve each question's original language. Do not translate English, Russian, Turkish or Azerbaijani text while reviewing.
+9. RİYAZİYYAT DELİMİTERLƏRİ: mətndə və seçimlərdə HƏR düstur/ifadə tək dollar işarələri arasında olmalıdır — $...$ (məs. "$\\\\frac{5}{7}$", "$x^2+1$"). Əgər $...$-siz açıq LaTeX görürsənsə (\\\\frac, \\\\sqrt, x^2 və s.) onu $...$ içinə al; açıq qalan/balanssız $ varsa (bağlayan $ yoxdursa) düzəlt. "latex" sahəsi həmişə "" olmalıdır — riyaziyyat mətnin içindədir. Adi rəqəm/aralıq (20–30) $ ilə YAZILMIR.
+10. Sual ARTIQ DÜZGÜNDÜRSƏ, ona TOXUNMA — yalnız real səhvləri düzəlt.
+11. LANGUAGE: Preserve each question's original language. Do not translate English, Russian, Turkish or Azerbaijani text while reviewing.
 
 Cavabında bütün sualları (düzəldilmiş və toxunulmamış) tam qaytar.`;
 
@@ -1708,7 +1767,7 @@ QAYDALAR:
 - Uyğunluq sualından SONRA gələn suallarda "1 nömrəli səs", "2-ci variant" kimi əvvəlki sualın nömrələrinə İSTİNAD ETMƏ — hər sual öz-özünə tam başa düşülən olmalıdır.
 - Açıq sualı (Co) YALNIZ şagirdin əslən yazdığı cavablar üçün işlət: rəqəm, söz, düstur. Seçim və ya uyğunluq cavabını heç vaxt mətn kimi yazma.
 - "manualGrade" (əl ilə yoxlama): standart olaraq HƏMİŞƏ false. YALNIZ bir halda true et: müəllim açıq/yazılı/inşa/geniş cavablı suallar XÜSUSİ istəyibsə VƏ cavab avtomatik dəqiq yoxlana bilmirsə (izahlı, çoxcavablı, "izah et", "nümunələr göstər"). O zaman sualı Co/Cd saxla, manualGrade=true qoy — openAnswer/openAnswers boş qala bilər (müəllim əl ilə yoxlayacaq). Müəllim açıq sual İSTƏMƏYİBSƏ, avtomatik yoxlana bilməyən açıq sualı yuxarıdakı qaydaya görə «Cm»-ə çevir və manualGrade=false saxla.
-- Riyazi ifadələr üçün "latex" sahəsindən istifadə et. Sual mətnini BÜTÖVLÜKDƏ $...$ içinə ALMA — yalnız həqiqi düstur/ifadə $...$ ilə yazılır; adi cümlə heç vaxt.
+- RİYAZİYYAT (VACİB): hər düsturu/ifadəni mətnin İÇİNDƏ, öz yerində, tək dollar işarələri arasında LaTeX kimi yaz — $...$. Nümunələr: "3500-ün $\\\\frac{5}{7}$ hissəsini tapın.", "$x^{2}+1=0$ tənliyini həll et", "$\\\\sqrt{540}$ ədədi". "latex" sahəsini HEÇ VAXT işlətmə — həmişə "" saxla; bütün riyaziyyat mətnin içində $...$ ilə olur. QADAĞAN: $...$-siz açıq LaTeX yazma (məs. \\\\frac, \\\\sqrt, x^2 kimi) — belə yazsan şagird xam kodu görür. Açdığın hər $ üçün mütləq BAĞLAYAN $ qoy (balanslı olsun). Bütöv cümləni $...$ içinə ALMA — yalnız həqiqi düsturu. Adi rəqəm/aralıq/faiz/tarix riyaziyyat deyil ("20–30 arası" — $ ilə YOX). Seçim mətnində də riyaziyyatı $...$ ilə yaz, seçimin "latex"-i "" olsun.
 - Dırnaq işarəsi lazımdırsa adi " işlət — \\" kimi qaçış simvolu YAZMA.
 - Şəkil/qrafik tələb edən sual YARATMA (hasFigure həmişə false). Mümkün qədər mətnlə həll olunan suallar yarat.
 - Oxu mətni (reading) yalnız istənildikdə əlavə et. İstənilsə, onu "reading" tipli AYRICA element kimi ver: bütün mətn "text" sahəsində, abzaslar iki yeni sətirlə (\\n\\n) ayrılsın, başlıq varsa "title"-də. Sonra o mətnə aid suallar ayrıca elementlər kimi gəlsin. choices=[], correct=[], pairs=[], openAnswer="".
@@ -2574,6 +2633,7 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     "",
     "QAYDALAR:",
     "- Dəqiq 1 sual qaytar (questions massivində bir element).",
+    "- RİYAZİYYAT: mətndə və seçimlərdə hər düsturu tək dollar işarələri arasında yaz — $...$ (məs. \"$\\\\frac{5}{7}$\", \"$x^2$\"). $...$-siz açıq LaTeX (\\\\frac, \\\\sqrt, x^2) YAZMA və hər $ üçün bağlayan $ qoy; \"latex\" sahəsi \"\" olsun. Adi rəqəm/aralıq $ ilə yazılmır.",
     // A rewritten question must always be COMPLETE and self-consistent.
     "- ⛔ SUAL TAM VƏ DÜZGÜN OLMALIDIR: sən sualın müəllifisən — DÜZGÜN CAVABI BİLİRSƏN və MÜTLƏQ qeyd et. Tək/çox seçim (Cm/Cs) → 'correct' massivinə düzgün variant(lar)ın indeksini yaz (BOŞ BURAXMA). Açıq (Co/Cd) → 'openAnswers'-i doldur. Uyğunluq (Cma) → 'pairs' düzgün olsun. TİPİ DƏYİŞƏNDƏ (məs. açıq → tək seçim) yeni tipin BÜTÜN sahələrini tam doldur, düzgün cavabı İŞARƏLƏMƏDƏN sual qaytarma. Tək seçimə çevirəndə məntiqli 4 variant qur (biri düzgün) və düzgün olanın indeksini 'correct'-ə yaz.",
     "- Açıq (Co) YALNIZ birmənalı, hamının eyni yazacağı qısa cavab üçündür (ədəd, tək termin, düstur). Cavab çoxmənalı / təsvir / münasibətdirsə → 'Cm' et və düzgün variantı işarələ.",
