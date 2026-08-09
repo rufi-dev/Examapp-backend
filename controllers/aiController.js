@@ -1120,6 +1120,70 @@ const stripAnswers = (list) =>
     return out;
   });
 
+// ── Request fidelity: did the teacher get the NUMBER of questions they asked for? ──
+// The teacher's count lives only in their free-text prompt ("20 sual", "sual sayı 25",
+// "make 15 questions"). Parse it (1..100) so we can check the output against it and,
+// if short, top the set up. Null when no explicit count is stated.
+const parseRequestedCount = (prompt) => {
+  const s = String(prompt || "");
+  const nums = [];
+  const push = (v) => {
+    const n = parseInt(v, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 100) nums.push(n);
+  };
+  let m;
+  const re1 = /(\d{1,3})\s*(?:dənə|ədəd|dən)?\s*(?:sual|test|tapşırıq|question)/gi;
+  while ((m = re1.exec(s))) push(m[1]);
+  const re2 = /(?:sual\s*say[ıiİI]|question\s*count|ne[çc]ə\s*sual)[^\d]{0,8}(\d{1,3})/gi;
+  while ((m = re2.exec(s))) push(m[1]);
+  return nums.length ? nums[0] : null;
+};
+
+// A cheap identity for de-duping questions when topping a set up.
+const questionKey = (q) =>
+  String(q?.text || "").toLowerCase().replace(/\s+/g, " ").trim().slice(0, 120);
+
+// When generation returned FEWER questions than asked, request the missing ones and
+// append them (deduped). Skipped when the set has reading/listening blocks — their
+// question grouping must not be split — and hard-capped so it can never loop. Uses
+// ONLY a user prompt; the system prompt is never touched.
+async function topUpToCount({ prompt, preset, model, signal, questions, target }) {
+  const acc = Array.isArray(questions) ? [...questions] : [];
+  let cost = null;
+  if (!target || acc.length >= target) return { questions: acc, cost };
+  if (acc.some((q) => q && (q.type === "reading" || q.type === "listening")))
+    return { questions: acc, cost };
+  const seen = new Set(acc.map(questionKey));
+  const MAX_ROUNDS = 3;
+  for (let r = 0; r < MAX_ROUNDS && acc.length < target; r += 1) {
+    if (signal?.aborted) break;
+    const need = target - acc.length;
+    const payload = `${String(prompt).slice(0, 3000)}\n\nARTIQ ${acc.length} sual hazırlandı. İNDİ onlardan FƏRQLİ, eyni mövzu və çətinlikdə DAHA ${need} sual yaz (təkrar OLMASIN, cavabları da doldur). Yalnız yeni sualları qaytar.`;
+    let out;
+    try {
+      out = await runGeneration({ prompt: payload, preset, model, signal });
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      break;
+    }
+    cost = sumCost(cost, out.cost);
+    const cleaned = cleanQuestions(out.questions);
+    if (!cleaned.length) break;
+    let added = 0;
+    for (const q of cleaned) {
+      if (acc.length >= target) break;
+      if (q && (q.type === "reading" || q.type === "listening")) continue;
+      const k = questionKey(q);
+      if (k && seen.has(k)) continue;
+      seen.add(k);
+      acc.push(q);
+      added += 1;
+    }
+    if (added === 0) break; // model isn't producing anything new — stop
+  }
+  return { questions: acc, cost };
+}
+
 // How a PDF's answer key is handled, chosen by the teacher before extraction:
 //   has-answers — keep the answers the PDF marks (the default)
 //   manual      — extract the questions only; the teacher marks the answers
@@ -2419,6 +2483,7 @@ const generateQuestions = asyncHandler(async (req, res) => {
     throw new Error("İmtahan təsviri boşdur");
   }
   const passageCount = detectPassageCount(prompt, req.body?.preset);
+  const requestedCount = parseRequestedCount(prompt);
   let questions = [];
   let cost = null;
   let issues = [];
@@ -2433,18 +2498,30 @@ const generateQuestions = asyncHandler(async (req, res) => {
       verified = r.verified;
     } else {
       const out = await runGeneration({ prompt, preset: req.body?.preset, model: req.body?.model });
+      // Request fidelity: if the model came back short of the teacher's asked count,
+      // top the set up to it (best-effort) BEFORE the review — so "20 sual" means 20.
+      const topped = await topUpToCount({
+        prompt,
+        preset: req.body?.preset,
+        model: req.body?.model,
+        questions: out.questions,
+        target: requestedCount,
+      });
       // Agentic quality gate: the AI reviews its own answers and variants before
       // the teacher sees them. Falls back to the un-reviewed set if review fails.
       const v = await verifyAndFix({
-        questions: out.questions,
+        questions: topped.questions,
         prompt,
         preset: req.body?.preset,
         model: req.body?.model,
       });
       questions = v.questions;
-      cost = sumCost(out.cost, v.reviewCost);
+      cost = sumCost(sumCost(out.cost, topped.cost), v.reviewCost);
       issues = v.issues;
-      verified = v.rounds > 0 && v.issues.length === 0;
+      // HONEST verified: only true when there are no defects AND the teacher got at
+      // least the count they asked for. A short set is never silently "verified".
+      const short = requestedCount != null && questions.length < requestedCount;
+      verified = v.rounds > 0 && v.issues.length === 0 && !short;
     }
   } catch (e) {
     res.status(e?.aiStatus || 502);
@@ -2453,7 +2530,13 @@ const generateQuestions = asyncHandler(async (req, res) => {
   await logGenerationUsage(req, { cost, questions });
   await rememberExamPrompt(req, prompt);
   if (req.aiCredit && questions.length) req.aiCredit.usable(); // charge only for a usable result
-  res.json({ questions, cost, issues, verified });
+  // countInfo lets the teacher see fidelity honestly ("18/20 — 2 çatışmır").
+  const countInfo = {
+    requested: requestedCount,
+    actual: questions.length,
+    short: requestedCount != null ? Math.max(0, requestedCount - questions.length) : 0,
+  };
+  res.json({ questions, cost, issues, verified, countInfo });
 });
 
 // POST /api/quiz/generateQuestionsStream/:examId — same thing over SSE.
@@ -2559,10 +2642,23 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
         clearInterval(hb);
         return res.end();
       }
+      // Request fidelity: top a short set up to the asked count before the review.
+      const target = parseRequestedCount(prompt);
+      if (target != null && out.questions.length < target) {
+        sse("status", { message: "Çatışmayan suallar hazırlanır…" });
+      }
+      const topped = await topUpToCount({
+        prompt,
+        preset: req.body?.preset,
+        model: req.body?.model,
+        signal: ac.signal,
+        questions: out.questions,
+        target,
+      });
       // The stream showed the questions arriving; now the AI checks its own
       // answers before they are committed. `status` events drive the panel.
       const v = await verifyAndFix({
-        questions: out.questions,
+        questions: topped.questions,
         prompt,
         preset: req.body?.preset,
         model: req.body?.model,
@@ -2570,9 +2666,10 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
         onStatus: (message) => sse("status", { message }),
       });
       questions = v.questions;
-      cost = sumCost(out.cost, v.reviewCost);
+      cost = sumCost(sumCost(out.cost, topped.cost), v.reviewCost);
       issues = v.issues;
-      verified = v.rounds > 0 && v.issues.length === 0;
+      const short = target != null && questions.length < target;
+      verified = v.rounds > 0 && v.issues.length === 0 && !short;
     }
   } catch (e) {
     clearInterval(hb);
@@ -2588,7 +2685,13 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
     await logGenerationUsage(req, { cost, questions });
     await rememberExamPrompt(req, prompt);
   }
-  sse("done", { questions, cost, issues, verified });
+  const reqCount = parseRequestedCount(prompt);
+  const countInfo = {
+    requested: reqCount,
+    actual: questions.length,
+    short: reqCount != null ? Math.max(0, reqCount - questions.length) : 0,
+  };
+  sse("done", { questions, cost, issues, verified, countInfo });
   res.end();
 });
 
@@ -3318,6 +3421,8 @@ module.exports = {
   // exported for tests
   cleanQuestions,
   auditQuestions,
+  parseRequestedCount,
+  hasMathLeak,
   stripAnswers,
   applyAnswerMode,
   verifyAndFix,
