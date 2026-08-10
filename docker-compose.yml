@@ -26,6 +26,7 @@ services:
       - uploads:/app/uploads # legacy public uploads (kept until migration relocates them)
       - exampdfs:/app/examPdfs # AUD-013 CR-067: persist PRIVATE exam PDFs across rebuilds
       - materials:/app/materials # persist study materials across rebuilds
+      - assignments:/app/assignments # persist homework tasks + student submissions across rebuilds
       - wa_auth:/app/.wwebjs_auth # persist the linked WhatsApp session
     networks:
       - web
@@ -46,6 +47,7 @@ services:
       - uploads:/app/uploads
       - exampdfs:/app/examPdfs
       - materials:/app/materials
+      - assignments:/app/assignments
     networks:
       - web
 
@@ -74,6 +76,7 @@ volumes:
   uploads:
   exampdfs:
   materials:
+  assignments:
   wa_auth:
   caddy_data:
   caddy_config:

@@ -11,6 +11,7 @@ const telegramRoute = require('./routes/telegramRoute')
 const whatsappRoute = require('./routes/whatsappRoute')
 const videoRoute = require('./routes/videoRoute')
 const materialRoute = require('./routes/materialRoute')
+const assignmentRoute = require('./routes/assignmentRoute')
 const healthRoute = require('./routes/healthRoute')
 const { initPersistedSessions, shutdownWhatsapp } = require('./helper/whatsapp')
 const Attempt = require('./models/attemptModel')
@@ -181,6 +182,8 @@ app.use("/api/telegram", telegramRoute)
 app.use("/api/whatsapp", whatsappRoute)
 app.use("/api/videos", videoRoute)
 app.use("/api/materials", materialRoute)
+// Class homework tasks + student submissions (private files in assignments/).
+app.use("/api/assignments", assignmentRoute)
 // Teacher Success Journey — every route is flag-gated (404 when off), so mounting
 // the router unconditionally is safe: a flag-off deployment exposes nothing.
 app.use("/api/teacher-success", require("./routes/teacherSuccessRoute"))
