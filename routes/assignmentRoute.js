@@ -10,6 +10,7 @@ const { validateUploadFile } = require("../utils/fileValidation");
 const {
   ASSIGNMENTS_DIR,
   listAssignments,
+  myAssignments,
   createAssignment,
   updateAssignment,
   deleteAssignment,
@@ -95,6 +96,8 @@ const runUpload = (field, max) => (req, res, next) =>
   });
 
 // ---- reads ------------------------------------------------------------------
+// Declared BEFORE the "/:id/..." routes so the literal "mine" is never parsed as an id.
+router.get("/mine", protect, myAssignments); // cross-class hub (all my classes)
 router.get("/", protect, listAssignments); // ?classId=...
 router.get("/:id/attachment/:fileName", protect, getAttachmentFile);
 router.get("/:id/submissions/:submissionId/files/:fileName", protect, getSubmissionFile);

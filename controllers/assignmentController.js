@@ -321,6 +321,74 @@ const submitAssignment = asyncHandler(async (req, res) => {
   res.status(201).json(submission.toObject());
 });
 
+// GET /api/assignments/mine — the caller's tasks across ALL their classes, for
+// the top-level "Tapşırıqlar" hub (a deadline/status view, not a class picker).
+// Teacher/admin: everything they own + per-task submission progress. Student:
+// every task from their approved-enrolled classes + THEIR own submission.
+const myAssignments = asyncHandler(async (req, res) => {
+  if (isManagerRole(req.user)) {
+    const assignments = await Assignment.find({ owner: req.user._id, deletedAt: null })
+      .populate("class", "name")
+      .sort({ createdAt: -1 })
+      .lean();
+    if (!assignments.length) return res.json([]);
+    const ids = assignments.map((a) => a._id);
+    // Unique class ObjectIds (from the populated class) for the roster counts.
+    const classObjIds = [
+      ...new Map(assignments.filter((a) => a.class?._id).map((a) => [String(a.class._id), a.class._id])).values(),
+    ];
+    const [counts, enroll] = await Promise.all([
+      Submission.aggregate([
+        { $match: { assignment: { $in: ids } } },
+        { $group: { _id: "$assignment", submitted: { $sum: 1 }, graded: { $sum: { $cond: [{ $eq: ["$status", "returned"] }, 1, 0] } } } },
+      ]),
+      classObjIds.length
+        ? Enrollment.aggregate([
+            { $match: { class: { $in: classObjIds }, status: "approved" } },
+            { $group: { _id: "$class", n: { $sum: 1 } } },
+          ])
+        : Promise.resolve([]),
+    ]);
+    const cById = new Map(counts.map((c) => [String(c._id), c]));
+    const eByClass = new Map(enroll.map((e) => [String(e._id), e.n]));
+    const out = assignments.map((a) => {
+      const c = cById.get(String(a._id));
+      return {
+        ...a,
+        studentTotal: eByClass.get(String(a.class?._id || a.class)) || 0,
+        submittedCount: c?.submitted || 0,
+        gradedCount: c?.graded || 0,
+      };
+    });
+    return res.json(out);
+  }
+
+  // Student view.
+  const classIds = await Enrollment.find({ student: req.user._id, status: "approved" }).distinct("class");
+  if (!classIds.length) return res.json([]);
+  const assignments = await Assignment.find({ class: { $in: classIds }, deletedAt: null })
+    .populate("class", "name")
+    .sort({ createdAt: -1 })
+    .lean();
+  const ids = assignments.map((a) => a._id);
+  const mine = await Submission.find({ assignment: { $in: ids }, student: req.user._id }).lean();
+  const byA = new Map(mine.map((s) => [String(s.assignment), s]));
+  const out = assignments.map((a) => ({
+    _id: a._id,
+    class: a.class, // { _id, name }
+    ownerName: a.ownerName,
+    title: a.title,
+    description: a.description,
+    attachments: a.attachments,
+    dueAt: a.dueAt,
+    allowLate: a.allowLate,
+    maxPoints: a.maxPoints,
+    createdAt: a.createdAt,
+    mySubmission: byA.get(String(a._id)) || null,
+  }));
+  return res.json(out);
+});
+
 // GET /api/assignments/:id/attachment/:fileName — a teacher's handout file.
 // Readable by anyone who can see the class (manager or enrolled student).
 const getAttachmentFile = asyncHandler(async (req, res) => {
@@ -375,6 +443,7 @@ function sendStored(res, meta, download) {
 module.exports = {
   ASSIGNMENTS_DIR,
   listAssignments,
+  myAssignments,
   createAssignment,
   updateAssignment,
   deleteAssignment,
