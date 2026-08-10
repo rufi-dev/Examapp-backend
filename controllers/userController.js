@@ -19,6 +19,9 @@ const {
   clearAuthCookies,
   setRefreshCookie,
   legacyCookiePolicy,
+  setTrustCookie,
+  clearTrustCookie,
+  TRUST_COOKIE,
 } = require("./authSessionController");
 const sessionService = require("../services/sessionService");
 const { resolveAdminCapability, resolveApprovalAction, resolveSelfServiceCapability } = require("../services/teacherCapability");
@@ -156,6 +159,8 @@ const registerUser = asyncHandler(async (req, res) => {
 
     // AUD-002 (CR-011): unified issuance — legacy off, session/rollback on.
     const token = await issueLoginToken(req, res, user);
+    // Trust this device for one-tap re-login later (opt-in; default on).
+    if (req.body?.rememberDevice !== false) await issueTrustDevice(req, res, user);
 
     // CR-125: bind a referral if a valid code came through the register flow
     // (?ref=<code>). Teacher referees only. NEVER fail registration on a referral
@@ -216,6 +221,103 @@ const registerUser = asyncHandler(async (req, res) => {
 });
 
 // Login User
+// ── "Trust this device" one-tap re-login ─────────────────────────────────────
+// Issue a fresh trusted-device token: store its HASH on the user (capped +
+// expiry-pruned) and put the raw value in the httpOnly, path-scoped trust cookie.
+// `drop` removes a prior hash (used to ROTATE on each device-login). Best-effort:
+// a failure here never blocks the login it rides on.
+const TRUST_TTL_MS = Number(process.env.TRUST_DEVICE_TTL_MS) || 60 * 24 * 60 * 60 * 1000; // 60d
+async function issueTrustDevice(req, res, user, { drop } = {}) {
+  try {
+    const now = Date.now();
+    const raw = crypto.randomBytes(32).toString("hex");
+    const dev = {
+      tokenHash: hashToken(raw),
+      createdAt: new Date(now),
+      lastUsedAt: new Date(now),
+      expiresAt: new Date(now + TRUST_TTL_MS),
+      ua: String(req.headers["user-agent"] || "").slice(0, 200),
+    };
+    const existing = (await User.findById(user._id).select("trustedDevices").lean())?.trustedDevices || [];
+    const base = existing.filter(
+      (d) => d && new Date(d.expiresAt).getTime() > now && d.tokenHash !== drop
+    );
+    const next = [...base, dev].slice(-10); // keep at most 10 trusted devices
+    await User.updateOne({ _id: user._id }, { $set: { trustedDevices: next } });
+    setTrustCookie(res, raw, dev.expiresAt);
+  } catch (e) {
+    console.warn("issueTrustDevice failed:", e?.message);
+  }
+}
+
+// The login-response DTO, shared by password login and device login so both hand
+// the client an identical, fully-hydrated identity (mirrors loginUser's body).
+async function buildAuthDTO(user, token) {
+  const loginUsage = user.role === "teacher" ? await usageFor(user) : null;
+  return {
+    _id: user._id,
+    name: user.name,
+    email: user.email,
+    phone: user.phone,
+    bio: user.bio,
+    photo: user.photo,
+    role: user.role,
+    teacherApproval: user.teacherApproval,
+    isVerified: user.isVerified,
+    userAgent: user.userAgent,
+    createdAt: user.createdAt,
+    token,
+    plan: normalizePlan(user.plan),
+    planExpiresAt: user.planExpiresAt || null,
+    aiCredits: user.aiCredits || 0,
+    ...(loginUsage ? { usage: loginUsage } : {}),
+    teacherSuccessJourneyEnabled: isJourneyEnabled(),
+    ...(isJourneyEnabled() && user.role === "teacher"
+      ? { teacherLevel: user.teacherLevel || "spark", journeyWelcomeSeen: !!user.journeyWelcomeSeenAt }
+      : {}),
+    capabilities: [...capabilitiesFor(user, { journeyEnabled: isJourneyEnabled() })],
+  };
+}
+
+// POST /api/users/device/login — exchange a valid trust cookie for a session, no
+// password. Rotates the device token on success; clears it on any failure.
+const deviceLogin = asyncHandler(async (req, res) => {
+  const raw = req.cookies ? req.cookies[TRUST_COOKIE] : undefined;
+  if (!raw) return res.status(401).json({ message: "Bu cihaz xatırlanmayıb" });
+
+  const tokenHash = hashToken(raw);
+  const now = Date.now();
+  const user = await User.findOne({ "trustedDevices.tokenHash": tokenHash }).select("+trustedDevices");
+  const dev =
+    user && Array.isArray(user.trustedDevices)
+      ? user.trustedDevices.find((d) => d.tokenHash === tokenHash && new Date(d.expiresAt).getTime() > now)
+      : null;
+  if (!user || !dev) {
+    clearTrustCookie(res);
+    return res.status(401).json({ message: "Sessiya bitib, şifrə ilə daxil olun" });
+  }
+
+  recordDebug({ kind: "login_ok", message: "device", email: user.email, ua: req.headers["user-agent"], ip: req.ip });
+  const token = await issueLoginToken(req, res, user);
+  await issueTrustDevice(req, res, user, { drop: tokenHash }); // rotate this device's token
+  return res.status(200).json(await buildAuthDTO(user, token));
+});
+
+// POST /api/users/device/forget — the chooser's "×": drop this device's trust
+// token everywhere and clear the cookie. Safe when no cookie/entry exists.
+const forgetDevice = asyncHandler(async (req, res) => {
+  const raw = req.cookies ? req.cookies[TRUST_COOKIE] : undefined;
+  if (raw) {
+    const tokenHash = hashToken(raw);
+    await User.updateOne(
+      { "trustedDevices.tokenHash": tokenHash },
+      { $pull: { trustedDevices: { tokenHash } } }
+    ).catch(() => {});
+  }
+  clearTrustCookie(res);
+  return res.status(200).json({ ok: true });
+});
+
 const loginUser = asyncHandler(async (req, res) => {
   try {
     const { password } = req.body;
@@ -292,6 +394,9 @@ const loginUser = asyncHandler(async (req, res) => {
       // AUD-002 (CR-011): one issuance path — legacy when flag off, session or
       // bounded rollback cookie when on (never a legacy no-exp token when on).
       token = await issueLoginToken(req, res, user);
+      // "Trust this device" for one-tap re-login later (opt-in; default on). The
+      // client sends rememberDevice:false to skip it (e.g. a shared computer).
+      if (req.body?.rememberDevice !== false) await issueTrustDevice(req, res, user);
       const {
         _id,
         name,
@@ -1229,6 +1334,8 @@ const resetPassword = asyncHandler(async (req, res) => {
     // AUD-002 (partial): bump the token-version so every previously-issued token
     // for this account is revoked by the reset.
     user.sessionVersion = (user.sessionVersion || 0) + 1;
+    // A password reset also distrusts every remembered device (one-tap re-login).
+    user.trustedDevices = [];
     await user.save();
   } catch (err) {
     // Do NOT restore the claim. Surface a structured event so a stranded reset
@@ -1310,6 +1417,10 @@ const changePassword = asyncHandler(async (req, res) => {
     res.status(409);
     throw new Error("Password change conflicted, please retry");
   }
+  // A password change distrusts every remembered device (defence in depth) and
+  // clears this device's trust cookie.
+  await User.updateOne({ _id: user._id }, { $set: { trustedDevices: [] } }).catch(() => {});
+  clearTrustCookie(res);
   // Password + epoch are committed here (whether or not the caller can rebind) — the
   // server-owned notice is best-effort and never affects that committed result.
   await notifyBestEffort("passwordChanged", user, { subject: "Examopia — Şifrəniz dəyişdirildi" });
@@ -1360,6 +1471,7 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
       // AUD-002 (CR-011): unified issuance (Google, new user) — preserve the
       // historical 1-day flag-off cookie expiry.
       const token = await issueLoginToken(req, res, newUser, { expires: new Date(Date.now() + 1000 * 86400) });
+      await issueTrustDevice(req, res, newUser);
 
       const {
         _id,
@@ -1405,6 +1517,7 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
     // AUD-002 (CR-011): unified issuance (Google, existing user) — preserve the
     // historical 1-day flag-off cookie expiry.
     const token = await issueLoginToken(req, res, user, { expires: new Date(Date.now() + 1000 * 86400) });
+    await issueTrustDevice(req, res, user);
 
     const { _id, name, email, phone, bio, photo, role, teacherApproval, isVerified, userAgent, createdAt } =
       user;
@@ -1863,6 +1976,8 @@ module.exports = {
   onboardingReport,
   registerUser,
   loginUser,
+  deviceLogin,
+  forgetDevice,
   logoutUser,
   markAppInstalled,
   getPushPublicKey,

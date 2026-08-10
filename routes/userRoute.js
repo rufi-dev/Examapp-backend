@@ -1,5 +1,5 @@
 const express = require('express')
-const { registerUser, loginUser, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush, getOutreachStatus, toggleOutreach, getSetupFunnel } = require('../controllers/userController')
+const { registerUser, loginUser, deviceLogin, forgetDevice, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush, getOutreachStatus, toggleOutreach, getSetupFunnel } = require('../controllers/userController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
 const { refreshHandler, logoutAllHandler, requireSessionFlag } = require('../controllers/authSessionController')
 const { csrfProtect } = require('../middleware/csrf')
@@ -12,6 +12,10 @@ const router = express.Router()
 // loginLimiter is the generous per-IP classroom-safe cap.
 router.post('/register', registerLimiter, registerUser)
 router.post('/login', loginLimiter, accountGuard, loginUser)
+// One-tap re-login from the account chooser: exchange the httpOnly trust cookie
+// for a session (no password). Same per-IP limiter as /login.
+router.post('/device/login', loginLimiter, deviceLogin)
+router.post('/device/forget', forgetDevice)
 router.get('/logout', logoutUser)
 
 // AUD-002 session model (additive). requireSessionFlag runs BEFORE any auth

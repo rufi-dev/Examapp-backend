@@ -81,6 +81,24 @@ function clearLegacyCookie(res) {
   res.clearCookie(LEGACY_COOKIE, { path: "/" });
 }
 
+// "Trust this device" cookie — a long-lived, httpOnly, path-scoped credential the
+// account chooser exchanges for a fresh session via POST /api/users/device/login
+// (no password). Separate from the session refresh cookie so normal logout still
+// revokes the SESSION while the device stays trusted for re-login; only the
+// user's "forget" action (or a password change) drops it. Scoped to the two
+// /device routes so it rides on nothing else.
+const TRUST_COOKIE = DEV_HTTP_COOKIES ? "exq_trust" : "__Secure-exq_trust";
+const TRUST_PATH = "/api/users/device";
+function setTrustCookie(res, rawToken, expiresAt) {
+  const maxAge = Math.max(0, new Date(expiresAt).getTime() - Date.now());
+  res.cookie(TRUST_COOKIE, rawToken, {
+    path: TRUST_PATH, httpOnly: true, secure: COOKIE_SECURE, sameSite: "lax", maxAge,
+  });
+}
+function clearTrustCookie(res) {
+  res.clearCookie(TRUST_COOKIE, { path: TRUST_PATH });
+}
+
 // Clear EVERY credential cookie (ADR-015) so no stale cross-mode cookie lingers.
 function clearAuthCookies(res) {
   res.clearCookie(REFRESH_COOKIE, { path: REFRESH_PATH });
@@ -211,6 +229,9 @@ module.exports = {
   clearLegacyCookie,
   legacyCookiePolicy,
   isSafeHttpJourneyPreview,
+  setTrustCookie,
+  clearTrustCookie,
   REFRESH_COOKIE,
   ROLLBACK_COOKIE,
+  TRUST_COOKIE,
 };

@@ -261,6 +261,29 @@ const userSchema = Schema(
         // is enabled. Simple integer balance, never negative.
         aiCredits: { type: Number, default: 0, min: 0 },
 
+        // "Trust this device" tokens for one-tap re-login from the account chooser
+        // (Login page). Each entry is a HASHED device token (never the raw value)
+        // the browser holds in an httpOnly cookie; POST /device/login exchanges a
+        // valid, unexpired one for a fresh session — WITHOUT a password. `select:
+        // false` so it never leaves the server in a user DTO. Cleared on password
+        // change/reset and when the user "forgets" the device. This is the standard
+        // "remember me" trade-off: whoever holds the device can start a session, so
+        // it is opt-in (a login-page checkbox) and revocable.
+        trustedDevices: {
+            type: [
+                {
+                    _id: false,
+                    tokenHash: { type: String },
+                    createdAt: { type: Date },
+                    lastUsedAt: { type: Date },
+                    expiresAt: { type: Date },
+                    ua: { type: String, default: "" },
+                },
+            ],
+            default: [],
+            select: false,
+        },
+
         // ── Auto-outreach watcher (jobs/autoOutreach.js) ──────────────────────
         // A new teacher who hasn't finished setting up within a grace window
         // (empty exam / empty class / never started) gets ONE friendly WhatsApp
