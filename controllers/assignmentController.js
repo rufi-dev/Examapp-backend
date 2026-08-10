@@ -327,7 +327,12 @@ const submitAssignment = asyncHandler(async (req, res) => {
 // every task from their approved-enrolled classes + THEIR own submission.
 const myAssignments = asyncHandler(async (req, res) => {
   if (isManagerRole(req.user)) {
-    const assignments = await Assignment.find({ owner: req.user._id, deletedAt: null })
+    // ADMIN oversees the whole platform → every teacher's tasks. A TEACHER sees
+    // only the ones they created (across all THEIR classes). Each doc carries
+    // `ownerName`, so the admin view can label who created each task.
+    const filter =
+      req.user.role === "admin" ? { deletedAt: null } : { owner: req.user._id, deletedAt: null };
+    const assignments = await Assignment.find(filter)
       .populate("class", "name")
       .sort({ createdAt: -1 })
       .lean();
