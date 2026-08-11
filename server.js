@@ -326,6 +326,13 @@ mongoose
                 cert: require("fs").readFileSync(process.env.E2E_TLS_CERT),
               }, app).listen(PORT)
             : app.listen(PORT)
+        // Large uploads (up to ~2GB videos) can stream for many minutes on a slow
+        // connection. Node's default 5-minute requestTimeout would abort them, so
+        // raise it (env-overridable). headersTimeout must stay >= requestTimeout.
+        try {
+            _server.requestTimeout = Number(process.env.SERVER_REQUEST_TIMEOUT_MS || 45 * 60 * 1000)
+            _server.headersTimeout = Number(process.env.SERVER_HEADERS_TIMEOUT_MS || 46 * 60 * 1000)
+        } catch (_) { /* older Node without these knobs — ignore */ }
         _server.once("listening", () => {
             const bound = (_server.address() && _server.address().port) || PORT
             console.log("Connected to DB and listening on port:", bound)

@@ -18,7 +18,10 @@ const Video = require("../models/videoModel");
 
 const WINDOW_MS = Number(process.env.UPLOAD_RATE_WINDOW_MS || 60 * 60 * 1000); // 1h
 const MAX_PER_WINDOW = Number(process.env.UPLOAD_RATE_MAX || 20);
-const DEFAULT_QUOTA = Number(process.env.UPLOAD_QUOTA_BYTES || 4 * 1024 * 1024 * 1024); // 4GB
+// Shared per-teacher storage (materials + uploaded videos). Raised so 2GB videos
+// are actually usable (a 4GB cap only fit ~2). Env-overridable; a per-user
+// override (user.storageQuotaBytes) still wins for accounts that need more.
+const DEFAULT_QUOTA = Number(process.env.UPLOAD_QUOTA_BYTES || 12 * 1024 * 1024 * 1024); // 12GB
 
 const hits = new Map(); // userId -> { count, resetAt }
 

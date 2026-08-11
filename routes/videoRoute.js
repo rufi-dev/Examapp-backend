@@ -26,7 +26,7 @@ const storage = multer.diskStorage({
     cb(null, `vid-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
   },
 });
-const MAX_VIDEO_BYTES = Number(process.env.VIDEO_MAX_BYTES || 500 * 1024 * 1024); // 500MB
+const MAX_VIDEO_BYTES = Number(process.env.VIDEO_MAX_BYTES || 2 * 1024 * 1024 * 1024); // 2GB
 const upload = multer({
   storage,
   limits: { fileSize: MAX_VIDEO_BYTES },
