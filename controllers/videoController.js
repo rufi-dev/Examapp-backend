@@ -352,6 +352,33 @@ const updateVideo = asyncHandler(async (req, res) => {
     video.classes = await ownedClassIds(req.user, req.body.classIds ?? req.body.classId);
     video.class = null; // the list is authoritative from here on
   }
+  // Replace the video FILE (uploaded videos only): swap in the new file, delete
+  // the old file + poster (a fresh poster arrives via posterData below).
+  if (req.file) {
+    if (video.source !== "file") {
+      cleanup(req.file.path);
+    } else if (req.quotaRejected) {
+      cleanup(req.file.path);
+      return res.status(413).json({ message: req.quotaRejected.message });
+    } else if (!videoHeadOk(req.file.path)) {
+      cleanup(req.file.path);
+      return res.status(400).json({ message: "Yalnız MP4 və ya WebM video yükləyin" });
+    } else {
+      if (video.fileName) cleanup(path.join(VIDEOS_DIR, video.fileName));
+      if (video.posterName) {
+        cleanup(path.join(VIDEOS_DIR, video.posterName));
+        video.posterName = "";
+      }
+      video.fileName = path.basename(req.file.path);
+      video.originalName = req.file.originalname || "";
+      video.mimeType = /webm$/i.test(req.file.originalname) ? "video/webm" : "video/mp4";
+      try {
+        video.sizeBytes = fs.statSync(req.file.path).size;
+      } catch {
+        /* non-fatal */
+      }
+    }
+  }
   // Change the thumbnail (uploaded videos only): a new poster data URL replaces
   // the old poster file.
   if (
