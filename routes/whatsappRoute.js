@@ -8,6 +8,7 @@ const {
   getQrFor,
   logoutFor,
   initFor,
+  refreshFor,
   sendMessageFor,
   sendForOwner,
   listGroupsFor,
@@ -36,6 +37,13 @@ router.get("/status", protect, adminOnly, (req, res) => {
 router.get("/qr", protect, adminOnly, (req, res) => {
   initFor(oid(req)); // lazily boot this teacher's session if not running
   res.json({ ...getStatusFor(oid(req)), qr: getQrFor(oid(req)) });
+});
+
+// Force a clean restart when the QR is stuck (a hung Chromium / expired session):
+// resets the retry budget and recycles the client, so a new QR is generated.
+router.post("/qr/refresh", protect, adminOnly, (req, res) => {
+  refreshFor(oid(req));
+  res.json({ ok: true });
 });
 
 router.post("/logout", protect, adminOnly, async (req, res) => {

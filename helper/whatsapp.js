@@ -61,7 +61,23 @@ function getSession(ownerId) {
   const id = String(ownerId);
   let s = sessions.get(id);
   if (!s) {
-    s = { client: null, ready: false, lastQrDataUrl: null, starting: false, readyTimer: null, reconnectTimer: null };
+    s = {
+      client: null,
+      ready: false,
+      lastQrDataUrl: null,
+      starting: false,
+      readyTimer: null,
+      reconnectTimer: null,
+      // UX/resilience state: `connecting` = scanned, loading the account (not
+      // ready yet); `loadingPct` from the WA loading screen; `startTimer` watches
+      // for a hung start (no QR, no connect); `initRetries`/`lastError` bound the
+      // auto-recovery from transient Chromium failures.
+      connecting: false,
+      loadingPct: 0,
+      startTimer: null,
+      initRetries: 0,
+      lastError: null,
+    };
     sessions.set(id, s);
   }
   return s;
@@ -98,6 +114,25 @@ function clearStaleLocks(ownerId) {
       /* ignore */
     }
   }
+}
+
+// Auto-recover a transient start/init failure (WhatsApp 2.3000.x frequently
+// destroys the execution context mid-inject on a session restore). Bounded so a
+// genuinely broken session can't loop a headless browser forever — after the cap
+// the session stops with `lastError` and the admin re-links / hits "refresh".
+function scheduleInitRetry(s, id, reason) {
+  if (shuttingDown) return;
+  const MAX = Number(process.env.WHATSAPP_INIT_RETRIES || 4);
+  if ((s.initRetries || 0) >= MAX) {
+    s.lastError = reason || "start_failed";
+    console.warn(`[WHATSAPP] ${id} giving up after ${s.initRetries} tries (${reason}) — refresh to retry`);
+    return;
+  }
+  s.initRetries = (s.initRetries || 0) + 1;
+  const delay = Math.min(30000, 4000 * s.initRetries);
+  console.log(`[WHATSAPP] ${id} auto-retry ${s.initRetries}/${MAX} in ${Math.round(delay / 1000)}s (${reason})`);
+  clearTimeout(s.reconnectTimer);
+  s.reconnectTimer = setTimeout(() => { if (!shuttingDown) initFor(id); }, delay);
 }
 
 // Boot (or re-boot) a teacher's WhatsApp client. Safe to call repeatedly.
@@ -144,7 +179,7 @@ function initFor(ownerId) {
       // Give Chromium room on a small server: a session RESTORE after a restart
       // can exceed the default and fail with "Runtime.callFunctionOn timed out",
       // which left the QR stuck. A longer protocol timeout survives that.
-      protocolTimeout: Number(process.env.WHATSAPP_PROTOCOL_TIMEOUT || 120000),
+      protocolTimeout: Number(process.env.WHATSAPP_PROTOCOL_TIMEOUT || 180000),
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -157,6 +192,9 @@ function initFor(ownerId) {
 
   s.client.on("qr", async (qr) => {
     s.ready = false;
+    s.connecting = false;
+    s.lastError = null;
+    clearTimeout(s.startTimer); // a QR appeared → the start didn't hang
     clearTimeout(s.readyTimer); // waiting for a human to scan
     try {
       s.lastQrDataUrl = await QRCode.toDataURL(qr);
@@ -173,6 +211,13 @@ function initFor(ownerId) {
   s.client.on("authenticated", () => {
     s.everAuthed = true;
     s.qrLogged = false;
+    // The QR was scanned — drop it (so the dashboard stops showing it) and flip
+    // to the "connecting / loading account" state the UI renders as a loader.
+    s.lastQrDataUrl = null;
+    s.connecting = true;
+    s.loadingPct = s.loadingPct || 5;
+    s.lastError = null;
+    clearTimeout(s.startTimer);
     console.log(`[WHATSAPP] ${id} authenticated`);
     clearTimeout(s.readyTimer);
     s.readyTimer = setTimeout(() => {
@@ -185,6 +230,11 @@ function initFor(ownerId) {
   s.client.on("ready", async () => {
     s.ready = true;
     s.lastQrDataUrl = null;
+    s.connecting = false;
+    s.loadingPct = 100;
+    s.initRetries = 0;
+    s.lastError = null;
+    clearTimeout(s.startTimer);
     clearTimeout(s.readyTimer);
     console.log(`[WHATSAPP] ${id} client ready (pin=${WWEB_VERSION || "none"})`);
     try {
@@ -194,9 +244,13 @@ function initFor(ownerId) {
       console.warn(`[WHATSAPP][DEBUG] ${id} getWWebVersion failed:`, e.message);
     }
   });
-  s.client.on("loading_screen", (pct, msg) =>
-    console.log(`[WHATSAPP][DEBUG] ${id} loading ${pct}% ${msg || ""}`)
-  );
+  s.client.on("loading_screen", (pct, msg) => {
+    s.connecting = true;
+    const n = Number(pct);
+    if (Number.isFinite(n)) s.loadingPct = n;
+    clearTimeout(s.startTimer);
+    console.log(`[WHATSAPP][DEBUG] ${id} loading ${pct}% ${msg || ""}`);
+  });
   s.client.on("change_state", (st) => console.log(`[WHATSAPP][DEBUG] ${id} state=${st}`));
   s.client.on("auth_failure", (m) => console.error(`[WHATSAPP] ${id} auth failure:`, m));
   s.client.on("disconnected", (reason) => {
@@ -206,6 +260,8 @@ function initFor(ownerId) {
     s.client = null;
     s.starting = false;
     s.qrLogged = false;
+    s.connecting = false;
+    clearTimeout(s.startTimer);
     clearTimeout(s.readyTimer);
     // Only auto-reconnect a session that was actually LINKED (survive network
     // blips). A never-scanned session that ran out of QR retries is left
@@ -216,12 +272,45 @@ function initFor(ownerId) {
     else if (!wasLinked) console.log(`[WHATSAPP] ${id} not linked — stopped (re-link from dashboard).`);
   });
 
+  // Start watchdog: if this start neither shows a QR nor connects within the
+  // window, the Chromium/init has HUNG (a known 2.3000.x failure) — recycle it and
+  // auto-retry, instead of leaving the dashboard stuck on "QR hazırlanır…".
+  const START_TIMEOUT = Number(process.env.WHATSAPP_START_TIMEOUT_MS || 75000);
+  clearTimeout(s.startTimer);
+  s.startTimer = setTimeout(async () => {
+    if (shuttingDown || s.ready || s.lastQrDataUrl || s.connecting) return;
+    console.warn(`[WHATSAPP] ${id} no QR/connect ${Math.round(START_TIMEOUT / 1000)}s after start — recycling`);
+    const old = s.client;
+    s.client = null;
+    s.starting = false;
+    try {
+      if (old) await old.destroy();
+    } catch {
+      /* ignore */
+    }
+    clearStaleLocks(id);
+    scheduleInitRetry(s, id, "no_qr_timeout");
+  }, START_TIMEOUT);
+
   s.client.initialize().catch((e) => {
     console.error(`[WHATSAPP] ${id} initialize failed:`, e.message);
+    clearTimeout(s.startTimer);
     s.ready = false;
     s.client = null;
     s.starting = false;
+    s.connecting = false;
+    scheduleInitRetry(s, id, "init_failed");
   });
+}
+
+// Force a clean restart for a stuck session (manual "refresh QR" from the
+// dashboard): reset the retry budget + error, then recycle.
+function refreshFor(ownerId) {
+  const s = getSession(String(ownerId));
+  s.initRetries = 0;
+  s.lastError = null;
+  clearTimeout(s.reconnectTimer);
+  restartFor(String(ownerId));
 }
 
 // Tear down a stuck client and re-init (watchdog for the flaky "authenticated
@@ -249,7 +338,14 @@ function restartFor(ownerId) {
 
 const getStatusFor = (ownerId) => {
   const s = getSession(ownerId);
-  return { enabled: ENABLED, ready: s.ready, hasQr: !!s.lastQrDataUrl };
+  return {
+    enabled: ENABLED,
+    ready: s.ready,
+    hasQr: !!s.lastQrDataUrl,
+    connecting: !!s.connecting && !s.ready,
+    loadingPct: s.loadingPct || 0,
+    error: !!s.lastError,
+  };
 };
 const getQrFor = (ownerId) => getSession(ownerId).lastQrDataUrl;
 
@@ -504,6 +600,7 @@ function _initForTest(id) { return initFor(id); }
 
 module.exports = {
   initFor,
+  refreshFor,
   initPersistedSessions,
   shutdownWhatsapp,
   _resetShutdownForTests,
