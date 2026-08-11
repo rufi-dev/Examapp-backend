@@ -280,19 +280,34 @@ const submitAssignment = asyncHandler(async (req, res) => {
   const a = await Assignment.findById(req.params.id).lean();
   if (!a || a.deletedAt) return fail(404, "Tapşırıq tapılmadı");
   if (!(await isEnrolledStudent(req.user, a.class))) return fail(403, "Bu sinfin şagirdi deyilsiniz");
-  if (!files.length) return fail(400, "Ən azı bir fayl yükləyin");
-
   const now = new Date();
   const isLate = a.dueAt ? now > new Date(a.dueAt) : false;
   if (isLate && !a.allowLate) return fail(403, "Son tarix keçib — təhvil bağlıdır");
 
   const fileDocs = files.map(fileDocFor);
 
-  // Upsert the single (assignment, student) row, replacing any prior files.
+  // Re-upload = EDIT, not wipe: the client sends `keep` (a JSON array of the
+  // student's previously-stored file names) so they can keep some, drop some, and
+  // add new ones. Absent `keep` (older client) → previous "replace all" behavior.
+  let keepList = null;
+  if (typeof req.body.keep === "string") {
+    try {
+      const parsed = JSON.parse(req.body.keep);
+      keepList = Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch {
+      keepList = [];
+    }
+  }
+
   const existing = await Submission.findOne({ assignment: a._id, student: req.user._id });
   if (existing) {
     const oldFiles = existing.files || [];
-    existing.files = fileDocs;
+    const kept = keepList ? oldFiles.filter((f) => keepList.includes(f.fileName)) : [];
+    const combined = [...kept, ...fileDocs];
+    if (!combined.length) return fail(400, "Ən azı bir fayl olmalıdır");
+    if (combined.length > 10) return fail(400, "Maksimum 10 fayl");
+
+    existing.files = combined;
     existing.note = String(req.body.note || "").trim();
     existing.submittedAt = now;
     existing.late = isLate;
@@ -303,11 +318,16 @@ const submitAssignment = asyncHandler(async (req, res) => {
     existing.gradedAt = null;
     existing.gradedBy = null;
     await existing.save();
-    // Remove the superseded files from disk (best-effort).
-    oldFiles.forEach((f) => cleanup(path.join(ASSIGNMENTS_DIR, f.fileName)));
+    // Delete ONLY the files that were actually removed (in old, not in the new set).
+    const keptNames = new Set(combined.map((f) => f.fileName));
+    oldFiles
+      .filter((f) => !keptNames.has(f.fileName))
+      .forEach((f) => cleanup(path.join(ASSIGNMENTS_DIR, f.fileName)));
     return res.status(200).json(existing.toObject());
   }
 
+  // First submission: at least one uploaded file required.
+  if (!fileDocs.length) return fail(400, "Ən azı bir fayl yükləyin");
   const submission = await Submission.create({
     assignment: a._id,
     class: a.class,
