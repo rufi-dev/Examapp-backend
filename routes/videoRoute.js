@@ -39,6 +39,11 @@ const upload = multer({
     cb(null, true);
   },
 });
+// Edit (PATCH) sends the new thumbnail as a base64 field, which exceeds the JSON
+// body limit — parse it as multipart TEXT fields (no file). A JSON edit (rename /
+// audience) passes straight through: multer no-ops on non-multipart requests.
+const editParse = multer({ limits: { fieldSize: 3 * 1024 * 1024 } }).none();
+
 // A no-file POST (YouTube link) is fine — multer just leaves req.file undefined.
 const uploadVideo = (req, res, next) =>
   upload.single("file")(req, res, (err) => {
@@ -61,7 +66,7 @@ router.get("/:id/token", protect, getStreamToken);
 // Rate-limit BEFORE multer so a flood is refused without writing 500MB to disk;
 // the quota needs the written size, so it runs after.
 router.post("/", protect, teacherOnly, uploadRateLimit, uploadVideo, storageQuota, addVideo);
-router.patch("/:id", protect, teacherOnly, updateVideo);
+router.patch("/:id", protect, teacherOnly, editParse, updateVideo);
 router.delete("/:id", protect, teacherOnly, deleteVideo);
 
 module.exports = router;

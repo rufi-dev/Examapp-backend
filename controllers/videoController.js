@@ -352,8 +352,25 @@ const updateVideo = asyncHandler(async (req, res) => {
     video.classes = await ownedClassIds(req.user, req.body.classIds ?? req.body.classId);
     video.class = null; // the list is authoritative from here on
   }
+  // Change the thumbnail (uploaded videos only): a new poster data URL replaces
+  // the old poster file.
+  if (
+    video.source === "file" &&
+    typeof req.body.posterData === "string" &&
+    req.body.posterData.startsWith("data:image")
+  ) {
+    const base = String(video.fileName || "video").replace(/\.[^.]+$/, "");
+    const newPoster = writePoster(req.body.posterData, `${base}-${Date.now()}`);
+    if (newPoster) {
+      if (video.posterName) cleanup(path.join(VIDEOS_DIR, video.posterName));
+      video.posterName = newPoster;
+    }
+  }
   await video.save();
   const populated = await Video.findById(video._id).populate("classes", "name level").populate("class", "name level").lean();
+  if (populated.source === "file" && populated.posterName) {
+    populated.posterToken = signedMediaToken(video, req.user._id);
+  }
   res.json(populated);
 });
 
