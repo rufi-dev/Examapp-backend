@@ -1,5 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const Material = require("../models/materialModel");
+const Video = require("../models/videoModel");
 
 // ---------------------------------------------------------------------------
 // Upload abuse protection for study materials.
@@ -55,13 +56,20 @@ function uploadRateLimit(req, res, next) {
 const quotaFor = (user) =>
   Number(user?.storageQuotaBytes) > 0 ? Number(user.storageQuotaBytes) : DEFAULT_QUOTA;
 
-// Bytes this user already has stored.
+// Bytes this user already has stored — study materials AND uploaded videos both
+// live on the same disk, so they share one quota.
 async function usedBytes(userId) {
-  const agg = await Material.aggregate([
-    { $match: { owner: userId } },
-    { $group: { _id: null, bytes: { $sum: { $ifNull: ["$sizeBytes", 0] } } } },
+  const [mat, vid] = await Promise.all([
+    Material.aggregate([
+      { $match: { owner: userId } },
+      { $group: { _id: null, bytes: { $sum: { $ifNull: ["$sizeBytes", 0] } } } },
+    ]),
+    Video.aggregate([
+      { $match: { owner: userId, source: "file" } },
+      { $group: { _id: null, bytes: { $sum: { $ifNull: ["$sizeBytes", 0] } } } },
+    ]),
   ]);
-  return agg[0]?.bytes || 0;
+  return (mat[0]?.bytes || 0) + (vid[0]?.bytes || 0);
 }
 
 // Checked AFTER multer has written the file (it streams to disk as it arrives)
