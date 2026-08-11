@@ -12,6 +12,7 @@ const {
   deleteVideo,
   getStreamToken,
   streamVideo,
+  getPoster,
   VIDEOS_DIR,
 } = require("../controllers/videoController");
 
@@ -29,7 +30,8 @@ const storage = multer.diskStorage({
 const MAX_VIDEO_BYTES = Number(process.env.VIDEO_MAX_BYTES || 2 * 1024 * 1024 * 1024); // 2GB
 const upload = multer({
   storage,
-  limits: { fileSize: MAX_VIDEO_BYTES },
+  // fieldSize covers the base64 poster frame sent alongside the video.
+  limits: { fileSize: MAX_VIDEO_BYTES, fieldSize: 3 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (!/\.(mp4|webm)$/i.test(file.originalname || "")) {
       return cb(new Error("Yalnız MP4 və ya WebM video yükləyin"));
@@ -54,6 +56,7 @@ router.get("/", protect, getVideos);
 // Stream a private uploaded video. `token` (from /:id/token) is the auth — no
 // bearer middleware, so a native <video> tag can load it with Range support.
 router.get("/:id/stream", streamVideo);
+router.get("/:id/poster", getPoster); // token-gated thumbnail (no bearer on <img>)
 router.get("/:id/token", protect, getStreamToken);
 // Rate-limit BEFORE multer so a flood is refused without writing 500MB to disk;
 // the quota needs the written size, so it runs after.

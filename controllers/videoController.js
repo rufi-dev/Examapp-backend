@@ -59,6 +59,28 @@ async function canAccessVideo(user, video) {
   return classIds.some((c) => audience.includes(String(c)));
 }
 
+// Persist a poster frame grabbed CLIENT-SIDE (a base64 JPEG/PNG/WebP data URL),
+// next to the video in videos/. Best-effort + bounded (≤1MB); returns the stored
+// name or "" so a missing/oversized poster simply falls back to the placeholder.
+function writePoster(dataUrl, baseName) {
+  try {
+    const m = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl || ""));
+    if (!m) return "";
+    const buf = Buffer.from(m[2], "base64");
+    if (!buf.length || buf.length > 1024 * 1024) return "";
+    const name = `poster-${baseName}.jpg`;
+    fs.writeFileSync(path.join(VIDEOS_DIR, name), buf);
+    return name;
+  } catch {
+    return "";
+  }
+}
+
+// A short-lived signed token for the media endpoints (the <video>/<img> tags
+// can't send the bearer header). Scoped to one video.
+const signedMediaToken = (video, uid) =>
+  jwt.sign({ vid: String(video._id), uid: String(uid) }, process.env.JWT_SECRET, { expiresIn: "3h" });
+
 // Pull the 11-char YouTube video id out of the common URL shapes (watch,
 // youtu.be, embed, shorts, live) or accept a bare id.
 function extractYouTubeId(input) {
@@ -146,7 +168,19 @@ const getVideos = asyncHandler(async (req, res) => {
     .populate("classes", "name level").populate("class", "name level")
     .lean();
   const page = pageResult(rows, limit);
-  res.json(wantsEnvelope(req) ? page : page.items);
+  // Attach a short-lived poster token to uploaded videos so the card can show a
+  // real thumbnail via <img src=…/poster?t=…> (no bearer header on an <img>).
+  const withPosters = (list) =>
+    list.map((v) =>
+      v.source === "file" && v.posterName
+        ? { ...v, posterToken: signedMediaToken(v, req.user._id) }
+        : v
+    );
+  if (wantsEnvelope(req)) {
+    res.json({ ...page, items: withPosters(page.items) });
+  } else {
+    res.json(withPosters(page.items));
+  }
 });
 
 // POST /api/videos — teacher/admin adds a video: either a YouTube link OR an
@@ -179,13 +213,17 @@ const addVideo = asyncHandler(async (req, res) => {
       /* non-fatal */
     }
     const mimeType = /webm$/i.test(file.originalname) ? "video/webm" : "video/mp4";
+    const storedName = path.basename(file.path); // vid-<rand>.ext
+    // Store the client-captured poster frame (best-effort) named after the video.
+    const posterName = writePoster(req.body.posterData, storedName.replace(/\.[^.]+$/, ""));
     const video = await Video.create({
       title,
       source: "file",
-      fileName: path.basename(file.path),
+      fileName: storedName,
       originalName: file.originalname || "",
       mimeType,
       sizeBytes,
+      posterName,
       classes: classIds,
       class: null,
       owner: req.user._id,
@@ -195,6 +233,9 @@ const addVideo = asyncHandler(async (req, res) => {
       .populate("classes", "name level")
       .populate("class", "name level")
       .lean();
+    // Include a poster token so the card shows the thumbnail immediately (getVideos
+    // adds it on later loads).
+    if (posterName) populated.posterToken = signedMediaToken(video, req.user._id);
     return res.status(201).json(populated);
   }
 
@@ -269,6 +310,29 @@ const streamVideo = asyncHandler(async (req, res) => {
   });
 });
 
+// GET /api/videos/:id/poster?t=<token> — the uploaded video's thumbnail frame.
+// Token-gated like the stream (an <img> can't send the bearer header).
+const getPoster = asyncHandler(async (req, res) => {
+  let payload;
+  try {
+    payload = jwt.verify(String(req.query.t || ""), process.env.JWT_SECRET);
+  } catch {
+    return res.status(401).end();
+  }
+  if (!payload || payload.vid !== String(req.params.id)) return res.status(403).end();
+  const video = await Video.findById(req.params.id).lean();
+  if (!video || video.source !== "file" || !video.posterName) return res.status(404).end();
+  const abs = path.join(VIDEOS_DIR, video.posterName);
+  if (!abs.startsWith(VIDEOS_DIR) || !fs.existsSync(abs)) return res.status(404).end();
+  res.sendFile(abs, {
+    headers: {
+      "Content-Type": "image/jpeg",
+      "Cache-Control": "private, max-age=3600",
+      "X-Robots-Tag": "noindex, nofollow",
+    },
+  });
+});
+
 // PATCH /api/videos/:id — owner/admin retargets the video at another class (or
 // back to "all my students"), or renames it.
 const updateVideo = asyncHandler(async (req, res) => {
@@ -303,9 +367,11 @@ const deleteVideo = asyncHandler(async (req, res) => {
     return res.status(403).json({ message: "Bu video sizə aid deyil" });
   }
   const storedName = video.source === "file" ? video.fileName : "";
+  const posterName = video.source === "file" ? video.posterName : "";
   await video.deleteOne();
   if (storedName) cleanup(path.join(VIDEOS_DIR, storedName)); // free the disk
+  if (posterName) cleanup(path.join(VIDEOS_DIR, posterName));
   res.json({ id: req.params.id });
 });
 
-module.exports = { getVideos, addVideo, updateVideo, deleteVideo, getStreamToken, streamVideo, VIDEOS_DIR };
+module.exports = { getVideos, addVideo, updateVideo, deleteVideo, getStreamToken, streamVideo, getPoster, VIDEOS_DIR };

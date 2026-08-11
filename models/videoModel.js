@@ -23,6 +23,9 @@ const videoSchema = Schema(
     originalName: { type: String, trim: true, default: "" },
     mimeType: { type: String, default: "" }, // video/mp4 | video/webm
     sizeBytes: { type: Number, default: 0 },
+    // Auto-generated poster frame (a small JPEG grabbed in the browser at upload),
+    // stored next to the video in videos/. Served token-gated like the video.
+    posterName: { type: String, default: "" },
     // Audience, same rule as study materials: EMPTY = all of this teacher's
     // students, otherwise only the listed classes.
     classes: [{ type: Schema.Types.ObjectId, ref: "Class", index: true }],
