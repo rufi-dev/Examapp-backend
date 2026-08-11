@@ -95,6 +95,11 @@ const runUpload = (field, max) => (req, res, next) =>
     res.status(400).json({ message });
   });
 
+// Text-only edits must not consume the upload throttle. Multipart edits do,
+// because their files have the same storage/validation cost as creation.
+const uploadLimitWhenMultipart = (req, res, next) =>
+  req.is("multipart/form-data") ? uploadRateLimit(req, res, next) : next();
+
 // ---- reads ------------------------------------------------------------------
 // Declared BEFORE the "/:id/..." routes so the literal "mine" is never parsed as an id.
 router.get("/mine", protect, myAssignments); // cross-class hub (all my classes)
@@ -105,7 +110,15 @@ router.get("/:id/submissions", protect, teacherOnly, getSubmissions);
 
 // ---- teacher writes ---------------------------------------------------------
 router.post("/", protect, teacherOnly, uploadRateLimit, runUpload("attachments", 5), verifyUploads, createAssignment);
-router.patch("/:id", protect, teacherOnly, updateAssignment);
+router.patch(
+  "/:id",
+  protect,
+  teacherOnly,
+  uploadLimitWhenMultipart,
+  runUpload("attachments", 5),
+  verifyUploads,
+  updateAssignment
+);
 router.patch("/:id/submissions/:submissionId", protect, teacherOnly, gradeSubmission);
 router.delete("/:id", protect, teacherOnly, deleteAssignment);
 

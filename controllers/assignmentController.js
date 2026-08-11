@@ -166,16 +166,56 @@ const createAssignment = asyncHandler(async (req, res) => {
   res.status(201).json(assignment.toObject());
 });
 
-// PATCH /api/assignments/:id — owner/admin edits the text fields, deadline,
-// late policy and grading ceiling. Attachments are set at creation.
+function parseRemovedAttachments(value) {
+  if (value === undefined || value === null || value === "") return [];
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(parsed) || parsed.length > 5) return null;
+  const names = [];
+  for (const raw of parsed) {
+    const name = String(raw || "");
+    if (!name || name !== path.basename(name) || name.includes("\\")) return null;
+    if (!names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+// PATCH /api/assignments/:id — owner/admin edits content, policy and optional
+// handouts. New files are validated before this handler; removed private bytes
+// are deleted only after the assignment document has committed successfully.
 const updateAssignment = asyncHandler(async (req, res) => {
+  const files = req.files || [];
+  const fail = (code, message) => {
+    files.forEach((file) => cleanup(file.path));
+    return res.status(code).json({ message });
+  };
+
   const a = await Assignment.findById(req.params.id);
-  if (!a || a.deletedAt) return res.status(404).json({ message: "Tapılmadı" });
-  if (!(await isClassManager(req.user, a.class))) return res.status(403).json({ message: "İcazə yoxdur" });
+  if (!a || a.deletedAt) return fail(404, "Tapılmadı");
+  if (!(await isClassManager(req.user, a.class))) return fail(403, "İcazə yoxdur");
+
+  const removeNames = parseRemovedAttachments(req.body.removeAttachments);
+  if (removeNames === null) return fail(400, "Silinəcək fayllar yanlışdır");
+  const currentFiles = Array.from(a.attachments || []);
+  const currentNames = new Set(currentFiles.map((file) => String(file.fileName)));
+  if (removeNames.some((name) => !currentNames.has(name))) {
+    return fail(400, "Silinəcək fayl tapılmadı");
+  }
+  const removeSet = new Set(removeNames);
+  const retainedFiles = currentFiles.filter((file) => !removeSet.has(String(file.fileName)));
+  if (retainedFiles.length + files.length > 5) {
+    return fail(400, "Maksimum 5 fayl əlavə etmək olar");
+  }
 
   if (req.body.title !== undefined) {
     const title = String(req.body.title).trim();
-    if (!title) return res.status(400).json({ message: "Başlıq daxil edin" });
+    if (!title) return fail(400, "Başlıq daxil edin");
     a.title = title;
   }
   if (req.body.description !== undefined) a.description = String(req.body.description).trim();
@@ -184,7 +224,7 @@ const updateAssignment = asyncHandler(async (req, res) => {
     if (!req.body.dueAt) a.dueAt = null;
     else {
       const d = new Date(req.body.dueAt);
-      if (Number.isNaN(d.getTime())) return res.status(400).json({ message: "Son tarix yanlışdır" });
+      if (Number.isNaN(d.getTime())) return fail(400, "Son tarix yanlışdır");
       a.dueAt = d;
     }
   }
@@ -192,11 +232,20 @@ const updateAssignment = asyncHandler(async (req, res) => {
     if (req.body.maxPoints === "" || req.body.maxPoints === null) a.maxPoints = null;
     else {
       const n = Number(req.body.maxPoints);
-      if (!Number.isFinite(n) || n < 0) return res.status(400).json({ message: "Maksimal bal yanlışdır" });
+      if (!Number.isFinite(n) || n < 0) return fail(400, "Maksimal bal yanlışdır");
       a.maxPoints = n;
     }
   }
-  await a.save();
+
+  a.attachments = [...retainedFiles, ...files.map(fileDocFor)];
+  try {
+    await a.save();
+  } catch (error) {
+    files.forEach((file) => cleanup(file.path));
+    throw error;
+  }
+
+  removeNames.forEach((name) => cleanup(path.join(ASSIGNMENTS_DIR, name)));
   res.json(a.toObject());
 });
 
