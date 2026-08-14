@@ -181,9 +181,14 @@ const listClassBoards = asyncHandler(async (req, res) => {
     ],
   })
     .sort({ updatedAt: -1 })
-    .select("title elementCount classes updatedAt")
+    .select("title elementCount classes updatedAt owner")
+    .populate("classes", "name")
     .lean();
-  res.json(boards);
+  // `canManage` = the viewer owns this board (share/delete endpoints require it);
+  // don't leak the raw owner id to the client.
+  res.json(
+    boards.map(({ owner, ...b }) => ({ ...b, canManage: String(owner) === String(req.user._id) }))
+  );
 });
 
 module.exports = { listBoards, createBoard, getBoard, saveBoard, deleteBoard, listClassBoards };
