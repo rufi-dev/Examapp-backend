@@ -41,9 +41,14 @@ async function accessLevel(user, board) {
   if (String(board.owner) === String(user._id)) return { ok: true, canEdit: true };
   if (user.role === "teacher") return { ok: false, canEdit: false };
   const { classIds, ownerIds } = await studentScope(user._id);
-  if (!ownerIds.includes(String(board.owner))) return { ok: false, canEdit: false };
   const audience = audienceOf(board);
-  if (!audience.length) return { ok: true, canEdit: false }; // all of that teacher's students
+  if (!audience.length) {
+    // Empty audience = "all of the board owner's students": the student must be
+    // enrolled in a class owned by the board's owner.
+    return { ok: ownerIds.includes(String(board.owner)), canEdit: false };
+  }
+  // Explicit classes: a student in any listed class may view it — even if the
+  // board was shared by an admin who doesn't own that class.
   return { ok: audience.some((c) => classIds.includes(c)), canEdit: false };
 }
 
@@ -167,9 +172,13 @@ const listClassBoards = asyncHandler(async (req, res) => {
     if (!enrolled) return res.status(403).json({ message: "Bu sinfə girişiniz yoxdur" });
   }
   const boards = await Board.find({
-    owner: cls.owner,
     deletedAt: null,
-    $or: [{ classes: { $size: 0 } }, { classes: req.params.classId }],
+    $or: [
+      // The class teacher's boards shared with ALL their students.
+      { owner: cls.owner, classes: { $size: 0 } },
+      // Any board explicitly shared to THIS class (incl. admin-shared ones).
+      { classes: cls._id },
+    ],
   })
     .sort({ updatedAt: -1 })
     .select("title elementCount classes updatedAt")
