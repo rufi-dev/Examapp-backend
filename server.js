@@ -184,6 +184,8 @@ app.use("/api/videos", videoRoute)
 app.use("/api/materials", materialRoute)
 // Class homework tasks + student submissions (private files in assignments/).
 app.use("/api/assignments", assignmentRoute)
+// Teacher whiteboards ("Lövhə"). Scene saved via multipart (dodges the JSON cap).
+app.use("/api/boards", require("./routes/boardRoute"))
 // Teacher Success Journey — every route is flag-gated (404 when off), so mounting
 // the router unconditionally is safe: a flag-off deployment exposes nothing.
 app.use("/api/teacher-success", require("./routes/teacherSuccessRoute"))

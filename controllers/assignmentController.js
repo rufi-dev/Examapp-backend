@@ -1,5 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const fs = require("fs");
+const fsp = require("fs").promises;
 const path = require("path");
 const Assignment = require("../models/assignmentModel");
 const Submission = require("../models/submissionModel");
@@ -11,6 +12,47 @@ const Enrollment = require("../models/enrollmentModel");
 // files; nothing here is reachable without passing an access check below.
 const ASSIGNMENTS_DIR = path.join(process.cwd(), "assignments");
 if (!fs.existsSync(ASSIGNMENTS_DIR)) fs.mkdirSync(ASSIGNMENTS_DIR, { recursive: true });
+
+// Cached image thumbnails live in a subdir of the private store, so previews
+// stay behind the same access checks as the originals.
+const THUMBS_DIR = path.join(ASSIGNMENTS_DIR, ".thumbs");
+const THUMB_MAX_EDGE = 400; // px on the long edge — enough to eyeball the work.
+
+// sharp is a native module; if it fails to load (or is absent on a host), we
+// simply serve the full-size original instead. Previews degrade, never break.
+let sharp = null;
+try {
+  // eslint-disable-next-line global-require
+  sharp = require("sharp");
+} catch {
+  sharp = null;
+}
+
+const isImageMeta = (meta) =>
+  meta && (meta.kind === "image" || String(meta.mimeType || "").startsWith("image/"));
+
+// Return an absolute path to a small cached webp thumbnail for an image file,
+// or null to signal "no thumbnail — send the original". Generated once, then
+// reused. Any failure (unsupported format like HEIC, corrupt file) → null.
+async function thumbnailPathFor(meta) {
+  if (!sharp || !isImageMeta(meta)) return null;
+  const srcAbs = path.join(ASSIGNMENTS_DIR, meta.fileName);
+  if (!srcAbs.startsWith(ASSIGNMENTS_DIR) || !fs.existsSync(srcAbs)) return null;
+  const thumbAbs = path.join(THUMBS_DIR, `${meta.fileName}.webp`);
+  try {
+    if (fs.existsSync(thumbAbs) && fs.statSync(thumbAbs).size > 0) return thumbAbs;
+    if (!fs.existsSync(THUMBS_DIR)) fs.mkdirSync(THUMBS_DIR, { recursive: true });
+    await sharp(srcAbs, { failOn: "none" })
+      .rotate() // honour EXIF orientation so phone photos aren't sideways
+      .resize(THUMB_MAX_EDGE, THUMB_MAX_EDGE, { fit: "inside", withoutEnlargement: true })
+      .webp({ quality: 72 })
+      .toFile(thumbAbs);
+    return thumbAbs;
+  } catch {
+    cleanup(thumbAbs); // never leave a half-written thumb behind
+    return null;
+  }
+}
 
 const cleanup = (p) => {
   try {
@@ -91,12 +133,20 @@ const listAssignments = asyncHandler(async (req, res) => {
     const studentTotal = await Enrollment.countDocuments({ class: classId, status: "approved" });
     const counts = await Submission.aggregate([
       { $match: { assignment: { $in: ids } } },
-      { $group: { _id: "$assignment", submitted: { $sum: 1 }, graded: { $sum: { $cond: [{ $eq: ["$status", "returned"] }, 1, 0] } } } },
+      {
+        $group: {
+          _id: "$assignment",
+          submitted: { $sum: 1 },
+          graded: { $sum: { $cond: [{ $eq: ["$status", "returned"] }, 1, 0] } },
+          // Unseen by the owner, or re-uploaded since it was last seen.
+          newSub: { $sum: { $cond: [{ $lt: [{ $ifNull: ["$seenByOwnerAt", new Date(0)] }, "$submittedAt"] }, 1, 0] } },
+        },
+      },
     ]);
     const byId = new Map(counts.map((c) => [String(c._id), c]));
     const out = assignments.map((a) => {
       const c = byId.get(String(a._id));
-      return { ...a, studentTotal, submittedCount: c?.submitted || 0, gradedCount: c?.graded || 0 };
+      return { ...a, studentTotal, submittedCount: c?.submitted || 0, gradedCount: c?.graded || 0, newCount: c?.newSub || 0 };
     });
     return res.json(out);
   }
@@ -114,6 +164,7 @@ const listAssignments = asyncHandler(async (req, res) => {
     attachments: a.attachments,
     dueAt: a.dueAt,
     allowLate: a.allowLate,
+    lockAfterSubmit: a.lockAfterSubmit,
     maxPoints: a.maxPoints,
     createdAt: a.createdAt,
     mySubmission: byAssignment.get(String(a._id)) || null,
@@ -121,8 +172,28 @@ const listAssignments = asyncHandler(async (req, res) => {
   return res.json(out);
 });
 
+// Which classes a create targets: the hub picker sends `classIds` (a JSON array
+// — one or many, "all my classes" is just the full list resolved client-side);
+// a class page still sends a single `classId`. De-duplicated, trimmed.
+function parseTargetClassIds(body) {
+  let ids = [];
+  if (body.classIds !== undefined) {
+    try {
+      const parsed = JSON.parse(body.classIds);
+      if (Array.isArray(parsed)) ids = parsed;
+    } catch {
+      ids = [];
+    }
+  }
+  if (!ids.length && body.classId) ids = [body.classId];
+  return [...new Set(ids.map((x) => String(x || "").trim()).filter(Boolean))];
+}
+
 // POST /api/assignments — teacher/admin creates a task (multipart; optional
-// handout files under the "attachments" field).
+// handout files under the "attachments" field). Targets one class (class page)
+// or several at once (the hub's "all / specific classes" picker) — in which case
+// one independent assignment is created per class, each with its OWN copy of the
+// uploaded handout bytes so editing/deleting one never affects the others.
 const createAssignment = asyncHandler(async (req, res) => {
   const files = req.files || [];
   const fail = (code, message) => {
@@ -130,9 +201,11 @@ const createAssignment = asyncHandler(async (req, res) => {
     return res.status(code).json({ message });
   };
 
-  const classId = String(req.body.classId || "").trim();
-  if (!classId) return fail(400, "Sinif seçilməyib");
-  if (!(await isClassManager(req.user, classId))) return fail(403, "Bu sinif sizə aid deyil");
+  const classIds = parseTargetClassIds(req.body);
+  if (!classIds.length) return fail(400, "Sinif seçilməyib");
+  for (const cid of classIds) {
+    if (!(await isClassManager(req.user, cid))) return fail(403, "Sinif sizə aid deyil");
+  }
 
   const title = String(req.body.title || "").trim();
   if (!title) return fail(400, "Başlıq daxil edin");
@@ -150,20 +223,50 @@ const createAssignment = asyncHandler(async (req, res) => {
     maxPoints = n;
   }
 
-  const assignment = await Assignment.create({
-    class: classId,
+  const base = {
     owner: req.user._id,
     ownerName: req.user.name || "",
     title,
     description: String(req.body.description || "").trim(),
-    attachments: files.map(fileDocFor),
     dueAt,
     // Multipart booleans arrive as the string "true"/"false".
     allowLate: String(req.body.allowLate) !== "false",
+    lockAfterSubmit: String(req.body.lockAfterSubmit) === "true",
     maxPoints,
-  });
+  };
+  const baseFiles = files.map(fileDocFor);
 
-  res.status(201).json(assignment.toObject());
+  const created = [];
+  for (let i = 0; i < classIds.length; i += 1) {
+    const iterCopies = [];
+    try {
+      // The first class keeps the originally uploaded files; the rest get a
+      // private copy each so their lifecycles are fully independent.
+      let attachments = baseFiles;
+      if (i > 0) {
+        attachments = [];
+        for (const f of files) {
+          const ext = path.extname(f.path);
+          const newName = `asg-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+          const newPath = path.join(ASSIGNMENTS_DIR, newName);
+          await fsp.copyFile(f.path, newPath);
+          iterCopies.push(newPath);
+          attachments.push(fileDocFor({ ...f, path: newPath }));
+        }
+      }
+      const a = await Assignment.create({ ...base, class: classIds[i], attachments });
+      created.push(a.toObject());
+    } catch (err) {
+      iterCopies.forEach(cleanup); // never leave this iteration's copies orphaned
+      if (!created.length) return fail(500, "Tapşırıq yaradılmadı");
+      break; // some already committed — keep them, stop here
+    }
+  }
+
+  // Single target → the assignment object (unchanged contract for the class page).
+  // Multiple → a small summary; the hub refetches its list either way.
+  if (classIds.length === 1) return res.status(201).json(created[0]);
+  res.status(201).json({ created: created.length, assignments: created });
 });
 
 function parseRemovedAttachments(value) {
@@ -220,6 +323,7 @@ const updateAssignment = asyncHandler(async (req, res) => {
   }
   if (req.body.description !== undefined) a.description = String(req.body.description).trim();
   if (req.body.allowLate !== undefined) a.allowLate = String(req.body.allowLate) !== "false";
+  if (req.body.lockAfterSubmit !== undefined) a.lockAfterSubmit = String(req.body.lockAfterSubmit) === "true";
   if (req.body.dueAt !== undefined) {
     if (!req.body.dueAt) a.dueAt = null;
     else {
@@ -245,7 +349,10 @@ const updateAssignment = asyncHandler(async (req, res) => {
     throw error;
   }
 
-  removeNames.forEach((name) => cleanup(path.join(ASSIGNMENTS_DIR, name)));
+  removeNames.forEach((name) => {
+    cleanup(path.join(ASSIGNMENTS_DIR, name));
+    cleanup(path.join(THUMBS_DIR, `${name}.webp`));
+  });
   res.json(a.toObject());
 });
 
@@ -316,6 +423,23 @@ const gradeSubmission = asyncHandler(async (req, res) => {
   res.json(populated);
 });
 
+// POST /api/assignments/:id/submissions/:submissionId/seen — the class owner
+// opened this submission in the review dialog; clear its "new" badge. Idempotent.
+const markSubmissionSeen = asyncHandler(async (req, res) => {
+  const a = await Assignment.findById(req.params.id).lean();
+  if (!a || a.deletedAt) return res.status(404).json({ message: "Tapılmadı" });
+  if (!(await isClassManager(req.user, a.class))) return res.status(403).json({ message: "İcazə yoxdur" });
+
+  const now = new Date();
+  const s = await Submission.findOneAndUpdate(
+    { _id: req.params.submissionId, assignment: a._id },
+    { $set: { seenByOwnerAt: now } },
+    { new: true }
+  ).lean();
+  if (!s) return res.status(404).json({ message: "Təhvil tapılmadı" });
+  res.json({ _id: s._id, seenByOwnerAt: s.seenByOwnerAt });
+});
+
 // POST /api/assignments/:id/submit — student uploads work (multipart, field
 // "files", 1..10). A re-submission REPLACES the previous files (one row per
 // student per task). Blocked after the deadline unless the teacher allows late.
@@ -349,6 +473,10 @@ const submitAssignment = asyncHandler(async (req, res) => {
   }
 
   const existing = await Submission.findOne({ assignment: a._id, student: req.user._id });
+  // "Upload once" tasks: the first submission is final — no edit, add, or remove.
+  if (existing && a.lockAfterSubmit) {
+    return fail(403, "Bu tapşırıq birdəfəlikdir — təhvil verildikdən sonra dəyişmək olmaz");
+  }
   if (existing) {
     const oldFiles = existing.files || [];
     const kept = keepList ? oldFiles.filter((f) => keepList.includes(f.fileName)) : [];
@@ -371,7 +499,10 @@ const submitAssignment = asyncHandler(async (req, res) => {
     const keptNames = new Set(combined.map((f) => f.fileName));
     oldFiles
       .filter((f) => !keptNames.has(f.fileName))
-      .forEach((f) => cleanup(path.join(ASSIGNMENTS_DIR, f.fileName)));
+      .forEach((f) => {
+        cleanup(path.join(ASSIGNMENTS_DIR, f.fileName));
+        cleanup(path.join(THUMBS_DIR, `${f.fileName}.webp`));
+      });
     return res.status(200).json(existing.toObject());
   }
 
@@ -414,7 +545,14 @@ const myAssignments = asyncHandler(async (req, res) => {
     const [counts, enroll] = await Promise.all([
       Submission.aggregate([
         { $match: { assignment: { $in: ids } } },
-        { $group: { _id: "$assignment", submitted: { $sum: 1 }, graded: { $sum: { $cond: [{ $eq: ["$status", "returned"] }, 1, 0] } } } },
+        {
+          $group: {
+            _id: "$assignment",
+            submitted: { $sum: 1 },
+            graded: { $sum: { $cond: [{ $eq: ["$status", "returned"] }, 1, 0] } },
+            newSub: { $sum: { $cond: [{ $lt: [{ $ifNull: ["$seenByOwnerAt", new Date(0)] }, "$submittedAt"] }, 1, 0] } },
+          },
+        },
       ]),
       classObjIds.length
         ? Enrollment.aggregate([
@@ -432,6 +570,7 @@ const myAssignments = asyncHandler(async (req, res) => {
         studentTotal: eByClass.get(String(a.class?._id || a.class)) || 0,
         submittedCount: c?.submitted || 0,
         gradedCount: c?.graded || 0,
+        newCount: c?.newSub || 0,
       };
     });
     return res.json(out);
@@ -456,6 +595,7 @@ const myAssignments = asyncHandler(async (req, res) => {
     attachments: a.attachments,
     dueAt: a.dueAt,
     allowLate: a.allowLate,
+    lockAfterSubmit: a.lockAfterSubmit,
     maxPoints: a.maxPoints,
     createdAt: a.createdAt,
     mySubmission: byA.get(String(a._id)) || null,
@@ -471,7 +611,7 @@ const getAttachmentFile = asyncHandler(async (req, res) => {
   if (!(await canSeeClass(req.user, a.class))) return res.status(403).json({ message: "İcazə yoxdur" });
   const meta = (a.attachments || []).find((f) => f.fileName === req.params.fileName);
   if (!meta) return res.status(404).json({ message: "Fayl tapılmadı" });
-  return sendStored(res, meta, req.query.download === "1");
+  return sendStored(res, meta, { download: req.query.download === "1", thumb: req.query.thumb === "1" });
 });
 
 // GET /api/assignments/:id/submissions/:submissionId/files/:fileName — a
@@ -488,12 +628,13 @@ const getSubmissionFile = asyncHandler(async (req, res) => {
 
   const meta = (s.files || []).find((f) => f.fileName === req.params.fileName);
   if (!meta) return res.status(404).json({ message: "Fayl tapılmadı" });
-  return sendStored(res, meta, req.query.download === "1");
+  return sendStored(res, meta, { download: req.query.download === "1", thumb: req.query.thumb === "1" });
 });
 
 // Stream a stored file after the caller has been authorised. Inline by default
-// (so images/PDF render in-app); `download` forces a save with the real name.
-function sendStored(res, meta, download) {
+// (so images/PDF render in-app); `download` forces a save with the real name;
+// `thumb` serves a small cached preview for images (falls back to the original).
+async function sendStored(res, meta, { download = false, thumb = false } = {}) {
   const abs = path.join(ASSIGNMENTS_DIR, meta.fileName);
   // Defensive: never let a crafted fileName escape the assignments dir.
   if (!abs.startsWith(ASSIGNMENTS_DIR) || !fs.existsSync(abs)) {
@@ -502,6 +643,20 @@ function sendStored(res, meta, download) {
   if (download) {
     const safeName = String(meta.originalName || meta.fileName).replace(/[\\/:*?"<>|]+/g, "_");
     return res.download(abs, safeName);
+  }
+  if (thumb) {
+    const thumbAbs = await thumbnailPathFor(meta);
+    if (thumbAbs) {
+      return res.sendFile(thumbAbs, {
+        headers: {
+          "Content-Type": "image/webp",
+          "Content-Disposition": "inline",
+          "Cache-Control": "private, max-age=86400",
+          "X-Robots-Tag": "noindex, nofollow",
+        },
+      });
+    }
+    // No thumbnail available (not an image, or sharp unavailable) → original.
   }
   res.sendFile(abs, {
     acceptRanges: true,
@@ -523,6 +678,7 @@ module.exports = {
   deleteAssignment,
   getSubmissions,
   gradeSubmission,
+  markSubmissionSeen,
   submitAssignment,
   getAttachmentFile,
   getSubmissionFile,

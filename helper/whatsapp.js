@@ -124,6 +124,19 @@ function scheduleInitRetry(s, id, reason) {
   if (shuttingDown) return;
   const MAX = Number(process.env.WHATSAPP_INIT_RETRIES || 4);
   if ((s.initRetries || 0) >= MAX) {
+    // Self-heal against a stale version pin: a forced-but-outdated WhatsApp Web
+    // build keeps failing init with "Execution context was destroyed". Before
+    // giving up, drop the pin and retry with the LIVE version (always current),
+    // so a drifted pin can never permanently dead-end the connection.
+    if (WWEB_VERSION && !s.noPin) {
+      s.noPin = true;
+      s.initRetries = 0;
+      s.lastError = null;
+      console.warn(`[WHATSAPP] ${id} pinned start failed ${MAX}×; switching to LIVE WhatsApp Web version`);
+      clearTimeout(s.reconnectTimer);
+      s.reconnectTimer = setTimeout(() => { if (!shuttingDown) initFor(id); }, 3000);
+      return;
+    }
     s.lastError = reason || "start_failed";
     console.warn(`[WHATSAPP] ${id} giving up after ${s.initRetries} tries (${reason}) — refresh to retry`);
     return;
@@ -158,13 +171,19 @@ function initFor(ownerId) {
     return;
   }
 
+  // Force the pinned build UNLESS this session already fell back to live (the
+  // pin drifted stale and kept destroying the execution context — see
+  // scheduleInitRetry). noPin sessions load whatever WhatsApp Web serves today.
+  const usePin = !!WWEB_VERSION && !s.noPin;
+  console.log(`[WHATSAPP] ${id} starting (${usePin ? `pin=${WWEB_VERSION}` : "live version"})`);
   s.client = new Client({
     authStrategy: new LocalAuth({ clientId: id, dataPath: AUTH_ROOT }),
-    // Stop endlessly re-issuing a QR for a session nobody scans (~6 × 20s ≈ 2
+    // Stop endlessly re-issuing a QR for a session nobody scans (~10 × 20s ≈ 3
     // min); after that the client gives up (we won't auto-reconnect it below).
-    qrMaxRetries: Number(process.env.WHATSAPP_QR_MAX_RETRIES || 6),
-    // Pin a known-good WhatsApp Web build (see WWEB_VERSION above).
-    ...(WWEB_VERSION
+    qrMaxRetries: Number(process.env.WHATSAPP_QR_MAX_RETRIES || 10),
+    // Pin a known-good WhatsApp Web build (see WWEB_VERSION above), unless we've
+    // fallen back to the live version for this session.
+    ...(usePin
       ? {
           webVersion: WWEB_VERSION,
           webVersionCache: {

@@ -44,6 +44,11 @@ const submissionSchema = Schema(
     feedback: { type: String, trim: true, default: "" },
     gradedAt: { type: Date, default: null },
     gradedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
+
+    // When the class owner last opened this submission in the review dialog. A
+    // submission is "new" (badge) while seenByOwnerAt is null OR older than the
+    // latest submittedAt, so a re-upload after the teacher looked re-flags it.
+    seenByOwnerAt: { type: Date, default: null },
   },
   { timestamps: true, minimize: false }
 );

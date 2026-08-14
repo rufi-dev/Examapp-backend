@@ -16,6 +16,7 @@ const {
   deleteAssignment,
   getSubmissions,
   gradeSubmission,
+  markSubmissionSeen,
   submitAssignment,
   getAttachmentFile,
   getSubmissionFile,
@@ -120,6 +121,7 @@ router.patch(
   updateAssignment
 );
 router.patch("/:id/submissions/:submissionId", protect, teacherOnly, gradeSubmission);
+router.post("/:id/submissions/:submissionId/seen", protect, teacherOnly, markSubmissionSeen);
 router.delete("/:id", protect, teacherOnly, deleteAssignment);
 
 // ---- student write ----------------------------------------------------------

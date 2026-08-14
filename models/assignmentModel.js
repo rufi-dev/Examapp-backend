@@ -46,6 +46,11 @@ const assignmentSchema = Schema(
     // turns on point grading (0..maxPoints) in the teacher's review panel.
     maxPoints: { type: Number, default: null, min: 0 },
 
+    // true = a student may submit exactly ONCE; the upload endpoint then refuses
+    // any re-upload, so they cannot edit, add, or remove files afterwards. The
+    // student is warned before that final submit. false = free re-uploads (default).
+    lockAfterSubmit: { type: Boolean, default: false },
+
     deletedAt: { type: Date, default: null, index: true },
     deletedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
   },
