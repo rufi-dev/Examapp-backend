@@ -61,14 +61,23 @@ const pagesOf = (board) => {
 };
 
 // ---- teacher: manage own boards ---------------------------------------------
-// GET /api/boards — the teacher's boards (metadata + audience), newest first.
+// GET /api/boards — a teacher's own boards; an ADMIN sees EVERY teacher's boards
+// (with ownerName), newest first. `mine`/`canManage` let the client label and gate.
 const listBoards = asyncHandler(async (req, res) => {
-  const boards = await Board.find({ owner: req.user._id, deletedAt: null })
+  const isAdmin = req.user.role === "admin";
+  const filter = isAdmin ? { deletedAt: null } : { owner: req.user._id, deletedAt: null };
+  const boards = await Board.find(filter)
     .sort({ updatedAt: -1 })
-    .select("title elementCount sizeBytes classes createdAt updatedAt")
+    .select("title elementCount sizeBytes classes ownerName owner createdAt updatedAt")
     .populate("classes", "name")
     .lean();
-  res.json(boards.map((b) => ({ ...b, pageCount: undefined })));
+  res.json(
+    boards.map(({ owner, ...b }) => ({
+      ...b,
+      mine: String(owner) === String(req.user._id),
+      canManage: isAdmin || String(owner) === String(req.user._id),
+    }))
+  );
 });
 
 // POST /api/boards — create a new board (one empty page) with an audience.
@@ -108,7 +117,9 @@ const getBoard = asyncHandler(async (req, res) => {
 // PATCH /api/boards/:id — save (owner only). Pages arrive as a multipart file
 // (field "pages") to dodge the 100KB JSON cap; title/classes/elementCount as fields.
 const saveBoard = asyncHandler(async (req, res) => {
-  const board = await Board.findOne({ _id: req.params.id, owner: req.user._id, deletedAt: null });
+  // Owner edits; an admin may edit any board.
+  const scope = req.user.role === "admin" ? {} : { owner: req.user._id };
+  const board = await Board.findOne({ _id: req.params.id, deletedAt: null, ...scope });
   if (!board) return res.status(404).json({ message: "Lövhə tapılmadı" });
 
   if (typeof req.body.title === "string" && req.body.title.trim()) {
@@ -148,8 +159,10 @@ const saveBoard = asyncHandler(async (req, res) => {
 
 // DELETE /api/boards/:id — soft delete (owner).
 const deleteBoard = asyncHandler(async (req, res) => {
+  // Owner deletes; an admin may delete any board.
+  const scope = req.user.role === "admin" ? {} : { owner: req.user._id };
   const board = await Board.findOneAndUpdate(
-    { _id: req.params.id, owner: req.user._id, deletedAt: null },
+    { _id: req.params.id, deletedAt: null, ...scope },
     { $set: { deletedAt: new Date() } },
     { new: true }
   ).lean();
@@ -184,10 +197,14 @@ const listClassBoards = asyncHandler(async (req, res) => {
     .select("title elementCount classes updatedAt owner")
     .populate("classes", "name")
     .lean();
-  // `canManage` = the viewer owns this board (share/delete endpoints require it);
+  // `canManage` = the viewer may share/delete this board (its owner, or an admin);
   // don't leak the raw owner id to the client.
+  const isAdmin = req.user.role === "admin";
   res.json(
-    boards.map(({ owner, ...b }) => ({ ...b, canManage: String(owner) === String(req.user._id) }))
+    boards.map(({ owner, ...b }) => ({
+      ...b,
+      canManage: isAdmin || String(owner) === String(req.user._id),
+    }))
   );
 });
 
