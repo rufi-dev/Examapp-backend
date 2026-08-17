@@ -1,4 +1,5 @@
 const asyncHandler = require("express-async-handler");
+const mongoose = require("mongoose");
 const Board = require("../models/boardModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
@@ -81,37 +82,24 @@ const boardLiveStatus = asyncHandler(async (req, res) => {
 const saveBoard = asyncHandler(async (req, res) => {
   // Owner edits; an admin may edit any board.
   const scope = req.user.role === "admin" ? {} : { owner: req.user._id };
-  const board = await Board.findOne({ _id: req.params.id, deletedAt: null, ...scope });
-  if (!board) return res.status(404).json({ message: "Lövhə tapılmadı" });
 
   // While a live session owns the board, the realtime hub is the single writer of
   // the page scene. Reject an HTTP PAGE write (metadata-only saves still pass).
-  if (req.file && boardHub.isLive(board._id)) {
+  if (req.file && boardHub.isLive(req.params.id)) {
     return res.status(409).json({ message: "Lövhə canlı sessiyadadır", code: "board_live" });
   }
-  // Opt-in optimistic concurrency: if the client sends the revision it based its
-  // edit on and it no longer matches, refuse rather than last-write-wins clobber.
-  if (req.body.expectedRevision !== undefined && Number(req.body.expectedRevision) !== (board.revision || 0)) {
-    return res.status(409).json({ message: "Lövhə başqa yerdə dəyişdirilib", code: "board_conflict" });
-  }
 
-  if (typeof req.body.title === "string" && req.body.title.trim()) {
-    board.title = req.body.title.trim().slice(0, 120);
-  }
-  if (req.body.classIds !== undefined) {
-    board.classes = await ownedClassIds(req.user, req.body.classIds);
-  }
-  if (req.body.elementCount !== undefined) {
-    board.elementCount = Math.max(0, Number(req.body.elementCount) || 0);
-  }
-  if (["dots", "grid", "lines", "blank"].includes(req.body.background)) {
-    board.background = req.body.background;
-  }
-  // Canvas base colour: a CSS colour (#hex / rgb() / named / "transparent"),
-  // kept short and character-restricted so nothing unexpected is stored.
+  const cur = await Board.findOne({ _id: req.params.id, deletedAt: null, ...scope }).select("revision").lean();
+  if (!cur) return res.status(404).json({ message: "Lövhə tapılmadı" });
+
+  const set = {};
+  if (typeof req.body.title === "string" && req.body.title.trim()) set.title = req.body.title.trim().slice(0, 120);
+  if (req.body.classIds !== undefined) set.classes = await ownedClassIds(req.user, req.body.classIds);
+  if (req.body.elementCount !== undefined) set.elementCount = Math.max(0, Number(req.body.elementCount) || 0);
+  if (["dots", "grid", "lines", "blank"].includes(req.body.background)) set.background = req.body.background;
   if (typeof req.body.bgColor === "string") {
     const c = req.body.bgColor.trim();
-    if (c === "" || /^[#a-zA-Z0-9(),.%\s]{1,32}$/.test(c)) board.bgColor = c;
+    if (c === "" || /^[#a-zA-Z0-9(),.%\s]{1,32}$/.test(c)) set.bgColor = c;
   }
   if (req.file && req.file.buffer) {
     let pages;
@@ -121,14 +109,32 @@ const saveBoard = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: "Lövhə məlumatı yanlışdır" });
     }
     if (Array.isArray(pages) && pages.length) {
-      board.pages = pages.map((p) => ({ name: String(p?.name || "Səhifə").slice(0, 60), scene: p?.scene || null }));
-      board.scene = null; // legacy field retired once saved in the new shape
+      // Give each page a stable _id so the live hub can target one page (pageId).
+      set.pages = pages.map((p) => ({
+        _id: new mongoose.Types.ObjectId(),
+        name: String(p?.name || "Səhifə").slice(0, 60),
+        scene: p?.scene || null,
+      }));
+      set.scene = null; // legacy field retired once saved in the new shape
     }
-    board.sizeBytes = req.file.buffer.length;
+    set.sizeBytes = req.file.buffer.length;
   }
-  board.revision = (board.revision || 0) + 1; // advance the concurrency counter
-  await board.save();
-  res.json({ _id: board._id, title: board.title, sizeBytes: board.sizeBytes, revision: board.revision, updatedAt: board.updatedAt });
+
+  // ATOMIC optimistic-concurrency: bump revision only if the DB still holds the
+  // revision the client based its edit on (absent-safe for legacy docs). A stale
+  // second tab gets 409 instead of silently overwriting — in a single round trip,
+  // with no read-then-write gap.
+  const expected = req.body.expectedRevision !== undefined ? Number(req.body.expectedRevision) : cur.revision || 0;
+  const revMatch = expected === 0 ? { $in: [0, null] } : expected;
+  const updated = await Board.findOneAndUpdate(
+    { _id: req.params.id, deletedAt: null, ...scope, revision: revMatch },
+    { $set: set, $inc: { revision: 1 } },
+    { new: true }
+  ).lean();
+  if (!updated) {
+    return res.status(409).json({ message: "Lövhə başqa yerdə dəyişdirilib", code: "board_conflict" });
+  }
+  res.json({ _id: updated._id, title: updated.title, sizeBytes: updated.sizeBytes, revision: updated.revision, updatedAt: updated.updatedAt });
 });
 
 // DELETE /api/boards/:id — soft delete (owner).

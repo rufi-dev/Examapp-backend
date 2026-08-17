@@ -89,9 +89,22 @@ let heartbeat = null;
 let acceptingJoins = true;
 const rooms = new Map(); // boardId(String) -> room
 
+const DISPOSABLE = new Set(["pointer", "presence"]);
 const send = (ws, obj) => {
   if (ws.readyState !== ws.OPEN) return;
-  if (ws.bufferedAmount > LIMITS.MAX_BUFFERED_BYTES) return; // drop under backpressure
+  if (ws.bufferedAmount > LIMITS.MAX_BUFFERED_BYTES) {
+    // Slow client. Disposable frames (cursors/presence) are dropped; anything
+    // stateful (scene, page, grants) means the client is diverging — disconnect
+    // so it reconnects and resyncs from a fresh snapshot instead of silently
+    // losing mutations.
+    if (DISPOSABLE.has(obj.type)) return;
+    try {
+      ws.close(1013, "too-slow");
+    } catch {
+      /* gone */
+    }
+    return;
+  }
   try {
     ws.send(JSON.stringify(obj));
   } catch {
@@ -253,12 +266,12 @@ function dropSeat(room, seat, reason) {
   broadcastPresence(room);
 }
 
-// End the session for everyone: checkpoint, tell clients, close all sockets.
+// End the session for everyone: tell clients, close sockets, then durably persist
+// the final scene — and DON'T drop the room until that persist succeeds.
 async function endRoom(room) {
   if (room.status === "ending") return;
   room.status = "ending";
   clearTimeout(room.graceTimer);
-  await persistRoom(room).catch(() => {});
   broadcast(room, { v: 1, type: "host-left" });
   for (const seat of room.members.values()) {
     clearTimeout(seat.authTimer);
@@ -268,7 +281,23 @@ async function endRoom(room) {
       /* gone */
     }
   }
+  room.members.clear();
+  await finalizeRoom(room, 0);
+}
+
+// Persist the final scene before the room is discarded. If the save FAILS, keep
+// the room (with its in-memory scene) and retry — never throw away unsaved work.
+async function finalizeRoom(room, attempt) {
   clearTimeout(room.checkpointTimer);
+  await persistRoom(room).catch(() => {});
+  if (room.lastPersistError || room.persistedRevision < room.acceptedRevision) {
+    if (attempt < 40) {
+      room.finalizeTimer = setTimeout(() => finalizeRoom(room, attempt + 1), 3000);
+      return;
+    }
+    console.error("[LIVE] board", room.boardId, "final checkpoint failed after retries — scene may be unsaved");
+  }
+  clearTimeout(room.finalizeTimer);
   rooms.delete(room.boardId);
 }
 
@@ -511,6 +540,15 @@ async function handleInRoom(room, seat, msg) {
       if (error || !user || String(user._id) !== String(seat.user._id)) {
         return dropSeat(room, seat, "reauth-failed");
       }
+      // Re-run the FULL access check, not just token validity: a student removed
+      // from the class, or a teacher whose approval was revoked mid-session, must
+      // be dropped even if their token is still valid.
+      const board = await Board.findOne({ _id: room.boardId, deletedAt: null }).select("owner classes").lean();
+      if (!board) return dropSeat(room, seat, "board-gone");
+      const level = await accessLevel(user, board);
+      if (!level.ok) return dropSeat(room, seat, "access-revoked");
+      if (seat.isHost && !(await canHostLive(user, board))) return dropSeat(room, seat, "host-revoked");
+      seat.user = user;
       seat.authExpiresAt = Date.now() + LIMITS.AUTH_LEASE_MS;
       armAuthTimer(room, seat);
       send(seat.ws, { v: 1, type: "reauth-ok", authExpiresAt: seat.authExpiresAt });
@@ -553,7 +591,7 @@ async function handleInRoom(room, seat, msg) {
       return;
     }
     case "end-live": {
-      if (!seat.isHost) return; // only the teacher ends the lesson
+      if (seat.connId !== room.leaderSocketId) return; // leader (the driving host tab) only
       await endRoom(room); // immediate — students lose write and revert to view-only
       return;
     }
@@ -567,7 +605,7 @@ async function handleInRoom(room, seat, msg) {
       return;
     }
     case "grant-write": {
-      if (seat.connId !== room.leaderSocketId && !seat.isHost) return; // host/leader only
+      if (seat.connId !== room.leaderSocketId) return; // leader only
       const target = [...room.members.values()].find((s) => s.socketId === msg.targetSocketId);
       if (!target || target.isHost) return;
       target.canWrite = !!msg.allow;
@@ -577,16 +615,25 @@ async function handleInRoom(room, seat, msg) {
       return;
     }
     case "page": {
-      if (seat.connId !== room.leaderSocketId && !seat.isHost) return;
-      await persistRoom(room); // checkpoint current page before switching
-      const scene = msg.scene || {};
-      room.pageId = typeof msg.pageId === "string" ? msg.pageId : room.pageId;
+      if (seat.connId !== room.leaderSocketId) return; // leader only
+      const pageId = typeof msg.pageId === "string" ? msg.pageId : null;
+      if (!pageId) return;
+      // The page must actually belong to this board.
+      const board = await Board.findOne({ _id: room.boardId, deletedAt: null }).select("pages._id").lean();
+      if (!board || !board.pages.some((p) => String(p._id) === pageId)) return;
+      await persistRoom(room); // checkpoint the current page before switching
+      const scene = msg.scene && typeof msg.scene === "object" ? msg.scene : {};
+      const valid = (Array.isArray(scene.elements) ? scene.elements : [])
+        .filter(isValidElement)
+        .slice(0, LIMITS.MAX_ELEMENTS);
+      room.pageId = pageId;
       room.pageEpoch += 1; // stale updates from the old page are now rejected
-      room.scene.elements = new Map((scene.elements || []).map((e) => [e.id, e]));
-      room.scene.files = new Map(Object.entries(scene.files || {}));
+      room.scene.elements = new Map(valid.map((e) => [e.id, e]));
+      room.scene.files = new Map(); // files sync separately; not trusted in bulk here
       room.dirty = true;
+      room.acceptedRevision += 1;
       scheduleCheckpoint(room);
-      broadcast(room, { v: 1, type: "page-changed", pageId: room.pageId, pageEpoch: room.pageEpoch, scene: { elements: [...room.scene.elements.values()], files: mapToObj(room.scene.files) } });
+      broadcast(room, { v: 1, type: "page-changed", pageId, pageEpoch: room.pageEpoch, scene: { elements: [...room.scene.elements.values()], files: {} } });
       return;
     }
     default:
@@ -612,6 +659,7 @@ async function closeAll() {
   for (const room of rooms.values()) {
     clearTimeout(room.checkpointTimer);
     clearTimeout(room.graceTimer);
+    clearTimeout(room.finalizeTimer);
     for (const seat of room.members.values()) {
       clearTimeout(seat.authTimer);
       try {
