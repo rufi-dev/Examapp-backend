@@ -126,7 +126,9 @@ const saveBoard = asyncHandler(async (req, res) => {
   // with no read-then-write gap.
   const rawRev = req.body.expectedRevision;
   const revProvided = rawRev !== undefined && rawRev !== "";
-  if (revProvided && !/^\d+$/.test(String(rawRev))) {
+  // Bounded, non-negative, SAFE integer — a huge digit string passes the regex but
+  // becomes an unsafe/rounded number, so guard with Number.isSafeInteger.
+  if (revProvided && (!/^\d+$/.test(String(rawRev)) || !Number.isSafeInteger(Number(rawRev)))) {
     return res.status(400).json({ message: "expectedRevision yanlışdır", code: "bad_revision" });
   }
   // A scene (pages) write MUST declare the revision it edited — a stale/modified

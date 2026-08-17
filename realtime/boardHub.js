@@ -153,53 +153,79 @@ function broadcastSaveState(room) {
 
 // ---- persistence (server-authoritative, revision CAS) -----------------------
 function scheduleCheckpoint(room, delay = LIMITS.CHECKPOINT_DEBOUNCE_MS) {
-  if (room.checkpointTimer) return;
+  if (room.status === "ending" || room.checkpointTimer) return; // finalizeRoom drives ending
   room.checkpointTimer = setTimeout(() => {
     room.checkpointTimer = null;
     persistRoom(room).catch(() => {});
   }, delay);
 }
 
-async function persistRoom(room) {
-  if (room.persisting || !room.pageId) return;
-  if (room.persistedRevision >= room.acceptedRevision && !room.lastPersistError) return;
-  room.persisting = true;
-  const checkpointRev = room.acceptedRevision;
+// One CAS write of the current scene. Returns true on durable success.
+async function writeCheckpoint(room) {
   const elements = [...room.scene.elements.values()];
-  const files = {};
-  for (const [id, ref] of room.scene.files) files[id] = ref;
+  const files = mapToObj(room.scene.files);
   // Persist ONLY the page background from appState (allow-list), never arbitrary UI.
   const pageScene = { elements, appState: { viewBackgroundColor: "transparent" }, files };
   try {
     const res = await Board.findOneAndUpdate(
-      {
-        _id: room.boardId,
-        deletedAt: null,
-        "pages._id": room.pageId,
-        revision: { $in: [room.boardRevision, null] }, // absent-safe for legacy docs
-      },
+      { _id: room.boardId, deletedAt: null, "pages._id": room.pageId, revision: { $in: [room.boardRevision, null] } },
       { $set: { "pages.$.scene": pageScene, elementCount: elements.length }, $inc: { revision: 1 } },
       { new: true }
     ).lean();
     if (!res) {
-      // Conflict: another writer/tab advanced the revision. Reload and retry;
-      // NEVER blind-overwrite with a stale full-page write.
       const fresh = await Board.findById(room.boardId).select("revision").lean();
       room.boardRevision = fresh ? fresh.revision || 0 : room.boardRevision;
       room.lastPersistError = "conflict";
-      scheduleCheckpoint(room, 2000);
-    } else {
-      room.boardRevision = res.revision;
-      room.persistedRevision = checkpointRev;
-      room.lastPersistError = null;
+      return false;
     }
+    room.boardRevision = res.revision;
+    return true;
   } catch {
     room.lastPersistError = "error";
-    scheduleCheckpoint(room, 3000);
-  } finally {
-    room.persisting = false;
-    broadcastSaveState(room);
+    return false;
   }
+}
+
+// SERIALIZED per-room persistence. Only one write runs at a time; the run LOOPS
+// until persistedRevision catches up to the latest acceptedRevision. A concurrent
+// caller joins the in-flight run's promise (never treated as an instant success).
+function persistRoom(room) {
+  room.dirty = true;
+  if (!room.pageId) return Promise.resolve();
+  if (room.persisting) return room.persistTail || Promise.resolve();
+  room.persisting = true;
+  room.persistTail = (async () => {
+    try {
+      while (room.persistedRevision < room.acceptedRevision) {
+        const target = room.acceptedRevision; // captured BEFORE the write
+        const ok = await writeCheckpoint(room);
+        if (!ok) {
+          room.lastPersistError = room.lastPersistError || "error";
+          break;
+        }
+        room.persistedRevision = target;
+        room.lastPersistError = null;
+      }
+    } finally {
+      room.persisting = false;
+      broadcastSaveState(room);
+      if (room.lastPersistError) scheduleCheckpoint(room, 3000); // keep retrying while live
+    }
+  })();
+  return room.persistTail;
+}
+
+// Await durability THROUGH a specific accepted revision. Loops so that a caller
+// whose mutation landed just after an in-flight run's last check still gets its
+// own fresh run. Returns true only once persistedRevision >= target.
+async function persistThrough(room, target) {
+  for (let i = 0; i < 50; i += 1) {
+    if (room.persistedRevision >= target) return true;
+    await persistRoom(room).catch(() => {});
+    if (room.persistedRevision >= target) return true;
+    if (room.lastPersistError) return false;
+  }
+  return room.persistedRevision >= target;
 }
 
 // ---- room / seat lifecycle --------------------------------------------------
@@ -280,6 +306,7 @@ function dropSeat(room, seat, reason) {
 async function endRoom(room) {
   if (room.status === "ending") return;
   room.status = "ending";
+  const gen = room.generation;
   clearTimeout(room.graceTimer);
   broadcast(room, { v: 1, type: "host-left" });
   for (const seat of room.members.values()) {
@@ -291,21 +318,25 @@ async function endRoom(room) {
     }
   }
   room.members.clear();
-  await finalizeRoom(room, 0);
+  await finalizeRoom(room, gen, 0);
 }
 
-// Persist the final scene before the room is discarded. If the save FAILS, keep
-// the room (with its in-memory scene) and keep retrying — NEVER give up and drop
-// unsaved work (the room stays resumable via startOrHostRoom until it persists).
-async function finalizeRoom(room, attempt) {
+// Persist the final scene, then drop the room — but ONLY if this finalizer is
+// still current (generation match), the room is still ending, nobody resumed or
+// joined, and every accepted revision is durably saved. A finalizer whose
+// generation is stale (the host resumed the room) no-ops and never deletes.
+async function finalizeRoom(room, gen, attempt) {
+  if (room.generation !== gen || room.status !== "ending") return;
   clearTimeout(room.checkpointTimer);
-  await persistRoom(room).catch(() => {});
-  if (room.lastPersistError) {
-    const delay = Math.min(3000 * (attempt + 1), 30000);
+  const target = room.acceptedRevision;
+  const ok = await persistThrough(room, target).catch(() => false);
+  if (room.generation !== gen || room.status !== "ending") return; // resumed during the await
+  if (room.members.size) return; // someone joined — keep the room
+  if (!ok || room.persistedRevision < room.acceptedRevision) {
     if (attempt % 10 === 0) {
       console.error("[LIVE] board", room.boardId, "final checkpoint failing — retrying, scene retained in memory");
     }
-    room.finalizeTimer = setTimeout(() => finalizeRoom(room, attempt + 1), delay);
+    room.finalizeTimer = setTimeout(() => finalizeRoom(room, gen, attempt + 1), Math.min(3000 * (attempt + 1), 30000));
     return;
   }
   clearTimeout(room.finalizeTimer);
@@ -459,9 +490,11 @@ async function startOrHostRoom(ws, user, board) {
   let room = rooms.get(key);
   if (room) {
     // Resume an existing room (live, grace, OR finalizing) with its scene intact —
-    // never discard unsaved work just because the host restarted.
+    // never discard unsaved work just because the host restarted. Bumping the
+    // generation makes any in-flight old finalizer stale so it can't delete us.
     clearTimeout(room.graceTimer);
     clearTimeout(room.finalizeTimer);
+    room.generation += 1;
     room.status = "ready";
   }
   if (!room) {
@@ -482,6 +515,7 @@ async function startOrHostRoom(ws, user, board) {
       hostUserId: String(user._id),
       leaderSocketId: null,
       status: "ready",
+      generation: 0,
       pageId,
       pageEpoch: 0,
       acceptedRevision: 0,
@@ -491,9 +525,11 @@ async function startOrHostRoom(ws, user, board) {
       members: new Map(),
       dirty: false,
       persisting: false,
+      persistTail: null,
       lastPersistError: null,
       checkpointTimer: null,
       graceTimer: null,
+      finalizeTimer: null,
     };
     rooms.set(key, room);
   }
@@ -633,9 +669,11 @@ async function handleInRoom(room, seat, msg) {
       // The page must actually belong to this board.
       const board = await Board.findOne({ _id: room.boardId, deletedAt: null }).select("pages._id").lean();
       if (!board || !board.pages.some((p) => String(p._id) === pageId)) return;
-      await persistRoom(room); // checkpoint the current page before switching
-      if (room.lastPersistError) {
-        // The current page's scene did NOT save — do not switch away and lose it.
+      // Prove the CURRENT page is durably saved THROUGH its latest accepted
+      // revision before switching — an in-flight save is not treated as done.
+      const currentTarget = room.acceptedRevision;
+      const saved = await persistThrough(room, currentTarget);
+      if (!saved) {
         send(seat.ws, { v: 1, type: "page-blocked", reason: "save-failed" });
         return;
       }
@@ -665,21 +703,28 @@ function isLive(boardId) {
 }
 
 async function checkpointAll() {
-  await Promise.all([...rooms.values()].map((r) => persistRoom(r).catch(() => {})));
+  await Promise.all([...rooms.values()].map((r) => persistThrough(r, r.acceptedRevision).catch(() => false)));
 }
 
 async function closeAll() {
   acceptingJoins = false;
   clearInterval(heartbeat);
   for (const room of rooms.values()) broadcast(room, { v: 1, type: "server-restarting" });
-  // Best effort within the shutdown deadline: retry so a transient DB blip doesn't
-  // lose the final scene. (A hard-kill can still lose the last ~1.5s — documented.)
-  for (let i = 0; i < 3; i += 1) {
+  // Block shutdown, retrying, until every room is checkpointed OR the lifecycle
+  // budget is exhausted. A room counts as unsaved until persistedRevision has
+  // caught up to acceptedRevision — we do NOT declare a room safely closed on a
+  // best-effort attempt. On a prolonged DB outage, changes since the last
+  // successful checkpoint may still be lost (logged, not silently swallowed).
+  const deadline = Date.now() + 8000;
+  const unsavedRooms = () => [...rooms.values()].filter((r) => r.persistedRevision < r.acceptedRevision);
+  while (Date.now() < deadline) {
     await checkpointAll();
-    const unsaved = [...rooms.values()].filter((r) => r.lastPersistError);
-    if (!unsaved.length) break;
-    if (i === 2) console.error("[LIVE] shutdown: rooms still unsaved:", unsaved.map((r) => r.boardId));
-    await new Promise((r) => setTimeout(r, 500));
+    if (!unsavedRooms().length) break;
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  const lost = unsavedRooms();
+  if (lost.length) {
+    console.error("[LIVE] SHUTDOWN DATA-LOSS RISK — rooms not fully checkpointed:", lost.map((r) => r.boardId));
   }
   for (const room of rooms.values()) {
     clearTimeout(room.checkpointTimer);
@@ -710,4 +755,6 @@ module.exports = {
   validateHandshake,
   validateInRoom,
   LIMITS,
+  // test-only hooks for the persistence/finalization coordination
+  __test: { rooms, endRoom, finalizeRoom, persistThrough },
 };
