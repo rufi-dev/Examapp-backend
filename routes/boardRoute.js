@@ -6,6 +6,7 @@ const {
   listBoards,
   createBoard,
   getBoard,
+  boardLiveStatus,
   saveBoard,
   deleteBoard,
   listClassBoards,
@@ -31,6 +32,8 @@ router.post("/", protect, teacherOnly, createBoard);
 // Boards shared to a class (class page) — students + the class owner. Declared
 // before "/:id" so "class" is never parsed as a board id.
 router.get("/class/:classId", protect, listClassBoards);
+// Cheap live-session poll (declared before "/:id"'s siblings is fine — 2 segments).
+router.get("/:id/live", protect, boardLiveStatus);
 // One board — the controller decides edit (owner) vs view-only (audience student).
 router.get("/:id", protect, getBoard);
 router.patch("/:id", protect, teacherOnly, runSaveUpload, saveBoard);

@@ -66,6 +66,16 @@ const getBoard = asyncHandler(async (req, res) => {
   });
 });
 
+// GET /api/boards/:id/live — cheap poll: is a live session running? (Lets a
+// student who already has the board open see "Join live" without a full reload.)
+const boardLiveStatus = asyncHandler(async (req, res) => {
+  const board = await Board.findOne({ _id: req.params.id, deletedAt: null }).select("owner classes").lean();
+  if (!board) return res.status(404).json({ message: "Lövhə tapılmadı" });
+  const { ok } = await accessLevel(req.user, board);
+  if (!ok) return res.status(403).json({ message: "Giriş yoxdur" });
+  res.json({ live: boardHub.isLive(board._id) });
+});
+
 // PATCH /api/boards/:id — save (owner only). Pages arrive as a multipart file
 // (field "pages") to dodge the 100KB JSON cap; title/classes/elementCount as fields.
 const saveBoard = asyncHandler(async (req, res) => {
@@ -172,4 +182,4 @@ const listClassBoards = asyncHandler(async (req, res) => {
   );
 });
 
-module.exports = { listBoards, createBoard, getBoard, saveBoard, deleteBoard, listClassBoards };
+module.exports = { listBoards, createBoard, getBoard, boardLiveStatus, saveBoard, deleteBoard, listClassBoards };
