@@ -124,7 +124,17 @@ const saveBoard = asyncHandler(async (req, res) => {
   // revision the client based its edit on (absent-safe for legacy docs). A stale
   // second tab gets 409 instead of silently overwriting — in a single round trip,
   // with no read-then-write gap.
-  const expected = req.body.expectedRevision !== undefined ? Number(req.body.expectedRevision) : cur.revision || 0;
+  const rawRev = req.body.expectedRevision;
+  const revProvided = rawRev !== undefined && rawRev !== "";
+  if (revProvided && !/^\d+$/.test(String(rawRev))) {
+    return res.status(400).json({ message: "expectedRevision yanlışdır", code: "bad_revision" });
+  }
+  // A scene (pages) write MUST declare the revision it edited — a stale/modified
+  // client cannot overwrite newer content by omitting it.
+  if (req.file && !revProvided) {
+    return res.status(400).json({ message: "expectedRevision tələb olunur", code: "revision_required" });
+  }
+  const expected = revProvided ? Number(rawRev) : cur.revision || 0;
   const revMatch = expected === 0 ? { $in: [0, null] } : expected;
   const updated = await Board.findOneAndUpdate(
     { _id: req.params.id, deletedAt: null, ...scope, revision: revMatch },

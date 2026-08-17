@@ -35,6 +35,15 @@ const LIMITS = Object.freeze({
 
 const CLOSE = { POLICY: 1008, GOING_AWAY: 1001, RESTART: 1012, MSG_TOO_BIG: 1009 };
 
+// Excalidraw element types we accept over the wire. Anything else is rejected.
+const ELEMENT_TYPES = new Set([
+  "rectangle", "diamond", "ellipse", "arrow", "line", "freedraw",
+  "text", "image", "frame", "magicframe", "embeddable", "iframe", "selection",
+]);
+// Types only the HOST may add (external content). A modified student client cannot
+// inject an embed/iframe or a link over the socket.
+const HOST_ONLY_TYPES = new Set(["embeddable", "iframe"]);
+
 // ---- pure, unit-tested logic ------------------------------------------------
 
 // Excalidraw reconciliation winner: a higher version wins; on a version TIE the
@@ -51,7 +60,7 @@ function shouldAcceptElement(incoming, current) {
 // A single element is structurally safe to accept from the wire.
 function isValidElement(el) {
   if (!el || typeof el !== "object" || typeof el.id !== "string" || !el.id) return false;
-  if (typeof el.type !== "string") return false;
+  if (typeof el.type !== "string" || !ELEMENT_TYPES.has(el.type)) return false;
   for (const k of ["x", "y", "width", "height"]) {
     if (el[k] != null && (typeof el[k] !== "number" || !Number.isFinite(el[k]) || Math.abs(el[k]) > LIMITS.MAX_COORD)) {
       return false;
@@ -286,16 +295,18 @@ async function endRoom(room) {
 }
 
 // Persist the final scene before the room is discarded. If the save FAILS, keep
-// the room (with its in-memory scene) and retry — never throw away unsaved work.
+// the room (with its in-memory scene) and keep retrying — NEVER give up and drop
+// unsaved work (the room stays resumable via startOrHostRoom until it persists).
 async function finalizeRoom(room, attempt) {
   clearTimeout(room.checkpointTimer);
   await persistRoom(room).catch(() => {});
-  if (room.lastPersistError || room.persistedRevision < room.acceptedRevision) {
-    if (attempt < 40) {
-      room.finalizeTimer = setTimeout(() => finalizeRoom(room, attempt + 1), 3000);
-      return;
+  if (room.lastPersistError) {
+    const delay = Math.min(3000 * (attempt + 1), 30000);
+    if (attempt % 10 === 0) {
+      console.error("[LIVE] board", room.boardId, "final checkpoint failing — retrying, scene retained in memory");
     }
-    console.error("[LIVE] board", room.boardId, "final checkpoint failed after retries — scene may be unsaved");
+    room.finalizeTimer = setTimeout(() => finalizeRoom(room, attempt + 1), delay);
+    return;
   }
   clearTimeout(room.finalizeTimer);
   rooms.delete(room.boardId);
@@ -446,9 +457,12 @@ function ensurePageId(board) {
 async function startOrHostRoom(ws, user, board) {
   const key = String(board._id);
   let room = rooms.get(key);
-  if (room && room.status === "ending") {
-    rooms.delete(key);
-    room = null;
+  if (room) {
+    // Resume an existing room (live, grace, OR finalizing) with its scene intact —
+    // never discard unsaved work just because the host restarted.
+    clearTimeout(room.graceTimer);
+    clearTimeout(room.finalizeTimer);
+    room.status = "ready";
   }
   if (!room) {
     // Materialize a real first page for legacy single-scene boards so the CAS can
@@ -482,9 +496,6 @@ async function startOrHostRoom(ws, user, board) {
       graceTimer: null,
     };
     rooms.set(key, room);
-  } else {
-    clearTimeout(room.graceTimer);
-    room.status = "ready";
   }
   return seatIntoRoom(ws, user, room, true);
 }
@@ -561,6 +572,7 @@ async function handleInRoom(room, seat, msg) {
       const accepted = [];
       for (const el of incoming) {
         if (!isValidElement(el)) continue;
+        if (!seat.isHost && (HOST_ONLY_TYPES.has(el.type) || el.link != null)) continue; // only host adds embeds/links
         if (el.fileId && !room.scene.files.has(el.fileId)) continue; // unknown file ref
         const cur = room.scene.elements.get(el.id);
         if (shouldAcceptElement(el, cur)) {
@@ -622,6 +634,11 @@ async function handleInRoom(room, seat, msg) {
       const board = await Board.findOne({ _id: room.boardId, deletedAt: null }).select("pages._id").lean();
       if (!board || !board.pages.some((p) => String(p._id) === pageId)) return;
       await persistRoom(room); // checkpoint the current page before switching
+      if (room.lastPersistError) {
+        // The current page's scene did NOT save — do not switch away and lose it.
+        send(seat.ws, { v: 1, type: "page-blocked", reason: "save-failed" });
+        return;
+      }
       const scene = msg.scene && typeof msg.scene === "object" ? msg.scene : {};
       const valid = (Array.isArray(scene.elements) ? scene.elements : [])
         .filter(isValidElement)
@@ -655,7 +672,15 @@ async function closeAll() {
   acceptingJoins = false;
   clearInterval(heartbeat);
   for (const room of rooms.values()) broadcast(room, { v: 1, type: "server-restarting" });
-  await checkpointAll();
+  // Best effort within the shutdown deadline: retry so a transient DB blip doesn't
+  // lose the final scene. (A hard-kill can still lose the last ~1.5s — documented.)
+  for (let i = 0; i < 3; i += 1) {
+    await checkpointAll();
+    const unsaved = [...rooms.values()].filter((r) => r.lastPersistError);
+    if (!unsaved.length) break;
+    if (i === 2) console.error("[LIVE] shutdown: rooms still unsaved:", unsaved.map((r) => r.boardId));
+    await new Promise((r) => setTimeout(r, 500));
+  }
   for (const room of rooms.values()) {
     clearTimeout(room.checkpointTimer);
     clearTimeout(room.graceTimer);

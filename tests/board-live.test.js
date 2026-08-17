@@ -41,6 +41,9 @@ t("handshake wrong version rejected", () => assert.strictEqual(hub.validateHands
 t("element with out-of-range coord rejected", () => assert.strictEqual(hub.isValidElement({ id: "a", type: "rectangle", x: 1e9 }), false));
 t("element with no id rejected", () => assert.strictEqual(hub.isValidElement({ type: "rectangle" }), false));
 t("valid element accepted", () => assert.strictEqual(hub.isValidElement({ id: "a", type: "rectangle", x: 10, y: 10, width: 5, height: 5 }), true));
+t("unknown element type rejected (allow-list)", () => assert.strictEqual(hub.isValidElement({ id: "a", type: "evil-script" }), false));
+t("embeddable is a known type (host-gate is separate)", () => assert.strictEqual(hub.isValidElement({ id: "a", type: "embeddable" }), true));
+t("over-long text rejected", () => assert.strictEqual(hub.isValidElement({ id: "a", type: "text", text: "x".repeat(20001) }), false));
 
 t("maxPayload is 256 KiB (not ws' 100 MiB default)", () => assert.strictEqual(hub.LIMITS.MAX_PAYLOAD, 262144));
 
