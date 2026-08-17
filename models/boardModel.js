@@ -40,6 +40,11 @@ const boardSchema = Schema(
     // CAS matches `{ $in: [expected, null] }` (absent-safe). Each page also has a
     // stable `_id` (pageId) so writes target one page, never a whole-array replace.
     revision: { type: Number, default: 0 },
+    // The id of the last live-session journal whose scene was persisted into this
+    // board. Set atomically with the scene on every live checkpoint + recovery, so
+    // boot replay can PROVE a journal was already applied (idempotent recovery)
+    // before deleting it. See realtime/boardJournal.js + boardHub replayJournals.
+    lastLiveJournalId: { type: String, default: null },
     deletedAt: { type: Date, default: null, index: true },
   },
   { timestamps: true, minimize: false }

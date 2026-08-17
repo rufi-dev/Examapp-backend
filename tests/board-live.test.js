@@ -62,7 +62,7 @@ const stubWrite = (fn) => { Board.findOneAndUpdate = () => leanOf(fn); };
 Board.findById = () => ({ select: () => leanOf({ revision: 0 }) });
 const fakeWs = () => ({ readyState: 1, OPEN: 1, bufferedAmount: 0, send() {}, close() {} });
 
-const { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals } = hub.__test;
+const { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals, unresolvedRecovery } = hub.__test;
 const tick = () => new Promise((r) => setTimeout(r, 5));
 const fakeRoom = (id, over = {}) => ({
   boardId: id, generation: 0, status: "ending", pageId: "p1",
@@ -77,6 +77,8 @@ const at = async (name, fn) => {
 };
 
 (async () => {
+  await jrnl.preflight(); // durable storage must be proven before any journal write
+
   console.log("\nboard-live hub — persistence coordination");
 
   await at("CR-BOARD-002/003: persistThrough reports FAILURE when writes never succeed", async () => {
@@ -245,6 +247,75 @@ const at = async (name, fn) => {
     Board.findOneAndUpdate = origFOU;
     assert.ok(applied && applied.$inc && applied.$inc.revision === 1, "replay CAS-writes + bumps revision");
     assert.ok(!(await jrnl.listEntries()).some((x) => x.entry.boardId === id), "journal deleted after Mongo proved it");
+  });
+
+  // ---- CR-BOARD-005 durability hardening ------------------------------------
+  console.log("\nboard-live hub — CR-BOARD-005");
+
+  await at("overlapping flushes: a revision that lands mid-write is still journaled + acked", async () => {
+    const room = fakeRoom("eeeeeeeeeeeeeeeeeeeeeeee", { status: "ready", pageId: "p1", acceptedRevision: 1, journaledRevision: 0 });
+    const sent = [];
+    const seat = { pendingAcks: [{ clientSeq: 1, revision: 1 }, { clientSeq: 2, revision: 2 }], ws: { readyState: 1, OPEN: 1, bufferedAmount: 0, send: (s) => sent.push(JSON.parse(s)), close() {} } };
+    room.members.set("s", seat);
+    const p1 = journalFlush(room); // begins writing rev 1
+    room.acceptedRevision = 2; // rev 2 arrives mid-flight
+    const p2 = journalFlush(room); // must JOIN the active flush, not early-return
+    await Promise.all([p1, p2]);
+    assert.strictEqual(room.journaledRevision, 2, "journal caught up to the latest revision");
+    assert.ok(sent.filter((m) => m.type === "ack" && m.durable).length === 2, "both deferred acks released as durable");
+    await jrnl.deleteEntry(room.boardId);
+  });
+
+  await at("a stale delete for an OLD journalId cannot remove a NEWER journal", async () => {
+    const id = "ffffffffffffffffffffffff";
+    const w1 = await jrnl.writeEntry({ boardId: id, pageId: "p1", liveSessionId: "S", acceptedRevision: 1, boardRevision: 0, scene: { elements: [], files: {} } });
+    await jrnl.writeEntry({ boardId: id, pageId: "p1", liveSessionId: "S", acceptedRevision: 2, boardRevision: 0, scene: { elements: [{ id: "n", type: "rectangle" }], files: {} } });
+    const removed = await jrnl.deleteEntry(id, w1.journalId); // stale delete of the old id
+    assert.strictEqual(removed, false, "stale delete is a no-op");
+    const cur = await jrnl.readEntry(id);
+    assert.ok(cur && cur.acceptedRevision === 2, "the newer journal survives");
+    await jrnl.deleteEntry(id, cur.journalId);
+  });
+
+  await at("replay CAS-miss it cannot prove → RETAINS journal + locks the board", async () => {
+    const id = "111111111111111111111111";
+    await jrnl.writeEntry({ boardId: id, pageId: "p1", liveSessionId: "S", acceptedRevision: 2, boardRevision: 3, scene: { elements: [{ id: "z", type: "rectangle" }], files: {} } });
+    unresolvedRecovery.delete(id);
+    // Mongo advanced past the base (revision 9) with a DIFFERENT marker → cannot prove.
+    Board.findOne = () => ({ select: () => ({ lean: async () => ({ revision: 9, pages: [{ _id: "p1" }], lastLiveJournalId: "some-other-id" }) }) });
+    Board.findOneAndUpdate = () => ({ lean: async () => null }); // CAS never matches
+    await replayJournals();
+    Board.findOne = origFO;
+    Board.findOneAndUpdate = origFOU;
+    assert.ok(unresolvedRecovery.has(id), "board locked as unresolved");
+    assert.ok((await jrnl.readEntry(id)) !== null, "journal retained (not deleted unproven)");
+    unresolvedRecovery.delete(id);
+    await jrnl.deleteEntry(id, (await jrnl.readEntry(id)).journalId);
+  });
+
+  await at("replay deletes when the marker PROVES this journal was already applied", async () => {
+    const id = "222222222222222222222222";
+    const w = await jrnl.writeEntry({ boardId: id, pageId: "p1", liveSessionId: "S", acceptedRevision: 2, boardRevision: 5, scene: { elements: [], files: {} } });
+    unresolvedRecovery.delete(id);
+    Board.findOne = () => ({ select: () => ({ lean: async () => ({ revision: 6, pages: [{ _id: "p1" }], lastLiveJournalId: w.journalId }) }) });
+    await replayJournals();
+    Board.findOne = origFO;
+    assert.ok(!unresolvedRecovery.has(id), "not locked");
+    assert.strictEqual(await jrnl.readEntry(id), null, "journal deleted (marker proved it persisted)");
+  });
+
+  await at("storage failing → edit is NOT acked (durability contract held)", async () => {
+    const room = fakeRoom("333333333333333333333333", { status: "ready", pageId: "p1", acceptedRevision: 1, journaledRevision: 0 });
+    const sent = [];
+    const seat = { pendingAcks: [{ clientSeq: 1, revision: 1 }], ws: { readyState: 1, OPEN: 1, bufferedAmount: 0, send: (s) => sent.push(JSON.parse(s)), close() {} } };
+    room.members.set("s", seat);
+    // Force a write failure: an oversized scene fails journal validation.
+    room.scene.elements = new Map(Array.from({ length: 7000 }, (_v, i) => [String(i), { id: String(i), type: "rectangle" }]));
+    await journalFlush(room);
+    assert.ok(room.journalUnhealthy === true, "room flagged unhealthy");
+    assert.ok(!sent.some((m) => m.type === "ack"), "NO ack sent when the change is not durable");
+    assert.strictEqual(seat.pendingAcks.length, 1, "ack stays pending");
+    clearTimeout(room.journalTimer);
   });
 
   Board.findOneAndUpdate = origFOU;

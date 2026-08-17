@@ -32,6 +32,7 @@ const LIMITS = Object.freeze({
   MAX_MSGS_PER_SEC: 40,
   MAX_POINTERS_PER_SEC: 20,
   MAX_BUFFERED_BYTES: 1_048_576, // 1 MiB backlog → slow client
+  MAX_PENDING_ACKS: 1000, // per seat: stop accepting edits if durability lags this far
 });
 
 const CLOSE = { POLICY: 1008, GOING_AWAY: 1001, RESTART: 1012, MSG_TOO_BIG: 1009 };
@@ -97,6 +98,8 @@ function validateInRoom(msg, room, seat) {
 let wss = null;
 let heartbeat = null;
 let acceptingJoins = true;
+let replayDone = false; // WS connections are refused until boot recovery finishes
+const unresolvedRecovery = new Set(); // boards whose journal could not be proven — locked
 const rooms = new Map(); // boardId(String) -> room
 
 const DISPOSABLE = new Set(["pointer", "presence"]);
@@ -171,29 +174,42 @@ function scheduleJournal(room, delay = 300) {
 }
 
 // Durably record the accepted scene, then release the acks that were deferred
-// until this point — so "acked" always means "survives a hard kill".
-async function journalFlush(room) {
-  if (room.journalFlushing) return;
+// until this point — so "acked" always means "survives a hard kill". Serialized:
+// a concurrent call JOINS the active flush, and the run LOOPS until the journal
+// has caught up to the latest acceptedRevision (a revision that lands mid-write is
+// never stranded).
+function journalFlush(room) {
+  if (!room.pageId) return Promise.resolve();
+  if (room.journalFlushing) return room.journalTail || Promise.resolve();
   room.journalFlushing = true;
-  try {
-    const target = room.acceptedRevision;
-    if (room.pageId && room.journaledRevision < target) {
-      await journal.writeEntry({
-        boardId: room.boardId,
-        pageId: room.pageId,
-        liveSessionId: room.liveSessionId,
-        acceptedRevision: target,
-        boardRevision: room.boardRevision,
-        scene: { elements: [...room.scene.elements.values()], files: mapToObj(room.scene.files) },
-      });
-      room.journaledRevision = target;
+  room.journalTail = (async () => {
+    try {
+      while (room.journaledRevision < room.acceptedRevision) {
+        const target = room.acceptedRevision;
+        const { journalId } = await journal.writeEntry({
+          boardId: room.boardId,
+          pageId: room.pageId,
+          liveSessionId: room.liveSessionId,
+          acceptedRevision: target,
+          boardRevision: room.boardRevision,
+          scene: { elements: [...room.scene.elements.values()], files: mapToObj(room.scene.files) },
+        });
+        room.journaledRevision = target;
+        room.journalId = journalId;
+      }
+      room.journalUnhealthy = false;
+      for (const seat of room.members.values()) flushSeatAcks(seat, room);
+    } catch {
+      // Durable storage is failing — do NOT release acks (they stay pending, so
+      // nothing is falsely called durable), tell clients, and retry.
+      room.journalUnhealthy = true;
+      broadcast(room, { v: 1, type: "storage-degraded" });
+      scheduleJournal(room, 1000);
+    } finally {
+      room.journalFlushing = false;
     }
-    for (const seat of room.members.values()) flushSeatAcks(seat, room);
-  } catch {
-    scheduleJournal(room, 1000); // keep acks pending (not durable) and retry
-  } finally {
-    room.journalFlushing = false;
-  }
+  })();
+  return room.journalTail;
 }
 
 function flushSeatAcks(seat, room) {
@@ -212,8 +228,10 @@ function flushSeatAcks(seat, room) {
 // Once Mongo has durably caught up to the journaled revision, the journal file is
 // redundant — delete it (a newer accepted revision writes a fresh one).
 function maybeDropJournal(room) {
-  if (!room.lastPersistError && room.journaledRevision > 0 && room.journaledRevision <= room.persistedRevision) {
-    journal.deleteEntry(room.boardId).catch(() => {});
+  if (!room.lastPersistError && room.journalId && room.journaledRevision > 0 && room.journaledRevision <= room.persistedRevision) {
+    // Delete only the journal we know Mongo persisted — deleteEntry no-ops if a
+    // newer journal (different id) has since replaced the file.
+    journal.deleteEntry(room.boardId, room.journalId).catch(() => {});
   }
 }
 
@@ -226,7 +244,12 @@ async function writeCheckpoint(room) {
   try {
     const res = await Board.findOneAndUpdate(
       { _id: room.boardId, deletedAt: null, "pages._id": room.pageId, revision: { $in: [room.boardRevision, null] } },
-      { $set: { "pages.$.scene": pageScene, elementCount: elements.length }, $inc: { revision: 1 } },
+      {
+        // Persist the scene AND the applied-journal marker atomically, so boot
+        // replay can prove this journal's scene is already in Mongo.
+        $set: { "pages.$.scene": pageScene, elementCount: elements.length, lastLiveJournalId: room.journalId || null },
+        $inc: { revision: 1 },
+      },
       { new: true }
     ).lean();
     if (!res) {
@@ -434,14 +457,24 @@ async function replayJournals() {
     return;
   }
   for (const { entry } of entries) {
+    const bid = String(entry.boardId);
     try {
-      const board = await Board.findOne({ _id: entry.boardId, deletedAt: null }).select("revision pages._id").lean();
+      const board = await Board.findOne({ _id: entry.boardId, deletedAt: null })
+        .select("revision pages._id lastLiveJournalId")
+        .lean();
+      // Board gone → nothing to recover into.
       if (!board) {
-        await journal.deleteEntry(entry.boardId);
+        await journal.deleteEntry(bid, entry.journalId);
+        continue;
+      }
+      // This exact journal's scene is already persisted (idempotent proof).
+      if (board.lastLiveJournalId === entry.journalId) {
+        await journal.deleteEntry(bid, entry.journalId);
         continue;
       }
       const cur = board.revision || 0;
       const pageOk = board.pages.some((p) => String(p._id) === String(entry.pageId));
+      // Apply only if Mongo has NOT advanced past the journal's base revision.
       if (pageOk && cur <= (entry.boardRevision || 0)) {
         const pageScene = {
           elements: entry.scene.elements,
@@ -450,31 +483,63 @@ async function replayJournals() {
         };
         const res = await Board.findOneAndUpdate(
           { _id: entry.boardId, deletedAt: null, "pages._id": entry.pageId, revision: { $in: cur === 0 ? [0, null] : [cur] } },
-          { $set: { "pages.$.scene": pageScene, elementCount: entry.scene.elements.length }, $inc: { revision: 1 } },
+          { $set: { "pages.$.scene": pageScene, elementCount: entry.scene.elements.length, lastLiveJournalId: entry.journalId }, $inc: { revision: 1 } },
           { new: true }
         ).lean();
-        if (res) console.log("[LIVE] recovered board", entry.boardId, "from journal → rev", res.revision);
+        if (res) {
+          console.log("[LIVE] recovered board", bid, "→ rev", res.revision);
+          await journal.deleteEntry(bid, entry.journalId);
+          continue;
+        }
       }
-      await journal.deleteEntry(entry.boardId); // Mongo proved it, or it is stale
+      // CAS missed / Mongo advanced. Re-read and delete ONLY if the marker now
+      // proves this exact journal was applied. Otherwise RETAIN + lock + alert —
+      // never delete a journal whose scene we cannot prove is persisted.
+      const fresh = await Board.findOne({ _id: entry.boardId, deletedAt: null }).select("lastLiveJournalId").lean();
+      if (fresh && fresh.lastLiveJournalId === entry.journalId) {
+        await journal.deleteEntry(bid, entry.journalId);
+      } else {
+        unresolvedRecovery.add(bid);
+        console.error("[LIVE] UNRESOLVED recovery — board", bid, "locked, journal retained for manual review");
+      }
     } catch (e) {
-      console.error("[LIVE] journal replay error", entry.boardId, e && e.message);
-      // keep the file for the next boot — do NOT delete unverified
+      unresolvedRecovery.add(bid);
+      console.error("[LIVE] journal replay error", bid, e && e.message);
     }
   }
 }
 
 // ---- connection handling ----------------------------------------------------
 function attach(server) {
-  replayJournals().catch((e) => console.error("[LIVE] journal replay failed:", e && e.message));
   wss = new WebSocketServer({ noServer: true, maxPayload: LIMITS.MAX_PAYLOAD });
 
   server.on("upgrade", (req, socket, head) => {
     if (!req.url || !req.url.startsWith("/ws/board")) return; // let other upgraders handle
-    if (!acceptingJoins) return socket.destroy();
+    // Refuse connections until boot recovery has finished (and only if durable
+    // storage passed preflight) — no live edit may race an unfinished replay.
+    if (!acceptingJoins || !replayDone) return socket.destroy();
     const origin = req.headers.origin;
     if (origin && !isAllowedOrigin(origin)) return socket.destroy();
     wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws));
   });
+
+  // Prove durable storage, then replay journals, THEN start accepting connections.
+  // If preflight fails, replayDone stays false → the live board is disabled (safe).
+  (async () => {
+    try {
+      await journal.preflight();
+    } catch (e) {
+      console.error("[LIVE] durable-storage preflight FAILED — live board disabled:", e && e.message);
+      return;
+    }
+    try {
+      await replayJournals();
+    } catch (e) {
+      console.error("[LIVE] replay error:", e && e.message);
+    }
+    replayDone = true;
+    console.log("[LIVE] recovery complete — live board ready");
+  })();
 
   heartbeat = setInterval(() => {
     for (const room of rooms.values()) {
@@ -560,6 +625,11 @@ async function handleHandshake(ws, msg) {
     ws.close(CLOSE.POLICY, "not-found");
     return null;
   }
+  // A board whose crash-recovery could not be proven is locked until reviewed.
+  if (unresolvedRecovery.has(String(board._id))) {
+    ws.close(CLOSE.GOING_AWAY, "recovering");
+    return null;
+  }
 
   if (msg.type === "start-live") {
     if (!(await canHostLive(user, board))) {
@@ -625,6 +695,8 @@ async function startOrHostRoom(ws, user, board) {
       acceptedRevision: 0,
       persistedRevision: 0,
       journaledRevision: 0,
+      journalId: null,
+      journalUnhealthy: false,
       boardRevision: board.revision || 0,
       scene: { elements, files },
       members: new Map(),
@@ -632,6 +704,7 @@ async function startOrHostRoom(ws, user, board) {
       persisting: false,
       persistTail: null,
       journalFlushing: false,
+      journalTail: null,
       lastPersistError: null,
       checkpointTimer: null,
       journalTimer: null,
@@ -710,6 +783,13 @@ async function handleInRoom(room, seat, msg) {
     }
     case "scene-update": {
       if (!seat.canWrite) return;
+      // Durable storage is the contract for accepting edits. If journaling is
+      // failing or the durability backlog is too deep, refuse new edits rather
+      // than accept something we cannot promise to keep.
+      if (room.journalUnhealthy || !journal.isHealthy() || seat.pendingAcks.length >= LIMITS.MAX_PENDING_ACKS) {
+        send(seat.ws, { v: 1, type: "storage-degraded" });
+        return;
+      }
       const incoming = Array.isArray(msg.elements) ? msg.elements : [];
       if (incoming.length > LIMITS.MAX_ELEMENTS_PER_MSG) return;
       const accepted = [];
@@ -881,5 +961,5 @@ module.exports = {
   validateInRoom,
   LIMITS,
   // test-only hooks for the persistence/finalization/journal coordination
-  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals },
+  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals, unresolvedRecovery },
 };
