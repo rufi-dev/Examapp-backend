@@ -7,6 +7,10 @@ const Submission = require("../models/submissionModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 
+// Shared by the route-level upload guard and the re-submission merge check so
+// new submissions and edits always enforce the same student file limit.
+const STUDENT_SUBMISSION_MAX_FILES = 20;
+
 // PRIVATE storage — deliberately NOT under uploads/ (which express.static serves
 // publicly). Holds BOTH teacher handout attachments and student submission
 // files; nothing here is reachable without passing an access check below.
@@ -441,7 +445,7 @@ const markSubmissionSeen = asyncHandler(async (req, res) => {
 });
 
 // POST /api/assignments/:id/submit — student uploads work (multipart, field
-// "files", 1..10). A re-submission REPLACES the previous files (one row per
+// "files", 1..20). A re-submission REPLACES the previous files (one row per
 // student per task). Blocked after the deadline unless the teacher allows late.
 const submitAssignment = asyncHandler(async (req, res) => {
   const files = req.files || [];
@@ -482,7 +486,9 @@ const submitAssignment = asyncHandler(async (req, res) => {
     const kept = keepList ? oldFiles.filter((f) => keepList.includes(f.fileName)) : [];
     const combined = [...kept, ...fileDocs];
     if (!combined.length) return fail(400, "Ən azı bir fayl olmalıdır");
-    if (combined.length > 10) return fail(400, "Maksimum 10 fayl");
+    if (combined.length > STUDENT_SUBMISSION_MAX_FILES) {
+      return fail(400, `Maksimum ${STUDENT_SUBMISSION_MAX_FILES} fayl`);
+    }
 
     existing.files = combined;
     existing.note = String(req.body.note || "").trim();
@@ -671,6 +677,7 @@ async function sendStored(res, meta, { download = false, thumb = false } = {}) {
 
 module.exports = {
   ASSIGNMENTS_DIR,
+  STUDENT_SUBMISSION_MAX_FILES,
   listAssignments,
   myAssignments,
   createAssignment,

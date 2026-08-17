@@ -9,6 +9,7 @@ const { uploadRateLimit } = require("../middleware/uploadLimit");
 const { validateUploadFile } = require("../utils/fileValidation");
 const {
   ASSIGNMENTS_DIR,
+  STUDENT_SUBMISSION_MAX_FILES,
   listAssignments,
   myAssignments,
   createAssignment,
@@ -48,7 +49,7 @@ const ALLOWED_EXT = new Set([
 
 const upload = multer({
   storage,
-  limits: { fileSize: 50 * 1024 * 1024, files: 10 }, // 50MB/file, up to 10 files
+  limits: { fileSize: 50 * 1024 * 1024, files: STUDENT_SUBMISSION_MAX_FILES },
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname || "").toLowerCase();
     if (!ALLOWED_EXT.has(ext)) {
@@ -91,7 +92,7 @@ const runUpload = (field, max) => (req, res, next) =>
       err.code === "LIMIT_FILE_SIZE"
         ? "Fayl çox böyükdür (maksimum 50MB)"
         : err.code === "LIMIT_FILE_COUNT"
-        ? "Çox fayl seçildi (maksimum 10)"
+        ? `Çox fayl seçildi (maksimum ${max})`
         : err.message || "Fayl yüklənmədi";
     res.status(400).json({ message });
   });
@@ -126,6 +127,13 @@ router.delete("/:id", protect, teacherOnly, deleteAssignment);
 
 // ---- student write ----------------------------------------------------------
 // Any signed-in user (enrollment is checked in the controller) can submit.
-router.post("/:id/submit", protect, uploadRateLimit, runUpload("files", 10), verifyUploads, submitAssignment);
+router.post(
+  "/:id/submit",
+  protect,
+  uploadRateLimit,
+  runUpload("files", STUDENT_SUBMISSION_MAX_FILES),
+  verifyUploads,
+  submitAssignment
+);
 
 module.exports = router;
