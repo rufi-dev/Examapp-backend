@@ -815,6 +815,11 @@ async function handleInRoom(room, seat, msg) {
       if (!accepted.length) return;
       room.acceptedRevision += 1;
       room.dirty = true;
+      // CR-BOARD-009: announce "saving" IMMEDIATELY on accepting the change —
+      // persistedRevision now trails acceptedRevision, so this emits "saving" and
+      // the UI can never keep showing "Saxlanıldı" during the checkpoint window.
+      // The persist path emits the authoritative "saved"/"failed" when it finishes.
+      broadcastSaveState(room);
       scheduleCheckpoint(room);
       broadcast(room, { v: 1, type: "scene-update", elements: accepted, from: seat.socketId }, seat.connId);
       // The ack is DEFERRED until the change is durably journaled (survives a hard

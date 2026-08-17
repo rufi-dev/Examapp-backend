@@ -169,8 +169,10 @@ async function main() {
 
   ok("saveStateOf(untouched room) === 'saved'", hub.__test.saveStateOf(room) === "saved");
 
+  oWs.sent.length = 0; // isolate the save-state emitted by the next accept
   await hub.__test.handleInRoom(room, ownerSeat, { v: 1, type: "scene-update", liveSessionId: room.liveSessionId, pageEpoch: room.pageEpoch, clientSeq: 1, elements: [{ id: "e1", type: "rectangle", version: 1, versionNonce: 5, x: 1, y: 1, width: 2, height: 2 }] });
   ok("an accepted edit moves state to 'saving'", room.acceptedRevision === 1 && hub.__test.saveStateOf(room) === "saving");
+  ok("CR-BOARD-009: the accepted edit EMITS 'saving' to the client immediately (real hub broadcast)", oWs.sent.some((m) => m.type === "save-state" && m.state === "saving"));
 
   room.persistedRevision = room.acceptedRevision;
   ok("persisted through accepted → 'saved'", hub.__test.saveStateOf(room) === "saved");

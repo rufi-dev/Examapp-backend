@@ -313,6 +313,69 @@ const at = async (name, fn) => {
     clearTimeout(room.journalTimer);
   });
 
+  // ---- CR-BOARD-009 authoritative save-state EMISSION -----------------------
+  // Not just saveStateOf() math: prove the CLIENT actually RECEIVES the transition.
+  console.log("\nboard-live hub — CR-BOARD-009");
+
+  const saveSeat = (sent) => ({
+    connId: "H", socketId: "H", isHost: true, canWrite: true, lastClientSeq: 0, authExpiresAt: Date.now() + 1e6,
+    user: { _id: "u" }, pendingAcks: [], msgTimes: [], ptrTimes: [],
+    ws: { readyState: 1, OPEN: 1, bufferedAmount: 0, send: (s) => sent.push(JSON.parse(s)), close() {} },
+  });
+  const rectMsg = (clientSeq) => ({
+    v: 1, type: "scene-update", liveSessionId: "S", pageEpoch: 0, clientSeq,
+    elements: [{ id: "e" + clientSeq, type: "rectangle", version: 1, versionNonce: 5, x: 1, y: 1, width: 2, height: 2 }],
+  });
+
+  await at("an accepted edit EMITS 'saving' immediately; 'saved' only AFTER the write completes", async () => {
+    let release;
+    stubWrite(() => new Promise((res) => { release = () => res({ revision: 1 }); })); // pause the write
+    const sent = [];
+    const room = fakeRoom("999999999999999999999999", { status: "ready", liveSessionId: "S", pageEpoch: 0, pageId: "p1", leaderSocketId: "H" });
+    rooms.set(room.boardId, room);
+    const seat = saveSeat(sent);
+    room.members.set("H", seat);
+    const states = () => sent.filter((m) => m.type === "save-state").map((m) => m.state);
+
+    await handleInRoom(room, seat, rectMsg(1));
+    assert.ok(states().includes("saving"), "client IMMEDIATELY receives 'saving' on accept");
+    assert.ok(!states().includes("saved"), "no premature 'saved' before the write");
+
+    clearTimeout(room.checkpointTimer); // drive persistence now instead of the ~1.5s debounce
+    const p = persistThrough(room, 1); // begins the paused write
+    await tick();
+    assert.ok(!states().includes("saved"), "a DELAYED database write must NOT emit 'saved'");
+    release();
+    await p;
+    assert.strictEqual(states()[states().length - 1], "saved", "successful write emits 'saved' last");
+
+    clearTimeout(room.journalTimer);
+    rooms.delete(room.boardId);
+    await jrnl.deleteEntry(room.boardId);
+  });
+
+  await at("a FAILED write emits 'failed' after 'saving' — never a false 'saved'", async () => {
+    stubWrite(() => Promise.resolve(null)); // conflict forever
+    const sent = [];
+    const room = fakeRoom("888888888888888888888888", { status: "ready", liveSessionId: "S", pageEpoch: 0, pageId: "p1", leaderSocketId: "H" });
+    rooms.set(room.boardId, room);
+    const seat = saveSeat(sent);
+    room.members.set("H", seat);
+    const states = () => sent.filter((m) => m.type === "save-state").map((m) => m.state);
+
+    await handleInRoom(room, seat, rectMsg(1));
+    clearTimeout(room.checkpointTimer);
+    await persistThrough(room, 1).catch(() => {});
+    assert.ok(states().includes("saving"), "'saving' emitted on accept");
+    assert.strictEqual(states()[states().length - 1], "failed", "failed write emits 'failed'");
+    assert.ok(!states().includes("saved"), "never a false 'saved' on a failed write");
+
+    clearTimeout(room.checkpointTimer);
+    clearTimeout(room.journalTimer);
+    rooms.delete(room.boardId);
+    await jrnl.deleteEntry(room.boardId);
+  });
+
   // ---- CR-BOARD-006 fail-closed recovery ------------------------------------
   console.log("\nboard-live hub — CR-BOARD-006");
 
