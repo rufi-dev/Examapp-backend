@@ -4,7 +4,10 @@
 // (matching Excalidraw's reconcileElements) — a wrong direction makes elements
 // oscillate or vanish.
 const assert = require("assert");
+// Journal writes go to an isolated temp dir (set BEFORE the hub/journal load).
+process.env.LIVE_JOURNAL_DIR = require("path").join(require("os").tmpdir(), "exq-live-journal-test-" + process.pid);
 const hub = require("../realtime/boardHub");
+const jrnl = require("../realtime/boardJournal");
 
 let pass = 0;
 let fail = 0;
@@ -59,14 +62,14 @@ const stubWrite = (fn) => { Board.findOneAndUpdate = () => leanOf(fn); };
 Board.findById = () => ({ select: () => leanOf({ revision: 0 }) });
 const fakeWs = () => ({ readyState: 1, OPEN: 1, bufferedAmount: 0, send() {}, close() {} });
 
-const { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom } = hub.__test;
+const { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals } = hub.__test;
 const tick = () => new Promise((r) => setTimeout(r, 5));
 const fakeRoom = (id, over = {}) => ({
   boardId: id, generation: 0, status: "ending", pageId: "p1",
-  acceptedRevision: 0, persistedRevision: 0, boardRevision: 0,
+  acceptedRevision: 0, persistedRevision: 0, journaledRevision: 0, boardRevision: 0,
   scene: { elements: new Map(), files: new Map() }, members: new Map(),
-  dirty: false, persisting: false, persistTail: null, lastPersistError: null,
-  checkpointTimer: null, graceTimer: null, finalizeTimer: null, ...over,
+  dirty: false, persisting: false, persistTail: null, journalFlushing: false, lastPersistError: null,
+  checkpointTimer: null, journalTimer: null, graceTimer: null, finalizeTimer: null, ...over,
 });
 const at = async (name, fn) => {
   try { await fn(); console.log("  ✓ " + name); pass += 1; }
@@ -180,6 +183,68 @@ const at = async (name, fn) => {
     assert.ok(elapsed < 3000, `closeAll must honour the budget (took ${elapsed}ms)`);
     assert.ok(room.persistedRevision < room.acceptedRevision, "the room really was unsaved");
     assert.ok(errs.some((m) => /SHUTDOWN DATA-LOSS RISK/.test(m)), "the data-loss warning must be logged");
+  });
+
+  // ---- durable journal (recovery) -------------------------------------------
+  console.log("\nboard-live hub — durable journal");
+
+  await at("journal: write → list roundtrip (checksum verified)", async () => {
+    const id = "aaaaaaaaaaaaaaaaaaaaaaaa";
+    await jrnl.writeEntry({ boardId: id, pageId: "p1", liveSessionId: "S", acceptedRevision: 3, boardRevision: 1, scene: { elements: [{ id: "e", type: "rectangle" }], files: {} } });
+    const list = await jrnl.listEntries();
+    const e = list.find((x) => x.entry.boardId === id);
+    assert.ok(e && e.entry.acceptedRevision === 3, "entry listed with data intact");
+    await jrnl.deleteEntry(id);
+    assert.ok(!(await jrnl.listEntries()).some((x) => x.entry.boardId === id), "deleted entry gone");
+  });
+
+  await at("journal: a corrupted file is quarantined, never applied", async () => {
+    const fs = require("fs");
+    const id = "bbbbbbbbbbbbbbbbbbbbbbbb";
+    await jrnl.writeEntry({ boardId: id, pageId: "p1", liveSessionId: "S", acceptedRevision: 1, boardRevision: 0, scene: { elements: [], files: {} } });
+    fs.writeFileSync(jrnl.fileFor(id), '{"v":1,"sha256":"deadbeef","payload":"{}"}'); // wrong checksum
+    const list = await jrnl.listEntries();
+    assert.ok(!list.some((x) => x.entry.boardId === id), "corrupt entry skipped");
+    assert.ok(fs.existsSync(jrnl.fileFor(id) + ".corrupt"), "corrupt file quarantined");
+    fs.unlinkSync(jrnl.fileFor(id) + ".corrupt");
+  });
+
+  await at("scene-update ack is DEFERRED until the change is durably journaled", async () => {
+    const room = fakeRoom("cccccccccccccccccccccccc", { status: "ready", liveSessionId: "S", pageEpoch: 0, pageId: "p1", leaderSocketId: "H" });
+    rooms.set(room.boardId, room);
+    const sent = [];
+    const seat = {
+      connId: "H", socketId: "H", isHost: true, canWrite: true, lastClientSeq: 0, authExpiresAt: Date.now() + 1e6,
+      user: { _id: "u" }, pendingAcks: [], msgTimes: [], ptrTimes: [],
+      ws: { readyState: 1, OPEN: 1, bufferedAmount: 0, send: (s) => sent.push(JSON.parse(s)), close() {} },
+    };
+    room.members.set("H", seat);
+    await handleInRoom(room, seat, {
+      v: 1, type: "scene-update", liveSessionId: "S", pageEpoch: 0, clientSeq: 1,
+      elements: [{ id: "e1", type: "rectangle", version: 1, versionNonce: 5, x: 1, y: 1, width: 2, height: 2 }],
+    });
+    assert.ok(!sent.some((m) => m.type === "ack"), "ack must be deferred until journaled");
+    assert.strictEqual(seat.pendingAcks.length, 1);
+    await journalFlush(room);
+    assert.ok(sent.some((m) => m.type === "ack" && m.durable === true), "durable ack sent after journal flush");
+    assert.strictEqual(seat.pendingAcks.length, 0);
+    clearTimeout(room.journalTimer);
+    clearTimeout(room.checkpointTimer);
+    rooms.delete(room.boardId);
+    await jrnl.deleteEntry(room.boardId);
+  });
+
+  await at("replayJournals applies a journal Mongo hasn't advanced past, then deletes it", async () => {
+    const id = "dddddddddddddddddddddddd";
+    await jrnl.writeEntry({ boardId: id, pageId: "p1", liveSessionId: "S", acceptedRevision: 2, boardRevision: 0, scene: { elements: [{ id: "x", type: "rectangle" }], files: {} } });
+    let applied = null;
+    Board.findOne = () => ({ select: () => ({ lean: async () => ({ revision: 0, pages: [{ _id: "p1" }] }) }) });
+    Board.findOneAndUpdate = (q, u) => ({ lean: async () => { applied = u; return { revision: 1 }; } });
+    await replayJournals();
+    Board.findOne = origFO;
+    Board.findOneAndUpdate = origFOU;
+    assert.ok(applied && applied.$inc && applied.$inc.revision === 1, "replay CAS-writes + bumps revision");
+    assert.ok(!(await jrnl.listEntries()).some((x) => x.entry.boardId === id), "journal deleted after Mongo proved it");
   });
 
   Board.findOneAndUpdate = origFOU;

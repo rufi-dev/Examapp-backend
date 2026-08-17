@@ -9,3 +9,6 @@ assignments/
 videos/
 .wwebjs_auth/
 sbom.cdx.json
+
+# Live whiteboard write-ahead journal (runtime, per-instance)
+live-journal/

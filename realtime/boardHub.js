@@ -13,6 +13,7 @@ const Board = require("../models/boardModel");
 const { resolveSessionUser } = require("../middleware/authMiddleware");
 const { accessLevel, canHostLive } = require("../services/boardAccessService");
 const { isAllowedOrigin } = require("../config/corsOptions");
+const journal = require("./boardJournal");
 
 // ---- limits (explicit contract, not "cap it") -------------------------------
 const LIMITS = Object.freeze({
@@ -160,6 +161,62 @@ function scheduleCheckpoint(room, delay = LIMITS.CHECKPOINT_DEBOUNCE_MS) {
   }, delay);
 }
 
+// ---- durable write-ahead journal (survives a hard kill) ---------------------
+function scheduleJournal(room, delay = 300) {
+  if (room.status === "ending" || room.journalTimer) return;
+  room.journalTimer = setTimeout(() => {
+    room.journalTimer = null;
+    journalFlush(room).catch(() => {});
+  }, delay);
+}
+
+// Durably record the accepted scene, then release the acks that were deferred
+// until this point — so "acked" always means "survives a hard kill".
+async function journalFlush(room) {
+  if (room.journalFlushing) return;
+  room.journalFlushing = true;
+  try {
+    const target = room.acceptedRevision;
+    if (room.pageId && room.journaledRevision < target) {
+      await journal.writeEntry({
+        boardId: room.boardId,
+        pageId: room.pageId,
+        liveSessionId: room.liveSessionId,
+        acceptedRevision: target,
+        boardRevision: room.boardRevision,
+        scene: { elements: [...room.scene.elements.values()], files: mapToObj(room.scene.files) },
+      });
+      room.journaledRevision = target;
+    }
+    for (const seat of room.members.values()) flushSeatAcks(seat, room);
+  } catch {
+    scheduleJournal(room, 1000); // keep acks pending (not durable) and retry
+  } finally {
+    room.journalFlushing = false;
+  }
+}
+
+function flushSeatAcks(seat, room) {
+  if (!seat.pendingAcks || !seat.pendingAcks.length) return;
+  const keep = [];
+  for (const a of seat.pendingAcks) {
+    if (a.revision <= room.journaledRevision) {
+      send(seat.ws, { v: 1, type: "ack", clientSeq: a.clientSeq, acceptedRevision: a.revision, durable: true });
+    } else {
+      keep.push(a);
+    }
+  }
+  seat.pendingAcks = keep;
+}
+
+// Once Mongo has durably caught up to the journaled revision, the journal file is
+// redundant — delete it (a newer accepted revision writes a fresh one).
+function maybeDropJournal(room) {
+  if (!room.lastPersistError && room.journaledRevision > 0 && room.journaledRevision <= room.persistedRevision) {
+    journal.deleteEntry(room.boardId).catch(() => {});
+  }
+}
+
 // One CAS write of the current scene. Returns true on durable success.
 async function writeCheckpoint(room) {
   const elements = [...room.scene.elements.values()];
@@ -209,6 +266,7 @@ function persistRoom(room) {
     } finally {
       room.persisting = false;
       broadcastSaveState(room);
+      maybeDropJournal(room);
       if (room.lastPersistError) scheduleCheckpoint(room, 3000); // keep retrying while live
     }
   })();
@@ -246,6 +304,7 @@ function makeSeat(ws, user, isHost) {
     lastClientSeq: 0,
     msgTimes: [],
     ptrTimes: [],
+    pendingAcks: [], // acks deferred until the change is durably journaled
     alive: true,
   };
 }
@@ -340,6 +399,7 @@ async function finalizeRoom(room, gen, attempt) {
     return;
   }
   clearTimeout(room.finalizeTimer);
+  clearTimeout(room.journalTimer);
   rooms.delete(room.boardId);
 }
 
@@ -360,8 +420,52 @@ function onLeaderGone(room) {
   room.leaderSocketId = nextHost ? nextHost.connId : null;
 }
 
+// ---- startup recovery -------------------------------------------------------
+// Replay any journaled scenes a previous process left behind (accepted but not
+// yet checkpointed when it died). Apply ONLY when Mongo has not advanced past the
+// journal's base revision; delete a journal only once Mongo has proven it (or the
+// journal is stale / the board is gone). On a Mongo error, keep the file for the
+// next boot rather than dropping it unverified.
+async function replayJournals() {
+  let entries = [];
+  try {
+    entries = await journal.listEntries();
+  } catch {
+    return;
+  }
+  for (const { entry } of entries) {
+    try {
+      const board = await Board.findOne({ _id: entry.boardId, deletedAt: null }).select("revision pages._id").lean();
+      if (!board) {
+        await journal.deleteEntry(entry.boardId);
+        continue;
+      }
+      const cur = board.revision || 0;
+      const pageOk = board.pages.some((p) => String(p._id) === String(entry.pageId));
+      if (pageOk && cur <= (entry.boardRevision || 0)) {
+        const pageScene = {
+          elements: entry.scene.elements,
+          appState: { viewBackgroundColor: "transparent" },
+          files: entry.scene.files,
+        };
+        const res = await Board.findOneAndUpdate(
+          { _id: entry.boardId, deletedAt: null, "pages._id": entry.pageId, revision: { $in: cur === 0 ? [0, null] : [cur] } },
+          { $set: { "pages.$.scene": pageScene, elementCount: entry.scene.elements.length }, $inc: { revision: 1 } },
+          { new: true }
+        ).lean();
+        if (res) console.log("[LIVE] recovered board", entry.boardId, "from journal → rev", res.revision);
+      }
+      await journal.deleteEntry(entry.boardId); // Mongo proved it, or it is stale
+    } catch (e) {
+      console.error("[LIVE] journal replay error", entry.boardId, e && e.message);
+      // keep the file for the next boot — do NOT delete unverified
+    }
+  }
+}
+
 // ---- connection handling ----------------------------------------------------
 function attach(server) {
+  replayJournals().catch((e) => console.error("[LIVE] journal replay failed:", e && e.message));
   wss = new WebSocketServer({ noServer: true, maxPayload: LIMITS.MAX_PAYLOAD });
 
   server.on("upgrade", (req, socket, head) => {
@@ -520,14 +624,17 @@ async function startOrHostRoom(ws, user, board) {
       pageEpoch: 0,
       acceptedRevision: 0,
       persistedRevision: 0,
+      journaledRevision: 0,
       boardRevision: board.revision || 0,
       scene: { elements, files },
       members: new Map(),
       dirty: false,
       persisting: false,
       persistTail: null,
+      journalFlushing: false,
       lastPersistError: null,
       checkpointTimer: null,
+      journalTimer: null,
       graceTimer: null,
       finalizeTimer: null,
     };
@@ -622,7 +729,10 @@ async function handleInRoom(room, seat, msg) {
       room.dirty = true;
       scheduleCheckpoint(room);
       broadcast(room, { v: 1, type: "scene-update", elements: accepted, from: seat.socketId }, seat.connId);
-      send(seat.ws, { v: 1, type: "ack", clientSeq: msg.clientSeq, acceptedRevision: room.acceptedRevision });
+      // The ack is DEFERRED until the change is durably journaled (survives a hard
+      // kill), so an acknowledged drawing is never lost.
+      if (typeof msg.clientSeq === "number") seat.pendingAcks.push({ clientSeq: msg.clientSeq, revision: room.acceptedRevision });
+      scheduleJournal(room);
       return;
     }
     case "pointer": {
@@ -742,6 +852,7 @@ async function closeAll(budgetMs) {
   }
   for (const room of rooms.values()) {
     clearTimeout(room.checkpointTimer);
+    clearTimeout(room.journalTimer);
     clearTimeout(room.graceTimer);
     clearTimeout(room.finalizeTimer);
     for (const seat of room.members.values()) {
@@ -769,6 +880,6 @@ module.exports = {
   validateHandshake,
   validateInRoom,
   LIMITS,
-  // test-only hooks for the persistence/finalization coordination
-  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom },
+  // test-only hooks for the persistence/finalization/journal coordination
+  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals },
 };

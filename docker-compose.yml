@@ -29,6 +29,7 @@ services:
       - assignments:/app/assignments # persist homework tasks + student submissions across rebuilds
       - videos:/app/videos # persist uploaded MP4/WebM lesson videos across rebuilds
       - wa_auth:/app/.wwebjs_auth # persist the linked WhatsApp session
+      - live_journal:/app/live-journal # durable write-ahead journal for live whiteboard sessions
     networks:
       - web
 
@@ -81,5 +82,6 @@ volumes:
   assignments:
   videos:
   wa_auth:
+  live_journal:
   caddy_data:
   caddy_config:
