@@ -717,7 +717,7 @@ async function checkpointAll() {
   await Promise.all([...rooms.values()].map((r) => persistThrough(r, r.acceptedRevision).catch(() => false)));
 }
 
-async function closeAll() {
+async function closeAll(budgetMs) {
   acceptingJoins = false;
   clearInterval(heartbeat);
   for (const room of rooms.values()) broadcast(room, { v: 1, type: "server-restarting" });
@@ -726,7 +726,9 @@ async function closeAll() {
   // caught up to acceptedRevision — we do NOT declare a room safely closed on a
   // best-effort attempt. On a prolonged DB outage, changes since the last
   // successful checkpoint may still be lost (logged, not silently swallowed).
-  const budget = Number(process.env.LIVE_SHUTDOWN_BUDGET_MS) > 0 ? Number(process.env.LIVE_SHUTDOWN_BUDGET_MS) : 8000;
+  // Bounded, fixed production budget (stays within the 10s process deadline).
+  // A test-only override is accepted as an argument — there is NO env seam.
+  const budget = Number.isFinite(budgetMs) && budgetMs > 0 ? budgetMs : 8000;
   const deadline = Date.now() + budget;
   const unsavedRooms = () => [...rooms.values()].filter((r) => r.persistedRevision < r.acceptedRevision);
   while (Date.now() < deadline) {

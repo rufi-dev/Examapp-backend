@@ -166,17 +166,20 @@ const at = async (name, fn) => {
     assert.ok(room.persistedRevision >= 1, "closeAll should retry and persist the room");
   });
 
-  await at("closeAll: persistent failure respects the budget and does not hang", async () => {
-    process.env.LIVE_SHUTDOWN_BUDGET_MS = "300";
+  await at("closeAll: persistent failure honours the (test-only) budget, stays unsaved, and LOGS the warning", async () => {
     stubWrite(() => Promise.resolve(null)); // always fails
     const room = fakeRoom("bfail2", { status: "ready", acceptedRevision: 2 });
     rooms.set("bfail2", room);
+    const errs = [];
+    const origErr = console.error;
+    console.error = (...a) => errs.push(a.map(String).join(" "));
     const start = Date.now();
-    await hub.closeAll();
+    await hub.closeAll(300); // test-only budget parameter — no env seam
     const elapsed = Date.now() - start;
-    delete process.env.LIVE_SHUTDOWN_BUDGET_MS;
-    assert.ok(elapsed < 3000, `closeAll must honour the shutdown budget (took ${elapsed}ms)`);
+    console.error = origErr;
+    assert.ok(elapsed < 3000, `closeAll must honour the budget (took ${elapsed}ms)`);
     assert.ok(room.persistedRevision < room.acceptedRevision, "the room really was unsaved");
+    assert.ok(errs.some((m) => /SHUTDOWN DATA-LOSS RISK/.test(m)), "the data-loss warning must be logged");
   });
 
   Board.findOneAndUpdate = origFOU;
