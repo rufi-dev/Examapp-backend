@@ -103,6 +103,7 @@ const publicMembers = (room) =>
   [...room.members.values()].map((s) => ({
     socketId: s.socketId,
     username: s.username,
+    photo: s.photo,
     color: s.color,
     canWrite: s.canWrite,
     isHost: s.isHost,
@@ -187,6 +188,7 @@ function makeSeat(ws, user, isHost) {
     socketId: crypto.randomUUID(),
     user,
     username: user.name || "İstifadəçi",
+    photo: user.photo || "",
     color: colorFor(user._id),
     isHost,
     canWrite: isHost, // students start view-only (teacher grants write)
@@ -558,6 +560,10 @@ async function handleInRoom(room, seat, msg) {
     case "request-write": {
       seat.handRaised = true;
       broadcastPresence(room);
+      // Nudge the host(s) directly so the request is impossible to miss.
+      for (const s of room.members.values()) {
+        if (s.isHost) send(s.ws, { v: 1, type: "hand-raised", socketId: seat.socketId, username: seat.username });
+      }
       return;
     }
     case "grant-write": {
