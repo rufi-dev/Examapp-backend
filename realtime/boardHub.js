@@ -226,31 +226,58 @@ function dropSeat(room, seat, reason) {
   } catch {
     /* already gone */
   }
+  if (room.status === "ending") return;
+  const wasHost = seat.isHost;
   if (seat.connId === room.leaderSocketId) onLeaderGone(room);
-  if (!room.members.size) beginGrace(room);
-  else broadcastPresence(room);
+  if (!room.members.size) {
+    beginGrace(room);
+    return;
+  }
+  const hostPresent = [...room.members.values()].some((s) => s.isHost);
+  if (wasHost && !hostPresent) {
+    // Host left but students remain: IMMEDIATELY revoke every student's write
+    // (freeze editing) and start the reconnect grace. If no host returns the room
+    // ends — a student must never keep edit access after the teacher leaves.
+    for (const s of room.members.values()) {
+      if (s.canWrite && !s.isHost) {
+        s.canWrite = false;
+        send(s.ws, { v: 1, type: "write-changed", canWrite: false });
+      }
+    }
+    beginGrace(room);
+    broadcastPresence(room);
+    return;
+  }
+  broadcastPresence(room);
+}
+
+// End the session for everyone: checkpoint, tell clients, close all sockets.
+async function endRoom(room) {
+  if (room.status === "ending") return;
+  room.status = "ending";
+  clearTimeout(room.graceTimer);
+  await persistRoom(room).catch(() => {});
+  broadcast(room, { v: 1, type: "host-left" });
+  for (const seat of room.members.values()) {
+    clearTimeout(seat.authTimer);
+    try {
+      seat.ws.close(CLOSE.GOING_AWAY, "session-ended");
+    } catch {
+      /* gone */
+    }
+  }
+  clearTimeout(room.checkpointTimer);
+  rooms.delete(room.boardId);
 }
 
 function beginGrace(room) {
   // Host/leader gone or room emptied — freeze and allow a reconnect window, then
-  // checkpoint + close. A brief network blip must not end the lesson.
-  if (room.status === "ending") return;
+  // end. A brief network blip must not end the lesson; re-entry keeps one timer.
+  if (room.status === "ending" || room.status === "reconnecting") return;
   room.status = "reconnecting";
   clearTimeout(room.graceTimer);
-  room.graceTimer = setTimeout(async () => {
-    room.status = "ending";
-    await persistRoom(room).catch(() => {});
-    broadcast(room, { v: 1, type: "host-left" });
-    for (const seat of room.members.values()) {
-      clearTimeout(seat.authTimer);
-      try {
-        seat.ws.close(CLOSE.GOING_AWAY, "session-ended");
-      } catch {
-        /* gone */
-      }
-    }
-    clearTimeout(room.checkpointTimer);
-    rooms.delete(room.boardId);
+  room.graceTimer = setTimeout(() => {
+    endRoom(room).catch(() => {});
   }, LIMITS.GRACE_MS);
 }
 
@@ -521,6 +548,11 @@ async function handleInRoom(room, seat, msg) {
       if (!f || typeof f.fileId !== "string" || typeof f.hash !== "string") return;
       room.scene.files.set(f.fileId, { fileId: f.fileId, hash: f.hash, mime: f.mime, size: f.size });
       broadcast(room, { v: 1, type: "files-add", file: room.scene.files.get(f.fileId), from: seat.socketId }, seat.connId);
+      return;
+    }
+    case "end-live": {
+      if (!seat.isHost) return; // only the teacher ends the lesson
+      await endRoom(room); // immediate — students lose write and revert to view-only
       return;
     }
     case "request-write": {
