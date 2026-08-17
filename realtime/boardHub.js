@@ -666,13 +666,24 @@ async function handleInRoom(room, seat, msg) {
       if (seat.connId !== room.leaderSocketId) return; // leader only
       const pageId = typeof msg.pageId === "string" ? msg.pageId : null;
       if (!pageId) return;
-      // The page must actually belong to this board.
+      const gen = room.generation;
+      // WS messages are processed concurrently, so this room can be finalized /
+      // deleted / resumed while we await Mongo. Revalidate the room's identity,
+      // generation, status and leadership after EVERY await before mutating it —
+      // otherwise a page change could resume onto a dead room and lose its work.
+      const stillCurrent = () =>
+        rooms.get(room.boardId) === room &&
+        room.generation === gen &&
+        room.status === "ready" &&
+        seat.connId === room.leaderSocketId;
       const board = await Board.findOne({ _id: room.boardId, deletedAt: null }).select("pages._id").lean();
+      if (!stillCurrent()) return;
       if (!board || !board.pages.some((p) => String(p._id) === pageId)) return;
       // Prove the CURRENT page is durably saved THROUGH its latest accepted
       // revision before switching — an in-flight save is not treated as done.
       const currentTarget = room.acceptedRevision;
       const saved = await persistThrough(room, currentTarget);
+      if (!stillCurrent()) return;
       if (!saved) {
         send(seat.ws, { v: 1, type: "page-blocked", reason: "save-failed" });
         return;
@@ -715,7 +726,8 @@ async function closeAll() {
   // caught up to acceptedRevision — we do NOT declare a room safely closed on a
   // best-effort attempt. On a prolonged DB outage, changes since the last
   // successful checkpoint may still be lost (logged, not silently swallowed).
-  const deadline = Date.now() + 8000;
+  const budget = Number(process.env.LIVE_SHUTDOWN_BUDGET_MS) > 0 ? Number(process.env.LIVE_SHUTDOWN_BUDGET_MS) : 8000;
+  const deadline = Date.now() + budget;
   const unsavedRooms = () => [...rooms.values()].filter((r) => r.persistedRevision < r.acceptedRevision);
   while (Date.now() < deadline) {
     await checkpointAll();
@@ -756,5 +768,5 @@ module.exports = {
   validateInRoom,
   LIMITS,
   // test-only hooks for the persistence/finalization coordination
-  __test: { rooms, endRoom, finalizeRoom, persistThrough },
+  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom },
 };

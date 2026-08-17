@@ -53,11 +53,13 @@ t("maxPayload is 256 KiB (not ws' 100 MiB default)", () => assert.strictEqual(hu
 const Board = require("../models/boardModel");
 const origFOU = Board.findOneAndUpdate;
 const origFBI = Board.findById;
+const origFO = Board.findOne;
 const leanOf = (v) => ({ lean: () => (typeof v === "function" ? v() : Promise.resolve(v)) });
 const stubWrite = (fn) => { Board.findOneAndUpdate = () => leanOf(fn); };
 Board.findById = () => ({ select: () => leanOf({ revision: 0 }) });
+const fakeWs = () => ({ readyState: 1, OPEN: 1, bufferedAmount: 0, send() {}, close() {} });
 
-const { rooms, endRoom, finalizeRoom, persistThrough } = hub.__test;
+const { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom } = hub.__test;
 const tick = () => new Promise((r) => setTimeout(r, 5));
 const fakeRoom = (id, over = {}) => ({
   boardId: id, generation: 0, status: "ending", pageId: "p1",
@@ -126,8 +128,60 @@ const at = async (name, fn) => {
     rooms.delete("bresume");
   });
 
+  await at("CR-BOARD-004: a page request that resumes after end-live does not mutate the dead room", async () => {
+    stubWrite(() => Promise.resolve({ revision: 1 })); // checkpoints succeed
+    const room = fakeRoom("brace", {
+      status: "ready", liveSessionId: "S", pageEpoch: 0, acceptedRevision: 1, leaderSocketId: "L",
+    });
+    rooms.set("brace", room);
+    // Simulate end-live finalizing + deleting the room WHILE the page handler
+    // awaits this board read (concurrent WS messages).
+    Board.findOne = () => ({
+      select: () => ({
+        lean: async () => {
+          await endRoom(room);
+          return { pages: [{ _id: "p1" }, { _id: "p2" }] };
+        },
+      }),
+    });
+    const seat = {
+      connId: "L", socketId: "L", isHost: true, canWrite: true, ws: fakeWs(),
+      lastClientSeq: 0, authExpiresAt: Date.now() + 1e6, user: { _id: "u" },
+    };
+    const epochBefore = room.pageEpoch;
+    await handleInRoom(room, seat, {
+      v: 1, type: "page", liveSessionId: "S", pageEpoch: 0, clientSeq: 1, pageId: "p2", scene: { elements: [] },
+    });
+    Board.findOne = origFO;
+    assert.strictEqual(room.pageEpoch, epochBefore, "page must NOT mutate a room that ended during its await");
+    assert.ok(!rooms.has("brace"), "the room ended by end-live must stay gone");
+  });
+
+  await at("closeAll: a transient checkpoint failure is retried until it saves", async () => {
+    let n = 0;
+    stubWrite(() => { n += 1; return Promise.resolve(n < 2 ? null : { revision: 1 }); });
+    const room = fakeRoom("bclose", { status: "ready", acceptedRevision: 1 });
+    rooms.set("bclose", room);
+    await hub.closeAll();
+    assert.ok(room.persistedRevision >= 1, "closeAll should retry and persist the room");
+  });
+
+  await at("closeAll: persistent failure respects the budget and does not hang", async () => {
+    process.env.LIVE_SHUTDOWN_BUDGET_MS = "300";
+    stubWrite(() => Promise.resolve(null)); // always fails
+    const room = fakeRoom("bfail2", { status: "ready", acceptedRevision: 2 });
+    rooms.set("bfail2", room);
+    const start = Date.now();
+    await hub.closeAll();
+    const elapsed = Date.now() - start;
+    delete process.env.LIVE_SHUTDOWN_BUDGET_MS;
+    assert.ok(elapsed < 3000, `closeAll must honour the shutdown budget (took ${elapsed}ms)`);
+    assert.ok(room.persistedRevision < room.acceptedRevision, "the room really was unsaved");
+  });
+
   Board.findOneAndUpdate = origFOU;
   Board.findById = origFBI;
+  Board.findOne = origFO;
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
