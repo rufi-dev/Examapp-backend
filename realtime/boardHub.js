@@ -146,13 +146,17 @@ function broadcast(room, obj, exceptConnId) {
 
 const broadcastPresence = (room) => broadcast(room, { v: 1, type: "presence", members: publicMembers(room) });
 
+// The single, server-authoritative persistence state for a room. Derived from the
+// real durability counters + last error — NEVER assumed by the client. A brand-new
+// room has accepted===persisted===0 and no error, so it is "saved" immediately (a
+// client must not paint "saving" just because a socket opened — CR-BOARD-008).
+function saveStateOf(room) {
+  if (room.lastPersistError) return "failed";
+  return room.persistedRevision >= room.acceptedRevision ? "saved" : "saving";
+}
+
 function broadcastSaveState(room) {
-  const state = room.lastPersistError
-    ? "failed"
-    : room.persistedRevision >= room.acceptedRevision
-    ? "saved"
-    : "saving";
-  broadcast(room, { v: 1, type: "save-state", state, acceptedRevision: room.acceptedRevision, persistedRevision: room.persistedRevision });
+  broadcast(room, { v: 1, type: "save-state", state: saveStateOf(room), acceptedRevision: room.acceptedRevision, persistedRevision: room.persistedRevision });
 }
 
 // ---- persistence (server-authoritative, revision CAS) -----------------------
@@ -450,14 +454,19 @@ function onLeaderGone(room) {
 // journal is stale / the board is gone). On a Mongo error, keep the file for the
 // next boot rather than dropping it unverified.
 async function replayJournals() {
-  let entries = [];
-  try {
-    entries = await journal.listEntries();
-  } catch {
-    return;
-  }
-  for (const { entry } of entries) {
-    const bid = String(entry.boardId);
+  // Throws if the journal directory can't be enumerated — the caller keeps the hub
+  // NOT ready rather than falsely reporting recovery complete.
+  const entries = await journal.listEntries();
+  for (const rec of entries) {
+    const bid = String(rec.boardId);
+    // A corrupt/checksum-invalid journal was quarantined but its recoverable work
+    // is lost — lock the board and raise a stable alert; never silently continue.
+    if (rec.corrupt) {
+      unresolvedRecovery.add(bid);
+      console.error("[LIVE][SECURITY] corrupt-journal board=" + bid + " quarantined; board LOCKED pending review");
+      continue;
+    }
+    const entry = rec.entry;
     try {
       const board = await Board.findOne({ _id: entry.boardId, deletedAt: null })
         .select("revision pages._id lastLiveJournalId")
@@ -528,14 +537,10 @@ function attach(server) {
   (async () => {
     try {
       await journal.preflight();
+      await replayJournals(); // throws if journals can't be enumerated → stay not-ready
     } catch (e) {
-      console.error("[LIVE] durable-storage preflight FAILED — live board disabled:", e && e.message);
-      return;
-    }
-    try {
-      await replayJournals();
-    } catch (e) {
-      console.error("[LIVE] replay error:", e && e.message);
+      console.error("[LIVE] recovery FAILED — live board disabled (WS refused):", e && e.message);
+      return; // replayDone stays false
     }
     replayDone = true;
     console.log("[LIVE] recovery complete — live board ready");
@@ -738,6 +743,9 @@ function seatIntoRoom(ws, user, room, isHost) {
     pageId: room.pageId,
     pageEpoch: room.pageEpoch,
     revision: room.acceptedRevision,
+    // Authoritative initial/reconnect save state so the client never guesses — an
+    // untouched room reports "saved", not "saving" (CR-BOARD-008).
+    saveState: saveStateOf(room),
     self: { socketId: seat.socketId, canWrite: seat.canWrite, isHost: seat.isHost, isLeader: seat.connId === room.leaderSocketId },
     scene: { elements: [...room.scene.elements.values()], files: mapToObj(room.scene.files) },
     members: publicMembers(room),
@@ -853,43 +861,13 @@ async function handleInRoom(room, seat, msg) {
       return;
     }
     case "page": {
-      if (seat.connId !== room.leaderSocketId) return; // leader only
-      const pageId = typeof msg.pageId === "string" ? msg.pageId : null;
-      if (!pageId) return;
-      const gen = room.generation;
-      // WS messages are processed concurrently, so this room can be finalized /
-      // deleted / resumed while we await Mongo. Revalidate the room's identity,
-      // generation, status and leadership after EVERY await before mutating it —
-      // otherwise a page change could resume onto a dead room and lose its work.
-      const stillCurrent = () =>
-        rooms.get(room.boardId) === room &&
-        room.generation === gen &&
-        room.status === "ready" &&
-        seat.connId === room.leaderSocketId;
-      const board = await Board.findOne({ _id: room.boardId, deletedAt: null }).select("pages._id").lean();
-      if (!stillCurrent()) return;
-      if (!board || !board.pages.some((p) => String(p._id) === pageId)) return;
-      // Prove the CURRENT page is durably saved THROUGH its latest accepted
-      // revision before switching — an in-flight save is not treated as done.
-      const currentTarget = room.acceptedRevision;
-      const saved = await persistThrough(room, currentTarget);
-      if (!stillCurrent()) return;
-      if (!saved) {
-        send(seat.ws, { v: 1, type: "page-blocked", reason: "save-failed" });
-        return;
-      }
-      const scene = msg.scene && typeof msg.scene === "object" ? msg.scene : {};
-      const valid = (Array.isArray(scene.elements) ? scene.elements : [])
-        .filter(isValidElement)
-        .slice(0, LIMITS.MAX_ELEMENTS);
-      room.pageId = pageId;
-      room.pageEpoch += 1; // stale updates from the old page are now rejected
-      room.scene.elements = new Map(valid.map((e) => [e.id, e]));
-      room.scene.files = new Map(); // files sync separately; not trusted in bulk here
-      room.dirty = true;
-      room.acceptedRevision += 1;
-      scheduleCheckpoint(room);
-      broadcast(room, { v: 1, type: "page-changed", pageId, pageEpoch: room.pageEpoch, scene: { elements: [...room.scene.elements.values()], files: {} } });
+      // CR-BOARD-006: live page-switching is DISABLED for the one-page MVP. The
+      // old handler mutated room.scene from the message and broadcast BEFORE the
+      // scene was journaled — a crash in that window lost the switch with no WAL
+      // record. Rather than journal-before-broadcast for a feature we don't ship
+      // yet, refuse the op outright so no live mutation can bypass the WAL. The
+      // host still switches pages via the HTTP saveBoard path (not while live).
+      if (seat.connId === room.leaderSocketId) send(seat.ws, { v: 1, type: "page-blocked", reason: "not-supported" });
       return;
     }
     default:
@@ -961,5 +939,5 @@ module.exports = {
   validateInRoom,
   LIMITS,
   // test-only hooks for the persistence/finalization/journal coordination
-  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals, unresolvedRecovery },
+  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals, unresolvedRecovery, handleHandshake, seatIntoRoom, makeSeat, saveStateOf },
 };

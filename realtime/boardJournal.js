@@ -39,19 +39,18 @@ const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 const safeId = (id) => String(id).replace(/[^a-fA-F0-9]/g, "");
 const fileFor = (boardId) => path.join(JOURNAL_DIR, `${safeId(boardId)}.json`);
 
-// fsync the directory so the atomic rename itself is durable (POSIX). A GENUINE
-// I/O error propagates — a failed dir-fsync means the write is not proven durable.
-// Some platforms (Windows) simply don't support fsync on a directory handle; that
-// is a platform limitation (the file fsync + atomic rename already happened), so
-// only those specific codes are tolerated.
-const DIR_FSYNC_UNSUPPORTED = new Set(["EPERM", "EINVAL", "ENOSYS", "ENOTSUP", "EISDIR", "EACCES"]);
+// fsync the directory so the atomic rename itself is durable (POSIX). On LINUX
+// (production) EVERY fsync error propagates — a failed dir-fsync means the write is
+// not proven durable. Windows genuinely cannot fsync a directory handle, so ONLY
+// there, and only for the narrow "unsupported" codes, is it tolerated.
+const WIN_DIR_FSYNC_UNSUPPORTED = new Set(["EPERM", "EINVAL", "EISDIR", "ENOSYS"]);
 async function syncDir() {
   let dh;
   try {
     dh = await fsp.open(JOURNAL_DIR, "r");
     await dh.sync();
   } catch (e) {
-    if (!DIR_FSYNC_UNSUPPORTED.has(e.code)) throw e;
+    if (!(process.platform === "win32" && WIN_DIR_FSYNC_UNSUPPORTED.has(e.code))) throw e;
   } finally {
     if (dh) await dh.close().catch(() => {});
   }
@@ -116,26 +115,35 @@ function writeEntry(entry) {
   });
 }
 
-// Read the current entry (serialized). Corrupt files are quarantined and null'd.
+// Raw (non-queued) read. Returns { kind: "absent" | "corrupt" | "ok", entry? }.
+// A corrupt/checksum-invalid file is quarantined DURABLY (rename + dir fsync);
+// quarantine failures propagate. ENOENT → absent; other read errors propagate.
+async function _scan(boardId) {
+  const target = fileFor(boardId);
+  let raw;
+  try {
+    raw = await fsp.readFile(target, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return { kind: "absent" };
+    throw e;
+  }
+  try {
+    const doc = JSON.parse(raw);
+    if (!doc || typeof doc.payload !== "string" || doc.sha256 !== sha256(doc.payload)) throw new Error("checksum");
+    return { kind: "ok", entry: JSON.parse(doc.payload) };
+  } catch {
+    await fsp.rename(target, `${target}.corrupt`); // durable quarantine (throws propagate)
+    await syncDir();
+    return { kind: "corrupt" };
+  }
+}
+
+// Read the current entry (serialized). Returns the entry, or null (absent /
+// corrupt-after-quarantine). For corruption-AWARE recovery use listEntries().
 function readEntry(boardId) {
   return enqueue(boardId, async () => {
-    const target = fileFor(boardId);
-    let raw;
-    try {
-      raw = await fsp.readFile(target, "utf8");
-    } catch (e) {
-      if (e.code === "ENOENT") return null;
-      throw e;
-    }
-    let doc;
-    try {
-      doc = JSON.parse(raw);
-      if (!doc || typeof doc.payload !== "string" || doc.sha256 !== sha256(doc.payload)) throw new Error("checksum");
-      return JSON.parse(doc.payload);
-    } catch {
-      await fsp.rename(target, `${target}.corrupt`).catch(() => {});
-      return null;
-    }
+    const r = await _scan(boardId);
+    return r.kind === "ok" ? r.entry : null;
   });
 }
 
@@ -164,26 +172,25 @@ function deleteEntry(boardId, journalId) {
     await fsp.unlink(target).catch((e) => {
       if (e.code !== "ENOENT") throw e;
     });
-    await syncDir().catch(() => {});
+    await syncDir(); // propagates (Linux) — a deletion is not proven durable otherwise
     return true;
   });
 }
 
-// Every current entry (for boot replay). Uses the serialized read so corruption
-// is quarantined consistently.
+// Every current journal, for boot replay. THROWS if the directory can't be
+// enumerated (so the hub never reports "recovery complete" without examining the
+// files). Each record is { boardId, entry } for a valid journal or
+// { boardId, corrupt: true } for a quarantined one — corruption is never silently
+// dropped.
 async function listEntries() {
-  let files;
-  try {
-    files = await fsp.readdir(JOURNAL_DIR);
-  } catch {
-    return [];
-  }
+  const files = await fsp.readdir(JOURNAL_DIR); // throws on enumeration failure
   const out = [];
   for (const f of files) {
     if (!f.endsWith(".json")) continue;
     const boardId = f.replace(/\.json$/, "");
-    const entry = await readEntry(boardId).catch(() => null);
-    if (entry) out.push({ boardId, entry });
+    const r = await enqueue(boardId, () => _scan(boardId));
+    if (r.kind === "ok") out.push({ boardId, entry: r.entry });
+    else if (r.kind === "corrupt") out.push({ boardId, corrupt: true });
   }
   return out;
 }

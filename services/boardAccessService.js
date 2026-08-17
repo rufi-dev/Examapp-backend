@@ -37,7 +37,11 @@ async function ownedClassIds(user, raw) {
     .map((c) => String(c._id));
 }
 
-const audienceOf = (b) => (b.classes?.length ? b.classes.map(String) : []);
+// A board's audience class ids as strings. `classes` may arrive as raw ObjectIds
+// (WS/live-status paths) OR as populated {_id,name} objects (getBoard populates +
+// leans them) — normalise both, else a populated ref stringifies to "[object
+// Object]" and every explicit-audience member is wrongly denied on direct open.
+const audienceOf = (b) => (b.classes?.length ? b.classes.map((c) => String(c && c._id ? c._id : c)) : []);
 
 // Owner/admin may EDIT; a student in the audience may only VIEW. Returns
 // { ok, canEdit } so the caller can gate reading vs writing.
@@ -45,16 +49,23 @@ async function accessLevel(user, board) {
   if (!board) return { ok: false, canEdit: false };
   if (user.role === "admin") return { ok: true, canEdit: true };
   if (String(board.owner) === String(user._id)) return { ok: true, canEdit: true };
-  if (user.role === "teacher") return { ok: false, canEdit: false };
+  // Everyone else — INCLUDING a teacher-role account who is not the owner — is at
+  // most a read-only AUDIENCE member, and only if they hold an approved enrollment
+  // that puts them in this board's audience. Authorization is derived from board
+  // ownership/admin authority or approved class membership, NEVER from assuming a
+  // non-owner "teacher" is forbidden (that mismatch used to reject an enrolled
+  // co-teacher whom listClassBoards correctly showed the board — CR-BOARD-007).
+  // canEdit stays false here, so canHostLive (canEdit && hasTeacherCapability) can
+  // never let a co-teacher host, save, or manage merely because of their role.
   const { classIds, ownerIds } = await studentScope(user._id);
   const audience = audienceOf(board);
   if (!audience.length) {
-    // Empty audience = "all of the board owner's students": the student must be
-    // enrolled in a class owned by the board's owner.
+    // Empty audience = "all approved students of the board owner": the viewer must
+    // be enrolled (approved) in a class owned by the board's owner.
     return { ok: ownerIds.includes(String(board.owner)), canEdit: false };
   }
-  // Explicit classes: a student in any listed class may view it — even if the
-  // board was shared by an admin who doesn't own that class.
+  // Explicit classes: an approved member of any listed class may view it — even if
+  // the board was shared by an admin who doesn't own that class.
   return { ok: audience.some((c) => classIds.includes(c)), canEdit: false };
 }
 

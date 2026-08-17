@@ -133,33 +133,27 @@ const at = async (name, fn) => {
     rooms.delete("bresume");
   });
 
-  await at("CR-BOARD-004: a page request that resumes after end-live does not mutate the dead room", async () => {
+  await at("CR-BOARD-004: end-live deletes the room; a late page op cannot resurrect or mutate it", async () => {
     stubWrite(() => Promise.resolve({ revision: 1 })); // checkpoints succeed
     const room = fakeRoom("brace", {
       status: "ready", liveSessionId: "S", pageEpoch: 0, acceptedRevision: 1, leaderSocketId: "L",
     });
     rooms.set("brace", room);
-    // Simulate end-live finalizing + deleting the room WHILE the page handler
-    // awaits this board read (concurrent WS messages).
-    Board.findOne = () => ({
-      select: () => ({
-        lean: async () => {
-          await endRoom(room);
-          return { pages: [{ _id: "p1" }, { _id: "p2" }] };
-        },
-      }),
-    });
     const seat = {
       connId: "L", socketId: "L", isHost: true, canWrite: true, ws: fakeWs(),
-      lastClientSeq: 0, authExpiresAt: Date.now() + 1e6, user: { _id: "u" },
+      lastClientSeq: 0, authExpiresAt: Date.now() + 1e6, user: { _id: "u" }, pendingAcks: [], msgTimes: [], ptrTimes: [],
     };
+    room.members.set("L", seat);
+    await endRoom(room); // end-live finalizes + removes the room
+    assert.ok(!rooms.has("brace"), "end-live removed the room");
+    // A page op arriving after end-live is refused (page switching is disabled for
+    // the one-page MVP) and can never touch the removed room's scene.
     const epochBefore = room.pageEpoch;
     await handleInRoom(room, seat, {
       v: 1, type: "page", liveSessionId: "S", pageEpoch: 0, clientSeq: 1, pageId: "p2", scene: { elements: [] },
     });
-    Board.findOne = origFO;
-    assert.strictEqual(room.pageEpoch, epochBefore, "page must NOT mutate a room that ended during its await");
-    assert.ok(!rooms.has("brace"), "the room ended by end-live must stay gone");
+    assert.strictEqual(room.pageEpoch, epochBefore, "a late page op does not mutate the removed room");
+    assert.ok(!rooms.has("brace"), "the room ended by end-live stays gone");
   });
 
   await at("closeAll: a transient checkpoint failure is retried until it saves", async () => {
@@ -194,10 +188,10 @@ const at = async (name, fn) => {
     const id = "aaaaaaaaaaaaaaaaaaaaaaaa";
     await jrnl.writeEntry({ boardId: id, pageId: "p1", liveSessionId: "S", acceptedRevision: 3, boardRevision: 1, scene: { elements: [{ id: "e", type: "rectangle" }], files: {} } });
     const list = await jrnl.listEntries();
-    const e = list.find((x) => x.entry.boardId === id);
+    const e = list.find((x) => x.entry && x.entry.boardId === id);
     assert.ok(e && e.entry.acceptedRevision === 3, "entry listed with data intact");
     await jrnl.deleteEntry(id);
-    assert.ok(!(await jrnl.listEntries()).some((x) => x.entry.boardId === id), "deleted entry gone");
+    assert.ok(!(await jrnl.listEntries()).some((x) => x.entry && x.entry.boardId === id), "deleted entry gone");
   });
 
   await at("journal: a corrupted file is quarantined, never applied", async () => {
@@ -206,7 +200,8 @@ const at = async (name, fn) => {
     await jrnl.writeEntry({ boardId: id, pageId: "p1", liveSessionId: "S", acceptedRevision: 1, boardRevision: 0, scene: { elements: [], files: {} } });
     fs.writeFileSync(jrnl.fileFor(id), '{"v":1,"sha256":"deadbeef","payload":"{}"}'); // wrong checksum
     const list = await jrnl.listEntries();
-    assert.ok(!list.some((x) => x.entry.boardId === id), "corrupt entry skipped");
+    assert.ok(!list.some((x) => x.entry && x.entry.boardId === id), "corrupt entry not applied as valid");
+    assert.ok(list.some((x) => x.corrupt && x.boardId === id), "corrupt entry surfaced as a corrupt marker (never silently dropped)");
     assert.ok(fs.existsSync(jrnl.fileFor(id) + ".corrupt"), "corrupt file quarantined");
     fs.unlinkSync(jrnl.fileFor(id) + ".corrupt");
   });
@@ -246,7 +241,7 @@ const at = async (name, fn) => {
     Board.findOne = origFO;
     Board.findOneAndUpdate = origFOU;
     assert.ok(applied && applied.$inc && applied.$inc.revision === 1, "replay CAS-writes + bumps revision");
-    assert.ok(!(await jrnl.listEntries()).some((x) => x.entry.boardId === id), "journal deleted after Mongo proved it");
+    assert.ok(!(await jrnl.listEntries()).some((x) => x.entry && x.entry.boardId === id), "journal deleted after Mongo proved it");
   });
 
   // ---- CR-BOARD-005 durability hardening ------------------------------------
@@ -316,6 +311,58 @@ const at = async (name, fn) => {
     assert.ok(!sent.some((m) => m.type === "ack"), "NO ack sent when the change is not durable");
     assert.strictEqual(seat.pendingAcks.length, 1, "ack stays pending");
     clearTimeout(room.journalTimer);
+  });
+
+  // ---- CR-BOARD-006 fail-closed recovery ------------------------------------
+  console.log("\nboard-live hub — CR-BOARD-006");
+
+  await at("a corrupt journal LOCKS the board and is never silently applied", async () => {
+    const fs = require("fs");
+    const id = "444444444444444444444444";
+    await jrnl.writeEntry({ boardId: id, pageId: "p1", liveSessionId: "S", acceptedRevision: 1, boardRevision: 0, scene: { elements: [], files: {} } });
+    fs.writeFileSync(jrnl.fileFor(id), '{"v":1,"sha256":"deadbeef","payload":"{}"}'); // checksum no longer matches
+    unresolvedRecovery.delete(id);
+    let wrote = false;
+    Board.findOne = () => ({ select: () => ({ lean: async () => null }) }); // any stray valid journal → board-gone, harmless
+    Board.findOneAndUpdate = () => ({ lean: async () => { wrote = true; return { revision: 1 }; } });
+    await replayJournals();
+    Board.findOne = origFO;
+    Board.findOneAndUpdate = origFOU;
+    assert.ok(unresolvedRecovery.has(id), "corrupt journal locks the board (start/join refused)");
+    assert.ok(!wrote, "no scene was applied out of a corrupt journal");
+    unresolvedRecovery.delete(id);
+    if (fs.existsSync(jrnl.fileFor(id) + ".corrupt")) fs.unlinkSync(jrnl.fileFor(id) + ".corrupt");
+  });
+
+  await at("a directory-enumeration failure makes recovery THROW (hub stays not-ready)", async () => {
+    const fsmod = require("fs");
+    const origReaddir = fsmod.promises.readdir;
+    fsmod.promises.readdir = () => Promise.reject(Object.assign(new Error("io"), { code: "EIO" }));
+    let threw = false;
+    try { await replayJournals(); } catch { threw = true; }
+    fsmod.promises.readdir = origReaddir;
+    assert.ok(threw, "replayJournals rejects when journals cannot be enumerated → replayDone stays false");
+  });
+
+  await at("a live page op is REFUSED so no mutation can bypass the WAL", async () => {
+    const room = fakeRoom("555555555555555555555555", { status: "ready", liveSessionId: "S", pageEpoch: 0, pageId: "p1", acceptedRevision: 1, leaderSocketId: "L" });
+    rooms.set(room.boardId, room);
+    const sent = [];
+    const seat = {
+      connId: "L", socketId: "L", isHost: true, canWrite: true, lastClientSeq: 0, authExpiresAt: Date.now() + 1e6,
+      user: { _id: "u" }, pendingAcks: [], msgTimes: [], ptrTimes: [],
+      ws: { readyState: 1, OPEN: 1, bufferedAmount: 0, send: (s) => sent.push(JSON.parse(s)), close() {} },
+    };
+    room.members.set("L", seat);
+    const epochBefore = room.pageEpoch;
+    await handleInRoom(room, seat, {
+      v: 1, type: "page", liveSessionId: "S", pageEpoch: 0, clientSeq: 1, pageId: "p2",
+      scene: { elements: [{ id: "x", type: "rectangle", version: 1, versionNonce: 1, x: 1, y: 1, width: 2, height: 2 }] },
+    });
+    assert.strictEqual(room.pageEpoch, epochBefore, "page op did not advance the epoch");
+    assert.strictEqual(room.scene.elements.size, 0, "page op did not mutate the scene (no WAL bypass)");
+    assert.ok(sent.some((m) => m.type === "page-blocked" && m.reason === "not-supported"), "leader told page switching is unsupported");
+    rooms.delete(room.boardId);
   });
 
   Board.findOneAndUpdate = origFOU;
