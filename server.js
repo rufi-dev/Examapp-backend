@@ -220,6 +220,7 @@ const PORT = process.env.PORT || 5000
 const _timers = new Set()
 const track = (h) => { _timers.add(h); return h }
 let _server = null
+const boardHub = require("./realtime/boardHub") // live whiteboard WebSocket hub
 let _stopWorker = null
 let _stopBackgroundJobs = null
 let _shutdownPromise = null
@@ -239,6 +240,10 @@ function lifecycleShutdown(reason, code = 0) {
         }, SHUTDOWN_DEADLINE_MS)
         if (forced.unref) forced.unref()
         try {
+            // 0. Live whiteboard: stop new joins, checkpoint every room, then close
+            //    all WebSocket clients (code 1012) — BEFORE the HTTP server closes,
+            //    otherwise upgraded connections linger and delay/break shutdown.
+            try { await boardHub.closeAll() } catch (_) {}
             // 1. Stop accepting work: close the HTTP listener (drains in-flight).
             if (_server) {
                 await new Promise((resolve) => _server.close(() => resolve()))
@@ -335,6 +340,9 @@ mongoose
             _server.requestTimeout = Number(process.env.SERVER_REQUEST_TIMEOUT_MS || 45 * 60 * 1000)
             _server.headersTimeout = Number(process.env.SERVER_HEADERS_TIMEOUT_MS || 46 * 60 * 1000)
         } catch (_) { /* older Node without these knobs — ignore */ }
+        // Attach the live whiteboard WebSocket hub to the same HTTP server (Caddy
+        // already proxies /ws/* upgrades). ONE backend instance only (in-memory rooms).
+        try { boardHub.attach(_server) } catch (e) { console.error("[LIVE] boardHub attach failed:", e && e.message) }
         _server.once("listening", () => {
             const bound = (_server.address() && _server.address().port) || PORT
             console.log("Connected to DB and listening on port:", bound)

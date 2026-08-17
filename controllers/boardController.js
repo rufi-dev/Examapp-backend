@@ -3,62 +3,11 @@ const Board = require("../models/boardModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 
-// ---- audience / access helpers (mirror materialController) -------------------
-async function studentScope(studentId) {
-  const classIds = await Enrollment.find({ student: studentId, status: "approved" }).distinct("class");
-  const ownerIds = classIds.length
-    ? await Class.find({ _id: { $in: classIds } }).distinct("owner")
-    : [];
-  return { classIds: classIds.map(String), ownerIds: ownerIds.map(String) };
-}
-
-// Keep only the classes this user may publish to (their own; admins: any).
-async function ownedClassIds(user, raw) {
-  let ids = raw;
-  if (typeof ids === "string") {
-    try {
-      ids = JSON.parse(ids);
-    } catch {
-      ids = ids ? [ids] : [];
-    }
-  }
-  if (!Array.isArray(ids)) ids = ids ? [ids] : [];
-  ids = ids.filter(Boolean).map(String);
-  if (!ids.length) return [];
-  const found = await Class.find({ _id: { $in: ids } }).select("owner").lean();
-  return found
-    .filter((c) => user.role === "admin" || String(c.owner) === String(user._id))
-    .map((c) => String(c._id));
-}
-
-const audienceOf = (b) => (b.classes?.length ? b.classes.map(String) : []);
-
-// Owner/admin may EDIT; a student in the audience may only VIEW. Returns
-// { ok, canEdit } so the caller can gate reading vs writing.
-async function accessLevel(user, board) {
-  if (!board) return { ok: false, canEdit: false };
-  if (user.role === "admin") return { ok: true, canEdit: true };
-  if (String(board.owner) === String(user._id)) return { ok: true, canEdit: true };
-  if (user.role === "teacher") return { ok: false, canEdit: false };
-  const { classIds, ownerIds } = await studentScope(user._id);
-  const audience = audienceOf(board);
-  if (!audience.length) {
-    // Empty audience = "all of the board owner's students": the student must be
-    // enrolled in a class owned by the board's owner.
-    return { ok: ownerIds.includes(String(board.owner)), canEdit: false };
-  }
-  // Explicit classes: a student in any listed class may view it — even if the
-  // board was shared by an admin who doesn't own that class.
-  return { ok: audience.some((c) => classIds.includes(c)), canEdit: false };
-}
-
-// Migrate a legacy single-scene board to a one-page shape on read; guarantee at
-// least one page so the editor always has something to show.
-const pagesOf = (board) => {
-  if (board.pages && board.pages.length) return board.pages;
-  if (board.scene) return [{ name: "Səhifə 1", scene: board.scene }];
-  return [{ name: "Səhifə 1", scene: null }];
-};
+// ---- access policy ----------------------------------------------------------
+// Extracted to services/boardAccessService so the realtime hub enforces the SAME
+// open/edit/host rules as these HTTP handlers.
+const { ownedClassIds, accessLevel, pagesOf } = require("../services/boardAccessService");
+const boardHub = require("../realtime/boardHub"); // live-session registry (isLive)
 
 // ---- teacher: manage own boards ---------------------------------------------
 // GET /api/boards — a teacher's own boards; an ADMIN sees EVERY teacher's boards
@@ -110,6 +59,9 @@ const getBoard = asyncHandler(async (req, res) => {
     bgColor: board.bgColor || "",
     pages: pagesOf(board),
     canEdit,
+    revision: board.revision || 0,
+    // Non-null when a live session is running: the client can offer "Join live".
+    live: boardHub.isLive(board._id),
     updatedAt: board.updatedAt,
   });
 });
@@ -121,6 +73,17 @@ const saveBoard = asyncHandler(async (req, res) => {
   const scope = req.user.role === "admin" ? {} : { owner: req.user._id };
   const board = await Board.findOne({ _id: req.params.id, deletedAt: null, ...scope });
   if (!board) return res.status(404).json({ message: "Lövhə tapılmadı" });
+
+  // While a live session owns the board, the realtime hub is the single writer of
+  // the page scene. Reject an HTTP PAGE write (metadata-only saves still pass).
+  if (req.file && boardHub.isLive(board._id)) {
+    return res.status(409).json({ message: "Lövhə canlı sessiyadadır", code: "board_live" });
+  }
+  // Opt-in optimistic concurrency: if the client sends the revision it based its
+  // edit on and it no longer matches, refuse rather than last-write-wins clobber.
+  if (req.body.expectedRevision !== undefined && Number(req.body.expectedRevision) !== (board.revision || 0)) {
+    return res.status(409).json({ message: "Lövhə başqa yerdə dəyişdirilib", code: "board_conflict" });
+  }
 
   if (typeof req.body.title === "string" && req.body.title.trim()) {
     board.title = req.body.title.trim().slice(0, 120);
@@ -153,8 +116,9 @@ const saveBoard = asyncHandler(async (req, res) => {
     }
     board.sizeBytes = req.file.buffer.length;
   }
+  board.revision = (board.revision || 0) + 1; // advance the concurrency counter
   await board.save();
-  res.json({ _id: board._id, title: board.title, sizeBytes: board.sizeBytes, updatedAt: board.updatedAt });
+  res.json({ _id: board._id, title: board.title, sizeBytes: board.sizeBytes, revision: board.revision, updatedAt: board.updatedAt });
 });
 
 // DELETE /api/boards/:id — soft delete (owner).

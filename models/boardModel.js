@@ -34,6 +34,12 @@ const boardSchema = Schema(
     scene: { type: Schema.Types.Mixed, default: null },
     elementCount: { type: Number, default: 0 },
     sizeBytes: { type: Number, default: 0 },
+    // Optimistic-concurrency counter. Every persisted mutation does a CAS on this
+    // (see boardController.saveBoard + the live hub's checkpoint) so a stale tab
+    // or a second writer cannot clobber newer work. Legacy docs lack it; the first
+    // CAS matches `{ $in: [expected, null] }` (absent-safe). Each page also has a
+    // stable `_id` (pageId) so writes target one page, never a whole-array replace.
+    revision: { type: Number, default: 0 },
     deletedAt: { type: Date, default: null, index: true },
   },
   { timestamps: true, minimize: false }
