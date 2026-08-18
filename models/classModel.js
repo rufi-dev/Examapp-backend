@@ -41,6 +41,11 @@ const classSchema = Schema(
       type: Boolean,
       default: false,
     },
+    // Optional cover image (Cloudinary URL) shown on the class card. Display-only.
+    coverImage: {
+      type: String,
+      default: "",
+    },
     exams: [
       {
         type: Schema.Types.ObjectId,
