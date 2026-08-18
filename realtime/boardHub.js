@@ -424,7 +424,7 @@ function dropSeat(room, seat, reason) {
 // the final scene — and DON'T drop the room until that persist succeeds. This is
 // reached ONLY by an explicit end-live (leader), the idle-empty reaper, or graceful
 // shutdown — never by a transient disconnect.
-async function endRoom(room, reason) {
+async function endRoom(room, reason, opts) {
   if (room.status === "ending") return;
   room.status = "ending";
   const gen = room.generation;
@@ -436,6 +436,9 @@ async function endRoom(room, reason) {
     closeWs(seat.ws, reason || "explicit_end");
   }
   room.members.clear();
+  // Only an EXPLICIT end clears the durable session flag. Eviction/shutdown keep it
+  // active so the session can be rehydrated on reconnect.
+  if (opts && opts.markEnded) await persistSessionEnded(room.boardId);
   await finalizeRoom(room, gen, 0);
 }
 
@@ -476,13 +479,25 @@ function scheduleEmptyReap(room) {
   if (room.status === "ending") return;
   clearTimeout(room.reapTimer);
   scheduleCheckpoint(room, 0); // flush the latest scene while nobody is editing
-  room.reapTimer = setTimeout(() => reapEmptyRoom(room), EMPTY_ROOM_REAP_MS);
+  room.reapTimer = setTimeout(() => reapEmptyRoom(room).catch(() => {}), EMPTY_ROOM_REAP_MS);
 }
 
-function reapEmptyRoom(room) {
+// Evict an idle-empty room from MEMORY ONLY. The durable session stays active, so a
+// later reconnect rehydrates the SAME session from the saved scene. Never ends the
+// session; never drops unsaved work (retries if the final checkpoint fails).
+async function reapEmptyRoom(room) {
   if (room.status === "ending" || room.members.size) return; // someone reconnected
-  console.log("[LIVE] reaping idle-empty room", room.boardId, "(no members for the idle window)");
-  endRoom(room, "server_shutdown").catch(() => {});
+  const gen = room.generation;
+  const ok = await persistThrough(room, room.acceptedRevision).catch(() => false);
+  if (room.members.size || room.generation !== gen || room.status === "ending") return; // resumed mid-persist
+  if (!ok || room.persistedRevision < room.acceptedRevision) {
+    room.reapTimer = setTimeout(() => reapEmptyRoom(room).catch(() => {}), 60000); // retry; keep scene in memory
+    return;
+  }
+  clearTimeout(room.checkpointTimer);
+  clearTimeout(room.journalTimer);
+  rooms.delete(room.boardId); // memory only — liveSession stays active for rehydration
+  console.log("[LIVE] evicted idle-empty room", room.boardId, "from memory (session stays active)");
 }
 
 function onLeaderGone(room) {
@@ -694,7 +709,13 @@ async function handleHandshake(ws, msg) {
     closeWs(ws, "forbidden");
     return null;
   }
-  const room = rooms.get(String(board._id));
+  let room = rooms.get(String(board._id));
+  // No in-memory room, but a DURABLE session is still active (evicted or survived a
+  // restart) → rehydrate it from the saved scene so the viewer joins the SAME session.
+  if (!room && hasDurableSession(board)) {
+    room = buildRoom(board, board.liveSession.id);
+    console.log("[LIVE] rehydrated session", board.liveSession.id, "(viewer) board", String(board._id));
+  }
   // A viewer may join a live room OR one that is awaiting its host's return — both
   // are active sessions. Only a truly absent/ended room is "no-live".
   if (!room || (room.status !== "ready" && room.status !== "awaiting-host")) {
@@ -710,13 +731,72 @@ function ensurePageId(board) {
   return page ? String(page._id) : null;
 }
 
+// DURABLE session identity: mark the board's session active/ended. `active` outlives
+// memory eviction + restart so the same session id can be rehydrated. Failures are
+// swallowed (best-effort) — the in-memory room is still authoritative while it lives.
+async function persistSessionActive(boardId, sessionId, pageId) {
+  await Board.updateOne(
+    { _id: boardId },
+    { $set: { liveSession: { id: sessionId, active: true, pageId: pageId || null, startedAt: new Date() } } }
+  ).catch((e) => console.error("[LIVE] persist session active failed", String(boardId), e && e.message));
+}
+async function persistSessionEnded(boardId) {
+  await Board.updateOne({ _id: boardId }, { $set: { "liveSession.active": false } }).catch((e) =>
+    console.error("[LIVE] persist session ended failed", String(boardId), e && e.message)
+  );
+}
+
+// Build the in-memory room from a board's SAVED scene, under a given session id
+// (a fresh id for a new session, or the persisted id when rehydrating). Registered
+// in `rooms`. Starts awaiting-host; the caller sets it ready if a host is seating.
+function buildRoom(board, sessionId) {
+  const key = String(board._id);
+  const pageId = ensurePageId(board);
+  const first = (board.pages && board.pages[0] && board.pages[0].scene) || {};
+  const elements = new Map((first.elements || []).map((e) => [e.id, e]));
+  const files = new Map(Object.entries(first.files || {}));
+  const room = {
+    boardId: key,
+    liveSessionId: sessionId,
+    hostUserId: null,
+    leaderSocketId: null,
+    status: "awaiting-host",
+    generation: 0,
+    pageId,
+    pageEpoch: 0,
+    acceptedRevision: 0,
+    persistedRevision: 0,
+    journaledRevision: 0,
+    journalId: null,
+    journalUnhealthy: false,
+    boardRevision: board.revision || 0,
+    scene: { elements, files },
+    members: new Map(),
+    dirty: false,
+    persisting: false,
+    persistTail: null,
+    journalFlushing: false,
+    journalTail: null,
+    lastPersistError: null,
+    checkpointTimer: null,
+    journalTimer: null,
+    graceTimer: null,
+    finalizeTimer: null,
+    reapTimer: null,
+  };
+  rooms.set(key, room);
+  return room;
+}
+
+const hasDurableSession = (board) =>
+  !!(board.liveSession && board.liveSession.active && board.liveSession.id && board.pages && board.pages.length);
+
 async function startOrHostRoom(ws, user, board) {
   const key = String(board._id);
   let room = rooms.get(key);
   if (room) {
-    // Resume an existing room (live, awaiting-host, OR finalizing) with its scene
-    // intact — never discard work just because the host reconnected. Bumping the
-    // generation makes any in-flight old finalizer stale so it can't delete us, and
+    // Resume the in-memory room (ready, awaiting-host, OR finalizing) with its scene
+    // intact. Bumping the generation makes any in-flight old finalizer stale, and
     // clearing the idle reaper keeps the same session alive.
     clearTimeout(room.graceTimer);
     clearTimeout(room.finalizeTimer);
@@ -725,49 +805,24 @@ async function startOrHostRoom(ws, user, board) {
     room.generation += 1;
     room.status = "ready";
     if (wasAwaiting) broadcast(room, { v: 1, type: "host-back" }); // viewers: host returned
-  }
-  if (!room) {
-    // Materialize a real first page for legacy single-scene boards so the CAS can
-    // target a stable pageId.
+  } else if (hasDurableSession(board)) {
+    // Rehydrate a durable session that outlived eviction/restart — SAME id + scene.
+    room = buildRoom(board, board.liveSession.id);
+    room.hostUserId = String(user._id);
+    room.status = "ready";
+    console.log("[LIVE] rehydrated session", board.liveSession.id, "(host) board", key);
+  } else {
+    // Brand-new session. Materialize a real first page for legacy single-scene
+    // boards so the CAS can target a stable pageId.
     if (!board.pages || !board.pages.length) {
       board.pages = [{ name: "Səhifə 1", scene: board.scene || null }];
       board.scene = null;
       await board.save();
     }
-    const pageId = ensurePageId(board);
-    const first = board.pages[0].scene || {};
-    const elements = new Map((first.elements || []).map((e) => [e.id, e]));
-    const files = new Map(Object.entries(first.files || {}));
-    room = {
-      boardId: key,
-      liveSessionId: crypto.randomUUID(),
-      hostUserId: String(user._id),
-      leaderSocketId: null,
-      status: "ready",
-      generation: 0,
-      pageId,
-      pageEpoch: 0,
-      acceptedRevision: 0,
-      persistedRevision: 0,
-      journaledRevision: 0,
-      journalId: null,
-      journalUnhealthy: false,
-      boardRevision: board.revision || 0,
-      scene: { elements, files },
-      members: new Map(),
-      dirty: false,
-      persisting: false,
-      persistTail: null,
-      journalFlushing: false,
-      journalTail: null,
-      lastPersistError: null,
-      checkpointTimer: null,
-      journalTimer: null,
-      graceTimer: null,
-      finalizeTimer: null,
-      reapTimer: null,
-    };
-    rooms.set(key, room);
+    room = buildRoom(board, crypto.randomUUID());
+    room.hostUserId = String(user._id);
+    room.status = "ready";
+    await persistSessionActive(key, room.liveSessionId, room.pageId);
   }
   return seatIntoRoom(ws, user, room, true);
 }
@@ -854,10 +909,20 @@ async function handleInRoom(room, seat, msg) {
       const incoming = Array.isArray(msg.elements) ? msg.elements : [];
       if (incoming.length > LIMITS.MAX_ELEMENTS_PER_MSG) return;
       const accepted = [];
+      const rejected = []; // { id, reason } — reported so a drop is NEVER silent
       for (const el of incoming) {
-        if (!isValidElement(el)) continue;
-        if (!seat.isHost && (HOST_ONLY_TYPES.has(el.type) || el.link != null)) continue; // only host adds embeds/links
-        if (el.fileId && !room.scene.files.has(el.fileId)) continue; // unknown file ref
+        if (!isValidElement(el)) {
+          if (el && typeof el.id === "string") rejected.push({ id: el.id, reason: "invalid" });
+          continue;
+        }
+        if (!seat.isHost && (HOST_ONLY_TYPES.has(el.type) || el.link != null)) {
+          rejected.push({ id: el.id, reason: "host-only" });
+          continue;
+        }
+        if (el.fileId && !room.scene.files.has(el.fileId)) {
+          rejected.push({ id: el.id, reason: "unknown-file" });
+          continue;
+        }
         const cur = room.scene.elements.get(el.id);
         if (shouldAcceptElement(el, cur)) {
           room.scene.elements.set(el.id, el);
@@ -865,6 +930,9 @@ async function handleInRoom(room, seat, msg) {
         }
       }
       if (room.scene.elements.size > LIMITS.MAX_ELEMENTS) return dropSeat(room, seat, "protocol_error");
+      // Tell the sender exactly which elements were NOT accepted, so the host and
+      // viewers can never silently diverge (CR-BOARD-010 item 4).
+      if (rejected.length) send(seat.ws, { v: 1, type: "scene-rejected", elements: rejected });
       if (!accepted.length) return;
       room.acceptedRevision += 1;
       room.dirty = true;
@@ -896,7 +964,8 @@ async function handleInRoom(room, seat, msg) {
     }
     case "end-live": {
       if (seat.connId !== room.leaderSocketId) return; // leader (the driving host tab) only
-      await endRoom(room); // immediate — students lose write and revert to view-only
+      // The ONLY normal way a session ends: clears the durable session flag too.
+      await endRoom(room, "explicit_end", { markEnded: true });
       return;
     }
     case "request-write": {
@@ -997,5 +1066,5 @@ module.exports = {
   validateInRoom,
   LIMITS,
   // test-only hooks for the persistence/finalization/journal coordination
-  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals, unresolvedRecovery, handleHandshake, seatIntoRoom, makeSeat, saveStateOf, dropSeat, reapEmptyRoom },
+  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals, unresolvedRecovery, handleHandshake, seatIntoRoom, makeSeat, saveStateOf, dropSeat, reapEmptyRoom, isReady: () => replayDone },
 };

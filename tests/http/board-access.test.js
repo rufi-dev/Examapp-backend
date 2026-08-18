@@ -220,8 +220,29 @@ async function main() {
   ok("resumed session continues from the SAME scene (element still present)", resumedMsg.scene.elements.some((e) => e.id === "keep"));
   ok("resumed room is ready again", roomB.status === "ready");
   ok("the viewer was told the host is back", vWs.sent.some((m) => m.type === "host-back"));
-  clearTimeout(roomB.reapTimer);
-  clearTimeout(roomB.checkpointTimer);
+
+  // ── CR-BOARD-010: durable session survives EVICTION/RESTART (rehydration) ──
+  console.log("\nboard access — CR-BOARD-010 durable session (rehydration)");
+  await hub.__test.persistThrough(roomB, roomB.acceptedRevision); // make the scene durable in Mongo
+  hub.__test.rooms.delete(String(boardB._id)); // simulate the 2h reaper / a backend restart
+  const dbBoard = await Board.findById(boardB._id).lean();
+  ok("the session is persisted ACTIVE in Mongo (outlives eviction/restart)", !!dbBoard.liveSession && dbBoard.liveSession.active === true && dbBoard.liveSession.id === liveIdB);
+  ok("controller reports the board live via the durable flag (no in-memory room)", !hub.isLive(boardB._id));
+  const rejoinWs = fakeWs();
+  const rejoinRes = await hub.__test.handleHandshake(rejoinWs, { v: 1, type: "join", boardId: String(boardB._id), token: tok(student) });
+  const rejoined = rejoinWs.sent.find((m) => m.type === "joined");
+  ok("a viewer REHYDRATES the SAME session id after eviction", rejoinRes && rejoined && rejoined.liveSessionId === liveIdB);
+  ok("the rehydrated scene still contains the drawn element", rejoined && rejoined.scene && rejoined.scene.elements.some((e) => e.id === "keep"));
+
+  // ── CR-BOARD-010: ONLY an explicit end-live ends the durable session ──
+  const endHostWs = fakeWs();
+  const endHost = await hub.__test.handleHandshake(endHostWs, { v: 1, type: "start-live", boardId: String(boardB._id), token: tok(owner) });
+  await hub.__test.handleInRoom(endHost.room, endHost.seat, { v: 1, type: "end-live", liveSessionId: endHost.room.liveSessionId, clientSeq: 1 });
+  const dbEnded = await Board.findById(boardB._id).lean();
+  ok("explicit end-live clears the durable session (the ONLY normal end)", dbEnded.liveSession.active === false);
+  ok("after end, isLive reports nothing", !hub.isLive(boardB._id));
+  clearTimeout(endHost.room.reapTimer);
+  clearTimeout(endHost.room.checkpointTimer);
 
   await new Promise((r) => server.close(r));
   await mongoose.disconnect();

@@ -61,8 +61,12 @@ const getBoard = asyncHandler(async (req, res) => {
     pages: pagesOf(board),
     canEdit,
     revision: board.revision || 0,
-    // Non-null when a live session is running: the client can offer "Join live".
-    live: boardHub.isLive(board._id),
+    // Non-null when a live session is running: the client can offer "Join live". The
+    // DURABLE session flag is authoritative — a session that outlived memory eviction
+    // or a restart still shows live (it rehydrates on connect).
+    live:
+      boardHub.isLive(board._id) ||
+      (board.liveSession && board.liveSession.active ? { liveSessionId: board.liveSession.id, awaitingHost: true } : null),
     updatedAt: board.updatedAt,
   });
 });
@@ -70,11 +74,15 @@ const getBoard = asyncHandler(async (req, res) => {
 // GET /api/boards/:id/live — cheap poll: is a live session running? (Lets a
 // student who already has the board open see "Join live" without a full reload.)
 const boardLiveStatus = asyncHandler(async (req, res) => {
-  const board = await Board.findOne({ _id: req.params.id, deletedAt: null }).select("owner classes").lean();
+  const board = await Board.findOne({ _id: req.params.id, deletedAt: null }).select("owner classes liveSession").lean();
   if (!board) return res.status(404).json({ message: "Lövhə tapılmadı" });
   const { ok } = await accessLevel(req.user, board);
   if (!ok) return res.status(403).json({ message: "Giriş yoxdur" });
-  res.json({ live: boardHub.isLive(board._id) });
+  res.json({
+    live:
+      boardHub.isLive(board._id) ||
+      (board.liveSession && board.liveSession.active ? { liveSessionId: board.liveSession.id, awaitingHost: true } : null),
+  });
 });
 
 // PATCH /api/boards/:id — save (owner only). Pages arrive as a multipart file
@@ -83,14 +91,15 @@ const saveBoard = asyncHandler(async (req, res) => {
   // Owner edits; an admin may edit any board.
   const scope = req.user.role === "admin" ? {} : { owner: req.user._id };
 
-  // While a live session owns the board, the realtime hub is the single writer of
-  // the page scene. Reject an HTTP PAGE write (metadata-only saves still pass).
-  if (req.file && boardHub.isLive(req.params.id)) {
+  const cur = await Board.findOne({ _id: req.params.id, deletedAt: null, ...scope }).select("revision liveSession").lean();
+  if (!cur) return res.status(404).json({ message: "Lövhə tapılmadı" });
+
+  // While a live session owns the board (in memory OR a durable session that
+  // survived eviction/restart), the realtime hub is the single writer of the page
+  // scene. Reject an HTTP PAGE write (metadata-only saves still pass).
+  if (req.file && (boardHub.isLive(req.params.id) || (cur.liveSession && cur.liveSession.active))) {
     return res.status(409).json({ message: "Lövhə canlı sessiyadadır", code: "board_live" });
   }
-
-  const cur = await Board.findOne({ _id: req.params.id, deletedAt: null, ...scope }).select("revision").lean();
-  if (!cur) return res.status(404).json({ message: "Lövhə tapılmadı" });
 
   const set = {};
   if (typeof req.body.title === "string" && req.body.title.trim()) set.title = req.body.title.trim().slice(0, 120);

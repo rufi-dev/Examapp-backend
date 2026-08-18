@@ -45,6 +45,17 @@ const boardSchema = Schema(
     // boot replay can PROVE a journal was already applied (idempotent recovery)
     // before deleting it. See realtime/boardJournal.js + boardHub replayJournals.
     lastLiveJournalId: { type: String, default: null },
+    // DURABLE live-session identity (CR-BOARD-010). `active` is true between an
+    // explicit start and an explicit end — it OUTLIVES memory eviction (the 2h idle
+    // reaper) and a backend restart, so the same session id can be rehydrated from
+    // the saved scene on reconnect. ONLY an explicit end-live clears `active`; the
+    // reaper/shutdown drop the in-memory room but keep the session active.
+    liveSession: {
+      id: { type: String, default: null },
+      active: { type: Boolean, default: false },
+      pageId: { type: String, default: null },
+      startedAt: { type: Date, default: null },
+    },
     deletedAt: { type: Date, default: null, index: true },
   },
   { timestamps: true, minimize: false }

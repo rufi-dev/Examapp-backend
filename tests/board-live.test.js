@@ -357,18 +357,18 @@ const at = async (name, fn) => {
     rooms.delete(room.boardId);
   });
 
-  await at("reapEmptyRoom only ends a STILL-empty room; a reconnect cancels it", async () => {
+  await at("reapEmptyRoom EVICTS a still-empty room from memory only; a reconnect cancels it", async () => {
     stubWrite(() => Promise.resolve({ revision: 1 }));
     const room = fakeRoom("c3c3c3c3c3c3c3c3c3c3c3c3", { status: "awaiting-host", liveSessionId: "S", acceptedRevision: 0 });
     rooms.set(room.boardId, room);
     // A member reconnected before the reaper fired:
     room.members.set("H", capSeat("H", true, []));
-    hub.__test.reapEmptyRoom(room);
+    await hub.__test.reapEmptyRoom(room);
     assert.ok(rooms.has(room.boardId), "reaper is a no-op while a member is present");
     room.members.clear();
-    hub.__test.reapEmptyRoom(room);
-    await tick();
-    assert.ok(!rooms.has(room.boardId), "a still-empty room is reaped");
+    await hub.__test.reapEmptyRoom(room);
+    assert.ok(!rooms.has(room.boardId), "a still-empty room is evicted from memory");
+    assert.notStrictEqual(room.status, "ending", "eviction is memory-only — the session is NOT logically ended");
   });
 
   // ---- CR-BOARD-009 authoritative save-state EMISSION -----------------------
