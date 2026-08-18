@@ -12,6 +12,7 @@ const telegramRoute = require('./routes/telegramRoute')
 const whatsappRoute = require('./routes/whatsappRoute')
 const videoRoute = require('./routes/videoRoute')
 const healthRoute = require('./routes/healthRoute')
+const examPaymentRoute = require('./routes/examPaymentRoute')
 const whatsapp = require('./helper/whatsapp')
 const Attempt = require('./models/attemptModel')
 const Result = require('./models/resultModel')
@@ -141,6 +142,7 @@ app.use("/api/telegram", telegramRoute)
 app.use("/api/whatsapp", whatsappRoute)
 app.use("/api/videos", videoRoute)
 app.use("/api/health", healthRoute)
+app.use("/api/payments", examPaymentRoute)
 app.use('/uploads', express.static('uploads'));
 
 app.get('/', (req, res) => {
