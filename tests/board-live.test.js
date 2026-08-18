@@ -342,6 +342,22 @@ const at = async (name, fn) => {
     rooms.delete(room.boardId);
   });
 
+  await at("an idle auth-lease lapse closes RECONNECTABLE (4001), not terminal — so it resumes", async () => {
+    const room = fakeRoom("d4d4d4d4d4d4d4d4d4d4d4d4", { status: "ready", liveSessionId: "S", leaderSocketId: "H" });
+    rooms.set(room.boardId, room);
+    let closedCode = null;
+    const seat = {
+      connId: "H", socketId: "H", isHost: true, canWrite: true, authTimer: null, authExpiresAt: Date.now() + 1e6,
+      user: { _id: "u" }, ws: { readyState: 1, OPEN: 1, bufferedAmount: 0, send() {}, close: (c) => { closedCode = c; } },
+    };
+    room.members.set("H", seat);
+    dropSeat(room, seat, "auth_expired");
+    assert.strictEqual(closedCode, 4001, "lease lapse uses 4001 (client reconnects + re-verifies) — not terminal 1008");
+    clearTimeout(room.reapTimer);
+    clearTimeout(room.capTimer);
+    rooms.delete(room.boardId);
+  });
+
   await at("the LAST member leaving keeps the room (idle reaper scheduled), never instant-ends", async () => {
     stubWrite(() => Promise.resolve({ revision: 1 }));
     const room = fakeRoom("b2b2b2b2b2b2b2b2b2b2b2b2", { status: "awaiting-host", liveSessionId: "S" });

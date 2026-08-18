@@ -66,7 +66,7 @@ const getBoard = asyncHandler(async (req, res) => {
     // or a restart still shows live (it rehydrates on connect).
     live:
       boardHub.isLive(board._id) ||
-      (board.liveSession && board.liveSession.active ? { liveSessionId: board.liveSession.id, awaitingHost: true } : null),
+      (boardHub.isSessionFresh(board) ? { liveSessionId: board.liveSession.id, awaitingHost: true } : null),
     updatedAt: board.updatedAt,
   });
 });
@@ -81,7 +81,7 @@ const boardLiveStatus = asyncHandler(async (req, res) => {
   res.json({
     live:
       boardHub.isLive(board._id) ||
-      (board.liveSession && board.liveSession.active ? { liveSessionId: board.liveSession.id, awaitingHost: true } : null),
+      (boardHub.isSessionFresh(board) ? { liveSessionId: board.liveSession.id, awaitingHost: true } : null),
   });
 });
 
@@ -97,7 +97,7 @@ const saveBoard = asyncHandler(async (req, res) => {
   // While a live session owns the board (in memory OR a durable session that
   // survived eviction/restart), the realtime hub is the single writer of the page
   // scene. Reject an HTTP PAGE write (metadata-only saves still pass).
-  if (req.file && (boardHub.isLive(req.params.id) || (cur.liveSession && cur.liveSession.active))) {
+  if (req.file && (boardHub.isLive(req.params.id) || boardHub.isSessionFresh(cur))) {
     return res.status(409).json({ message: "Lövhə canlı sessiyadadır", code: "board_live" });
   }
 

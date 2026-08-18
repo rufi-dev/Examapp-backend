@@ -286,6 +286,26 @@ async function main() {
   clearTimeout(zHost.room.reapTimer);
   clearTimeout(zHost.room.checkpointTimer);
 
+  // ── 4-hour hard cap: a session past 4h is not live and is cleared on next start ──
+  console.log("\nboard access — 4h session cap");
+  const boardCap = await Board.create({
+    owner: owner._id, ownerName: owner.name, title: "Cap", classes: [], pages: [{ name: "Səhifə 1", scene: null }],
+    liveSession: { id: "old-session", active: true, pageId: "p", startedAt: new Date(Date.now() - 5 * 60 * 60 * 1000) },
+  });
+  ok("a >4h session is NOT fresh (won't show live / rehydrate)", hub.isSessionFresh(await Board.findById(boardCap._id).lean()) === false);
+  const capVws = fakeWs();
+  const capV = await hub.__test.handleHandshake(capVws, { v: 1, type: "join", boardId: String(boardCap._id), token: tok(student) });
+  ok("a viewer joining a >4h stale session gets no-live (not rehydrated)", capV === null && capVws.sent.some((m) => m.type === "no-live"));
+  const capWs = fakeWs();
+  const capHost = await hub.__test.handleHandshake(capWs, { v: 1, type: "start-live", boardId: String(boardCap._id), token: tok(owner) });
+  const capStarted = capWs.sent.find((m) => m.type === "live-started");
+  ok("host start-live past the cap clears the stale flag and begins a FRESH session", capHost && capStarted && capStarted.liveSessionId !== "old-session");
+  const capDb = await Board.findById(boardCap._id).lean();
+  ok("the durable flag now points at the new active session", capDb.liveSession.active === true && capDb.liveSession.id !== "old-session");
+  clearTimeout(capHost.room.reapTimer);
+  clearTimeout(capHost.room.checkpointTimer);
+  clearTimeout(capHost.room.capTimer);
+
   await new Promise((r) => server.close(r));
   await mongoose.disconnect();
   await mem.stop();

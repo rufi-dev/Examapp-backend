@@ -42,7 +42,10 @@ const CLOSE = { POLICY: 1008, GOING_AWAY: 1001, RESTART: 1012, MSG_TOO_BIG: 1009
 // and continue the same session — no transient network/navigation event ends a
 // session. Only a long idle window with zero members reaps it; that is a memory
 // safeguard, NOT a grace/timeout that ends live lessons.
-const EMPTY_ROOM_REAP_MS = 2 * 60 * 60 * 1000; // 2 hours
+const EMPTY_ROOM_REAP_MS = 2 * 60 * 60 * 1000; // 2 hours (memory eviction only — session stays active)
+// HARD cap: a live session auto-ends 4h after it STARTED, no matter what. This is the
+// only automatic end besides the explicit End button — disconnects/idle never end it.
+const MAX_SESSION_MS = 4 * 60 * 60 * 1000;
 
 // Stable, privacy-safe close reasons for connection telemetry. Each tag maps to a
 // ws close code; the TAG is logged (never scene content or user identifiers), so
@@ -54,7 +57,11 @@ const CLOSE_REASONS = Object.freeze({
   recovering: CLOSE.GOING_AWAY,
   network: CLOSE.GOING_AWAY,
   server_shutdown: CLOSE.RESTART,
-  auth_revoked: CLOSE.POLICY,
+  // A lapsed auth LEASE (the client's periodic re-auth didn't fire in time, e.g. a
+  // backgrounded tab) is RECONNECTABLE (code 4001, not in the terminal set) — the
+  // client reconnects and re-verifies, resuming the session instead of dying on idle.
+  auth_expired: 4001,
+  auth_revoked: CLOSE.POLICY, // genuine revocation/forbidden → terminal
   forbidden: CLOSE.POLICY,
   unauthorized: CLOSE.POLICY,
   not_found: CLOSE.POLICY,
@@ -379,7 +386,7 @@ function colorFor(id) {
 
 function armAuthTimer(room, seat) {
   clearTimeout(seat.authTimer);
-  seat.authTimer = setTimeout(() => dropSeat(room, seat, "auth_revoked"), Math.max(0, seat.authExpiresAt - Date.now()));
+  seat.authTimer = setTimeout(() => dropSeat(room, seat, "auth_expired"), Math.max(0, seat.authExpiresAt - Date.now()));
 }
 
 function rateOk(times, max) {
@@ -447,6 +454,7 @@ async function endRoom(room, reason, opts) {
   const gen = room.generation;
   clearTimeout(room.graceTimer);
   clearTimeout(room.reapTimer);
+  clearTimeout(room.capTimer);
   broadcast(room, { v: 1, type: "host-left" });
   for (const seat of room.members.values()) {
     clearTimeout(seat.authTimer);
@@ -476,6 +484,7 @@ async function finalizeRoom(room, gen, attempt) {
   }
   clearTimeout(room.finalizeTimer);
   clearTimeout(room.journalTimer);
+  clearTimeout(room.capTimer);
   rooms.delete(room.boardId);
 }
 
@@ -510,6 +519,7 @@ async function reapEmptyRoom(room) {
   }
   clearTimeout(room.checkpointTimer);
   clearTimeout(room.journalTimer);
+  clearTimeout(room.capTimer); // the 4h cap is re-derived from startedAt on rehydration
   rooms.delete(room.boardId); // memory only — liveSession stays active for rehydration
   console.log("[LIVE] evicted idle-empty room", room.boardId, "from memory (session stays active)");
 }
@@ -727,7 +737,7 @@ async function handleHandshake(ws, msg) {
   // No in-memory room, but a DURABLE session is still active (evicted or survived a
   // restart) → rehydrate it from the saved scene so the viewer joins the SAME session.
   if (!room && hasDurableSession(board)) {
-    room = buildRoom(board, board.liveSession.id);
+    room = buildRoom(board, board.liveSession.id, startedAtMs(board));
     console.log("[LIVE] rehydrated session", board.liveSession.id, "(viewer) board", String(board._id));
   }
   // A viewer may join a live room OR one that is awaiting its host's return — both
@@ -778,10 +788,38 @@ async function endSession(boardId, sessionId) {
   return !(fresh.liveSession && fresh.liveSession.active && fresh.liveSession.id === sessionId);
 }
 
+// A session is "fresh" while active AND within the 4h hard cap from its start. Past
+// the cap it must not rehydrate or show as live — it gets ended on the next touch.
+const startedAtMs = (board) => (board.liveSession && board.liveSession.startedAt ? new Date(board.liveSession.startedAt).getTime() : 0);
+const isSessionFresh = (board) => {
+  const s = board && board.liveSession;
+  if (!s || !s.active || !s.id) return false;
+  const started = startedAtMs(board);
+  return started > 0 && Date.now() - started < MAX_SESSION_MS;
+};
+
+// The 4h HARD cap: end the session (clears the durable flag) once it has run 4h. This
+// and the explicit End button are the ONLY automatic ends — never a disconnect/idle.
+async function capSession(room) {
+  if (room.status === "ending") return;
+  console.log("[LIVE] 4h session cap reached — ending", room.boardId);
+  await endRoom(room, "explicit_end", { markEnded: true }).catch(() => {});
+}
+function scheduleSessionCap(room) {
+  clearTimeout(room.capTimer);
+  const remaining = room.startedAt + MAX_SESSION_MS - Date.now();
+  if (remaining <= 0) {
+    capSession(room).catch(() => {});
+    return;
+  }
+  room.capTimer = setTimeout(() => capSession(room).catch(() => {}), remaining);
+  room.capTimer.unref?.();
+}
+
 // Build the in-memory room from a board's SAVED scene, under a given session id
 // (a fresh id for a new session, or the persisted id when rehydrating). Registered
 // in `rooms`. Starts awaiting-host; the caller sets it ready if a host is seating.
-function buildRoom(board, sessionId) {
+function buildRoom(board, sessionId, startedAt) {
   const key = String(board._id);
   const pageId = ensurePageId(board);
   const first = (board.pages && board.pages[0] && board.pages[0].scene) || {};
@@ -796,6 +834,7 @@ function buildRoom(board, sessionId) {
     generation: 0,
     pageId,
     pageEpoch: 0,
+    startedAt: startedAt || Date.now(), // anchors the 4h cap; preserved across rehydration
     acceptedRevision: 0,
     persistedRevision: 0,
     journaledRevision: 0,
@@ -815,13 +854,14 @@ function buildRoom(board, sessionId) {
     graceTimer: null,
     finalizeTimer: null,
     reapTimer: null,
+    capTimer: null,
   };
   rooms.set(key, room);
+  scheduleSessionCap(room);
   return room;
 }
 
-const hasDurableSession = (board) =>
-  !!(board.liveSession && board.liveSession.active && board.liveSession.id && board.pages && board.pages.length);
+const hasDurableSession = (board) => isSessionFresh(board) && !!(board.pages && board.pages.length);
 
 async function startOrHostRoom(ws, user, board) {
   const key = String(board._id);
@@ -838,8 +878,9 @@ async function startOrHostRoom(ws, user, board) {
     room.status = "ready";
     if (wasAwaiting) broadcast(room, { v: 1, type: "host-back" }); // viewers: host returned
   } else if (hasDurableSession(board)) {
-    // Rehydrate a durable session that outlived eviction/restart — SAME id + scene.
-    room = buildRoom(board, board.liveSession.id);
+    // Rehydrate a durable session that outlived eviction/restart — SAME id + scene,
+    // preserving its original start so the 4h cap still counts from the beginning.
+    room = buildRoom(board, board.liveSession.id, startedAtMs(board));
     room.hostUserId = String(user._id);
     room.status = "ready";
     console.log("[LIVE] rehydrated session", board.liveSession.id, "(host) board", key);
@@ -850,6 +891,11 @@ async function startOrHostRoom(ws, user, board) {
       board.pages = [{ name: "Səhifə 1", scene: board.scene || null }];
       board.scene = null;
       await board.save();
+    }
+    // A stale session (active but past the 4h cap) blocks the activation CAS — clear
+    // it first so the host starts a clean new session.
+    if (board.liveSession && board.liveSession.active && board.liveSession.id && !isSessionFresh(board)) {
+      await endSession(key, board.liveSession.id).catch(() => {});
     }
     // FAIL-CLOSED: durably activate the session BEFORE admitting anyone. If Mongo
     // cannot confirm activation (write error or a concurrent session already active),
@@ -915,7 +961,7 @@ const mapToObj = (m) => {
 
 async function handleInRoom(room, seat, msg) {
   if (Date.now() > seat.authExpiresAt && msg.type !== "reauth") {
-    return dropSeat(room, seat, "auth_revoked");
+    return dropSeat(room, seat, "auth_expired"); // lease lapsed → reconnect + re-verify
   }
   const check = validateInRoom(msg, room, seat);
   if (!check.ok) return; // stale epoch / dup / bad shape → drop silently
@@ -1096,6 +1142,7 @@ async function closeAll(budgetMs) {
     clearTimeout(room.graceTimer);
     clearTimeout(room.finalizeTimer);
     clearTimeout(room.reapTimer);
+    clearTimeout(room.capTimer);
     for (const seat of room.members.values()) {
       clearTimeout(seat.authTimer);
       closeWs(seat.ws, "server_shutdown");
@@ -1109,6 +1156,7 @@ async function closeAll(budgetMs) {
 module.exports = {
   attach,
   isLive,
+  isSessionFresh, // controllers: a durable session shows live only within the 4h cap
   checkpointAll,
   closeAll,
   // pure logic (unit-tested)
