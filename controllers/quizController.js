@@ -785,16 +785,43 @@ const getAllClasses = asyncHandler(async (req, res) => {
   classes.forEach((c) => {
     if (!canManage(c)) delete c.joinCode;
   });
+  // Replace the raw array fields with numeric COUNTS for the cards (the cards
+  // render {students}/{exams}/{pending} directly — a raw ObjectId array leaks the
+  // id otherwise). Defaults first, then fill from aggregates.
+  const allIds = classes.map((c) => c._id);
+  classes.forEach((c) => {
+    c.students = 0;
+    c.exams = 0;
+    c.pending = 0;
+  });
+  // Exam count per class (exclude trashed) — shown to everyone.
+  if (allIds.length) {
+    const examCounts = await Exam.aggregate([
+      { $match: { class: { $in: allIds }, deletedAt: null } },
+      { $group: { _id: "$class", n: { $sum: 1 } } },
+    ]);
+    const em = {};
+    examCounts.forEach((e) => (em[String(e._id)] = e.n));
+    classes.forEach((c) => (c.exams = em[String(c._id)] || 0));
+  }
+  // Student (approved) + pending counts — only for classes the viewer manages.
   const manageIds = classes.filter(canManage).map((c) => c._id);
   if (manageIds.length) {
     const counts = await Enrollment.aggregate([
-      { $match: { class: { $in: manageIds }, status: "approved" } },
-      { $group: { _id: "$class", n: { $sum: 1 } } },
+      { $match: { class: { $in: manageIds } } },
+      { $group: { _id: { class: "$class", status: "$status" }, n: { $sum: 1 } } },
     ]);
-    const map = {};
-    counts.forEach((c) => (map[String(c._id)] = c.n));
+    const sMap = {};
+    const pMap = {};
+    counts.forEach((c) => {
+      if (c._id.status === "approved") sMap[String(c._id.class)] = c.n;
+      if (c._id.status === "pending") pMap[String(c._id.class)] = c.n;
+    });
     classes.forEach((c) => {
-      if (canManage(c)) c.students = map[String(c._id)] || 0;
+      if (canManage(c)) {
+        c.students = sMap[String(c._id)] || 0;
+        c.pending = pMap[String(c._id)] || 0;
+      }
     });
   }
   res.status(200).json(classes || []);
