@@ -2934,9 +2934,9 @@ const getLatestExams = asyncHandler(async (req, res) => {
   if (!isStaffUser(user)) filter.hidden = { $ne: true };
   filter.deletedAt = null; // never surface archived (trashed) exams
 
+  // Dashboard shows ALL created/accessible exams (newest first) — no cap.
   const exams = await Exam.find(filter)
     .sort({ createdAt: -1 })
-    .limit(8)
     .populate("class", "name level");
 
   // Cheap question-count aggregation for the cards (no heavy answer arrays).
