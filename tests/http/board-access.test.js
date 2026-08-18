@@ -244,6 +244,48 @@ async function main() {
   clearTimeout(endHost.room.reapTimer);
   clearTimeout(endHost.room.checkpointTimer);
 
+  // ── CR-BOARD-011: fail-closed activation / end (exact liveSession.id CAS) ──
+  console.log("\nboard access — CR-BOARD-011 fail-closed session transitions");
+
+  const boardX = await Board.create({ owner: owner._id, ownerName: owner.name, title: "X", classes: [], pages: [{ name: "Səhifə 1", scene: null }] });
+  const a1 = await hub.__test.activateSession(boardX._id, "sess-1", "p1");
+  const a2 = await hub.__test.activateSession(boardX._id, "sess-2", "p1"); // concurrent worker
+  ok("first activation wins (durably confirmed)", a1 === true);
+  ok("a concurrent second activation is REFUSED — no double-activate", a2 === false);
+  const aIdem = await hub.__test.activateSession(boardX._id, "sess-1", "p1");
+  ok("re-activating our OWN id is idempotent (response-loss safe)", aIdem === true);
+
+  const e1 = await hub.__test.endSession(boardX._id, "sess-1");
+  ok("ending the active session is durably confirmed", e1 === true);
+  ok("the durable flag is now inactive in Mongo", (await Board.findById(boardX._id).lean()).liveSession.active === false);
+  ok("ending a stale/replaced session is a durable no-op success", (await hub.__test.endSession(boardX._id, "sess-old")) === true);
+
+  // Activation DB failure → fail-closed: no live-started, socket closed, nothing active.
+  const boardY = await Board.create({ owner: owner._id, ownerName: owner.name, title: "Y", classes: [], pages: [{ name: "Səhifə 1", scene: null }] });
+  const origFOU = Board.findOneAndUpdate;
+  Board.findOneAndUpdate = () => { throw new Error("mongo down"); };
+  const yWs = fakeWs();
+  const yRes = await hub.__test.handleHandshake(yWs, { v: 1, type: "start-live", boardId: String(boardY._id), token: tok(owner) });
+  Board.findOneAndUpdate = origFOU;
+  ok("activation failure → NO live-started + socket closed (fail-closed)", yRes === null && !yWs.sent.some((m) => m.type === "live-started") && yWs.closes.length > 0);
+  ok("no active session persisted on activation failure", !((await Board.findById(boardY._id).lean()).liveSession || {}).active);
+
+  // End DB failure → fail-closed: room NOT deleted, leader told, session stays active.
+  const boardZ = await Board.create({ owner: owner._id, ownerName: owner.name, title: "Z", classes: [], pages: [{ name: "Səhifə 1", scene: null }] });
+  const zWs = fakeWs();
+  const zHost = await hub.__test.handleHandshake(zWs, { v: 1, type: "start-live", boardId: String(boardZ._id), token: tok(owner) });
+  const origFBI = Board.findById;
+  Board.findOneAndUpdate = () => { throw new Error("mongo down"); };
+  Board.findById = () => ({ select: () => ({ lean: async () => { throw new Error("mongo down"); } }) }); // re-read also fails
+  await hub.__test.handleInRoom(zHost.room, zHost.seat, { v: 1, type: "end-live", liveSessionId: zHost.room.liveSessionId, clientSeq: 1 });
+  Board.findOneAndUpdate = origFOU;
+  Board.findById = origFBI;
+  ok("end failure → room is NOT deleted (no resurrection risk)", hub.__test.rooms.has(String(boardZ._id)));
+  ok("the leader is told end-failed", zWs.sent.some((m) => m.type === "end-failed"));
+  ok("the session stays active when End could not be confirmed", (await Board.findById(boardZ._id).lean()).liveSession.active === true);
+  clearTimeout(zHost.room.reapTimer);
+  clearTimeout(zHost.room.checkpointTimer);
+
   await new Promise((r) => server.close(r));
   await mongoose.disconnect();
   await mem.stop();

@@ -29,7 +29,8 @@ const LIMITS = Object.freeze({
   MAX_ELEMENTS_PER_MSG: 500,
   MAX_TEXT_LEN: 20000,
   MAX_COORD: 1e7,
-  MAX_MSGS_PER_SEC: 40,
+  MAX_MSGS_PER_SEC: 120, // per-connection ABUSE backstop; per-op buckets below are the real limits
+  MAX_SCENE_UPDATES_PER_SEC: 30, // stateful-scene bucket (separate from pointers)
   MAX_POINTERS_PER_SEC: 20,
   MAX_BUFFERED_BYTES: 1_048_576, // 1 MiB backlog → slow client
   MAX_PENDING_ACKS: 1000, // per seat: stop accepting edits if durability lags this far
@@ -364,6 +365,7 @@ function makeSeat(ws, user, isHost) {
     authTimer: null,
     lastClientSeq: 0,
     msgTimes: [],
+    sceneTimes: [], // stateful-scene rate bucket (separate from pointers)
     ptrTimes: [],
     pendingAcks: [], // acks deferred until the change is durably journaled
     alive: true,
@@ -426,6 +428,21 @@ function dropSeat(room, seat, reason) {
 // shutdown — never by a transient disconnect.
 async function endRoom(room, reason, opts) {
   if (room.status === "ending") return;
+  // FAIL-CLOSED end (CR-BOARD-011): for an EXPLICIT end, durably flip the session
+  // inactive FIRST (exact-id CAS). If Mongo cannot confirm, do NOT delete the room or
+  // confirm End — otherwise a reconnect could resurrect a session the host ended.
+  // Tell the leader it failed so they can retry; the room stays live meanwhile.
+  if (opts && opts.markEnded) {
+    const ended = await endSession(room.boardId, room.liveSessionId).catch((e) => {
+      console.error("[LIVE] session end persist failed", room.boardId, e && e.message);
+      return false;
+    });
+    if (!ended) {
+      const leader = room.leaderSocketId && room.members.get(room.leaderSocketId);
+      if (leader) send(leader.ws, { v: 1, type: "end-failed" });
+      return;
+    }
+  }
   room.status = "ending";
   const gen = room.generation;
   clearTimeout(room.graceTimer);
@@ -436,9 +453,6 @@ async function endRoom(room, reason, opts) {
     closeWs(seat.ws, reason || "explicit_end");
   }
   room.members.clear();
-  // Only an EXPLICIT end clears the durable session flag. Eviction/shutdown keep it
-  // active so the session can be rehydrated on reconnect.
-  if (opts && opts.markEnded) await persistSessionEnded(room.boardId);
   await finalizeRoom(room, gen, 0);
 }
 
@@ -731,19 +745,37 @@ function ensurePageId(board) {
   return page ? String(page._id) : null;
 }
 
-// DURABLE session identity: mark the board's session active/ended. `active` outlives
-// memory eviction + restart so the same session id can be rehydrated. Failures are
-// swallowed (best-effort) — the in-memory room is still authoritative while it lives.
-async function persistSessionActive(boardId, sessionId, pageId) {
-  await Board.updateOne(
-    { _id: boardId },
-    { $set: { liveSession: { id: sessionId, active: true, pageId: pageId || null, startedAt: new Date() } } }
-  ).catch((e) => console.error("[LIVE] persist session active failed", String(boardId), e && e.message));
-}
-async function persistSessionEnded(boardId) {
-  await Board.updateOne({ _id: boardId }, { $set: { "liveSession.active": false } }).catch((e) =>
-    console.error("[LIVE] persist session ended failed", String(boardId), e && e.message)
+// DURABLE session identity — FAIL-CLOSED, exact liveSession.id CAS (CR-BOARD-011).
+//
+// activateSession: durably flips the board to active under THIS session id. The CAS
+// only matches when no OTHER session is active (idempotent for our own id), so two
+// racing activations can never both win. Returns true ONLY when Mongo confirmed it —
+// the caller must NOT admit anyone (send live-started) unless this returned true.
+async function activateSession(boardId, sessionId, pageId) {
+  const res = await Board.findOneAndUpdate(
+    { _id: boardId, $or: [{ "liveSession.active": { $ne: true } }, { "liveSession.id": sessionId }] },
+    { $set: { liveSession: { id: sessionId, active: true, pageId: pageId || null, startedAt: new Date() } } },
+    { new: true }
   );
+  return !!(res && res.liveSession && res.liveSession.active && res.liveSession.id === sessionId);
+}
+// endSession: durably flips THIS exact session inactive. Returns true when Mongo
+// confirms it is inactive (either we flipped it, or it was already inactive/replaced —
+// both mean this session is durably not-active). The caller must NOT tear the room
+// down / confirm End unless this returned true (else a reconnect could resurrect it).
+async function endSession(boardId, sessionId) {
+  const res = await Board.findOneAndUpdate(
+    { _id: boardId, "liveSession.id": sessionId },
+    { $set: { "liveSession.active": false } },
+    { new: true }
+  );
+  if (res) return !res.liveSession || res.liveSession.active === false;
+  // No doc matched our id — re-read: if the board is gone or a DIFFERENT/inactive
+  // session is recorded, THIS session is durably not active. Only a confirmed still
+  // -active OUR-id record (or a read failure) is a failure to end.
+  const fresh = await Board.findById(boardId).select("liveSession").lean();
+  if (!fresh) return true; // board gone → session cannot be resurrected
+  return !(fresh.liveSession && fresh.liveSession.active && fresh.liveSession.id === sessionId);
 }
 
 // Build the in-memory room from a board's SAVED scene, under a given session id
@@ -819,10 +851,22 @@ async function startOrHostRoom(ws, user, board) {
       board.scene = null;
       await board.save();
     }
-    room = buildRoom(board, crypto.randomUUID());
+    // FAIL-CLOSED: durably activate the session BEFORE admitting anyone. If Mongo
+    // cannot confirm activation (write error or a concurrent session already active),
+    // we do NOT build a room and do NOT send live-started — the client reconnects and
+    // either rehydrates the winning session or retries.
+    const sessionId = crypto.randomUUID();
+    const activated = await activateSession(key, sessionId, ensurePageId(board)).catch((e) => {
+      console.error("[LIVE] session activation failed", key, e && e.message);
+      return false;
+    });
+    if (!activated) {
+      closeWs(ws, "no_live"); // not durably started — never claim "live-started"
+      return null;
+    }
+    room = buildRoom(board, sessionId);
     room.hostUserId = String(user._id);
     room.status = "ready";
-    await persistSessionActive(key, room.liveSessionId, room.pageId);
   }
   return seatIntoRoom(ws, user, room, true);
 }
@@ -899,11 +943,19 @@ async function handleInRoom(room, seat, msg) {
     }
     case "scene-update": {
       if (!seat.canWrite) return;
+      // Stateful frames get their OWN rate bucket and a TYPED rejection when exceeded
+      // — never a silent drop (the client can back off + retry). clientSeq is echoed
+      // so the client knows exactly which send was refused (CR-BOARD-012).
+      if (!seat.sceneTimes) seat.sceneTimes = [];
+      if (!rateOk(seat.sceneTimes, LIMITS.MAX_SCENE_UPDATES_PER_SEC)) {
+        send(seat.ws, { v: 1, type: "rate-limited", op: "scene-update", clientSeq: typeof msg.clientSeq === "number" ? msg.clientSeq : null });
+        return;
+      }
       // Durable storage is the contract for accepting edits. If journaling is
       // failing or the durability backlog is too deep, refuse new edits rather
       // than accept something we cannot promise to keep.
       if (room.journalUnhealthy || !journal.isHealthy() || seat.pendingAcks.length >= LIMITS.MAX_PENDING_ACKS) {
-        send(seat.ws, { v: 1, type: "storage-degraded" });
+        send(seat.ws, { v: 1, type: "storage-degraded", clientSeq: typeof msg.clientSeq === "number" ? msg.clientSeq : null });
         return;
       }
       const incoming = Array.isArray(msg.elements) ? msg.elements : [];
@@ -1066,5 +1118,5 @@ module.exports = {
   validateInRoom,
   LIMITS,
   // test-only hooks for the persistence/finalization/journal coordination
-  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals, unresolvedRecovery, handleHandshake, seatIntoRoom, makeSeat, saveStateOf, dropSeat, reapEmptyRoom, isReady: () => replayDone },
+  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals, unresolvedRecovery, handleHandshake, seatIntoRoom, makeSeat, saveStateOf, dropSeat, reapEmptyRoom, activateSession, endSession, isReady: () => replayDone },
 };

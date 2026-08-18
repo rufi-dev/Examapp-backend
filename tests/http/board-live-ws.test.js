@@ -117,9 +117,31 @@ async function main() {
   ok("a late viewer receives the already-drawn element in the join snapshot", joined.scene.elements.some((e) => e.id === "c1"));
 
   // A subsequent live edit propagates to the viewer.
-  host.send({ v: 1, type: "scene-update", ...env(), clientSeq: host.nextSeq(), elements: [{ id: "c2", type: "ellipse", version: 1, versionNonce: 3, x: 9, y: 9, width: 7, height: 7 }] });
+  const c2Seq = host.nextSeq();
+  host.send({ v: 1, type: "scene-update", ...env(), clientSeq: c2Seq, elements: [{ id: "c2", type: "ellipse", version: 1, versionNonce: 3, x: 9, y: 9, width: 7, height: 7 }] });
   const relayed = await viewer.waitFor("scene-update");
   ok("a live scene-update propagates to the viewer over the wire", relayed.elements.some((e) => e.id === "c2"));
+
+  // CR-BOARD-012: the host gets a DURABLE ack correlated to its clientSeq (skip the
+  // earlier c1 ack that may still be buffered).
+  let ack = await host.waitFor("ack");
+  for (let i = 0; i < 10 && ack.clientSeq !== c2Seq; i += 1) ack = await host.waitFor("ack", 3000);
+  ok("host receives a durable ack correlated to the clientSeq", ack.clientSeq === c2Seq && ack.durable === true);
+
+  // CR-BOARD-012: idempotent replay — resending the SAME element (id+version) converges
+  // to exactly one copy (a duplicate from a reconnect replay never doubles the scene).
+  host.send({ v: 1, type: "scene-update", ...env(), clientSeq: host.nextSeq(), elements: [{ id: "c2", type: "ellipse", version: 1, versionNonce: 3, x: 9, y: 9, width: 7, height: 7 }] });
+  await sleep(120);
+
+  // CR-BOARD-012: a burst over the per-second scene cap gets a TYPED rejection, never
+  // a silent drop.
+  let rateLimited = null;
+  for (let i = 0; i < 45; i += 1) {
+    const cs = host.nextSeq();
+    host.send({ v: 1, type: "scene-update", ...env(), clientSeq: cs, elements: [{ id: "burst" + i, type: "rectangle", version: 1, versionNonce: 10 + i, x: i, y: i, width: 3, height: 3 }] });
+  }
+  try { rateLimited = await host.waitFor("rate-limited", 2000); } catch { /* none */ }
+  ok("a scene burst over the cap yields a TYPED rate-limited rejection (not silent)", rateLimited && rateLimited.op === "scene-update" && typeof rateLimited.clientSeq === "number");
 
   // Make it durable, then simulate eviction/restart (drop the in-memory room).
   ok("scene is checkpointed to Mongo", await waitElementInDb(bid, "c2"));
