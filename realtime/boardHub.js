@@ -1047,7 +1047,9 @@ async function handleInRoom(room, seat, msg) {
           rejected.push({ id: el.id, reason: "host-only" });
           continue;
         }
-        if (el.fileId && !room.scene.files.has(el.fileId)) {
+        // A live image needs its file registered first — but a DELETED element (a
+        // tombstone) references no bytes, so never reject a deletion for that.
+        if (el.fileId && !el.isDeleted && !room.scene.files.has(el.fileId)) {
           rejected.push({ id: el.id, reason: "unknown-file" });
           continue;
         }
