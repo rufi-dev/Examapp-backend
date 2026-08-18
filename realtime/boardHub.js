@@ -9,6 +9,7 @@
  */
 const { WebSocketServer } = require("ws");
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 const Board = require("../models/boardModel");
 const { resolveSessionUser } = require("../middleware/authMiddleware");
 const { accessLevel, canHostLive } = require("../services/boardAccessService");
@@ -953,6 +954,35 @@ function seatIntoRoom(ws, user, room, isHost) {
   return { seat, room };
 }
 
+// Point the live room at a DIFFERENT saved page (server-authoritative scene, loaded
+// from Mongo — never the client message) and tell everyone. The target page is
+// already durable, so there is no unpersisted state to journal before broadcasting
+// (this is what CR-BOARD-006 required). Callers MUST persist the current page first.
+function switchRoomToPage(room, board, page) {
+  const scene = page.scene || {};
+  room.pageId = String(page._id);
+  room.pageEpoch += 1; // stale updates from the previous page are now rejected
+  room.scene.elements = new Map((scene.elements || []).map((e) => [e.id, e]));
+  room.scene.files = new Map(Object.entries(scene.files || {}));
+  room.boardRevision = board.revision || room.boardRevision;
+  room.dirty = false;
+  room.lastPersistError = null;
+  // The target is loaded-as-saved: nothing unpersisted, so mark it fully persisted
+  // + journaled and drop any journal left for the previous page.
+  room.persistedRevision = room.acceptedRevision;
+  room.journaledRevision = room.acceptedRevision;
+  maybeDropJournal(room);
+  broadcast(room, {
+    v: 1,
+    type: "page-changed",
+    pageId: room.pageId,
+    name: page.name || "Səhifə",
+    pageEpoch: room.pageEpoch,
+    scene: { elements: [...room.scene.elements.values()], files: mapToObj(room.scene.files) },
+  });
+  broadcastSaveState(room);
+}
+
 const mapToObj = (m) => {
   const o = {};
   for (const [k, v] of m) o[k] = v;
@@ -1101,13 +1131,68 @@ async function handleInRoom(room, seat, msg) {
       return;
     }
     case "page": {
-      // CR-BOARD-006: live page-switching is DISABLED for the one-page MVP. The
-      // old handler mutated room.scene from the message and broadcast BEFORE the
-      // scene was journaled — a crash in that window lost the switch with no WAL
-      // record. Rather than journal-before-broadcast for a feature we don't ship
-      // yet, refuse the op outright so no live mutation can bypass the WAL. The
-      // host still switches pages via the HTTP saveBoard path (not while live).
-      if (seat.connId === room.leaderSocketId) send(seat.ws, { v: 1, type: "page-blocked", reason: "not-supported" });
+      // Host switches everyone to another EXISTING page. Persist the current page
+      // durably first, then load the target's SAVED scene from Mongo (authoritative).
+      if (seat.connId !== room.leaderSocketId) return; // leader only
+      const pageId = typeof msg.pageId === "string" ? msg.pageId : null;
+      if (!pageId || pageId === room.pageId) return;
+      const gen = room.generation;
+      const stillCurrent = () =>
+        rooms.get(room.boardId) === room && room.generation === gen && room.status === "ready" && seat.connId === room.leaderSocketId;
+      const saved = await persistThrough(room, room.acceptedRevision);
+      if (!stillCurrent()) return;
+      if (!saved || room.persistedRevision < room.acceptedRevision) {
+        send(seat.ws, { v: 1, type: "page-blocked", reason: "save-failed" });
+        return;
+      }
+      const board = await Board.findOne({ _id: room.boardId, deletedAt: null }).select("pages revision").lean();
+      if (!stillCurrent()) return;
+      const page = board && (board.pages || []).find((p) => String(p._id) === pageId);
+      if (!page) {
+        send(seat.ws, { v: 1, type: "page-blocked", reason: "not-found" });
+        return;
+      }
+      if (room.persistedRevision < room.acceptedRevision) {
+        // An edit landed during the load — don't drop it; the host can retry the switch.
+        send(seat.ws, { v: 1, type: "page-blocked", reason: "busy" });
+        return;
+      }
+      switchRoomToPage(room, board, page);
+      return;
+    }
+    case "add-page": {
+      // Host adds a new page (appended durably) and switches everyone to it.
+      if (seat.connId !== room.leaderSocketId) return; // leader only
+      const gen = room.generation;
+      const stillCurrent = () =>
+        rooms.get(room.boardId) === room && room.generation === gen && room.status === "ready" && seat.connId === room.leaderSocketId;
+      const saved = await persistThrough(room, room.acceptedRevision);
+      if (!stillCurrent()) return;
+      if (!saved || room.persistedRevision < room.acceptedRevision) {
+        send(seat.ws, { v: 1, type: "page-blocked", reason: "save-failed" });
+        return;
+      }
+      const newPage = {
+        _id: new mongoose.Types.ObjectId(),
+        name: typeof msg.name === "string" && msg.name.trim() ? msg.name.trim().slice(0, 60) : "Səhifə",
+        scene: null,
+      };
+      const res = await Board.findOneAndUpdate(
+        { _id: room.boardId, deletedAt: null },
+        { $push: { pages: newPage } },
+        { new: true }
+      ).select("pages revision").lean();
+      if (!stillCurrent()) return;
+      const page = res && (res.pages || []).find((p) => String(p._id) === String(newPage._id));
+      if (!page) {
+        send(seat.ws, { v: 1, type: "page-blocked", reason: "add-failed" });
+        return;
+      }
+      if (room.persistedRevision < room.acceptedRevision) {
+        send(seat.ws, { v: 1, type: "page-blocked", reason: "busy" });
+        return;
+      }
+      switchRoomToPage(room, res, page);
       return;
     }
     default:

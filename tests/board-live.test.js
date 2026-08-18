@@ -481,24 +481,32 @@ const at = async (name, fn) => {
     assert.ok(threw, "replayJournals rejects when journals cannot be enumerated → replayDone stays false");
   });
 
-  await at("a live page op is REFUSED so no mutation can bypass the WAL", async () => {
-    const room = fakeRoom("555555555555555555555555", { status: "ready", liveSessionId: "S", pageEpoch: 0, pageId: "p1", acceptedRevision: 1, leaderSocketId: "L" });
-    rooms.set(room.boardId, room);
+  await at("live page SWITCH: non-leader ignored; leader loads the target's SAVED scene (from Mongo, not the message)", async () => {
+    stubWrite(() => Promise.resolve({ revision: 2 }));
     const sent = [];
-    const seat = {
-      connId: "L", socketId: "L", isHost: true, canWrite: true, lastClientSeq: 0, authExpiresAt: Date.now() + 1e6,
-      user: { _id: "u" }, pendingAcks: [], msgTimes: [], ptrTimes: [],
+    const room = fakeRoom("555555555555555555555555", { status: "ready", liveSessionId: "S", pageEpoch: 0, pageId: "p1", acceptedRevision: 1, persistedRevision: 1, leaderSocketId: "L" });
+    rooms.set(room.boardId, room);
+    const mk = (id, isHost) => ({
+      connId: id, socketId: id, isHost, canWrite: isHost, lastClientSeq: 0, authExpiresAt: Date.now() + 1e6,
+      user: { _id: id }, pendingAcks: [], msgTimes: [], sceneTimes: [], ptrTimes: [],
       ws: { readyState: 1, OPEN: 1, bufferedAmount: 0, send: (s) => sent.push(JSON.parse(s)), close() {} },
-    };
-    room.members.set("L", seat);
-    const epochBefore = room.pageEpoch;
-    await handleInRoom(room, seat, {
-      v: 1, type: "page", liveSessionId: "S", pageEpoch: 0, clientSeq: 1, pageId: "p2",
-      scene: { elements: [{ id: "x", type: "rectangle", version: 1, versionNonce: 1, x: 1, y: 1, width: 2, height: 2 }] },
     });
-    assert.strictEqual(room.pageEpoch, epochBefore, "page op did not advance the epoch");
-    assert.strictEqual(room.scene.elements.size, 0, "page op did not mutate the scene (no WAL bypass)");
-    assert.ok(sent.some((m) => m.type === "page-blocked" && m.reason === "not-supported"), "leader told page switching is unsupported");
+    room.members.set("L", mk("L", true));
+    room.members.set("V", mk("V", false));
+    Board.findOne = () => ({ select: () => ({ lean: async () => ({ pages: [{ _id: "p1" }, { _id: "p2", name: "Page 2", scene: { elements: [{ id: "x", type: "rectangle" }], files: {} } }], revision: 2 }) }) });
+    // A non-leader cannot switch the page (the client message never mutates the room).
+    await handleInRoom(room, room.members.get("V"), { v: 1, type: "page", liveSessionId: "S", pageEpoch: 0, clientSeq: 1, pageId: "p2" });
+    assert.strictEqual(room.pageId, "p1", "non-leader page switch ignored");
+    // The leader switches everyone to p2 — its SAVED scene is loaded from Mongo.
+    await handleInRoom(room, room.members.get("L"), { v: 1, type: "page", liveSessionId: "S", pageEpoch: 0, clientSeq: 1, pageId: "p2" });
+    Board.findOne = origFO;
+    assert.strictEqual(room.pageId, "p2", "leader switched the active page");
+    assert.strictEqual(room.pageEpoch, 1, "page epoch advanced (stale updates rejected)");
+    assert.ok(room.scene.elements.has("x"), "target page's saved scene loaded (server-authoritative, not from the message)");
+    assert.ok(sent.some((m) => m.type === "page-changed" && m.pageId === "p2"), "page-changed broadcast to the room");
+    clearTimeout(room.checkpointTimer);
+    clearTimeout(room.journalTimer);
+    clearTimeout(room.capTimer);
     rooms.delete(room.boardId);
   });
 

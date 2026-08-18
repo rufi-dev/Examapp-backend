@@ -152,6 +152,21 @@ async function main() {
     return false;
   })());
 
+  // Multi-page live: the host adds a page → the viewer follows (page-changed), a draw
+  // on it propagates, then switching BACK restores page 1's saved scene.
+  await sleep(1100); // let the scene rate bucket drain from the burst above
+  host.send({ v: 1, type: "add-page", ...env(), clientSeq: host.nextSeq(), name: "Səhifə 2" });
+  const page2 = await viewer.waitFor("page-changed");
+  ok("host add-page switches the viewer to a NEW page", !!page2.pageId && page2.pageEpoch >= 1 && page2.pageId !== started.pageId);
+  const env2 = () => ({ liveSessionId: liveId, pageId: page2.pageId, pageEpoch: page2.pageEpoch });
+  host.send({ v: 1, type: "scene-update", ...env2(), clientSeq: host.nextSeq(), elements: [{ id: "onPage2", type: "rectangle", version: 1, versionNonce: 4, x: 2, y: 2, width: 4, height: 4 }] });
+  let onPage2 = null; // drain any scene-updates still buffered from earlier tests
+  for (let i = 0; i < 80 && !(onPage2 && onPage2.elements.some((e) => e.id === "onPage2")); i += 1) onPage2 = await viewer.waitFor("scene-update", 3000);
+  ok("a draw on the new page reaches the viewer", !!onPage2 && onPage2.elements.some((e) => e.id === "onPage2"));
+  host.send({ v: 1, type: "page", ...env2(), clientSeq: host.nextSeq(), pageId: started.pageId });
+  const backPage = await viewer.waitFor("page-changed");
+  ok("switching back to page 1 restores its SAVED scene (c1 + c2, from the server)", backPage.pageId === started.pageId && ["c1", "c2"].every((idv) => backPage.scene.elements.some((e) => e.id === idv)));
+
   // Make it durable, then simulate eviction/restart (drop the in-memory room).
   ok("scene is checkpointed to Mongo", await waitElementInDb(bid, "c2"));
   host.close();
