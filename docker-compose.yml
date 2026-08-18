@@ -15,6 +15,7 @@ services:
       # rebuild/recreate would erase every migrated exam PDF. The startup
       # preflight refuses a non-absolute EXAM_PDF_DIR in production.
       EXAM_PDF_DIR: /app/examPdfs
+      BOARD_FILES_DIR: /app/boardFiles
     # tini as PID 1 reaps zombie Chromium processes and forwards signals so the
     # browser shuts down cleanly (avoids stale profile locks on restart).
     init: true
@@ -28,6 +29,7 @@ services:
       - materials:/app/materials # persist study materials across rebuilds
       - assignments:/app/assignments # persist homework tasks + student submissions across rebuilds
       - videos:/app/videos # persist uploaded MP4/WebM lesson videos across rebuilds
+      - boardfiles:/app/boardFiles # persist private board images across rebuilds
       - wa_auth:/app/.wwebjs_auth # persist the linked WhatsApp session
       - live_journal:/app/live-journal # durable write-ahead journal for live whiteboard sessions
     networks:
@@ -81,6 +83,7 @@ volumes:
   materials:
   assignments:
   videos:
+  boardfiles:
   wa_auth:
   live_journal:
   caddy_data:

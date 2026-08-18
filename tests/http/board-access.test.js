@@ -19,6 +19,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || "test-secret-board-access";
 process.env.CRYPTR_KEY = process.env.CRYPTR_KEY || "test-cryptr-board-access";
 process.env.LIVE_JOURNAL_DIR = require("path").join(require("os").tmpdir(), "exq-board-access-journal-" + process.pid);
+process.env.BOARD_FILES_DIR = require("path").join(require("os").tmpdir(), "exq-board-files-" + process.pid);
 
 const http = require("http");
 const express = require("express");
@@ -55,6 +56,42 @@ const fakeWs = () => {
   return { readyState: 1, OPEN: 1, bufferedAmount: 0, sent, closes,
     send: (s) => sent.push(JSON.parse(s)), close: (code, reason) => closes.push({ code, reason }) };
 };
+
+// Multipart POST of a raw buffer under field "file".
+function uploadFile(server, path, token, buf) {
+  return new Promise((resolve, reject) => {
+    const { port } = server.address();
+    const B = "----exqBoundary" + Math.random().toString(16).slice(2);
+    const head = Buffer.from(`--${B}\r\nContent-Disposition: form-data; name="file"; filename="img"\r\nContent-Type: application/octet-stream\r\n\r\n`);
+    const tail = Buffer.from(`\r\n--${B}--\r\n`);
+    const body = Buffer.concat([head, buf, tail]);
+    const req = http.request(
+      { host: "127.0.0.1", port, method: "POST", path, headers: { Authorization: `Bearer ${token}`, "Content-Type": `multipart/form-data; boundary=${B}`, "Content-Length": body.length } },
+      (res) => { const c = []; res.on("data", (d) => c.push(d)); res.on("end", () => resolve({ status: res.statusCode, body: (() => { try { return JSON.parse(Buffer.concat(c).toString()); } catch { return {}; } })() })); }
+    );
+    req.on("error", reject); req.write(body); req.end();
+  });
+}
+
+// Binary GET → { status, contentType, bytes }.
+function getBinary(server, path, token) {
+  return new Promise((resolve, reject) => {
+    const { port } = server.address();
+    const req = http.request(
+      { host: "127.0.0.1", port, method: "GET", path, headers: { Authorization: `Bearer ${token}` } },
+      (res) => { const c = []; res.on("data", (d) => c.push(d)); res.on("end", () => resolve({ status: res.statusCode, contentType: res.headers["content-type"], bytes: Buffer.concat(c).length })); }
+    );
+    req.on("error", reject); req.end();
+  });
+}
+
+// A minimal valid 1x1 PNG (real signature so magic-byte validation passes).
+const PNG_1X1 = Buffer.from(
+  "89504e470d0a1a0a0000000d494844520000000100000001080600000" +
+  "01f15c4890000000d49444154789c6360000002000100050001" +
+  "0d0a2db40000000049454e44ae426082",
+  "hex"
+);
 
 let seq = 0;
 const mkUser = (over) => User.create({ name: over.name || "U", email: `u${seq++}@e.com`, password: "xxxxxxxx", isVerified: true, ...over });
@@ -305,6 +342,19 @@ async function main() {
   clearTimeout(capHost.room.reapTimer);
   clearTimeout(capHost.room.checkpointTimer);
   clearTimeout(capHost.room.capTimer);
+
+  // ── private board images: upload (owner, magic-byte) + serve (audience) ──
+  console.log("\nboard access — private board images");
+  const up = await uploadFile(server, `/api/boards/${boardB._id}/files`, tok(owner), PNG_1X1);
+  ok("owner uploads a valid PNG → 200 with {fileId,hash,mime,size}", up.status === 200 && up.body.mime === "image/png" && typeof up.body.fileId === "string" && up.body.size === PNG_1X1.length);
+  const notImg = await uploadFile(server, `/api/boards/${boardB._id}/files`, tok(owner), Buffer.from("this is not an image at all"));
+  ok("a non-image upload is rejected by magic bytes → 415", notImg.status === 415);
+  const foreignUp = await uploadFile(server, `/api/boards/${boardB._id}/files`, tok(unrelated), PNG_1X1);
+  ok("a non-owner teacher cannot upload to the board → 404", foreignUp.status === 404);
+  const dl = await getBinary(server, `/api/boards/${boardB._id}/files/${up.body.fileId}`, tok(student));
+  ok("an enrolled student can fetch the image → 200 image/png bytes", dl.status === 200 && dl.contentType === "image/png" && dl.bytes === PNG_1X1.length);
+  const dlForbidden = await getBinary(server, `/api/boards/${boardB._id}/files/${up.body.fileId}`, tok(unrelated));
+  ok("a non-audience user cannot fetch the image → 403", dlForbidden.status === 403);
 
   await new Promise((r) => server.close(r));
   await mongoose.disconnect();

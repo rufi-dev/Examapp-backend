@@ -143,6 +143,15 @@ async function main() {
   try { rateLimited = await host.waitFor("rate-limited", 2000); } catch { /* none */ }
   ok("a scene burst over the cap yields a TYPED rate-limited rejection (not silent)", rateLimited && rateLimited.op === "scene-update" && typeof rateLimited.clientSeq === "number");
 
+  // Background sync: the host changes the canvas pattern/colour → the viewer receives it.
+  host.send({ v: 1, type: "bg-change", ...env(), clientSeq: host.nextSeq(), background: "dots", bgColor: "#eef2ff" });
+  const bg = await viewer.waitFor("bg-change");
+  ok("host background change propagates to the viewer", bg.background === "dots" && bg.bgColor === "#eef2ff");
+  ok("the background is persisted to the board", await (async () => {
+    for (let i = 0; i < 30; i += 1) { const b = await Board.findById(bid).lean(); if (b.background === "dots") return true; await sleep(100); }
+    return false;
+  })());
+
   // Make it durable, then simulate eviction/restart (drop the in-memory room).
   ok("scene is checkpointed to Mongo", await waitElementInDb(bid, "c2"));
   host.close();

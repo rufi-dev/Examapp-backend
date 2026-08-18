@@ -1,14 +1,30 @@
 const asyncHandler = require("express-async-handler");
 const mongoose = require("mongoose");
+const crypto = require("crypto");
+const fs = require("fs");
+const fsp = fs.promises;
+const path = require("path");
 const Board = require("../models/boardModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
+const { detectHead } = require("../utils/fileValidation"); // magic-byte image auth
 
 // ---- access policy ----------------------------------------------------------
 // Extracted to services/boardAccessService so the realtime hub enforces the SAME
 // open/edit/host rules as these HTTP handlers.
 const { ownedClassIds, accessLevel, pagesOf } = require("../services/boardAccessService");
 const boardHub = require("../realtime/boardHub"); // live-session registry (isLive)
+
+// ---- private board image storage (CR-BOARD image sync) ----------------------
+// Board images live on a PRIVATE volume, referenced by id — never base64 in Mongo
+// or over the WebSocket. The bytes are validated by magic bytes (never the client
+// MIME) and served only to the board's audience.
+const BOARD_FILES_DIR = process.env.BOARD_FILES_DIR || path.join(process.cwd(), "boardFiles");
+const IMG_MIME = { png: "image/png", jpg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+const MAX_IMG_BYTES = 8 * 1024 * 1024; // 8 MB per image
+const MAX_BOARD_FILES_BYTES = 80 * 1024 * 1024; // total per board
+const safeSeg = (s) => String(s || "").replace(/[^a-fA-F0-9]/g, "").slice(0, 40);
+const safeFileId = (s) => String(s || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
 
 // ---- teacher: manage own boards ---------------------------------------------
 // GET /api/boards — a teacher's own boards; an ADMIN sees EVERY teacher's boards
@@ -209,4 +225,74 @@ const listClassBoards = asyncHandler(async (req, res) => {
   );
 });
 
-module.exports = { listBoards, createBoard, getBoard, boardLiveStatus, saveBoard, deleteBoard, listClassBoards };
+// POST /api/boards/:id/files — the OWNER/admin uploads a board image (multipart
+// "file"). Validated by magic bytes (never the client MIME), size-capped per image
+// and per board. Returns { fileId, hash, mime, size } — the id/hash referenced over
+// the live socket and persisted in the scene. Content-addressed (same bytes → same
+// id) so a re-upload is idempotent.
+const uploadBoardFile = asyncHandler(async (req, res) => {
+  const scope = req.user.role === "admin" ? {} : { owner: req.user._id };
+  const board = await Board.findOne({ _id: req.params.id, deletedAt: null, ...scope }).select("_id").lean();
+  if (!board) return res.status(404).json({ message: "Lövhə tapılmadı" });
+  const buf = req.file && req.file.buffer;
+  if (!buf || !buf.length) return res.status(400).json({ message: "Fayl yoxdur" });
+  if (buf.length > MAX_IMG_BYTES) return res.status(413).json({ message: "Şəkil çox böyükdür (maksimum 8MB)" });
+  // Authenticate the bytes: only real PNG/JPEG/GIF/WebP images.
+  const det = detectHead(buf.slice(0, 64));
+  const kind = det && ["png", "jpg", "gif", "webp"].includes(det.type) ? det.type : null;
+  if (!kind) return res.status(415).json({ message: "Yalnız PNG, JPEG, GIF və ya WebP şəkillər" });
+
+  const hash = crypto.createHash("sha256").update(buf).digest("hex");
+  const fileId = hash.slice(0, 40); // content-addressed → idempotent, collision-safe id
+  const dir = path.join(BOARD_FILES_DIR, safeSeg(String(req.params.id)));
+  await fsp.mkdir(dir, { recursive: true });
+  const target = path.join(dir, safeFileId(fileId));
+
+  // Idempotent: if the exact file already exists, don't re-count it toward the cap.
+  const already = await fsp.stat(target).then((s) => s.size, () => 0);
+  if (!already) {
+    let total = 0;
+    try {
+      const names = await fsp.readdir(dir);
+      for (const n of names) total += await fsp.stat(path.join(dir, n)).then((s) => s.size, () => 0);
+    } catch { /* fresh dir */ }
+    if (total + buf.length > MAX_BOARD_FILES_BYTES) return res.status(413).json({ message: "Lövhənin şəkil həcmi limitini keçdi" });
+    // Atomic write: temp → rename.
+    const tmp = `${target}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+    await fsp.writeFile(tmp, buf);
+    await fsp.rename(tmp, target);
+  }
+  res.json({ fileId, hash, mime: IMG_MIME[kind], size: buf.length });
+});
+
+// GET /api/boards/:id/files/:fileId — serve a board image to the audience (owner/
+// admin/enrolled). Content-type is sniffed from the bytes, never trusted from input.
+const getBoardFile = asyncHandler(async (req, res) => {
+  const board = await Board.findOne({ _id: req.params.id, deletedAt: null }).select("owner classes").lean();
+  if (!board) return res.status(404).json({ message: "Tapılmadı" });
+  const { ok } = await accessLevel(req.user, board);
+  if (!ok) return res.status(403).json({ message: "Giriş yoxdur" });
+  const target = path.join(BOARD_FILES_DIR, safeSeg(String(req.params.id)), safeFileId(req.params.fileId));
+  let stat;
+  try {
+    stat = await fsp.stat(target);
+  } catch {
+    return res.status(404).json({ message: "Şəkil tapılmadı" });
+  }
+  let mime = "application/octet-stream";
+  try {
+    const fh = await fsp.open(target, "r");
+    const head = Buffer.alloc(64);
+    await fh.read(head, 0, 64, 0);
+    await fh.close();
+    const det = detectHead(head);
+    if (det && IMG_MIME[det.type]) mime = IMG_MIME[det.type];
+  } catch { /* fall back to octet-stream */ }
+  res.setHeader("Content-Type", mime);
+  res.setHeader("Content-Length", stat.size);
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  fs.createReadStream(target).pipe(res);
+});
+
+module.exports = { listBoards, createBoard, getBoard, boardLiveStatus, saveBoard, deleteBoard, listClassBoards, uploadBoardFile, getBoardFile };

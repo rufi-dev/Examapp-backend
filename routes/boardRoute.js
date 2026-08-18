@@ -10,6 +10,8 @@ const {
   saveBoard,
   deleteBoard,
   listClassBoards,
+  uploadBoardFile,
+  getBoardFile,
 } = require("../controllers/boardController");
 
 // Pages (all canvases) are sent as one multipart file — dodges the JSON body cap.
@@ -17,6 +19,17 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024, files: 1 },
 });
+// Board images: private storage, magic-byte validated in the controller.
+const uploadImage = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 9 * 1024 * 1024, files: 1 },
+});
+const runImageUpload = (req, res, next) =>
+  uploadImage.single("file")(req, res, (err) => {
+    if (!err) return next();
+    const message = err.code === "LIMIT_FILE_SIZE" ? "Şəkil çox böyükdür (maksimum 8MB)" : "Şəkil yüklənmədi";
+    res.status(400).json({ message });
+  });
 
 const runSaveUpload = (req, res, next) =>
   upload.single("pages")(req, res, (err) => {
@@ -34,6 +47,9 @@ router.post("/", protect, teacherOnly, createBoard);
 router.get("/class/:classId", protect, listClassBoards);
 // Cheap live-session poll (declared before "/:id"'s siblings is fine — 2 segments).
 router.get("/:id/live", protect, boardLiveStatus);
+// Private board images: owner uploads, the audience reads (declared before "/:id").
+router.post("/:id/files", protect, teacherOnly, runImageUpload, uploadBoardFile);
+router.get("/:id/files/:fileId", protect, getBoardFile);
 // One board — the controller decides edit (owner) vs view-only (audience student).
 router.get("/:id", protect, getBoard);
 router.patch("/:id", protect, teacherOnly, runSaveUpload, saveBoard);

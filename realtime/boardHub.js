@@ -1060,6 +1060,21 @@ async function handleInRoom(room, seat, msg) {
       broadcast(room, { v: 1, type: "files-add", file: room.scene.files.get(f.fileId), from: seat.socketId }, seat.connId);
       return;
     }
+    case "bg-change": {
+      if (seat.connId !== room.leaderSocketId) return; // host controls the background
+      const bg = ["dots", "grid", "lines", "blank"].includes(msg.background) ? msg.background : null;
+      const rawColor = typeof msg.bgColor === "string" ? msg.bgColor.trim() : "";
+      const color = rawColor === "" || /^[#a-zA-Z0-9(),.%\s]{1,32}$/.test(rawColor) ? rawColor : null;
+      if (bg == null && color == null) return;
+      broadcast(room, { v: 1, type: "bg-change", background: bg, bgColor: color }, seat.connId);
+      // Persist the host-authoritative canvas background (scalar board fields — not the
+      // page scene, so no revision CAS needed). Best-effort; survives after live ends.
+      const set = {};
+      if (bg != null) set.background = bg;
+      if (color != null) set.bgColor = color;
+      Board.updateOne({ _id: room.boardId }, { $set: set }).catch(() => {});
+      return;
+    }
     case "end-live": {
       if (seat.connId !== room.leaderSocketId) return; // leader (the driving host tab) only
       // The ONLY normal way a session ends: clears the durable session flag too.
