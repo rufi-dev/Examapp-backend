@@ -243,7 +243,10 @@ const uploadBoardFile = asyncHandler(async (req, res) => {
   if (!kind) return res.status(415).json({ message: "Yalnız PNG, JPEG, GIF və ya WebP şəkillər" });
 
   const hash = crypto.createHash("sha256").update(buf).digest("hex");
-  const fileId = hash.slice(0, 40); // content-addressed → idempotent, collision-safe id
+  // Store under the ELEMENT's fileId (what the scene references + viewers fetch by).
+  // Fall back to a content-addressed id if none supplied.
+  const fileId = req.body && req.body.fileId ? safeFileId(req.body.fileId) : hash.slice(0, 40);
+  if (!fileId) return res.status(400).json({ message: "fileId yanlışdır" });
   const dir = path.join(BOARD_FILES_DIR, safeSeg(String(req.params.id)));
   await fsp.mkdir(dir, { recursive: true });
   const target = path.join(dir, safeFileId(fileId));

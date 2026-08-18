@@ -57,14 +57,17 @@ const fakeWs = () => {
     send: (s) => sent.push(JSON.parse(s)), close: (code, reason) => closes.push({ code, reason }) };
 };
 
-// Multipart POST of a raw buffer under field "file".
-function uploadFile(server, path, token, buf) {
+// Multipart POST of a raw buffer under field "file" (+ optional fileId field first).
+function uploadFile(server, path, token, buf, fileId) {
   return new Promise((resolve, reject) => {
     const { port } = server.address();
     const B = "----exqBoundary" + Math.random().toString(16).slice(2);
+    const idPart = fileId
+      ? Buffer.from(`--${B}\r\nContent-Disposition: form-data; name="fileId"\r\n\r\n${fileId}\r\n`)
+      : Buffer.alloc(0);
     const head = Buffer.from(`--${B}\r\nContent-Disposition: form-data; name="file"; filename="img"\r\nContent-Type: application/octet-stream\r\n\r\n`);
     const tail = Buffer.from(`\r\n--${B}--\r\n`);
-    const body = Buffer.concat([head, buf, tail]);
+    const body = Buffer.concat([idPart, head, buf, tail]);
     const req = http.request(
       { host: "127.0.0.1", port, method: "POST", path, headers: { Authorization: `Bearer ${token}`, "Content-Type": `multipart/form-data; boundary=${B}`, "Content-Length": body.length } },
       (res) => { const c = []; res.on("data", (d) => c.push(d)); res.on("end", () => resolve({ status: res.statusCode, body: (() => { try { return JSON.parse(Buffer.concat(c).toString()); } catch { return {}; } })() })); }
@@ -353,6 +356,11 @@ async function main() {
   ok("a non-owner teacher cannot upload to the board → 404", foreignUp.status === 404);
   const dl = await getBinary(server, `/api/boards/${boardB._id}/files/${up.body.fileId}`, tok(student));
   ok("an enrolled student can fetch the image → 200 image/png bytes", dl.status === 200 && dl.contentType === "image/png" && dl.bytes === PNG_1X1.length);
+  // The scene references Excalidraw's fileId — storing/fetching must use THAT id.
+  const withId = await uploadFile(server, `/api/boards/${boardB._id}/files`, tok(owner), PNG_1X1, "excalidrawFileId123");
+  ok("upload stores under the provided (Excalidraw) fileId", withId.status === 200 && withId.body.fileId === "excalidrawFileId123");
+  const dlById = await getBinary(server, `/api/boards/${boardB._id}/files/excalidrawFileId123`, tok(student));
+  ok("the image is fetchable by that same fileId (the id viewers use)", dlById.status === 200 && dlById.bytes === PNG_1X1.length);
   const dlForbidden = await getBinary(server, `/api/boards/${boardB._id}/files/${up.body.fileId}`, tok(unrelated));
   ok("a non-audience user cannot fetch the image → 403", dlForbidden.status === 403);
 
