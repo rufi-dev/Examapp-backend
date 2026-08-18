@@ -313,6 +313,64 @@ const at = async (name, fn) => {
     clearTimeout(room.journalTimer);
   });
 
+  // ---- CR-BOARD-010 connection lifecycle ------------------------------------
+  // A transient disconnect must NEVER end the room; only an explicit end-live does.
+  console.log("\nboard-live hub — CR-BOARD-010 lifecycle");
+
+  const { dropSeat } = hub.__test;
+  const capSeat = (connId, isHost, sent) => ({
+    connId, socketId: connId, isHost, canWrite: isHost, authTimer: null, authExpiresAt: Date.now() + 1e6,
+    user: { _id: "u" + connId }, ws: { readyState: 1, OPEN: 1, bufferedAmount: 0, send: (s) => sent.push(JSON.parse(s)), close() {} },
+  });
+
+  await at("a host disconnect does NOT end the room — it awaits the host; viewers stay connected", async () => {
+    const room = fakeRoom("a1a1a1a1a1a1a1a1a1a1a1a1", { status: "ready", liveSessionId: "S", leaderSocketId: "H" });
+    rooms.set(room.boardId, room);
+    const vSent = [];
+    const host = capSeat("H", true, []);
+    const viewer = capSeat("V", false, vSent);
+    room.members.set("H", host);
+    room.members.set("V", viewer);
+    dropSeat(room, host, "network");
+    assert.strictEqual(room.status, "awaiting-host", "room awaits the host (not ended)");
+    assert.ok(rooms.has(room.boardId), "room retained");
+    assert.ok(room.members.has("V"), "viewer stays connected");
+    assert.ok(!room.graceTimer, "NO destructive grace timer is armed");
+    assert.ok(vSent.some((m) => m.type === "host-away"), "viewer told the host is away");
+    clearTimeout(room.reapTimer);
+    clearTimeout(room.checkpointTimer);
+    rooms.delete(room.boardId);
+  });
+
+  await at("the LAST member leaving keeps the room (idle reaper scheduled), never instant-ends", async () => {
+    stubWrite(() => Promise.resolve({ revision: 1 }));
+    const room = fakeRoom("b2b2b2b2b2b2b2b2b2b2b2b2", { status: "awaiting-host", liveSessionId: "S" });
+    rooms.set(room.boardId, room);
+    const viewer = capSeat("V", false, []);
+    room.members.set("V", viewer);
+    dropSeat(room, viewer, "network");
+    assert.ok(rooms.has(room.boardId), "empty room retained (host can still reconnect)");
+    assert.strictEqual(room.status, "awaiting-host");
+    assert.ok(room.reapTimer, "a long idle reaper is scheduled (not a 20s grace)");
+    clearTimeout(room.reapTimer);
+    clearTimeout(room.checkpointTimer);
+    rooms.delete(room.boardId);
+  });
+
+  await at("reapEmptyRoom only ends a STILL-empty room; a reconnect cancels it", async () => {
+    stubWrite(() => Promise.resolve({ revision: 1 }));
+    const room = fakeRoom("c3c3c3c3c3c3c3c3c3c3c3c3", { status: "awaiting-host", liveSessionId: "S", acceptedRevision: 0 });
+    rooms.set(room.boardId, room);
+    // A member reconnected before the reaper fired:
+    room.members.set("H", capSeat("H", true, []));
+    hub.__test.reapEmptyRoom(room);
+    assert.ok(rooms.has(room.boardId), "reaper is a no-op while a member is present");
+    room.members.clear();
+    hub.__test.reapEmptyRoom(room);
+    await tick();
+    assert.ok(!rooms.has(room.boardId), "a still-empty room is reaped");
+  });
+
   // ---- CR-BOARD-009 authoritative save-state EMISSION -----------------------
   // Not just saveStateOf() math: prove the CLIENT actually RECEIVES the transition.
   console.log("\nboard-live hub — CR-BOARD-009");

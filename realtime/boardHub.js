@@ -37,6 +37,40 @@ const LIMITS = Object.freeze({
 
 const CLOSE = { POLICY: 1008, GOING_AWAY: 1001, RESTART: 1012, MSG_TOO_BIG: 1009 };
 
+// A fully-EMPTY room (nobody connected at all) is KEPT so the host can reconnect
+// and continue the same session — no transient network/navigation event ends a
+// session. Only a long idle window with zero members reaps it; that is a memory
+// safeguard, NOT a grace/timeout that ends live lessons.
+const EMPTY_ROOM_REAP_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+// Stable, privacy-safe close reasons for connection telemetry. Each tag maps to a
+// ws close code; the TAG is logged (never scene content or user identifiers), so
+// production can tell WHY a socket closed: network, payload_limit, auth_revoked,
+// explicit_end, server_shutdown, protocol_error, etc.
+const CLOSE_REASONS = Object.freeze({
+  explicit_end: CLOSE.GOING_AWAY,
+  no_live: CLOSE.GOING_AWAY,
+  recovering: CLOSE.GOING_AWAY,
+  network: CLOSE.GOING_AWAY,
+  server_shutdown: CLOSE.RESTART,
+  auth_revoked: CLOSE.POLICY,
+  forbidden: CLOSE.POLICY,
+  unauthorized: CLOSE.POLICY,
+  not_found: CLOSE.POLICY,
+  protocol_error: CLOSE.POLICY,
+  payload_limit: CLOSE.MSG_TOO_BIG,
+});
+function closeWs(ws, reason) {
+  const tag = CLOSE_REASONS[reason] !== undefined ? reason : "protocol_error";
+  const code = CLOSE_REASONS[tag];
+  try {
+    console.log("[LIVE][CONN] close code=" + code + " reason=" + tag);
+    ws.close(code, tag);
+  } catch {
+    /* already gone */
+  }
+}
+
 // Excalidraw element types we accept over the wire. Anything else is rejected.
 const ELEMENT_TYPES = new Set([
   "rectangle", "diamond", "ellipse", "arrow", "line", "freedraw",
@@ -343,7 +377,7 @@ function colorFor(id) {
 
 function armAuthTimer(room, seat) {
   clearTimeout(seat.authTimer);
-  seat.authTimer = setTimeout(() => dropSeat(room, seat, "auth-expired"), Math.max(0, seat.authExpiresAt - Date.now()));
+  seat.authTimer = setTimeout(() => dropSeat(room, seat, "auth_revoked"), Math.max(0, seat.authExpiresAt - Date.now()));
 }
 
 function rateOk(times, max) {
@@ -356,52 +390,50 @@ function rateOk(times, max) {
 
 function dropSeat(room, seat, reason) {
   clearTimeout(seat.authTimer);
+  const had = room.members.has(seat.connId);
   room.members.delete(seat.connId);
-  try {
-    seat.ws.close(CLOSE.POLICY, reason && reason.length <= 60 ? reason : "closed");
-  } catch {
-    /* already gone */
-  }
-  if (room.status === "ending") return;
-  const wasHost = seat.isHost;
+  closeWs(seat.ws, reason || "network");
+  if (room.status === "ending" || !had) return;
   if (seat.connId === room.leaderSocketId) onLeaderGone(room);
-  if (!room.members.size) {
-    beginGrace(room);
-    return;
-  }
   const hostPresent = [...room.members.values()].some((s) => s.isHost);
-  if (wasHost && !hostPresent) {
-    // Host left but students remain: IMMEDIATELY revoke every student's write
-    // (freeze editing) and start the reconnect grace. If no host returns the room
-    // ends — a student must never keep edit access after the teacher leaves.
+  if (!hostPresent && room.status === "ready") {
+    // Host/leader gone: freeze every student's write (a student must never keep
+    // edit access once the teacher leaves) and enter AWAITING-HOST. The room is
+    // NOT ended and viewers are NOT disconnected — they stay in view-only mode and
+    // the host can reconnect to the same session. Only an explicit end-live ends it.
     for (const s of room.members.values()) {
       if (s.canWrite && !s.isHost) {
         s.canWrite = false;
         send(s.ws, { v: 1, type: "write-changed", canWrite: false });
       }
     }
-    beginGrace(room);
-    broadcastPresence(room);
-    return;
+    room.status = "awaiting-host";
+    broadcast(room, { v: 1, type: "host-away" });
   }
-  broadcastPresence(room);
+  if (!room.members.size) {
+    // Nobody is connected. Keep the room + scene so the host (or a viewer) can
+    // reconnect and continue; only a LONG idle window with zero members reaps it.
+    enterAwaitingHost(room);
+    scheduleEmptyReap(room);
+  } else {
+    broadcastPresence(room);
+  }
 }
 
 // End the session for everyone: tell clients, close sockets, then durably persist
-// the final scene — and DON'T drop the room until that persist succeeds.
-async function endRoom(room) {
+// the final scene — and DON'T drop the room until that persist succeeds. This is
+// reached ONLY by an explicit end-live (leader), the idle-empty reaper, or graceful
+// shutdown — never by a transient disconnect.
+async function endRoom(room, reason) {
   if (room.status === "ending") return;
   room.status = "ending";
   const gen = room.generation;
   clearTimeout(room.graceTimer);
+  clearTimeout(room.reapTimer);
   broadcast(room, { v: 1, type: "host-left" });
   for (const seat of room.members.values()) {
     clearTimeout(seat.authTimer);
-    try {
-      seat.ws.close(CLOSE.GOING_AWAY, "session-ended");
-    } catch {
-      /* gone */
-    }
+    closeWs(seat.ws, reason || "explicit_end");
   }
   room.members.clear();
   await finalizeRoom(room, gen, 0);
@@ -430,15 +462,27 @@ async function finalizeRoom(room, gen, attempt) {
   rooms.delete(room.boardId);
 }
 
-function beginGrace(room) {
-  // Host/leader gone or room emptied — freeze and allow a reconnect window, then
-  // end. A brief network blip must not end the lesson; re-entry keeps one timer.
-  if (room.status === "ending" || room.status === "reconnecting") return;
-  room.status = "reconnecting";
-  clearTimeout(room.graceTimer);
-  room.graceTimer = setTimeout(() => {
-    endRoom(room).catch(() => {});
-  }, LIMITS.GRACE_MS);
+// The host/leader is gone but the session is NOT ended — mark it awaiting-host so
+// a reconnecting host resumes the SAME session. No timer ends the room here.
+function enterAwaitingHost(room) {
+  if (room.status === "ending") return;
+  if (room.status !== "awaiting-host") room.status = "awaiting-host";
+}
+
+// The room has ZERO connected members. Persist the scene now and, after a long idle
+// window, reap it to bound memory. ANY reconnect (host or viewer) cancels this via
+// seatIntoRoom. This is a resource safeguard, never a lesson-ending grace timeout.
+function scheduleEmptyReap(room) {
+  if (room.status === "ending") return;
+  clearTimeout(room.reapTimer);
+  scheduleCheckpoint(room, 0); // flush the latest scene while nobody is editing
+  room.reapTimer = setTimeout(() => reapEmptyRoom(room), EMPTY_ROOM_REAP_MS);
+}
+
+function reapEmptyRoom(room) {
+  if (room.status === "ending" || room.members.size) return; // someone reconnected
+  console.log("[LIVE] reaping idle-empty room", room.boardId, "(no members for the idle window)");
+  endRoom(room, "server_shutdown").catch(() => {});
 }
 
 function onLeaderGone(room) {
@@ -604,7 +648,7 @@ function onConnection(ws) {
 
   ws.on("close", () => {
     clearTimeout(joinTimer);
-    if (seat && room) dropSeat(room, seat, "closed");
+    if (seat && room) dropSeat(room, seat, "network");
   });
   ws.on("error", () => {
     try {
@@ -617,28 +661,28 @@ function onConnection(ws) {
 
 async function handleHandshake(ws, msg) {
   if (!validateHandshake(msg).ok) {
-    ws.close(CLOSE.POLICY, "bad-handshake");
+    closeWs(ws, "protocol_error");
     return null;
   }
   const { user, error } = await resolveSessionUser(msg.token);
   if (error || !user) {
-    ws.close(CLOSE.POLICY, "unauthorized");
+    closeWs(ws, "unauthorized");
     return null;
   }
   const board = await Board.findOne({ _id: msg.boardId, deletedAt: null });
   if (!board) {
-    ws.close(CLOSE.POLICY, "not-found");
+    closeWs(ws, "not_found");
     return null;
   }
   // A board whose crash-recovery could not be proven is locked until reviewed.
   if (unresolvedRecovery.has(String(board._id))) {
-    ws.close(CLOSE.GOING_AWAY, "recovering");
+    closeWs(ws, "recovering");
     return null;
   }
 
   if (msg.type === "start-live") {
     if (!(await canHostLive(user, board))) {
-      ws.close(CLOSE.POLICY, "forbidden");
+      closeWs(ws, "forbidden");
       return null;
     }
     return startOrHostRoom(ws, user, board);
@@ -647,13 +691,15 @@ async function handleHandshake(ws, msg) {
   // join
   const { ok } = await accessLevel(user, board);
   if (!ok) {
-    ws.close(CLOSE.POLICY, "forbidden");
+    closeWs(ws, "forbidden");
     return null;
   }
   const room = rooms.get(String(board._id));
-  if (!room || room.status !== "ready") {
+  // A viewer may join a live room OR one that is awaiting its host's return — both
+  // are active sessions. Only a truly absent/ended room is "no-live".
+  if (!room || (room.status !== "ready" && room.status !== "awaiting-host")) {
     send(ws, { v: 1, type: "no-live" });
-    ws.close(CLOSE.GOING_AWAY, "no-live");
+    closeWs(ws, "no_live");
     return null;
   }
   return seatIntoRoom(ws, user, room, false);
@@ -668,13 +714,17 @@ async function startOrHostRoom(ws, user, board) {
   const key = String(board._id);
   let room = rooms.get(key);
   if (room) {
-    // Resume an existing room (live, grace, OR finalizing) with its scene intact —
-    // never discard unsaved work just because the host restarted. Bumping the
-    // generation makes any in-flight old finalizer stale so it can't delete us.
+    // Resume an existing room (live, awaiting-host, OR finalizing) with its scene
+    // intact — never discard work just because the host reconnected. Bumping the
+    // generation makes any in-flight old finalizer stale so it can't delete us, and
+    // clearing the idle reaper keeps the same session alive.
     clearTimeout(room.graceTimer);
     clearTimeout(room.finalizeTimer);
+    clearTimeout(room.reapTimer);
+    const wasAwaiting = room.status !== "ready";
     room.generation += 1;
     room.status = "ready";
+    if (wasAwaiting) broadcast(room, { v: 1, type: "host-back" }); // viewers: host returned
   }
   if (!room) {
     // Materialize a real first page for legacy single-scene boards so the CAS can
@@ -715,6 +765,7 @@ async function startOrHostRoom(ws, user, board) {
       journalTimer: null,
       graceTimer: null,
       finalizeTimer: null,
+      reapTimer: null,
     };
     rooms.set(key, room);
   }
@@ -723,14 +774,16 @@ async function startOrHostRoom(ws, user, board) {
 
 function seatIntoRoom(ws, user, room, isHost) {
   if (room.members.size >= LIMITS.MAX_MEMBERS_PER_ROOM) {
-    ws.close(CLOSE.POLICY, "room-full");
+    closeWs(ws, "protocol_error");
     return null;
   }
   const perUser = [...room.members.values()].filter((s) => String(s.user._id) === String(user._id)).length;
   if (perUser >= LIMITS.MAX_SOCKETS_PER_USER) {
-    ws.close(CLOSE.POLICY, "too-many-sessions");
+    closeWs(ws, "protocol_error");
     return null;
   }
+  // A member (re)connected — cancel any idle-empty reaper so the session persists.
+  clearTimeout(room.reapTimer);
   const seat = makeSeat(ws, user, isHost);
   room.members.set(seat.connId, seat);
   armAuthTimer(room, seat);
@@ -763,7 +816,7 @@ const mapToObj = (m) => {
 
 async function handleInRoom(room, seat, msg) {
   if (Date.now() > seat.authExpiresAt && msg.type !== "reauth") {
-    return dropSeat(room, seat, "auth-expired");
+    return dropSeat(room, seat, "auth_revoked");
   }
   const check = validateInRoom(msg, room, seat);
   if (!check.ok) return; // stale epoch / dup / bad shape → drop silently
@@ -773,16 +826,16 @@ async function handleInRoom(room, seat, msg) {
     case "reauth": {
       const { user, error } = await resolveSessionUser(msg.token);
       if (error || !user || String(user._id) !== String(seat.user._id)) {
-        return dropSeat(room, seat, "reauth-failed");
+        return dropSeat(room, seat, "auth_revoked");
       }
       // Re-run the FULL access check, not just token validity: a student removed
       // from the class, or a teacher whose approval was revoked mid-session, must
       // be dropped even if their token is still valid.
       const board = await Board.findOne({ _id: room.boardId, deletedAt: null }).select("owner classes").lean();
-      if (!board) return dropSeat(room, seat, "board-gone");
+      if (!board) return dropSeat(room, seat, "not_found");
       const level = await accessLevel(user, board);
-      if (!level.ok) return dropSeat(room, seat, "access-revoked");
-      if (seat.isHost && !(await canHostLive(user, board))) return dropSeat(room, seat, "host-revoked");
+      if (!level.ok) return dropSeat(room, seat, "auth_revoked");
+      if (seat.isHost && !(await canHostLive(user, board))) return dropSeat(room, seat, "auth_revoked");
       seat.user = user;
       seat.authExpiresAt = Date.now() + LIMITS.AUTH_LEASE_MS;
       armAuthTimer(room, seat);
@@ -811,7 +864,7 @@ async function handleInRoom(room, seat, msg) {
           accepted.push(el);
         }
       }
-      if (room.scene.elements.size > LIMITS.MAX_ELEMENTS) return dropSeat(room, seat, "too-many-elements");
+      if (room.scene.elements.size > LIMITS.MAX_ELEMENTS) return dropSeat(room, seat, "protocol_error");
       if (!accepted.length) return;
       room.acceptedRevision += 1;
       room.dirty = true;
@@ -883,7 +936,10 @@ async function handleInRoom(room, seat, msg) {
 // ---- exports for server.js + tests -----------------------------------------
 function isLive(boardId) {
   const room = rooms.get(String(boardId));
-  return room && room.status === "ready" ? { liveSessionId: room.liveSessionId, pageEpoch: room.pageEpoch } : null;
+  // A session awaiting its host's return is still LIVE — viewers may (re)join and
+  // the host sees a resume affordance. Only "ending" is not live.
+  const active = room && (room.status === "ready" || room.status === "awaiting-host");
+  return active ? { liveSessionId: room.liveSessionId, pageEpoch: room.pageEpoch, awaitingHost: room.status === "awaiting-host" } : null;
 }
 
 async function checkpointAll() {
@@ -918,13 +974,10 @@ async function closeAll(budgetMs) {
     clearTimeout(room.journalTimer);
     clearTimeout(room.graceTimer);
     clearTimeout(room.finalizeTimer);
+    clearTimeout(room.reapTimer);
     for (const seat of room.members.values()) {
       clearTimeout(seat.authTimer);
-      try {
-        seat.ws.close(CLOSE.RESTART, "server-restarting");
-      } catch {
-        /* gone */
-      }
+      closeWs(seat.ws, "server_shutdown");
     }
   }
   // wss.close() under noServer does NOT close clients — hence the explicit loop above.
@@ -944,5 +997,5 @@ module.exports = {
   validateInRoom,
   LIMITS,
   // test-only hooks for the persistence/finalization/journal coordination
-  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals, unresolvedRecovery, handleHandshake, seatIntoRoom, makeSeat, saveStateOf },
+  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals, unresolvedRecovery, handleHandshake, seatIntoRoom, makeSeat, saveStateOf, dropSeat, reapEmptyRoom },
 };

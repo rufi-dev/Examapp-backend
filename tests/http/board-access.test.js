@@ -194,6 +194,35 @@ async function main() {
   await hub.__test.handleInRoom(room, coSeat, { v: 1, type: "reauth", liveSessionId: room.liveSessionId, clientSeq: 99, token: tok(coT) });
   ok("revoked co-teacher is DROPPED on reauth (removed + socket closed)", !room.members.has(coSeat.connId) && cWs.closes.length > 0);
 
+  // ── CR-BOARD-010: connection lifecycle over the REAL handshake ──
+  console.log("\nboard access — CR-BOARD-010 lifecycle (real handshake)");
+  const hWs = fakeWs();
+  const hostB = await hub.__test.handleHandshake(hWs, { v: 1, type: "start-live", boardId: String(boardB._id), token: tok(owner) });
+  ok("owner starts a live session on board B", hostB && hWs.sent.some((m) => m.type === "live-started"));
+  const roomB = hostB.room;
+  const liveIdB = roomB.liveSessionId;
+  // A viewer (approved student) joins.
+  const vWs = fakeWs();
+  const viewerB = await hub.__test.handleHandshake(vWs, { v: 1, type: "join", boardId: String(boardB._id), token: tok(student) });
+  ok("an approved student joins the live session", viewerB && vWs.sent.some((m) => m.type === "joined"));
+  // Draw something so the scene is non-trivial, then the HOST transport-drops (NOT end-live).
+  await hub.__test.handleInRoom(roomB, hostB.seat, { v: 1, type: "scene-update", liveSessionId: liveIdB, pageEpoch: roomB.pageEpoch, clientSeq: 1, elements: [{ id: "keep", type: "rectangle", version: 1, versionNonce: 3, x: 5, y: 5, width: 9, height: 9 }] });
+  hub.__test.dropSeat(roomB, hostB.seat, "network");
+  ok("host disconnect → room AWAITS host, is NOT ended", hub.__test.rooms.has(String(boardB._id)) && roomB.status === "awaiting-host");
+  ok("the viewer stays connected after the host disconnects", roomB.members.has(viewerB.seat.connId));
+  ok("isLive still reports the session (awaitingHost) so viewers can (re)join", !!hub.isLive(boardB._id) && hub.isLive(boardB._id).awaitingHost === true);
+  ok("the drawn element is retained in the room scene", roomB.scene.elements.has("keep"));
+  // Host reconnects → SAME session resumes, viewer told host is back.
+  const hWs2 = fakeWs();
+  const resumeB = await hub.__test.handleHandshake(hWs2, { v: 1, type: "start-live", boardId: String(boardB._id), token: tok(owner) });
+  const resumedMsg = hWs2.sent.find((m) => m.type === "live-started");
+  ok("host reconnect resumes the SAME live session id", resumeB && resumedMsg && resumedMsg.liveSessionId === liveIdB);
+  ok("resumed session continues from the SAME scene (element still present)", resumedMsg.scene.elements.some((e) => e.id === "keep"));
+  ok("resumed room is ready again", roomB.status === "ready");
+  ok("the viewer was told the host is back", vWs.sent.some((m) => m.type === "host-back"));
+  clearTimeout(roomB.reapTimer);
+  clearTimeout(roomB.checkpointTimer);
+
   await new Promise((r) => server.close(r));
   await mongoose.disconnect();
   await mem.stop();
