@@ -75,10 +75,27 @@ function kindFromType(detected) {
   return "other";
 }
 
+// multer 1.x (busboy) decodes multipart filenames as latin1, so a UTF-8 name like
+// the Azerbaijani "dərs 1 ev tapşırığı.pdf" arrives mojibaked ("dÉrs 1 ev tapÅ…").
+// Re-decode the raw bytes as UTF-8 to recover the real name. Guard against bytes that
+// aren't valid UTF-8: if re-decoding introduces the replacement char (that wasn't
+// already there), keep the original string instead of corrupting it further.
+const decodeUploadName = (name) => {
+  const raw = String(name || "");
+  if (!raw) return "";
+  try {
+    const utf8 = Buffer.from(raw, "latin1").toString("utf8");
+    if (utf8.includes("�") && !raw.includes("�")) return raw;
+    return utf8;
+  } catch {
+    return raw;
+  }
+};
+
 // Turn a validated multer file into the stored-file subdocument.
 const fileDocFor = (file) => ({
   fileName: path.basename(file.path),
-  originalName: file.originalname || "",
+  originalName: decodeUploadName(file.originalname),
   mimeType: file.canonicalMime || file.mimetype || "",
   sizeBytes: Number(file.size || 0),
   kind: kindFromType(file.detectedType),
