@@ -26,11 +26,41 @@ const MAX_BOARD_FILES_BYTES = 80 * 1024 * 1024; // total per board
 const safeSeg = (s) => String(s || "").replace(/[^a-fA-F0-9]/g, "").slice(0, 40);
 const safeFileId = (s) => String(s || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
 
-// ---- teacher: manage own boards ---------------------------------------------
-// GET /api/boards — a teacher's own boards; an ADMIN sees EVERY teacher's boards
-// (with ownerName), newest first. `mine`/`canManage` let the client label and gate.
+// ---- list boards ------------------------------------------------------------
+// GET /api/boards — teacher: their own boards; ADMIN: EVERY teacher's boards (with
+// ownerName); STUDENT: boards shared to any class they are approved-enrolled in
+// (read-only — mine/canManage are false). Newest first.
 const listBoards = asyncHandler(async (req, res) => {
   const isAdmin = req.user.role === "admin";
+
+  // Student: boards visible across ALL their enrolled classes — either explicitly
+  // shared to a class they are in, or a teacher's "all my students" boards (empty
+  // `classes`, owned by that class's teacher). This mirrors listClassBoards but
+  // aggregated across every class instead of one.
+  if (req.user.role === "student") {
+    const enrollments = await Enrollment.find({ student: req.user._id, status: "approved" })
+      .select("class")
+      .lean();
+    const classIds = enrollments.map((e) => e.class).filter(Boolean);
+    if (!classIds.length) return res.json([]);
+    const ownerRows = await Class.find({ _id: { $in: classIds }, deletedAt: null })
+      .select("owner")
+      .lean();
+    const ownerIds = [...new Set(ownerRows.map((c) => String(c.owner)).filter(Boolean))];
+    const boards = await Board.find({
+      deletedAt: null,
+      $or: [
+        { classes: { $in: classIds } },
+        { owner: { $in: ownerIds }, classes: { $size: 0 } },
+      ],
+    })
+      .sort({ updatedAt: -1 })
+      .select("title elementCount sizeBytes classes ownerName updatedAt")
+      .populate("classes", "name")
+      .lean();
+    return res.json(boards.map((b) => ({ ...b, mine: false, canManage: false })));
+  }
+
   const filter = isAdmin ? { deletedAt: null } : { owner: req.user._id, deletedAt: null };
   const boards = await Board.find(filter)
     .sort({ updatedAt: -1 })

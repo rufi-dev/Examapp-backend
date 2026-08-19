@@ -39,8 +39,10 @@ const runSaveUpload = (req, res, next) =>
     res.status(400).json({ message });
   });
 
-// Teacher manages their own boards.
-router.get("/", protect, teacherOnly, listBoards);
+// List boards: teacher/admin get their own/all; a STUDENT gets boards shared to their
+// enrolled classes (read-only — the controller branches by role). Creating a board
+// stays teacher-only.
+router.get("/", protect, listBoards);
 router.post("/", protect, teacherOnly, createBoard);
 // Boards shared to a class (class page) — students + the class owner. Declared
 // before "/:id" so "class" is never parsed as a board id.
