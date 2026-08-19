@@ -192,6 +192,23 @@ app.use("/api/teacher-success", require("./routes/teacherSuccessRoute"))
 app.use("/api/chat", require("./routes/chatRoute"))
 app.use("/api/plan", require("./routes/planRoute"))
 app.use("/api/health", healthRoute)
+// Public step-by-step "how to use the platform" guide videos (self-hosted help
+// content, NO auth — nothing sensitive). express.static gives byte-range support so
+// <video> can seek/stream. Files live in a persistent volume (guide-videos/); a
+// missing file 404s (fallthrough:false) instead of leaking to the error handler.
+const GUIDES_DIR = process.env.GUIDES_DIR || require("path").join(process.cwd(), "guide-videos")
+app.use(
+    "/api/guides/videos",
+    express.static(GUIDES_DIR, {
+        fallthrough: false,
+        dotfiles: "ignore",
+        index: false,
+        setHeaders: (res) => {
+            res.setHeader("Accept-Ranges", "bytes")
+            res.setHeader("Cache-Control", "public, max-age=604800")
+        },
+    })
+)
 // AUD-013 CR-057: NOTHING under uploads/ is public anymore. Exam PDFs moved to
 // PRIVATE key storage (examPdfs/) served only by the authorized byte-stream
 // GET /api/quiz/exam/:examId/pdf/stream, so a shared file URL can no longer
