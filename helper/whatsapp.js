@@ -433,6 +433,38 @@ function firstReadyOwner(ownerIds) {
   return null;
 }
 
+// A single admin can link a SECOND WhatsApp number in a separate "slot". Slot 1
+// keeps the bare owner id (so an already-linked number needs NO re-scan); slot 2
+// gets a filesystem-safe suffix. LocalAuth.clientId must match /^[-_\w]+$/, so the
+// suffix uses only word chars — no colon, which would break Windows/Docker auth
+// paths (.wwebjs_auth/session-<id>__wa2).
+function accountKey(ownerId, slot) {
+  const id = String(ownerId);
+  return Number(slot) === 2 ? `${id}__wa2` : id;
+}
+
+// All given owner keys whose session is linked AND ready, in order.
+function readyOwners(ownerIds) {
+  const out = [];
+  for (const id of ownerIds || []) {
+    const s = sessions.get(String(id));
+    if (s && s.ready && s.client) out.push(String(id));
+  }
+  return out;
+}
+
+// Round-robin over the ready sessions so auto-outreach alternates between the
+// linked numbers "1 by 1" — spreading volume across numbers lowers per-number
+// ban risk. A module-level cursor advances each call; null when NONE are ready.
+let rrCursor = 0;
+function nextReadyOwner(ownerIds) {
+  const ready = readyOwners(ownerIds);
+  if (!ready.length) return null;
+  const pick = ready[rrCursor % ready.length];
+  rrCursor = (rrCursor + 1) % ready.length;
+  return pick;
+}
+
 // Send one outreach message, reporting WHY it didn't go through so the watcher
 // can act differently per outcome. Returns:
 //   "sent"        — delivered to WhatsApp
@@ -633,6 +665,9 @@ module.exports = {
   sendMessageFor,
   sendOutreachFor,
   firstReadyOwner,
+  accountKey,
+  readyOwners,
+  nextReadyOwner,
   listGroupsFor,
   notifyStudentsNewExam,
   toDigits,

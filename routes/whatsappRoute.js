@@ -12,6 +12,7 @@ const {
   sendMessageFor,
   sendForOwner,
   listGroupsFor,
+  accountKey,
 } = require("../helper/whatsapp");
 
 // ADMIN-ONLY: WhatsApp linking is an admin surface (the /connections page is
@@ -19,6 +20,11 @@ const {
 // logged-in admin's own session — they link a number and pick the notify group;
 // nobody else's session is touched.
 const oid = (req) => String(req.user._id);
+// The admin may link a SECOND number in slot 2 (?slot=2 or body.slot). Slot 1 is
+// the original session (bare id), so an already-linked number keeps working. Only
+// the per-number linking surface (status/qr/logout/test) is slot-aware; the notify
+// group lives on the user doc (one group) and stays on slot 1.
+const key = (req) => accountKey(req.user._id, req.query.slot ?? req.body?.slot);
 
 // Direct support outreach from the logged-in ADMIN's connected WhatsApp.
 // The controller resolves the selected user's phone server-side; the client
@@ -31,23 +37,23 @@ router.post(
 );
 
 router.get("/status", protect, adminOnly, (req, res) => {
-  res.json(getStatusFor(oid(req)));
+  res.json(getStatusFor(key(req)));
 });
 
 router.get("/qr", protect, adminOnly, (req, res) => {
-  initFor(oid(req)); // lazily boot this teacher's session if not running
-  res.json({ ...getStatusFor(oid(req)), qr: getQrFor(oid(req)) });
+  initFor(key(req)); // lazily boot this slot's session if not running
+  res.json({ ...getStatusFor(key(req)), qr: getQrFor(key(req)) });
 });
 
 // Force a clean restart when the QR is stuck (a hung Chromium / expired session):
 // resets the retry budget and recycles the client, so a new QR is generated.
 router.post("/qr/refresh", protect, adminOnly, (req, res) => {
-  refreshFor(oid(req));
+  refreshFor(key(req));
   res.json({ ok: true });
 });
 
 router.post("/logout", protect, adminOnly, async (req, res) => {
-  await logoutFor(oid(req));
+  await logoutFor(key(req));
   res.json({ ok: true });
 });
 
@@ -57,7 +63,7 @@ router.post("/test", protect, adminOnly, async (req, res) => {
   const phone = req.body?.phone || req.user?.phone;
   if (!phone) return res.status(400).json({ ok: false, message: "Telefon nömrəsi yoxdur" });
   const ok = await sendMessageFor(
-    oid(req),
+    key(req),
     phone,
     "✅ Examopia WhatsApp testi — bağlantı işləyir. Yeni imtahanlar bura gələcək."
   );

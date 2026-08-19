@@ -109,11 +109,14 @@ const firstName = (name) => String(name || "").trim().split(/\s+/)[0] || "";
 function outreachMessage(u, stuck) {
   const fn = firstName(u.name);
   const n = fn ? ` ${fn} müəllim` : " müəllim";
-  if (stuck.hasEmptyExam)
-    return `Salam${n} 🙂 Examopia komandasından yazıram. Gördüm ki, imtahan yaratmağa başlamısınız, amma sual əlavə etməmisiniz. Nə oldu? Hansı hissə çətin gəldi, nədə ilişdiniz? İstəsəniz, birlikdə edə bilərik — kömək etməkdən məmnun olaram 🌷`;
-  if (stuck.hasEmptyClass)
-    return `Salam${n} 🙂 Examopia komandasından yazıram. Gördüm ki, sinif yaratmısınız, amma hələ imtahan əlavə etməmisiniz. Nə oldu? Hansı hissə çətin gəldi, nədə ilişdiniz? İstəsəniz, birlikdə ilk imtahanınızı yarada bilərik — kömək etməkdən məmnun olaram 🌷`;
-  return `Salam${n} 🙂 Examopia komandasından yazıram. Gördüm ki, qeydiyyatdan keçmisiniz, amma hələ başlamamısınız. Nə oldu? Hansı hissə çətin gəldi, nə sizi dayandırdı? İstəsəniz, birlikdə ilk imtahanınızı yarada bilərik — kömək etməkdən məmnun olaram 🌷`;
+  // One unified re-engagement script for every stuck state (WhatsApp bold = *single* asterisks).
+  return `Salam${n} 😊 *Examopia-da qeydiyyatdan keçdiyinizi*, amma platformadan istifadəni davam etdirmədiyinizi gördük.
+
+Examopia müəllimlər üçün *AI ilə test və imtahan yaratmaq, şagirdləri siniflər üzrə idarə etmək, dərs materialları paylaşmaq, ev tapşırıqları vermək, canlı imtahan keçirmək, elektron lövhədən istifadə etmək və nəticələri izləmək* üçün hazırlanmış onlayn tədris platformasıdır.
+
+Deyəsən, istifadə zamanı hansısa çətinlik yaşamısınız. *Hansı hissədə ilişdiniz?* Sizə kömək edə bilərəm 😊
+
+https://examopia.com`;
 }
 
 // Attempt one send + record the outcome. Returns the raw send result
@@ -185,8 +188,13 @@ async function runOutreachSweep(now = new Date()) {
   if (!enabled) return { skipped: "disabled" };
 
   const admins = await User.find({ role: "admin" }).select("_id").lean();
-  const senderId = wa.firstReadyOwner(admins.map((a) => a._id));
-  if (!senderId) return { skipped: "no_linked_whatsapp" };
+  // Consider BOTH linked numbers (slot 1 + slot 2) of every admin. The sender is
+  // rotated PER ACTUAL SEND (in the loop below), NOT here: a sweep runs every ~2 min
+  // but real sends are ~30 min apart, so advancing the round-robin cursor here would
+  // churn it on every idle sweep and the alternation would drift / stick to one
+  // number. Here we only check that SOMETHING is ready.
+  const senderKeys = admins.flatMap((a) => [wa.accountKey(a._id, 1), wa.accountKey(a._id, 2)]);
+  if (!wa.readyOwners(senderKeys).length) return { skipped: "no_linked_whatsapp" };
 
   if (!withinHours(now)) return { skipped: "outside_hours", hour: localHour(now) };
   if (lastSentAt && now.getTime() - lastSentAt.getTime() < GAP_MIN * 60 * 1000) return { skipped: "gap" };
@@ -222,6 +230,10 @@ async function runOutreachSweep(now = new Date()) {
     const stuck = stuckMap.get(String(u._id));
     if (!stuck || !stuck.isStuck) continue; // finished setup → leave alone
     attempts += 1;
+    // Rotate to the next ready number for THIS send, so consecutive sends go out
+    // from alternating linked numbers ("1 by 1").
+    const senderId = wa.nextReadyOwner(senderKeys);
+    if (!senderId) return { skipped: "not_ready" };
     const status = await contact(senderId, u, stuck);
     if (status === "not_ready") return { skipped: "not_ready" };
     if (status === "sent") {
