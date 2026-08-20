@@ -919,12 +919,34 @@ async function startOrHostRoom(ws, user, board) {
 }
 
 function seatIntoRoom(ws, user, room, isHost) {
-  if (room.members.size >= LIMITS.MAX_MEMBERS_PER_ROOM) {
-    closeWs(ws, "protocol_error");
-    return null;
+  // ── Reconnect hygiene — fixes DUPLICATE participants + the "board keeps dropping /
+  // ends every 2–3 min" loop. ──────────────────────────────────────────────────────
+  // A flaky mobile socket often leaves a STALE seat: the dead TCP connection isn't
+  // detected until the 30s heartbeat reaps it, so when the user reconnects the old seat
+  // still sits in room.members. It shows as a DUPLICATE participant AND counts toward
+  // MAX_SOCKETS_PER_USER, so a few quick reconnects fill the cap and every further
+  // reconnect is refused with protocol_error — which kicks the host and ends the live
+  // session. So a NEW connection SUPERSEDES this user's previous seat(s): reap them here
+  // (we add the fresh seat below). Closing with 1001 (GOING_AWAY) is terminal on the
+  // client, so a superseded socket won't reconnect and restart the loop.
+  for (const s of [...room.members.values()]) {
+    if (s.ws === ws || String(s.user._id) !== String(user._id)) continue;
+    clearTimeout(s.authTimer);
+    room.members.delete(s.connId);
+    if (s.connId === room.leaderSocketId) room.leaderSocketId = null;
+    try { s.ws.close(CLOSE.GOING_AWAY, "superseded"); } catch { /* already gone */ }
   }
-  const perUser = [...room.members.values()].filter((s) => String(s.user._id) === String(user._id)).length;
-  if (perUser >= LIMITS.MAX_SOCKETS_PER_USER) {
+  // Also reap any OTHER member whose socket is already dead, so the room capacity below
+  // reflects only LIVE connections.
+  for (const s of [...room.members.values()]) {
+    if (s.ws !== ws && s.ws.readyState !== undefined && s.ws.readyState !== s.ws.OPEN) {
+      clearTimeout(s.authTimer);
+      room.members.delete(s.connId);
+      if (s.connId === room.leaderSocketId) room.leaderSocketId = null;
+      try { s.ws.terminate(); } catch { /* gone */ }
+    }
+  }
+  if (room.members.size >= LIMITS.MAX_MEMBERS_PER_ROOM) {
     closeWs(ws, "protocol_error");
     return null;
   }
