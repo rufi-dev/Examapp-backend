@@ -21,7 +21,12 @@ const LIMITS = Object.freeze({
   MAX_PAYLOAD: 262144, // 256 KiB — overrides ws' 100 MiB default
   JOIN_TIMEOUT_MS: 10000,
   HEARTBEAT_MS: 30000,
-  AUTH_LEASE_MS: 90000, // socket must reauth within this window
+  // A socket must re-verify within this window or it's closed (4001, reconnectable).
+  // Kept generous (10 min) so a BACKGROUNDED/locked phone — whose reauth timer the
+  // browser heavily throttles — is NOT dropped every ~90s (that caused a needless
+  // reconnect mid-lesson). The client also re-verifies immediately on return to the
+  // foreground, so a revoked user is still removed promptly.
+  AUTH_LEASE_MS: 600000,
   GRACE_MS: 20000, // host reconnect grace
   CHECKPOINT_DEBOUNCE_MS: 1500,
   MAX_MEMBERS_PER_ROOM: 60,
