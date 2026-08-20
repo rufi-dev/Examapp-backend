@@ -3376,6 +3376,49 @@ const heartbeatAttempt = asyncHandler(async (req, res) => {
 // question they're on, progress, time, and live violations. The runner pushes a
 // heartbeat via autosave; this reads the active attempts.
 const LIVE_ACTIVE_MS = 30 * 1000; // heartbeat within 30s → "active"
+// GET /api/quiz/live-exams — exams that CURRENTLY have students taking them (an
+// unsubmitted, unexpired attempt). Teacher-scoped by ownership; an admin sees all.
+// Powers the "Canlı imtahan" overview: one card per live exam → open its monitor.
+const getLiveExams = asyncHandler(async (req, res) => {
+  const now = Date.now();
+  const activeCutoff = new Date(now - 2 * 60 * 1000); // in-progress (not long-expired)
+  const writingCutoff = new Date(now - 20 * 1000); // "writing now" = seen in last ~20s
+  const grouped = await Attempt.aggregate([
+    { $match: { submitted: false, expiresAt: { $gt: activeCutoff } } },
+    {
+      $group: {
+        _id: "$examId",
+        activeCount: { $sum: 1 },
+        writingCount: { $sum: { $cond: [{ $gt: ["$lastSeenAt", writingCutoff] }, 1, 0] } },
+        lastSeenAt: { $max: "$lastSeenAt" },
+      },
+    },
+  ]);
+  if (!grouped.length) return res.json({ exams: [] });
+  const byExam = new Map(grouped.map((g) => [String(g._id), g]));
+  const isAdmin = req.user.role === "admin";
+  const filter = { _id: { $in: grouped.map((g) => g._id) }, deletedAt: null };
+  if (!isAdmin) filter.owner = req.user._id; // a teacher only monitors their own exams
+  const exams = await Exam.find(filter).select("name class owner totalMarks").populate("class", "name").lean();
+  const list = exams.map((e) => {
+    const g = byExam.get(String(e._id)) || {};
+    return {
+      examId: e._id,
+      name: e.name,
+      className: e.class?.name || "",
+      totalMarks: e.totalMarks || 0,
+      activeCount: g.activeCount || 0,
+      writingCount: g.writingCount || 0,
+      lastSeenAt: g.lastSeenAt || null,
+    };
+  });
+  // Most actively-written first, then most-recent activity.
+  list.sort(
+    (a, b) => b.writingCount - a.writingCount || new Date(b.lastSeenAt || 0) - new Date(a.lastSeenAt || 0)
+  );
+  res.json({ exams: list });
+});
+
 const getLiveAttempts = asyncHandler(async (req, res) => {
   const { examId } = req.params;
   // Polled every ~2s while a teacher watches, so keep it light: only the fields the
@@ -4880,6 +4923,7 @@ module.exports = {
   addResult,
   autosaveAttempt,
   getLiveAttempts,
+  getLiveExams,
   heartbeatAttempt,
   finalizeExpiredAttempts,
   finalizeAttempt, // exported for CR-038 deterministic freeze tests

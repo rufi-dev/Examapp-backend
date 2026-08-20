@@ -31,6 +31,7 @@ const {
   addResult,
   autosaveAttempt,
   getLiveAttempts,
+  getLiveExams,
   heartbeatAttempt,
   startAttempt,
   attemptStatus,
@@ -241,6 +242,7 @@ router.post("/exam/:examId/autosave", protect, autosaveAttempt);
 router.post("/exam/:examId/heartbeat", protect, heartbeatAttempt);
 router.get("/exam/:examId/attemptStatus", protect, attemptStatus);
 // Live exam watch — owner/admin sees who is currently writing + their progress.
+router.get("/live-exams", protect, getLiveExams);
 router.get("/exam/:examId/live", protect, getLiveAttempts);
 router.post("/exam/:examId/violation", protect, reportViolation);
 router.get("/exam/:examId/rank", protect, getExamRank);
