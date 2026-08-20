@@ -3390,7 +3390,8 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   if (!ownsOrAdmin(req.user, exam)) {
     return res.status(403).json({ message: "Bu imtahan sizə aid deyil" });
   }
-  const total = (exam.questions?.correctAnswers || []).length;
+  const correct = exam.questions?.correctAnswers || [];
+  const total = correct.length;
   const now = Date.now();
   const FINISHED_WATCH_MS = 12 * 60 * 60 * 1000; // keep finishers on the board a school day
 
@@ -3399,6 +3400,58 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
     const arr = [];
     for (let i = 0; i < total; i++) arr.push(isAnswered(ans[i]));
     return arr;
+  };
+
+  // LIVE per-question correctness ("correct" | "wrong" | "unanswered" | "manual" |
+  // "section"), in DISPLAY order so it lines up 1:1 with `answered`. Reuses the exported
+  // pure grader `isCorrectAnswer`; best-effort against the LIVE key. Manual-graded
+  // questions and reading/listening section blocks are non-auto (never shown red/green).
+  const manualGradingOn = require("../config/featureFlags").flags.MANUAL_GRADING_ENABLED;
+  const gradeOne = (ca, sel) => {
+    if (!ca || ca.type === "reading") return "section";
+    if (manualGradingOn && ca.manualGrade) return "manual";
+    if (!isAnswered(sel)) return "unanswered";
+    return isCorrectAnswer(ca, sel) ? "correct" : "wrong";
+  };
+  // Must DE-SHUFFLE first: `answers` is display-order, the key is canonical, and each
+  // attempt stores its own question/option permutations (same mapping scoreAndCreateResult
+  // applies before grading). Without this, every shuffled attempt would grade garbage.
+  const buildCorrectness = (a) => {
+    const out = new Array(total).fill("unanswered");
+    if (!a || !Array.isArray(a.answers) || !total) return out;
+    let sel = a.answers;
+    const qperm = Array.isArray(a.questionOrder) && a.questionOrder.length ? a.questionOrder : null;
+    if (qperm) {
+      const canon = new Array(total);
+      qperm.forEach((canonIdx, dispPos) => {
+        if (Number.isInteger(canonIdx) && canonIdx >= 0 && canonIdx < total) canon[canonIdx] = sel[dispPos];
+      });
+      sel = canon;
+    }
+    if (a.optionOrder) {
+      const order = a.optionOrder;
+      sel = sel.map((ans, i) => {
+        const perm = order[i];
+        if (!ans || !Array.isArray(perm)) return ans;
+        const ca = correct[i];
+        if (!ca || (ca.type !== "Cm" && ca.type !== "Cs")) return ans;
+        if (!Array.isArray(ca.choices) || ca.choices.length !== perm.length) return ans;
+        const back = (d) => {
+          const n = Number(d);
+          return Number.isInteger(n) && n >= 0 && n < perm.length ? perm[n] : n;
+        };
+        if (Array.isArray(ans.answer)) return { ...ans, answer: ans.answer.map(back) };
+        if (ans.answer === "" || ans.answer == null) return ans;
+        return { ...ans, answer: back(ans.answer) };
+      });
+    }
+    const canonGrade = correct.map((ca, i) => gradeOne(ca, sel[i]));
+    if (!qperm) return canonGrade;
+    qperm.forEach((canonIdx, dispPos) => {
+      out[dispPos] =
+        Number.isInteger(canonIdx) && canonIdx >= 0 && canonIdx < total ? canonGrade[canonIdx] : "unanswered";
+    });
+    return out;
   };
   const uid = (u) => String((u && u._id) || u || ""); // works for a populated user OR a raw id
 
@@ -3420,6 +3473,7 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
       grade: a.userId?.grade || "",
       currentQuestion: a.currentQuestion || 0,
       answered: buildAnswered(a),
+      correctness: buildCorrectness(a), // live per-question right/wrong for the teacher
       answeredCount: a.answeredCount || 0,
       total,
       violations: a.violations || 0,
