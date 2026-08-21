@@ -3436,7 +3436,6 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   const correct = exam.questions?.correctAnswers || [];
   const total = correct.length;
   const now = Date.now();
-  const FINISHED_WATCH_MS = 12 * 60 * 60 * 1000; // keep finishers on the board a school day
 
   const buildAnswered = (a) => {
     const ans = a && Array.isArray(a.answers) ? a.answers : [];
@@ -3530,31 +3529,37 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
       score: null,
       resultId: null,
       pendingReview: false,
+      attemptNo: 1, // patched below once each student's finished count is known
     };
   });
 
   // ── Finished: driven by RESULTS, not raw submitted attempts. A student is only
   // "finished" once they have a graded Result — abandoned/superseded attempts (the
   // previous run that gets frozen when a student restarts) have NO Result and must
-  // NOT show up as fake finishers. One card per student (their latest result), and
-  // anyone currently writing is shown only in the active section. ──
-  const resultRows = await Result.find({
-    examId,
-    createdAt: { $gt: new Date(now - FINISHED_WATCH_MS) },
-  })
+  // NOT show up as fake finishers. EVERY result becomes its OWN card: no per-user
+  // dedup (a retake ADDS a card, never replaces the old one) and no time expiry
+  // (cards stay on the board until the page is closed). Ordered oldest→newest so
+  // each student's attempts can be numbered 1..N. ──
+  const resultRows = await Result.find({ examId })
     .select("attemptId userId earnPoints pendingReview terminated violations createdAt")
     .populate("userId", "name email grade")
-    .sort({ createdAt: -1 })
+    .sort({ createdAt: 1 })
     .lean();
-  const latestByUser = new Map();
+  // Per-student attempt numbering: the k-th chronological result is that student's
+  // "Cəhd k". After the loop, attemptsByUser holds each student's FINISHED count.
+  const attemptsByUser = new Map();
   for (const r of resultRows) {
     const u = uid(r.userId);
-    // Keep a student's finished result even while they're RETAKING: they then show
-    // in BOTH sections — the new attempt under "Yazır" and their previous result
-    // under "Bitirənlər" — instead of the result card being replaced.
-    if (!latestByUser.has(u)) latestByUser.set(u, r); // first seen = latest (sorted desc)
+    const n = (attemptsByUser.get(u) || 0) + 1;
+    attemptsByUser.set(u, n);
+    r._attemptNo = n;
   }
-  const finList = [...latestByUser.values()];
+  const finList = resultRows;
+  // A student mid-retake is on their (finished + 1)-th attempt — label the active card too.
+  for (let i = 0; i < activeStudents.length; i++) {
+    const done = attemptsByUser.get(uid(activeAttempts[i].userId)) || 0;
+    activeStudents[i].attemptNo = done + 1;
+  }
   // Pull each finisher's attempt for the answered count / start time.
   const finAttemptIds = finList.map((r) => r.attemptId).filter(Boolean);
   const attById = new Map(
@@ -3587,6 +3592,7 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
       score: typeof r.earnPoints === "number" ? r.earnPoints : null,
       resultId: r._id,
       pendingReview: !!r.pendingReview,
+      attemptNo: r._attemptNo || 1,
     };
   });
   // Finished section doubles as a live mini-leaderboard: highest score first.
