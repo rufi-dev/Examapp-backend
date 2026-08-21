@@ -3376,45 +3376,79 @@ const heartbeatAttempt = asyncHandler(async (req, res) => {
 // question they're on, progress, time, and live violations. The runner pushes a
 // heartbeat via autosave; this reads the active attempts.
 const LIVE_ACTIVE_MS = 30 * 1000; // heartbeat within 30s → "active"
-// GET /api/quiz/live-exams — exams that CURRENTLY have students taking them (an
-// unsubmitted, unexpired attempt). Teacher-scoped by ownership; an admin sees all.
-// Powers the "Canlı imtahan" overview: one card per live exam → open its monitor.
+// GET /api/quiz/live-exams — exams with a live session going on: students still taking
+// them (an unsubmitted, unexpired attempt) OR students who FINISHED within the last
+// ~30 min. Keeping recent finishers means the exam DOESN'T vanish the moment students
+// start submitting — the teacher watches the whole session (0/3 → 1/3 → 3/3 bitirdi).
+// Teacher-scoped by ownership; an admin sees all. Powers the "Canlı imtahan" overview.
 const getLiveExams = asyncHandler(async (req, res) => {
   const now = Date.now();
   const activeCutoff = new Date(now - 2 * 60 * 1000); // in-progress (not long-expired)
   const writingCutoff = new Date(now - 20 * 1000); // "writing now" = seen in last ~20s
-  const grouped = await Attempt.aggregate([
-    { $match: { submitted: false, expiresAt: { $gt: activeCutoff } } },
-    {
-      $group: {
-        _id: "$examId",
-        activeCount: { $sum: 1 },
-        writingCount: { $sum: { $cond: [{ $gt: ["$lastSeenAt", writingCutoff] }, 1, 0] } },
-        lastSeenAt: { $max: "$lastSeenAt" },
+  const finishCutoff = new Date(now - 30 * 60 * 1000); // keep a just-finished session ~30 min
+
+  const [activeGroups, finishedGroups] = await Promise.all([
+    Attempt.aggregate([
+      { $match: { submitted: false, expiresAt: { $gt: activeCutoff } } },
+      {
+        $group: {
+          _id: "$examId",
+          activeCount: { $sum: 1 },
+          writingCount: { $sum: { $cond: [{ $gt: ["$lastSeenAt", writingCutoff] }, 1, 0] } },
+          lastAt: { $max: "$lastSeenAt" },
+        },
       },
-    },
+    ]),
+    // Distinct students who finished (have a Result) recently — one per user.
+    Result.aggregate([
+      { $match: { createdAt: { $gt: finishCutoff } } },
+      { $group: { _id: { examId: "$examId", userId: "$userId" }, at: { $max: "$createdAt" } } },
+      { $group: { _id: "$_id.examId", finishedCount: { $sum: 1 }, lastAt: { $max: "$at" } } },
+    ]),
   ]);
-  if (!grouped.length) return res.json({ exams: [] });
-  const byExam = new Map(grouped.map((g) => [String(g._id), g]));
+
+  const byExam = new Map();
+  const bump = (id, patch) => {
+    const k = String(id);
+    const cur = byExam.get(k) || { activeCount: 0, writingCount: 0, finishedCount: 0, lastAt: null };
+    Object.assign(cur, {
+      activeCount: cur.activeCount + (patch.activeCount || 0),
+      writingCount: cur.writingCount + (patch.writingCount || 0),
+      finishedCount: cur.finishedCount + (patch.finishedCount || 0),
+    });
+    if (patch.lastAt && (!cur.lastAt || new Date(patch.lastAt) > new Date(cur.lastAt))) cur.lastAt = patch.lastAt;
+    byExam.set(k, cur);
+  };
+  for (const g of activeGroups) bump(g._id, g);
+  for (const g of finishedGroups) bump(g._id, g);
+  if (!byExam.size) return res.json({ exams: [] });
+
   const isAdmin = req.user.role === "admin";
-  const filter = { _id: { $in: grouped.map((g) => g._id) }, deletedAt: null };
+  const filter = { _id: { $in: [...byExam.keys()] }, deletedAt: null };
   if (!isAdmin) filter.owner = req.user._id; // a teacher only monitors their own exams
   const exams = await Exam.find(filter).select("name class owner totalMarks").populate("class", "name").lean();
   const list = exams.map((e) => {
     const g = byExam.get(String(e._id)) || {};
+    const activeCount = g.activeCount || 0;
+    const finishedCount = g.finishedCount || 0;
     return {
       examId: e._id,
       name: e.name,
       className: e.class?.name || "",
       totalMarks: e.totalMarks || 0,
-      activeCount: g.activeCount || 0,
+      activeCount,
       writingCount: g.writingCount || 0,
-      lastSeenAt: g.lastSeenAt || null,
+      finishedCount,
+      totalCount: activeCount + finishedCount, // students in this session so far
+      lastSeenAt: g.lastAt || null,
     };
   });
-  // Most actively-written first, then most-recent activity.
+  // Still-writing exams first, then still-active, then most-recent activity.
   list.sort(
-    (a, b) => b.writingCount - a.writingCount || new Date(b.lastSeenAt || 0) - new Date(a.lastSeenAt || 0)
+    (a, b) =>
+      b.writingCount - a.writingCount ||
+      b.activeCount - a.activeCount ||
+      new Date(b.lastSeenAt || 0) - new Date(a.lastSeenAt || 0)
   );
   res.json({ exams: list });
 });
@@ -3424,7 +3458,7 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   // Polled every ~2s while a teacher watches, so keep it light: only the fields the
   // live view needs (ownership + name + how many questions), not the full paper.
   const exam = await Exam.findById(examId)
-    .select("name owner questions totalMarks")
+    .select("name owner questions totalMarks antiCheat")
     .populate({ path: "questions", select: "correctAnswers" });
   if (!exam) {
     res.status(404);
@@ -3597,6 +3631,10 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
     examName: exam.name,
     total,
     totalMarks: exam.totalMarks || 0,
+    // Anti-cheat: whether it's ON for this exam + the exit/violation limit, so the
+    // monitor can show each student's live "X/limit" violation count.
+    antiCheat: !!exam.antiCheat,
+    violationLimit: ANTICHEAT_LIMIT,
     activeCount: activeStudents.filter((s) => s.active).length,
     finishedCount: finishedStudents.length,
     serverNow: new Date(now),
