@@ -9,9 +9,12 @@ const parentLinkSchema = new Schema(
   {
     parent: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
     student: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
-    // Reserved for a future "teacher must approve this link" flow; auto-approved today
-    // because the code itself is the shared secret.
-    status: { type: String, enum: ["approved"], default: "approved", index: true },
+    // "approved" = active link (code entry, or after approval). "pending" = an
+    // email-based request awaiting the student's or a teacher's approval (email is
+    // guessable, so it can't auto-link). Code entry is always approved.
+    status: { type: String, enum: ["approved", "pending"], default: "approved", index: true },
+    // How the link was requested — for display/audit.
+    via: { type: String, enum: ["code", "email"], default: "code" },
   },
   { timestamps: true, minimize: false }
 );

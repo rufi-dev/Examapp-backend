@@ -1,6 +1,7 @@
 const asyncHandler = require("express-async-handler");
 const ParentLink = require("../models/parentLinkModel");
 const User = require("../models/userModel");
+const ClassModel = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 const Assignment = require("../models/assignmentModel");
 const Submission = require("../models/submissionModel");
@@ -17,11 +18,16 @@ const childDto = (u) => ({
   grade: u.grade || "",
 });
 
-// True when this parent is linked to this student.
-const isLinked = (parentId, studentId) => ParentLink.exists({ parent: parentId, student: studentId });
+// Case-insensitive exact-email matcher (stored emails may differ in case).
+const emailRegex = (raw) => new RegExp(`^${String(raw).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+
+// True when this parent has an APPROVED link to this student. A pending (email) link
+// grants no data access until it is approved.
+const isLinked = (parentId, studentId) => ParentLink.exists({ parent: parentId, student: studentId, status: "approved" });
 
 // POST /api/parent/link { code } — link the caller (a parent) to the student who owns
-// this parentCode. Idempotent: entering the same code twice is a no-op.
+// this parentCode. Always APPROVED (the code is the shared secret). Upgrades a prior
+// pending email request to approved. Idempotent.
 const linkChild = asyncHandler(async (req, res) => {
   const code = String(req.body.code || "").trim().toUpperCase();
   if (!code) {
@@ -39,20 +45,51 @@ const linkChild = asyncHandler(async (req, res) => {
   }
   await ParentLink.updateOne(
     { parent: req.user._id, student: student._id },
-    { $setOnInsert: { parent: req.user._id, student: student._id, status: "approved" } },
+    { $set: { status: "approved" }, $setOnInsert: { parent: req.user._id, student: student._id, via: "code" } },
     { upsert: true }
   );
-  res.json({ ok: true, child: childDto(student) });
+  res.json({ ok: true, child: { ...childDto(student), status: "approved" } });
 });
 
-// GET /api/parent/children — the caller's linked children.
+// POST /api/parent/link-email { email } — request to follow a student by their email.
+// Creates a PENDING link (email is guessable, so it can't auto-grant access). The
+// student or one of their teachers approves it before any data is shared.
+const linkChildByEmail = asyncHandler(async (req, res) => {
+  const raw = String(req.body.email || "").trim();
+  if (!raw) {
+    res.status(400);
+    throw new Error("Email daxil edin");
+  }
+  const student = await User.findOne({ email: emailRegex(raw), role: "student" }).select("name email photo grade");
+  if (!student) {
+    res.status(404);
+    throw new Error("Bu email ilə şagird tapılmadı");
+  }
+  if (String(student._id) === String(req.user._id)) {
+    res.status(400);
+    throw new Error("Özünüzü əlavə edə bilməzsiniz");
+  }
+  const existing = await ParentLink.findOne({ parent: req.user._id, student: student._id }).lean();
+  if (existing) {
+    return res.json({ ok: true, child: { ...childDto(student), status: existing.status } });
+  }
+  await ParentLink.create({ parent: req.user._id, student: student._id, status: "pending", via: "email" });
+  res.json({ ok: true, child: { ...childDto(student), status: "pending" } });
+});
+
+// GET /api/parent/children — the caller's linked children (with link status).
 const listChildren = asyncHandler(async (req, res) => {
-  const ids = await ParentLink.find({ parent: req.user._id }).sort({ createdAt: -1 }).distinct("student");
+  const links = await ParentLink.find({ parent: req.user._id }).sort({ createdAt: -1 }).lean();
+  const ids = links.map((l) => l.student);
   const kids = ids.length ? await User.find({ _id: { $in: ids } }).select("name email photo grade").lean() : [];
-  // Preserve link recency order (distinct loses it) by re-sorting to the id order.
-  const order = new Map(ids.map((id, i) => [String(id), i]));
-  kids.sort((a, b) => (order.get(String(a._id)) ?? 0) - (order.get(String(b._id)) ?? 0));
-  res.json({ children: kids.map(childDto) });
+  const byId = new Map(kids.map((k) => [String(k._id), k]));
+  const children = links
+    .map((l) => {
+      const k = byId.get(String(l.student));
+      return k ? { ...childDto(k), status: l.status } : null;
+    })
+    .filter(Boolean);
+  res.json({ children });
 });
 
 // DELETE /api/parent/children/:childId — unlink a child from the caller.
@@ -177,4 +214,126 @@ const childPayments = asyncHandler(async (req, res) => {
   res.json({ payments, unpaidTotal });
 });
 
-module.exports = { linkChild, listChildren, unlinkChild, childResults, childHomework, childAttendance, childPayments };
+// GET /api/parent/teacher/students — the teacher's students (across their classes),
+// each with their class(es), the owning teacher, and their linked parents + status.
+// Admins see every class (and which teacher owns it).
+const teacherStudents = asyncHandler(async (req, res) => {
+  const admin = req.user.role === "admin";
+  const classes = await ClassModel.find(admin ? { deletedAt: null } : { owner: req.user._id, deletedAt: null })
+    .select("_id name owner")
+    .lean();
+  if (!classes.length) return res.json({ students: [] });
+  const classById = new Map(classes.map((c) => [String(c._id), c]));
+  const ownerIds = [...new Set(classes.map((c) => String(c.owner)))];
+  const owners = await User.find({ _id: { $in: ownerIds } }).select("name").lean();
+  const ownerName = new Map(owners.map((o) => [String(o._id), o.name]));
+
+  const enrolls = await Enrollment.find({ class: { $in: classes.map((c) => c._id) }, status: "approved" })
+    .populate("student", "name email photo grade")
+    .lean();
+  const byStudent = new Map();
+  for (const e of enrolls) {
+    if (!e.student) continue;
+    const sid = String(e.student._id);
+    if (!byStudent.has(sid)) {
+      byStudent.set(sid, {
+        student: { _id: e.student._id, name: e.student.name, email: e.student.email, photo: e.student.photo, grade: e.student.grade },
+        classes: [],
+        parents: [],
+      });
+    }
+    const c = classById.get(String(e.class));
+    if (c) byStudent.get(sid).classes.push({ _id: c._id, name: c.name, teacherName: ownerName.get(String(c.owner)) || "" });
+  }
+
+  const studentIds = [...byStudent.keys()];
+  const links = studentIds.length
+    ? await ParentLink.find({ student: { $in: studentIds } }).populate("parent", "name email photo").lean()
+    : [];
+  for (const l of links) {
+    const entry = byStudent.get(String(l.student));
+    if (entry && l.parent) {
+      entry.parents.push({ linkId: l._id, name: l.parent.name || "", email: l.parent.email || "", photo: l.parent.photo || "", status: l.status });
+    }
+  }
+  // Students with a pending parent request first, then by name.
+  const students = [...byStudent.values()].sort((a, b) => {
+    const ap = a.parents.some((p) => p.status === "pending") ? 0 : 1;
+    const bp = b.parents.some((p) => p.status === "pending") ? 0 : 1;
+    return ap - bp || (a.student.name || "").localeCompare(b.student.name || "");
+  });
+  res.json({ students });
+});
+
+// PATCH /api/parent/teacher/link/:linkId { action } — a teacher approves/rejects a
+// pending parent request for one of THEIR students.
+const decideParentLink = asyncHandler(async (req, res) => {
+  const link = await ParentLink.findById(req.params.linkId);
+  if (!link) {
+    res.status(404);
+    throw new Error("Sorğu tapılmadı");
+  }
+  if (req.user.role !== "admin") {
+    const myClassIds = await ClassModel.find({ owner: req.user._id, deletedAt: null }).distinct("_id");
+    const inMyClass = await Enrollment.exists({ student: link.student, status: "approved", class: { $in: myClassIds } });
+    if (!inMyClass) {
+      res.status(403);
+      throw new Error("Bu şagird sizin sinifdə deyil");
+    }
+  }
+  const action = req.body?.action;
+  if (action === "approve") {
+    link.status = "approved";
+    await link.save();
+    return res.json({ ok: true, status: "approved" });
+  }
+  if (action === "reject") {
+    await link.deleteOne();
+    return res.json({ ok: true, status: "removed" });
+  }
+  res.status(400);
+  throw new Error("Yanlış əməliyyat");
+});
+
+// GET /api/parent/student/requests — a STUDENT's own pending parent requests.
+const myParentRequests = asyncHandler(async (req, res) => {
+  const links = await ParentLink.find({ student: req.user._id, status: "pending" }).populate("parent", "name email photo").lean();
+  res.json({ requests: links.filter((l) => l.parent).map((l) => ({ linkId: l._id, name: l.parent.name || "", email: l.parent.email || "", photo: l.parent.photo || "" })) });
+});
+
+// PATCH /api/parent/student/link/:linkId { action } — a STUDENT approves/rejects a
+// pending parent request for themselves.
+const decideMyParentLink = asyncHandler(async (req, res) => {
+  const link = await ParentLink.findOne({ _id: req.params.linkId, student: req.user._id });
+  if (!link) {
+    res.status(404);
+    throw new Error("Sorğu tapılmadı");
+  }
+  const action = req.body?.action;
+  if (action === "approve") {
+    link.status = "approved";
+    await link.save();
+    return res.json({ ok: true });
+  }
+  if (action === "reject") {
+    await link.deleteOne();
+    return res.json({ ok: true });
+  }
+  res.status(400);
+  throw new Error("Yanlış əməliyyat");
+});
+
+module.exports = {
+  linkChild,
+  linkChildByEmail,
+  listChildren,
+  unlinkChild,
+  childResults,
+  childHomework,
+  childAttendance,
+  childPayments,
+  teacherStudents,
+  decideParentLink,
+  myParentRequests,
+  decideMyParentLink,
+};
