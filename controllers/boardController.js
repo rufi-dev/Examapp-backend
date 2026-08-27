@@ -8,7 +8,10 @@ const Board = require("../models/boardModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 const Assignment = require("../models/assignmentModel");
+const Submission = require("../models/submissionModel");
+const sharp = require("sharp");
 const { detectHead } = require("../utils/fileValidation"); // magic-byte image auth
+const ASSIGNMENTS_DIR = path.join(process.cwd(), "assignments"); // where submissions live
 
 // ---- access policy ----------------------------------------------------------
 // Extracted to services/boardAccessService so the realtime hub enforces the SAME
@@ -50,6 +53,7 @@ const listBoards = asyncHandler(async (req, res) => {
     const ownerIds = [...new Set(ownerRows.map((c) => String(c.owner)).filter(Boolean))];
     const boards = await Board.find({
       deletedAt: null,
+      assignment: null, // hide homework/annotation boards — those live inside the assignment
       $or: [
         { classes: { $in: classIds } },
         { owner: { $in: ownerIds }, classes: { $size: 0 } },
@@ -62,7 +66,10 @@ const listBoards = asyncHandler(async (req, res) => {
     return res.json(boards.map((b) => ({ ...b, mine: false, canManage: false })));
   }
 
-  const filter = isAdmin ? { deletedAt: null } : { owner: req.user._id, deletedAt: null };
+  // Only real lesson boards on the hub — homework/annotation boards live in assignments.
+  const filter = isAdmin
+    ? { deletedAt: null, assignment: null }
+    : { owner: req.user._id, deletedAt: null, assignment: null };
   const boards = await Board.find(filter)
     .sort({ updatedAt: -1 })
     .select("title elementCount sizeBytes classes ownerName owner createdAt updatedAt")
@@ -114,6 +121,12 @@ const getBoard = asyncHandler(async (req, res) => {
     live:
       boardHub.isLive(board._id) ||
       (boardHub.isSessionFresh(board) ? { liveSessionId: board.liveSession.id, awaitingHost: true } : null),
+    // Set when this is an annotation board (teacher marking a submitted image); the
+    // editor then shows "Şagirdə göndər" which exports the PNG onto that submission.
+    annotation:
+      board.submission && canEdit
+        ? { assignmentId: board.assignment, submissionId: board.submission, sourceFileName: board.sourceFileName }
+        : null,
     updatedAt: board.updatedAt,
   });
 });
@@ -370,4 +383,87 @@ const listHomeworkBoards = asyncHandler(async (req, res) => {
   res.json({ boards });
 });
 
-module.exports = { listBoards, createBoard, getBoard, boardLiveStatus, saveBoard, deleteBoard, listClassBoards, uploadBoardFile, getBoardFile, getOrCreateHomeworkBoard, listHomeworkBoards };
+// A locked Excalidraw image element referencing a board file id (resolved on load).
+function buildImageElement(fileId, width, height) {
+  const rand = () => Math.floor(Math.random() * 2 ** 31);
+  return {
+    id: crypto.randomBytes(8).toString("hex"),
+    type: "image",
+    x: 0,
+    y: 0,
+    width,
+    height,
+    angle: 0,
+    strokeColor: "transparent",
+    backgroundColor: "transparent",
+    fillStyle: "solid",
+    strokeWidth: 1,
+    strokeStyle: "solid",
+    roughness: 0,
+    opacity: 100,
+    groupIds: [],
+    frameId: null,
+    roundness: null,
+    seed: rand(),
+    version: 1,
+    versionNonce: rand(),
+    isDeleted: false,
+    boundElements: null,
+    updated: Date.now(),
+    link: null,
+    locked: true,
+    status: "saved",
+    fileId,
+    scale: [1, 1],
+  };
+}
+
+// POST /api/boards/annotate — the teacher opens (creating on first use) a full board
+// to mark a student's submitted image, seeded with that image as a locked background.
+// One board per (submission, sourceFileName). Returns its id.
+const getOrCreateAnnotationBoard = asyncHandler(async (req, res) => {
+  const { assignmentId, submissionId, sourceFileName } = req.body || {};
+  const a = await Assignment.findById(assignmentId).lean();
+  if (!a || a.deletedAt) return res.status(404).json({ message: "Tapşırıq tapılmadı" });
+  const cls = await Class.findById(a.class).select("owner").lean();
+  const isManager = req.user.role === "admin" || (cls && String(cls.owner) === String(req.user._id));
+  if (!isManager) return res.status(403).json({ message: "İcazə yoxdur" });
+  const sub = await Submission.findOne({ _id: submissionId, assignment: a._id }).lean();
+  if (!sub) return res.status(404).json({ message: "Təhvil tapılmadı" });
+  const meta = (sub.files || []).find((f) => f.fileName === sourceFileName);
+  if (!meta || meta.kind !== "image") return res.status(400).json({ message: "Yalnız şəkil işarələnə bilər" });
+
+  const existing = await Board.findOne({ submission: sub._id, sourceFileName, deletedAt: null }).select("_id").lean();
+  if (existing) return res.json({ _id: existing._id });
+
+  const board = await Board.create({
+    owner: req.user._id,
+    ownerName: req.user.name || "",
+    title: `İşarələmə — ${sub.studentName || "Şagird"}`,
+    assignment: a._id,
+    submission: sub._id,
+    sourceFileName,
+    classes: [],
+    pages: [{ name: "Səhifə 1", scene: null }],
+  });
+  try {
+    const srcAbs = path.join(ASSIGNMENTS_DIR, sourceFileName);
+    if (!srcAbs.startsWith(ASSIGNMENTS_DIR) || !fs.existsSync(srcAbs)) throw new Error("no source");
+    // Bake EXIF orientation so the drawn image is upright and its width/height match.
+    const outBuf = await sharp(fs.readFileSync(srcAbs)).rotate().toBuffer();
+    const md = await sharp(outBuf).metadata();
+    const fileId = crypto.randomBytes(20).toString("hex");
+    const dir = path.join(BOARD_FILES_DIR, safeSeg(String(board._id)));
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, safeFileId(fileId)), outBuf);
+    const el = buildImageElement(fileId, md.width || 800, md.height || 600);
+    board.pages = [{ name: "Səhifə 1", scene: { elements: [el], appState: {}, files: {} } }];
+    board.elementCount = 1;
+    await board.save();
+  } catch {
+    /* seeding failed — the board still opens (image just won't be pre-placed) */
+  }
+  res.json({ _id: board._id });
+});
+
+module.exports = { listBoards, createBoard, getBoard, boardLiveStatus, saveBoard, deleteBoard, listClassBoards, uploadBoardFile, getBoardFile, getOrCreateHomeworkBoard, listHomeworkBoards, getOrCreateAnnotationBoard };

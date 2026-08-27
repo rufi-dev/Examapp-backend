@@ -34,6 +34,11 @@ const boardSchema = Schema(
     // EDIT it (write their solution). See boardAccessService.accessLevel.
     assignment: { type: Schema.Types.ObjectId, ref: "Assignment", default: null, index: true },
     student: { type: Schema.Types.ObjectId, ref: "User", default: null, index: true },
+    // Annotation board: the teacher marks a student's submitted image on a full board
+    // (all custom tools). `submission` + `sourceFileName` link back so "send to student"
+    // exports the marked PNG onto that submission. Owner-only (no student edit).
+    submission: { type: Schema.Types.ObjectId, ref: "Submission", default: null, index: true },
+    sourceFileName: { type: String, default: "" },
     // Legacy single-scene field (boards made before multi-page). Read-migrated to
     // pages[0] on load; never written anymore.
     scene: { type: Schema.Types.Mixed, default: null },
