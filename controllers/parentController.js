@@ -301,6 +301,17 @@ const myParentRequests = asyncHandler(async (req, res) => {
   res.json({ requests: links.filter((l) => l.parent).map((l) => ({ linkId: l._id, name: l.parent.name || "", email: l.parent.email || "", photo: l.parent.photo || "" })) });
 });
 
+// GET /api/parent/student/parents — a STUDENT's parents, split into pending requests
+// (to approve/deny) and approved links (which they can remove). Full student control.
+const myParents = asyncHandler(async (req, res) => {
+  const links = await ParentLink.find({ student: req.user._id }).populate("parent", "name email photo").sort({ createdAt: -1 }).lean();
+  const map = (l) => ({ linkId: l._id, name: l.parent?.name || "", email: l.parent?.email || "", photo: l.parent?.photo || "", via: l.via || "code" });
+  res.json({
+    pending: links.filter((l) => l.status === "pending" && l.parent).map(map),
+    approved: links.filter((l) => l.status === "approved" && l.parent).map(map),
+  });
+});
+
 // PATCH /api/parent/student/link/:linkId { action } — a STUDENT approves/rejects a
 // pending parent request for themselves.
 const decideMyParentLink = asyncHandler(async (req, res) => {
@@ -335,5 +346,6 @@ module.exports = {
   teacherStudents,
   decideParentLink,
   myParentRequests,
+  myParents,
   decideMyParentLink,
 };

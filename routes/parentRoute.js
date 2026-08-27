@@ -13,6 +13,7 @@ const {
   teacherStudents,
   decideParentLink,
   myParentRequests,
+  myParents,
   decideMyParentLink,
 } = require("../controllers/parentController");
 
@@ -32,6 +33,7 @@ router.patch("/teacher/link/:linkId", protect, teacherOnly, decideParentLink);
 
 // ── Student approves/rejects a pending parent request (any signed-in student) ──
 router.get("/student/requests", protect, myParentRequests);
-router.patch("/student/link/:linkId", protect, decideMyParentLink);
+router.get("/student/parents", protect, myParents);
+router.patch("/student/link/:linkId", protect, decideMyParentLink); // approve | reject (also removes an approved parent)
 
 module.exports = router;
