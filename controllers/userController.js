@@ -93,9 +93,10 @@ const registerUser = asyncHandler(async (req, res) => {
   try {
     const { name, password, phone, grade } = req.body;
     const email = normalizeEmail(req.body.email); // CR-050: canonical identity
-    // Role is chosen at sign-up (teacher/student). Anything else falls back to
-    // student, so a bad/absent value can never silently create a teacher.
-    const role = req.body.role === "teacher" ? "teacher" : "student";
+    // Role is chosen at sign-up (teacher/student/parent). Anything else falls back
+    // to student, so a bad/absent value can never silently create a teacher.
+    const SELF_ROLES = new Set(["teacher", "student", "parent"]);
+    const role = SELF_ROLES.has(req.body.role) ? req.body.role : "student";
     // AUD-005 (CR-046): a public registrant NEVER receives teacher CAPABILITY.
     // Requesting the teacher role only records the request — the shared
     // self-service resolver creates the account `pending` (method "self"),
@@ -1967,8 +1968,42 @@ const getSetupFunnel = asyncHandler(async (req, res) => {
   res.json(out);
 });
 
+// A student's shareable parent-invite code (generated lazily on first request). The
+// student gives it to a parent, who enters it once to link their account (see
+// parentController.linkChild). Non-ambiguous alphabet, collision-checked.
+const PARENT_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+function genParentCode(len = 6) {
+  let s = "";
+  for (let i = 0; i < len; i++) s += PARENT_CODE_ALPHABET[Math.floor(Math.random() * PARENT_CODE_ALPHABET.length)];
+  return s;
+}
+async function uniqueParentCode() {
+  for (let i = 0; i < 8; i++) {
+    const code = genParentCode();
+    if (!(await User.exists({ parentCode: code }))) return code;
+  }
+  return genParentCode(8);
+}
+const getParentCode = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id);
+  if (!user) {
+    res.status(404);
+    throw new Error("İstifadəçi tapılmadı");
+  }
+  if (user.role !== "student") {
+    res.status(400);
+    throw new Error("Yalnız şagird valideyn kodu yarada bilər");
+  }
+  if (!user.parentCode) {
+    user.parentCode = await uniqueParentCode();
+    await user.save();
+  }
+  res.json({ parentCode: user.parentCode });
+});
+
 module.exports = {
   __setGoogleVerifyForTest, // test-only seam (rejects unless NODE_ENV==="test")
+  getParentCode,
   getSetupFunnel,
   getMyStorage,
   setUserStorage,

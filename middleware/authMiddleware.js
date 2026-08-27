@@ -134,6 +134,17 @@ function hasTeacherCapability(user) {
   return user.role === "teacher" && APPROVED_TEACHER_STATES.has(user.teacherApproval);
 }
 
+// Parent area gate: a parent-role account (or an admin, for support). Mirrors
+// adminOnly — role is a bare string, so this is the whole check.
+const parentOnly = asyncHandler(async (req, res, next) => {
+  if (req.user && (req.user.role === "parent" || req.user.role === "admin")) {
+    next();
+  } else {
+    res.status(401);
+    throw new Error("Not authorized as a parent");
+  }
+});
+
 const teacherOnly = asyncHandler(async (req, res, next) => {
   if (hasTeacherCapability(req.user)) {
     next();
@@ -203,4 +214,4 @@ const attachUser = asyncHandler(async (req, res, next) => {
   next();
 });
 
-module.exports = { protect, adminOnly, teacherOnly, verifiedOnly, requireCompleteProfile, attachUser, resolveSessionUser, hasTeacherCapability };
+module.exports = { protect, adminOnly, parentOnly, teacherOnly, verifiedOnly, requireCompleteProfile, attachUser, resolveSessionUser, hasTeacherCapability };

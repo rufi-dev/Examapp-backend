@@ -1,5 +1,5 @@
 const express = require('express')
-const { registerUser, loginUser, deviceLogin, forgetDevice, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush, getOutreachStatus, toggleOutreach, getSetupFunnel } = require('../controllers/userController')
+const { registerUser, loginUser, deviceLogin, forgetDevice, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush, getOutreachStatus, toggleOutreach, getSetupFunnel, getParentCode } = require('../controllers/userController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
 const { refreshHandler, logoutAllHandler, requireSessionFlag } = require('../controllers/authSessionController')
 const { csrfProtect } = require('../middleware/csrf')
@@ -35,6 +35,9 @@ router.post('/app-installed', protect, markAppInstalled)
 router.get('/push/public-key', protect, getPushPublicKey)
 router.post('/push/subscribe', protect, subscribePush)
 router.post('/push/unsubscribe', protect, unsubscribePush)
+
+// A student fetches (creating on first call) their shareable parent-invite code.
+router.get('/parent-code', protect, getParentCode)
 
 router.get('/getUser', protect, getUser)
 router.get('/getUserById/:id', protect, teacherOnly, getUserById)

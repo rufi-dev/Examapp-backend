@@ -191,6 +191,9 @@ app.use("/api/boards", require("./routes/boardRoute"))
 app.use("/api/teacher-success", require("./routes/teacherSuccessRoute"))
 app.use("/api/chat", require("./routes/chatRoute"))
 app.use("/api/plan", require("./routes/planRoute"))
+// Parent portal: a parent links to a child by code, then reads that child's exam
+// results + homework (read-only). Every route is protect + parentOnly.
+app.use("/api/parent", require("./routes/parentRoute"))
 app.use("/api/health", healthRoute)
 // Public step-by-step "how to use the platform" guide videos (self-hosted help
 // content, NO auth — nothing sensitive). express.static gives byte-range support so

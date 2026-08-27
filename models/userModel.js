@@ -340,6 +340,9 @@ const userSchema = Schema(
         // This teacher's OWN random, non-sequential share code (/register?ref=<code>).
         // Uniqueness is enforced by a migration-owned partial unique index.
         referralCode: { type: String, default: null },
+        // A STUDENT's shareable code for linking a parent account (parentController).
+        // Generated lazily on first request; collision-checked in userController.
+        parentCode: { type: String, default: null, index: true },
         // IPs for the admin directory: the address this account signed up from,
         // and its most recent one (refreshed on authenticated activity, throttled).
         // Also used to match a registered user to an anonymous visitor row by IP.
