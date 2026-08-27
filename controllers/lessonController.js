@@ -107,32 +107,45 @@ const listLessons = asyncHandler(async (req, res) => {
 // GET /api/lessons/:id — one lesson + its attendance roster (enrolled students with
 // their present/late/absent status) + the check-in QR (data URL) for the teacher.
 const getLesson = asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    res.status(404);
+    throw new Error("Dərs tapılmadı");
+  }
   const lesson = await Lesson.findOne({ _id: req.params.id, deletedAt: null }).populate("class", "name").lean();
   if (!lesson) {
     res.status(404);
     throw new Error("Dərs tapılmadı");
   }
   assertOwns(lesson, req.user, res);
-  const students = await Enrollment.find({ class: lesson.class._id || lesson.class, status: "approved" })
-    .populate("student", "name email photo")
-    .lean();
-  const marks = await Attendance.find({ lesson: lesson._id }).lean();
-  const byStudent = new Map(marks.map((m) => [String(m.student), m]));
-  const roster = students
-    .filter((r) => r.student)
-    .map((r) => {
-      const m = byStudent.get(String(r.student._id));
-      return {
-        student: { _id: r.student._id, name: r.student.name, email: r.student.email, photo: r.student.photo },
-        status: m ? m.status : null, // null = not marked yet
-        method: m ? m.method : null,
-        at: m ? m.at : null,
-      };
-    });
-  const checkinUrl = `${FRONTEND_URL}/checkin/${lesson.attendanceCode}`;
+  // The roster/QR build must never 500 the whole page: any bad/legacy data (a deleted
+  // class, a broken ref) degrades to an empty roster. Never pass an undefined class to
+  // the query (that would match ALL enrollments).
+  let roster = [];
+  try {
+    const classId = lesson.class ? lesson.class._id || lesson.class : null;
+    const students = classId
+      ? await Enrollment.find({ class: classId, status: "approved" }).populate("student", "name email photo").lean()
+      : [];
+    const marks = await Attendance.find({ lesson: lesson._id }).lean();
+    const byStudent = new Map(marks.map((m) => [String(m.student), m]));
+    roster = students
+      .filter((r) => r.student)
+      .map((r) => {
+        const m = byStudent.get(String(r.student._id));
+        return {
+          student: { _id: r.student._id, name: r.student.name, email: r.student.email, photo: r.student.photo },
+          status: m ? m.status : null, // null = not marked yet
+          method: m ? m.method : null,
+          at: m ? m.at : null,
+        };
+      });
+  } catch (e) {
+    console.warn("[LESSON] roster build failed for", String(lesson._id), "-", e?.message);
+  }
+  const checkinUrl = lesson.attendanceCode ? `${FRONTEND_URL}/checkin/${lesson.attendanceCode}` : null;
   let qr = null;
   try {
-    qr = await QRCode.toDataURL(checkinUrl, { margin: 1, width: 320 });
+    if (checkinUrl) qr = await QRCode.toDataURL(checkinUrl, { margin: 1, width: 320 });
   } catch {
     /* QR optional */
   }
