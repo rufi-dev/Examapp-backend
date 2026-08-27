@@ -245,6 +245,103 @@ const childrenLive = asyncHandler(async (req, res) => {
   res.json({ live });
 });
 
+// The parent's approved children as a { id -> {name,photo} } map.
+async function childrenMap(parentId) {
+  const ids = await ParentLink.find({ parent: parentId, status: "approved" }).distinct("student");
+  if (!ids.length) return { ids: [], byId: new Map() };
+  const kids = await User.find({ _id: { $in: ids } }).select("name photo grade").lean();
+  return { ids, byId: new Map(kids.map((k) => [String(k._id), { _id: k._id, name: k.name || "", photo: k.photo || "", grade: k.grade || "" }])) };
+}
+
+// GET /api/parent/results — ALL children's exam results, newest first, each tagged
+// with the child. (Aggregated sidebar view.)
+const allResults = asyncHandler(async (req, res) => {
+  const { ids, byId } = await childrenMap(req.user._id);
+  if (!ids.length) return res.json({ results: [] });
+  const rows = await Result.find({ userId: { $in: ids } })
+    .sort({ createdAt: -1, _id: -1 })
+    .limit(300)
+    .populate("examId", "name totalMarks passingMarks")
+    .lean();
+  const results = rows.map((r) => ({
+    _id: r._id,
+    child: byId.get(String(r.userId)) || null,
+    exam: r.examId ? { _id: r.examId._id, name: r.examId.name || "İmtahan", totalMarks: r.examId.totalMarks, passingMarks: r.examId.passingMarks } : null,
+    earnPoints: r.earnPoints,
+    createdAt: r.createdAt,
+    terminated: !!r.terminated,
+    violations: r.violations || 0,
+    pending: !!r.pendingReview,
+  }));
+  res.json({ results });
+});
+
+// GET /api/parent/homework — ALL children's assignments + submission status, newest
+// activity first (submitted, else due, else created).
+const allHomework = asyncHandler(async (req, res) => {
+  const { ids, byId } = await childrenMap(req.user._id);
+  if (!ids.length) return res.json({ assignments: [] });
+  // Each child's approved classes.
+  const enrolls = await Enrollment.find({ student: { $in: ids }, status: "approved" }).select("student class").lean();
+  const classesByChild = new Map();
+  enrolls.forEach((e) => {
+    const k = String(e.student);
+    if (!classesByChild.has(k)) classesByChild.set(k, []);
+    classesByChild.get(k).push(e.class);
+  });
+  const allClassIds = [...new Set(enrolls.map((e) => String(e.class)))];
+  if (!allClassIds.length) return res.json({ assignments: [] });
+  const assignments = await Assignment.find({ class: { $in: allClassIds }, deletedAt: null }).populate("class", "name").sort({ createdAt: -1 }).lean();
+  const subs = await Submission.find({ assignment: { $in: assignments.map((a) => a._id) }, student: { $in: ids } }).lean();
+  const subKey = (assignment, student) => `${assignment}:${student}`;
+  const subByKey = new Map(subs.map((s) => [subKey(String(s.assignment), String(s.student)), s]));
+  const items = [];
+  for (const a of assignments) {
+    const clsId = String(a.class?._id || a.class);
+    // one row per child enrolled in this assignment's class
+    for (const childId of ids) {
+      const childClasses = (classesByChild.get(String(childId)) || []).map(String);
+      if (!childClasses.includes(clsId)) continue;
+      const s = subByKey.get(subKey(String(a._id), String(childId)));
+      items.push({
+        _id: `${a._id}-${childId}`,
+        child: byId.get(String(childId)) || null,
+        title: a.title,
+        dueAt: a.dueAt,
+        maxPoints: a.maxPoints,
+        class: a.class ? { _id: a.class._id, name: a.class.name } : null,
+        submission: s ? { status: s.status, grade: s.grade, feedback: s.feedback || "", submittedAt: s.submittedAt, late: !!s.late } : null,
+        sortAt: s?.submittedAt || a.dueAt || a.createdAt,
+      });
+    }
+  }
+  items.sort((x, y) => new Date(y.sortAt || 0) - new Date(x.sortAt || 0));
+  res.json({ assignments: items.slice(0, 300) });
+});
+
+// GET /api/parent/attendance — ALL children's attendance, newest first.
+const allAttendance = asyncHandler(async (req, res) => {
+  const { ids, byId } = await childrenMap(req.user._id);
+  if (!ids.length) return res.json({ attendance: [] });
+  const rows = await Attendance.find({ student: { $in: ids } })
+    .sort({ at: -1 })
+    .limit(300)
+    .populate({ path: "lesson", select: "title startAt", populate: { path: "class", select: "name" } })
+    .lean();
+  const attendance = rows
+    .filter((r) => r.lesson)
+    .map((r) => ({
+      _id: r._id,
+      child: byId.get(String(r.student)) || null,
+      status: r.status,
+      at: r.at,
+      lessonTitle: r.lesson?.title || "",
+      className: r.lesson?.class?.name || "",
+      startAt: r.lesson?.startAt || r.at,
+    }));
+  res.json({ attendance });
+});
+
 // GET /api/parent/teacher/students — the teacher's students (across their classes),
 // each with their class(es), the owning teacher, and their linked parents + status.
 // Admins see every class (and which teacher owns it).
@@ -375,6 +472,9 @@ module.exports = {
   childAttendance,
   childPayments,
   childrenLive,
+  allResults,
+  allHomework,
+  allAttendance,
   teacherStudents,
   decideParentLink,
   myParentRequests,
