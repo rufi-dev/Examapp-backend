@@ -453,6 +453,10 @@ mongoose
                 const n = await require("./controllers/paymentController").runRecurringSweep()
                 if (n) console.log(`[RECURRING] generated ${n} monthly payment(s)`)
             } catch (e) { console.warn("[RECURRING] sweep error:", e && e.message) }
+            try {
+                const m = await require("./controllers/lessonController").runLessonSeriesSweep()
+                if (m) console.log(`[LESSON-SERIES] topped up ${m} lesson(s)`)
+            } catch (e) { console.warn("[LESSON-SERIES] sweep error:", e && e.message) }
         })
         track(setTimeout(recurringTick, 3 * 60 * 1000))
         track(setInterval(recurringTick, 24 * 60 * 60 * 1000))

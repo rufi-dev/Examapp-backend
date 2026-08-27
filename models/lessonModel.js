@@ -18,6 +18,8 @@ const lessonSchema = new Schema(
     // gates whether a scan is accepted right now (teacher opens/closes it).
     attendanceCode: { type: String, default: null, index: true },
     attendanceOpen: { type: Boolean, default: false },
+    // Set when this lesson belongs to a weekly-recurring series (lessonSeriesModel).
+    series: { type: Schema.Types.ObjectId, ref: "LessonSeries", default: null, index: true },
     deletedAt: { type: Date, default: null },
     deletedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
   },
