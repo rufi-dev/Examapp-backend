@@ -47,6 +47,12 @@ const classSchema = Schema(
       type: Boolean,
       default: false,
     },
+    // When true, linked parents of this class's students get WhatsApp notifications
+    // (attendance, homework graded, exam results, payments). Teacher-controlled.
+    notifyParents: {
+      type: Boolean,
+      default: false,
+    },
     deletedAt: { type: Date, default: null, index: true },
     deletedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
     // Scalar summary only. The authoritative relationship is Exam.class; the

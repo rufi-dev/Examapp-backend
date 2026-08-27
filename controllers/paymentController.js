@@ -4,6 +4,7 @@ const Payment = require("../models/paymentModel");
 const ClassModel = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 const User = require("../models/userModel");
+const parentNotify = require("../helper/parentNotify");
 
 const isAdmin = (u) => u && u.role === "admin";
 
@@ -53,6 +54,9 @@ const createPayment = asyncHandler(async (req, res) => {
     dueDate: dueDate && !Number.isNaN(new Date(dueDate).getTime()) ? new Date(dueDate) : null,
   });
   res.status(201).json(payment);
+  parentNotify
+    .payment(studentId, classId, { childName: student?.name, label: payment.label, amount: payment.amount, paid: payment.paid, dueDate: payment.dueDate })
+    .catch(() => {});
 });
 
 // GET /api/payments?classId=&studentId= — the teacher's payment ledger.

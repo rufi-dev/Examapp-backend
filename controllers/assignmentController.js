@@ -6,6 +6,7 @@ const Assignment = require("../models/assignmentModel");
 const Submission = require("../models/submissionModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
+const parentNotify = require("../helper/parentNotify");
 
 // Shared by the route-level upload guard and the re-submission merge check so
 // new submissions and edits always enforce the same student file limit.
@@ -445,6 +446,14 @@ const gradeSubmission = asyncHandler(async (req, res) => {
 
   const populated = await Submission.findById(s._id).populate("student", "name email photo").lean();
   res.json(populated);
+  parentNotify
+    .homeworkGraded(s.student, a.class, {
+      childName: populated?.student?.name || s.studentName,
+      title: a.title,
+      grade: s.grade,
+      maxPoints: a.maxPoints,
+    })
+    .catch(() => {});
 });
 
 // POST /api/assignments/:id/submissions/:submissionId/seen — the class owner

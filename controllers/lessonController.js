@@ -5,6 +5,7 @@ const Lesson = require("../models/lessonModel");
 const Attendance = require("../models/attendanceModel");
 const ClassModel = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
+const parentNotify = require("../helper/parentNotify");
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || "https://examopia.com").replace(/\/$/, "");
 const isAdmin = (u) => u && u.role === "admin";
@@ -189,12 +190,19 @@ const markAttendance = asyncHandler(async (req, res) => {
     throw new Error("Şagird bu sinifdə deyil");
   }
   const student = await mongoose.model("User").findById(studentId).select("name").lean();
+  const prev = await Attendance.findOne({ lesson: lesson._id, student: studentId }).select("status").lean();
   const doc = await Attendance.findOneAndUpdate(
     { lesson: lesson._id, student: studentId },
     { $set: { status, method: "manual", at: new Date(), class: lesson.class, studentName: student?.name || "" } },
     { upsert: true, new: true }
   );
   res.json({ ok: true, attendance: doc });
+  // Notify parents only when the status actually changed (avoids re-click spam).
+  if (!prev || prev.status !== status) {
+    parentNotify
+      .attendance(studentId, lesson.class, { childName: student?.name, lessonTitle: lesson.title, status, at: doc.at })
+      .catch(() => {});
+  }
 });
 
 // POST /api/lessons/checkin/:code — a STUDENT self-checks-in by scanning the QR. Any
@@ -232,6 +240,15 @@ const checkin = asyncHandler(async (req, res) => {
     at: new Date(),
   });
   res.json({ ok: true, status: late ? "late" : "present", lesson: { title: lesson.title, className: lesson.class?.name } });
+  parentNotify
+    .attendance(req.user._id, lesson.class._id, {
+      childName: req.user.name,
+      className: lesson.class?.name,
+      lessonTitle: lesson.title,
+      status: late ? "late" : "present",
+      at: new Date(),
+    })
+    .catch(() => {});
 });
 
 module.exports = {

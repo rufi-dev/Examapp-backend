@@ -10,6 +10,7 @@ const ExamVersion = require("../models/examVersionModel");
 const User = require("../models/userModel");
 const Enrollment = require("../models/enrollmentModel");
 const { notifyExamStarted, notifyExamFinished } = require("../helper/telegram");
+const parentNotify = require("../helper/parentNotify");
 const { notifyStudentsNewExam } = require("../helper/whatsapp");
 const { PRESETS } = require("../helper/examPresets");
 const { publishExam, resolveActiveVersionForStart, verifyIntegrity, VersionIntegrityError } = require("../helper/examVersion");
@@ -2987,6 +2988,14 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
     await markTerminationNotified(newResult);
   }
 
+  // Parents (WhatsApp, class-gated): only when the score is FINAL now (auto-graded).
+  // Manual-review exams stay pending here and notify later from gradeManualAnswer.
+  if (!suppressNotifications && user && user.role === "student" && !newResult.pendingReview) {
+    parentNotify
+      .examFinished(user._id, exam.class, { childName: user.name, examName: exam.name, earnPoints: newResult.earnPoints, totalMarks: exam.totalMarks })
+      .catch(() => {});
+  }
+
   return earnedPoints;
 }
 
@@ -4220,6 +4229,21 @@ const gradeManualAnswer = asyncHandler(async (req, res) => {
     pendingReview: result.pendingReview,
     manualItems: (result.manualItems || []).map(({ gradedBy, ...rest }) => rest),
   });
+
+  // Parents (WhatsApp, class-gated): the manual-review result is now fully graded.
+  if (justCompleted) {
+    (async () => {
+      try {
+        const exam = await Exam.findById(result.examId).select("class name totalMarks").lean();
+        const student = await User.findById(result.userId).select("name role").lean();
+        if (exam && student && student.role === "student") {
+          await parentNotify.examFinished(result.userId, exam.class, { childName: student.name, examName: exam.name, earnPoints: result.earnPoints, totalMarks: exam.totalMarks });
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    })();
+  }
 });
 
 const editExam = asyncHandler(async (req, res) => {
@@ -4371,9 +4395,11 @@ const editTag = asyncHandler(async (req, res) => {
 
 const editClass = asyncHandler(async (req, res) => {
   const { classId } = req.params;
-  const { name, level, regenerateCode, coverImage } = req.body;
+  const { name, level, regenerateCode, coverImage, notifyParents } = req.body;
   const label = typeof name === "string" ? name.trim() : "";
-  if (!label && !level) {
+  // A settings-only edit (e.g. toggling parent notifications) needs no name/level.
+  const settingsOnly = typeof notifyParents === "boolean" && name === undefined && level === undefined;
+  if (!label && !level && !settingsOnly) {
     res.status(400);
     throw new Error("Sinif adını daxil edin");
   }
@@ -4390,6 +4416,7 @@ const editClass = asyncHandler(async (req, res) => {
   if (typeof name === "string") update.name = label;
   if (typeof coverImage === "string") update.coverImage = coverImage.trim();
   if (level !== undefined && level !== "") update.level = level;
+  if (typeof notifyParents === "boolean") update.notifyParents = notifyParents;
   // Classes are always code-only (public was removed); keep it enforced.
   update.requireCode = true;
   // Let the teacher rotate the join code (invalidates the previously shared one).
