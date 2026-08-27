@@ -21,6 +21,7 @@ const {
   submitAssignment,
   getAttachmentFile,
   getSubmissionFile,
+  annotateSubmission,
 } = require("../controllers/assignmentController");
 
 if (!fs.existsSync(ASSIGNMENTS_DIR)) fs.mkdirSync(ASSIGNMENTS_DIR, { recursive: true });
@@ -122,6 +123,15 @@ router.patch(
   updateAssignment
 );
 router.patch("/:id/submissions/:submissionId", protect, teacherOnly, gradeSubmission);
+router.post(
+  "/:id/submissions/:submissionId/annotation",
+  protect,
+  teacherOnly,
+  uploadRateLimit,
+  runUpload("annotation", 1),
+  verifyUploads,
+  annotateSubmission
+);
 router.post("/:id/submissions/:submissionId/seen", protect, teacherOnly, markSubmissionSeen);
 router.delete("/:id", protect, teacherOnly, deleteAssignment);
 

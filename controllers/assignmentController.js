@@ -649,9 +649,57 @@ const getSubmissionFile = asyncHandler(async (req, res) => {
   const manages = await isClassManager(req.user, a.class);
   if (!owns && !manages) return res.status(403).json({ message: "İcazə yoxdur" });
 
-  const meta = (s.files || []).find((f) => f.fileName === req.params.fileName);
+  const meta =
+    (s.files || []).find((f) => f.fileName === req.params.fileName) ||
+    (s.annotations || []).find((f) => f.fileName === req.params.fileName);
   if (!meta) return res.status(404).json({ message: "Fayl tapılmadı" });
   return sendStored(res, meta, { download: req.query.download === "1", thumb: req.query.thumb === "1" });
+});
+
+// POST /api/assignments/:id/submissions/:submissionId/annotation — the teacher's
+// marked-up image (✓/✗, notes drawn over the student's work). One flattened PNG,
+// field "annotation". Replaces any prior annotation of the same source file, marks
+// the submission "returned" so the student sees it.
+const annotateSubmission = asyncHandler(async (req, res) => {
+  const files = req.files || [];
+  const fail = (code, message) => {
+    files.forEach((f) => cleanup(f.path));
+    return res.status(code).json({ message });
+  };
+  const a = await Assignment.findById(req.params.id).lean();
+  if (!a || a.deletedAt) return fail(404, "Tapılmadı");
+  if (!(await isClassManager(req.user, a.class))) return fail(403, "İcazə yoxdur");
+  const s = await Submission.findOne({ _id: req.params.submissionId, assignment: a._id });
+  if (!s) return fail(404, "Təhvil tapılmadı");
+  const file = files[0];
+  if (!file) return fail(400, "Şəkil tapılmadı");
+  if (kindFromType(file.detectedType) !== "image") return fail(400, "Yalnız şəkil");
+
+  const sourceFileName = String(req.body.sourceFileName || "");
+  const doc = {
+    fileName: path.basename(file.path),
+    originalName: decodeUploadName(file.originalname) || "isarelenmis.png",
+    mimeType: file.canonicalMime || file.mimetype || "image/png",
+    sizeBytes: Number(file.size || 0),
+    sourceFileName,
+    createdAt: new Date(),
+  };
+  // Replace an earlier annotation of the same source image (don't pile up).
+  if (sourceFileName) {
+    const idx = s.annotations.findIndex((x) => x.sourceFileName === sourceFileName);
+    if (idx >= 0) {
+      cleanup(path.join(ASSIGNMENTS_DIR, s.annotations[idx].fileName));
+      s.annotations.splice(idx, 1);
+    }
+  }
+  s.annotations.push(doc);
+  s.status = "returned";
+  s.gradedAt = new Date();
+  s.gradedBy = req.user._id;
+  await s.save();
+
+  const populated = await Submission.findById(s._id).populate("student", "name email photo").lean();
+  res.json(populated);
 });
 
 // Stream a stored file after the caller has been authorised. Inline by default
@@ -706,5 +754,6 @@ module.exports = {
   submitAssignment,
   getAttachmentFile,
   getSubmissionFile,
+  annotateSubmission,
   isManagerRole,
 };

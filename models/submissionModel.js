@@ -45,6 +45,26 @@ const submissionSchema = Schema(
     gradedAt: { type: Date, default: null },
     gradedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
 
+    // Teacher's marked-up images (✓/✗, notes drawn over the student's work). Each
+    // is a flattened PNG stored in the same private dir; `sourceFileName` points at
+    // the uploaded file it annotates. The student sees these when the work is returned.
+    annotations: {
+      type: [
+        new Schema(
+          {
+            fileName: { type: String, required: true },
+            originalName: { type: String, trim: true, default: "" },
+            mimeType: { type: String, default: "image/png" },
+            sizeBytes: { type: Number, default: 0 },
+            sourceFileName: { type: String, default: "" },
+            createdAt: { type: Date, default: Date.now },
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
+    },
+
     // When the class owner last opened this submission in the review dialog. A
     // submission is "new" (badge) while seenByOwnerAt is null OR older than the
     // latest submittedAt, so a re-upload after the teacher looked re-flags it.
