@@ -12,6 +12,8 @@ const {
   listClassBoards,
   uploadBoardFile,
   getBoardFile,
+  getOrCreateHomeworkBoard,
+  listHomeworkBoards,
 } = require("../controllers/boardController");
 
 // Pages (all canvases) are sent as one multipart file — dodges the JSON body cap.
@@ -47,6 +49,9 @@ router.post("/", protect, teacherOnly, createBoard);
 // Boards shared to a class (class page) — students + the class owner. Declared
 // before "/:id" so "class" is never parsed as a board id.
 router.get("/class/:classId", protect, listClassBoards);
+// Homework solve-boards. Declared before "/:id" so "homework" isn't a board id.
+router.get("/homework/:assignmentId/list", protect, teacherOnly, listHomeworkBoards);
+router.post("/homework/:assignmentId", protect, getOrCreateHomeworkBoard);
 // Cheap live-session poll (declared before "/:id"'s siblings is fine — 2 segments).
 router.get("/:id/live", protect, boardLiveStatus);
 // Private board images: owner uploads, the audience reads (declared before "/:id").

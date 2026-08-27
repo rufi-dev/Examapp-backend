@@ -29,6 +29,11 @@ const boardSchema = Schema(
     // Audience (like materials/videos): [] = all of this teacher's students;
     // otherwise only students of the listed classes. Students always read-only.
     classes: [{ type: Schema.Types.ObjectId, ref: "Class", index: true }],
+    // Homework solve-board: when set, this board belongs to ONE student for ONE
+    // assignment — only that student (+ owner/admin) may open it, and the student may
+    // EDIT it (write their solution). See boardAccessService.accessLevel.
+    assignment: { type: Schema.Types.ObjectId, ref: "Assignment", default: null, index: true },
+    student: { type: Schema.Types.ObjectId, ref: "User", default: null, index: true },
     // Legacy single-scene field (boards made before multi-page). Read-migrated to
     // pages[0] on load; never written anymore.
     scene: { type: Schema.Types.Mixed, default: null },

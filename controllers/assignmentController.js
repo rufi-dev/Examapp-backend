@@ -186,6 +186,7 @@ const listAssignments = asyncHandler(async (req, res) => {
     dueAt: a.dueAt,
     allowLate: a.allowLate,
     lockAfterSubmit: a.lockAfterSubmit,
+    boardEnabled: a.boardEnabled,
     maxPoints: a.maxPoints,
     createdAt: a.createdAt,
     mySubmission: byAssignment.get(String(a._id)) || null,
@@ -253,6 +254,7 @@ const createAssignment = asyncHandler(async (req, res) => {
     // Multipart booleans arrive as the string "true"/"false".
     allowLate: String(req.body.allowLate) !== "false",
     lockAfterSubmit: String(req.body.lockAfterSubmit) === "true",
+    boardEnabled: String(req.body.boardEnabled) === "true",
     maxPoints,
   };
   const baseFiles = files.map(fileDocFor);
@@ -345,6 +347,7 @@ const updateAssignment = asyncHandler(async (req, res) => {
   if (req.body.description !== undefined) a.description = String(req.body.description).trim();
   if (req.body.allowLate !== undefined) a.allowLate = String(req.body.allowLate) !== "false";
   if (req.body.lockAfterSubmit !== undefined) a.lockAfterSubmit = String(req.body.lockAfterSubmit) === "true";
+  if (req.body.boardEnabled !== undefined) a.boardEnabled = String(req.body.boardEnabled) === "true";
   if (req.body.dueAt !== undefined) {
     if (!req.body.dueAt) a.dueAt = null;
     else {
@@ -619,6 +622,7 @@ const myAssignments = asyncHandler(async (req, res) => {
     dueAt: a.dueAt,
     allowLate: a.allowLate,
     lockAfterSubmit: a.lockAfterSubmit,
+    boardEnabled: a.boardEnabled,
     maxPoints: a.maxPoints,
     createdAt: a.createdAt,
     mySubmission: byA.get(String(a._id)) || null,

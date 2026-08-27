@@ -7,6 +7,7 @@ const path = require("path");
 const Board = require("../models/boardModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
+const Assignment = require("../models/assignmentModel");
 const { detectHead } = require("../utils/fileValidation"); // magic-byte image auth
 
 // ---- access policy ----------------------------------------------------------
@@ -328,4 +329,45 @@ const getBoardFile = asyncHandler(async (req, res) => {
   fs.createReadStream(target).pipe(res);
 });
 
-module.exports = { listBoards, createBoard, getBoard, boardLiveStatus, saveBoard, deleteBoard, listClassBoards, uploadBoardFile, getBoardFile };
+// POST /api/boards/homework/:assignmentId — a student opens (creating on first use)
+// their OWN solve-board for a board-enabled assignment. One board per (assignment,
+// student); returns its id so the client can navigate to the editor.
+const getOrCreateHomeworkBoard = asyncHandler(async (req, res) => {
+  const a = await Assignment.findById(req.params.assignmentId).lean();
+  if (!a || a.deletedAt) return res.status(404).json({ message: "Tapşırıq tapılmadı" });
+  if (!a.boardEnabled) return res.status(400).json({ message: "Bu tapşırıq üçün lövhə aktiv deyil" });
+  const enrolled = await Enrollment.exists({ class: a.class, student: req.user._id, status: "approved" });
+  if (!enrolled) return res.status(403).json({ message: "Yalnız bu sinifin şagirdi lövhədə həll edə bilər" });
+
+  let board = await Board.findOne({ assignment: a._id, student: req.user._id, deletedAt: null });
+  if (!board) {
+    board = await Board.create({
+      owner: a.owner,
+      ownerName: a.ownerName || "",
+      title: `${a.title} — ${req.user.name || "Şagird"}`,
+      assignment: a._id,
+      student: req.user._id,
+      classes: [],
+      pages: [{ name: "Səhifə 1", scene: null }],
+    });
+  }
+  res.json({ _id: board._id });
+});
+
+// GET /api/boards/homework/:assignmentId/list — the assignment owner lists every
+// student's solve-board for it (to open and mark).
+const listHomeworkBoards = asyncHandler(async (req, res) => {
+  const a = await Assignment.findById(req.params.assignmentId).lean();
+  if (!a || a.deletedAt) return res.status(404).json({ message: "Tapşırıq tapılmadı" });
+  if (String(a.owner) !== String(req.user._id) && req.user.role !== "admin") {
+    return res.status(403).json({ message: "İcazə yoxdur" });
+  }
+  const boards = await Board.find({ assignment: a._id, deletedAt: null })
+    .select("_id student title updatedAt elementCount")
+    .populate("student", "name email photo")
+    .sort({ updatedAt: -1 })
+    .lean();
+  res.json({ boards });
+});
+
+module.exports = { listBoards, createBoard, getBoard, boardLiveStatus, saveBoard, deleteBoard, listClassBoards, uploadBoardFile, getBoardFile, getOrCreateHomeworkBoard, listHomeworkBoards };

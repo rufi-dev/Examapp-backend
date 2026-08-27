@@ -51,6 +51,10 @@ const assignmentSchema = Schema(
     // student is warned before that final submit. false = free re-uploads (default).
     lockAfterSubmit: { type: Boolean, default: false },
 
+    // true = students can solve this task directly on their own whiteboard (a
+    // per-student board is created on demand). They can still upload files too.
+    boardEnabled: { type: Boolean, default: false },
+
     deletedAt: { type: Date, default: null, index: true },
     deletedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
   },
