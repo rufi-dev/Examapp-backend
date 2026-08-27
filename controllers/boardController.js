@@ -500,10 +500,16 @@ const getOrCreateAnnotationBoard = asyncHandler(async (req, res) => {
   if (!isManager) return res.status(403).json({ message: "İcazə yoxdur" });
   const sub = await Submission.findOne({ _id: submissionId, assignment: a._id }).lean();
   if (!sub) return res.status(404).json({ message: "Təhvil tapılmadı" });
-  const meta = (sub.files || []).find((f) => f.fileName === sourceFileName);
-  if (!meta || meta.kind !== "image") return res.status(400).json({ message: "Yalnız şəkil işarələnə bilər" });
+  // sourceFileName is OPTIONAL: with it, seed that image as a locked background (legacy
+  // per-image flow). Without it, create ONE empty marking board per submission — the
+  // teacher pulls the student's uploaded photos onto it from inside the board.
+  const seedName = sourceFileName || null;
+  if (seedName) {
+    const meta = (sub.files || []).find((f) => f.fileName === seedName);
+    if (!meta || meta.kind !== "image") return res.status(400).json({ message: "Yalnız şəkil işarələnə bilər" });
+  }
 
-  const existing = await Board.findOne({ submission: sub._id, sourceFileName, deletedAt: null }).select("_id").lean();
+  const existing = await Board.findOne({ submission: sub._id, sourceFileName: seedName, deletedAt: null }).select("_id").lean();
   if (existing) return res.json({ _id: existing._id });
 
   const board = await Board.create({
@@ -512,26 +518,28 @@ const getOrCreateAnnotationBoard = asyncHandler(async (req, res) => {
     title: `İşarələmə — ${sub.studentName || "Şagird"}`,
     assignment: a._id,
     submission: sub._id,
-    sourceFileName,
+    sourceFileName: seedName,
     classes: [],
     pages: [{ name: "Səhifə 1", scene: null }],
   });
-  try {
-    const srcAbs = path.join(ASSIGNMENTS_DIR, sourceFileName);
-    if (!srcAbs.startsWith(ASSIGNMENTS_DIR) || !fs.existsSync(srcAbs)) throw new Error("no source");
-    // Bake EXIF orientation so the drawn image is upright and its width/height match.
-    const outBuf = await sharp(fs.readFileSync(srcAbs)).rotate().toBuffer();
-    const md = await sharp(outBuf).metadata();
-    const fileId = crypto.randomBytes(20).toString("hex");
-    const dir = path.join(BOARD_FILES_DIR, safeSeg(String(board._id)));
-    await fsp.mkdir(dir, { recursive: true });
-    await fsp.writeFile(path.join(dir, safeFileId(fileId)), outBuf);
-    const el = buildImageElement(fileId, md.width || 800, md.height || 600);
-    board.pages = [{ name: "Səhifə 1", scene: { elements: [el], appState: {}, files: {} } }];
-    board.elementCount = 1;
-    await board.save();
-  } catch {
-    /* seeding failed — the board still opens (image just won't be pre-placed) */
+  if (seedName) {
+    try {
+      const srcAbs = path.join(ASSIGNMENTS_DIR, seedName);
+      if (!srcAbs.startsWith(ASSIGNMENTS_DIR) || !fs.existsSync(srcAbs)) throw new Error("no source");
+      // Bake EXIF orientation so the drawn image is upright and its width/height match.
+      const outBuf = await sharp(fs.readFileSync(srcAbs)).rotate().toBuffer();
+      const md = await sharp(outBuf).metadata();
+      const fileId = crypto.randomBytes(20).toString("hex");
+      const dir = path.join(BOARD_FILES_DIR, safeSeg(String(board._id)));
+      await fsp.mkdir(dir, { recursive: true });
+      await fsp.writeFile(path.join(dir, safeFileId(fileId)), outBuf);
+      const el = buildImageElement(fileId, md.width || 800, md.height || 600);
+      board.pages = [{ name: "Səhifə 1", scene: { elements: [el], appState: {}, files: {} } }];
+      board.elementCount = 1;
+      await board.save();
+    } catch {
+      /* seeding failed — the board still opens (image just won't be pre-placed) */
+    }
   }
   res.json({ _id: board._id });
 });
