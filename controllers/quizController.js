@@ -4497,10 +4497,10 @@ const editTag = asyncHandler(async (req, res) => {
 
 const editClass = asyncHandler(async (req, res) => {
   const { classId } = req.params;
-  const { name, level, regenerateCode, coverImage, notifyParents } = req.body;
+  const { name, level, regenerateCode, coverImage, notifyParents, parentNotify } = req.body;
   const label = typeof name === "string" ? name.trim() : "";
   // A settings-only edit (e.g. toggling parent notifications) needs no name/level.
-  const settingsOnly = typeof notifyParents === "boolean" && name === undefined && level === undefined;
+  const settingsOnly = (typeof notifyParents === "boolean" || (parentNotify && typeof parentNotify === "object")) && name === undefined && level === undefined;
   if (!label && !level && !settingsOnly) {
     res.status(400);
     throw new Error("Sinif adını daxil edin");
@@ -4519,6 +4519,12 @@ const editClass = asyncHandler(async (req, res) => {
   if (typeof coverImage === "string") update.coverImage = coverImage.trim();
   if (level !== undefined && level !== "") update.level = level;
   if (typeof notifyParents === "boolean") update.notifyParents = notifyParents;
+  // Per-event parent-notification flags (attendance/homework/exam/payment).
+  if (parentNotify && typeof parentNotify === "object") {
+    for (const k of ["attendance", "homework", "exam", "payment"]) {
+      if (typeof parentNotify[k] === "boolean") update[`parentNotify.${k}`] = parentNotify[k];
+    }
+  }
   // Classes are always code-only (public was removed); keep it enforced.
   update.requireCode = true;
   // Let the teacher rotate the join code (invalidates the previously shared one).

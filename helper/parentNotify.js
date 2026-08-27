@@ -32,13 +32,15 @@ async function nameOf(studentId) {
 }
 
 // Core: send `text` to every linked parent of `studentId`. When `classId` is given,
-// only sends if that class has parent notifications enabled.
-async function notifyParentsOf(studentId, classId, text) {
+// only sends if that class's master switch is on AND the per-event `category` flag
+// (attendance | homework | exam | payment) is not turned off.
+async function notifyParentsOf(studentId, classId, text, category) {
   try {
     if (!enabled() || !text) return;
     if (classId) {
-      const cls = await ClassModel.findById(classId).select("notifyParents").lean();
+      const cls = await ClassModel.findById(classId).select("notifyParents parentNotify").lean();
       if (!cls || !cls.notifyParents) return;
+      if (category && cls.parentNotify && cls.parentNotify[category] === false) return;
     }
     const parentIds = await ParentLink.find({ student: studentId }).distinct("parent");
     if (!parentIds.length) return;
@@ -62,21 +64,21 @@ async function attendance(studentId, classId, { childName, className, lessonTitl
   const head = status === "absent" ? `❌ ${who} — dərsə gəlmədi` : status === "late" ? `🕐 ${who} — dərsə gecikdi` : `✅ ${who} — dərsə gəldi`;
   const line2 = className || lessonTitle ? `📘 ${[className, lessonTitle].filter(Boolean).join(" · ")}` : null;
   const line3 = at && status !== "absent" ? `🕐 ${hhmm(at)}` : null;
-  return notifyParentsOf(studentId, classId, [head, line2, line3].filter(Boolean).join("\n"));
+  return notifyParentsOf(studentId, classId, [head, line2, line3].filter(Boolean).join("\n"), "attendance");
 }
 
 async function homeworkGraded(studentId, classId, { childName, title, grade, maxPoints } = {}) {
   const who = childName || (await nameOf(studentId));
   const score = grade != null ? `⭐ Qiymət: ${grade}${maxPoints != null ? `/${maxPoints}` : ""}` : null;
   const text = [`📝 ${who} — tapşırıq qiymətləndirildi`, title ? `📘 ${title}` : null, score].filter(Boolean).join("\n");
-  return notifyParentsOf(studentId, classId, text);
+  return notifyParentsOf(studentId, classId, text, "homework");
 }
 
 async function examFinished(studentId, classId, { childName, examName, earnPoints, totalMarks } = {}) {
   const who = childName || (await nameOf(studentId));
   const score = earnPoints != null ? `⭐ Nəticə: ${earnPoints}${totalMarks != null ? `/${totalMarks}` : ""}` : null;
   const text = [`🎓 ${who} — imtahan nəticəsi hazırdır`, examName ? `📄 ${examName}` : null, score].filter(Boolean).join("\n");
-  return notifyParentsOf(studentId, classId, text);
+  return notifyParentsOf(studentId, classId, text, "exam");
 }
 
 async function payment(studentId, classId, { childName, label, amount, paid, dueDate } = {}) {
@@ -84,7 +86,7 @@ async function payment(studentId, classId, { childName, label, amount, paid, due
   const money = `${label ? `${label}: ` : ""}${amount != null ? `${amount} ₼` : ""}`.trim();
   const head = paid ? `💰 ${who} — ödəniş qeydə alındı (ödənilib)` : `💳 ${who} üçün yeni ödəniş`;
   const line3 = !paid && dueDate ? `📅 Son tarix: ${ddmon(dueDate)}` : null;
-  return notifyParentsOf(studentId, classId, [head, money || null, line3].filter(Boolean).join("\n"));
+  return notifyParentsOf(studentId, classId, [head, money || null, line3].filter(Boolean).join("\n"), "payment");
 }
 
 module.exports = { notifyParentsOf, attendance, homeworkGraded, examFinished, payment };

@@ -47,11 +47,18 @@ const classSchema = Schema(
       type: Boolean,
       default: false,
     },
-    // When true, linked parents of this class's students get WhatsApp notifications
-    // (attendance, homework graded, exam results, payments). Teacher-controlled.
+    // Master switch: when true, linked parents of this class's students may get WhatsApp
+    // notifications. The per-event flags below refine WHICH events notify (all default
+    // on). Teacher-controlled from class settings.
     notifyParents: {
       type: Boolean,
       default: false,
+    },
+    parentNotify: {
+      attendance: { type: Boolean, default: true }, // came / late / absent
+      homework: { type: Boolean, default: true }, // assignment graded
+      exam: { type: Boolean, default: true }, // exam result ready
+      payment: { type: Boolean, default: true }, // new charge / due
     },
     deletedAt: { type: Date, default: null, index: true },
     deletedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
