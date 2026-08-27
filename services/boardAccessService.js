@@ -50,10 +50,10 @@ async function accessLevel(user, board) {
   if (user.role === "admin") return { ok: true, canEdit: true };
   if (String(board.owner) === String(user._id)) return { ok: true, canEdit: true };
   // Homework solve-board: bound to ONE student (the assignee). Only that student may
-  // open it, and they may EDIT (write their solution). No class-audience applies.
+  // open it; they may EDIT until they submit it (then it's read-only). No class audience.
   if (board.student) {
     const mine = String(board.student) === String(user._id);
-    return { ok: mine, canEdit: mine };
+    return { ok: mine, canEdit: mine && !board.submitted };
   }
   // Everyone else — INCLUDING a teacher-role account who is not the owner — is at
   // most a read-only AUDIENCE member, and only if they hold an approved enrollment

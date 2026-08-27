@@ -127,6 +127,11 @@ const getBoard = asyncHandler(async (req, res) => {
       board.submission && canEdit
         ? { assignmentId: board.assignment, submissionId: board.submission, sourceFileName: board.sourceFileName }
         : null,
+    // Set for a student's solve-board so the editor can show "Müəllimə göndər".
+    homework:
+      board.student && !board.submission
+        ? { assignmentId: board.assignment, submitted: !!board.submitted }
+        : null,
     updatedAt: board.updatedAt,
   });
 });
@@ -352,19 +357,73 @@ const getOrCreateHomeworkBoard = asyncHandler(async (req, res) => {
   const enrolled = await Enrollment.exists({ class: a.class, student: req.user._id, status: "approved" });
   if (!enrolled) return res.status(403).json({ message: "Yalnız bu sinifin şagirdi lövhədə həll edə bilər" });
 
-  let board = await Board.findOne({ assignment: a._id, student: req.user._id, deletedAt: null });
-  if (!board) {
-    board = await Board.create({
-      owner: a.owner,
-      ownerName: a.ownerName || "",
-      title: `${a.title} — ${req.user.name || "Şagird"}`,
+  // Reuse the student's OPEN (not-yet-submitted) board; once submitted it locks and a
+  // fresh board is started (if the assignment rules still allow).
+  const boards = await Board.find({ assignment: a._id, student: req.user._id, submission: null, deletedAt: null }).sort({ createdAt: -1 });
+  const open = boards.find((b) => !b.submitted);
+  if (open) return res.json({ _id: open._id });
+
+  const overdue = a.dueAt && Date.now() > new Date(a.dueAt).getTime();
+  if (overdue && !a.allowLate) return res.status(403).json({ message: "Son tarix keçib — yeni lövhə açmaq olmaz" });
+  if (a.lockAfterSubmit && boards.length) return res.status(403).json({ message: "Bu tapşırıq yalnız bir dəfə həll edilə bilər" });
+
+  const board = await Board.create({
+    owner: a.owner,
+    ownerName: a.ownerName || "",
+    title: `${a.title} — ${req.user.name || "Şagird"}`,
+    assignment: a._id,
+    student: req.user._id,
+    classes: [],
+    pages: [{ name: "Səhifə 1", scene: null }],
+  });
+  res.json({ _id: board._id });
+});
+
+// POST /api/boards/homework/:boardId/submit — the student sends their solve-board to
+// the teacher: the exported PNG (field "file") is attached to their assignment
+// submission and the board locks. Respects the assignment's deadline rules.
+const submitHomeworkBoard = asyncHandler(async (req, res) => {
+  const board = await Board.findOne({ _id: req.params.boardId, student: req.user._id, submission: null, deletedAt: null });
+  if (!board) return res.status(404).json({ message: "Lövhə tapılmadı" });
+  if (board.submitted) return res.status(400).json({ message: "Artıq göndərilib" });
+  const a = await Assignment.findById(board.assignment).lean();
+  if (!a || a.deletedAt) return res.status(404).json({ message: "Tapşırıq tapılmadı" });
+
+  const overdue = a.dueAt && Date.now() > new Date(a.dueAt).getTime();
+  if (overdue && !a.allowLate) return res.status(403).json({ message: "Son tarix keçib" });
+
+  const buf = req.file && req.file.buffer;
+  if (!buf || !buf.length) return res.status(400).json({ message: "Şəkil yoxdur" });
+  const det = detectHead(buf.slice(0, 64));
+  if (!det || det.type !== "png") return res.status(415).json({ message: "PNG lazımdır" });
+
+  const fileName = `asg-brd-${Date.now()}-${crypto.randomBytes(6).toString("hex")}.png`;
+  await fsp.writeFile(path.join(ASSIGNMENTS_DIR, fileName), buf);
+  const fileDoc = { fileName, originalName: `${a.title} — lövhə.png`, mimeType: "image/png", sizeBytes: buf.length, kind: "image" };
+
+  let sub = await Submission.findOne({ assignment: a._id, student: req.user._id });
+  if (sub) {
+    sub.files.push(fileDoc);
+    sub.submittedAt = new Date();
+    sub.status = "submitted";
+    sub.seenByOwnerAt = null; // re-flag as new for the teacher
+    if (overdue) sub.late = true;
+    await sub.save();
+  } else {
+    sub = await Submission.create({
       assignment: a._id,
+      class: a.class,
       student: req.user._id,
-      classes: [],
-      pages: [{ name: "Səhifə 1", scene: null }],
+      studentName: req.user.name || "",
+      files: [fileDoc],
+      submittedAt: new Date(),
+      late: !!overdue,
+      status: "submitted",
     });
   }
-  res.json({ _id: board._id });
+  board.submitted = true;
+  await board.save();
+  res.json({ ok: true, submissionId: sub._id });
 });
 
 // GET /api/boards/homework/:assignmentId/list — the assignment owner lists every
@@ -466,4 +525,4 @@ const getOrCreateAnnotationBoard = asyncHandler(async (req, res) => {
   res.json({ _id: board._id });
 });
 
-module.exports = { listBoards, createBoard, getBoard, boardLiveStatus, saveBoard, deleteBoard, listClassBoards, uploadBoardFile, getBoardFile, getOrCreateHomeworkBoard, listHomeworkBoards, getOrCreateAnnotationBoard };
+module.exports = { listBoards, createBoard, getBoard, boardLiveStatus, saveBoard, deleteBoard, listClassBoards, uploadBoardFile, getBoardFile, getOrCreateHomeworkBoard, listHomeworkBoards, submitHomeworkBoard, getOrCreateAnnotationBoard };
