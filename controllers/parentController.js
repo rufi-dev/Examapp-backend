@@ -5,6 +5,8 @@ const Enrollment = require("../models/enrollmentModel");
 const Assignment = require("../models/assignmentModel");
 const Submission = require("../models/submissionModel");
 const Result = require("../models/resultModel");
+const Attendance = require("../models/attendanceModel");
+const Payment = require("../models/paymentModel");
 
 // Compact child DTO — never leak more of a student's account than a parent needs.
 const childDto = (u) => ({
@@ -125,4 +127,52 @@ const childHomework = asyncHandler(async (req, res) => {
   res.json({ assignments: assignmentsOut });
 });
 
-module.exports = { linkChild, listChildren, unlinkChild, childResults, childHomework };
+// GET /api/parent/children/:childId/attendance — the child's recent attendance,
+// newest first, with the lesson's title/time.
+const childAttendance = asyncHandler(async (req, res) => {
+  if (!(await isLinked(req.user._id, req.params.childId))) {
+    res.status(403);
+    throw new Error("Bu şagirdə girişiniz yoxdur");
+  }
+  const rows = await Attendance.find({ student: req.params.childId })
+    .sort({ at: -1 })
+    .limit(200)
+    .populate({ path: "lesson", select: "title startAt", populate: { path: "class", select: "name" } })
+    .lean();
+  const attendance = rows
+    .filter((r) => r.lesson)
+    .map((r) => ({
+      _id: r._id,
+      status: r.status,
+      at: r.at,
+      lessonTitle: r.lesson?.title || "",
+      className: r.lesson?.class?.name || "",
+      startAt: r.lesson?.startAt || r.at,
+    }));
+  res.json({ attendance });
+});
+
+// GET /api/parent/children/:childId/payments — the child's payment ledger.
+const childPayments = asyncHandler(async (req, res) => {
+  if (!(await isLinked(req.user._id, req.params.childId))) {
+    res.status(403);
+    throw new Error("Bu şagirdə girişiniz yoxdur");
+  }
+  const rows = await Payment.find({ student: req.params.childId, deletedAt: null })
+    .sort({ createdAt: -1 })
+    .limit(300)
+    .lean();
+  const payments = rows.map((p) => ({
+    _id: p._id,
+    label: p.label,
+    amount: p.amount,
+    paid: p.paid,
+    paidAt: p.paidAt,
+    dueDate: p.dueDate,
+    createdAt: p.createdAt,
+  }));
+  const unpaidTotal = rows.filter((p) => !p.paid).reduce((s, p) => s + (p.amount || 0), 0);
+  res.json({ payments, unpaidTotal });
+});
+
+module.exports = { linkChild, listChildren, unlinkChild, childResults, childHomework, childAttendance, childPayments };

@@ -197,6 +197,9 @@ app.use("/api/parent", require("./routes/parentRoute"))
 // Lessons calendar + QR attendance (teacher schedules lessons; students scan to
 // check in). Payments ledger is a sibling route below.
 app.use("/api/lessons", require("./routes/lessonRoute"))
+// Payments ledger: teacher tracks per-student paid/unpaid charges (monthly or
+// per-lesson). Parents see them via /api/parent.
+app.use("/api/payments", require("./routes/paymentRoute"))
 app.use("/api/health", healthRoute)
 // Public step-by-step "how to use the platform" guide videos (self-hosted help
 // content, NO auth — nothing sensitive). express.static gives byte-range support so
