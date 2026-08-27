@@ -106,7 +106,25 @@ const getBoard = asyncHandler(async (req, res) => {
   if (!board) return res.status(404).json({ message: "Lövhə tapılmadı" });
   const { ok, canEdit } = await accessLevel(req.user, board);
   if (!ok) return res.status(403).json({ message: "Bu lövhəyə girişiniz yoxdur" });
+  // For a homework/annotation board, the student's UPLOADED photos (so they can be
+  // pulled onto the board to work/mark on). Never the board's own snapshot.
+  let uploads = [];
+  if ((board.student || board.submission) && board.assignment) {
+    const subQuery = board.submission ? { _id: board.submission } : { assignment: board.assignment, student: board.student };
+    const sub = await Submission.findOne(subQuery).select("_id files assignment").lean();
+    if (sub) {
+      uploads = (sub.files || [])
+        .filter((f) => f.kind === "image" && !f.fromBoard)
+        .map((f) => ({
+          assignmentId: String(sub.assignment || board.assignment),
+          submissionId: String(sub._id),
+          fileName: f.fileName,
+          name: f.originalName || f.fileName,
+        }));
+    }
+  }
   res.json({
+    uploads,
     _id: board._id,
     title: board.title,
     classes: board.classes || [],
@@ -381,8 +399,8 @@ const getOrCreateHomeworkBoard = asyncHandler(async (req, res) => {
 });
 
 // POST /api/boards/homework/:boardId/submit — the student sends their solve-board to
-// the teacher: the exported PNG (field "file") is attached to their assignment
-// submission and the board locks. Respects the assignment's deadline rules.
+// the teacher. The BOARD ITSELF is the work (no PNG snapshot): the submission just
+// LINKS the board and the board locks. Respects the assignment's deadline rules.
 const submitHomeworkBoard = asyncHandler(async (req, res) => {
   const board = await Board.findOne({ _id: req.params.boardId, student: req.user._id, submission: null, deletedAt: null });
   if (!board) return res.status(404).json({ message: "Lövhə tapılmadı" });
@@ -393,18 +411,8 @@ const submitHomeworkBoard = asyncHandler(async (req, res) => {
   const overdue = a.dueAt && Date.now() > new Date(a.dueAt).getTime();
   if (overdue && !a.allowLate) return res.status(403).json({ message: "Son tarix keçib" });
 
-  const buf = req.file && req.file.buffer;
-  if (!buf || !buf.length) return res.status(400).json({ message: "Şəkil yoxdur" });
-  const det = detectHead(buf.slice(0, 64));
-  if (!det || det.type !== "png") return res.status(415).json({ message: "PNG lazımdır" });
-
-  const fileName = `asg-brd-${Date.now()}-${crypto.randomBytes(6).toString("hex")}.png`;
-  await fsp.writeFile(path.join(ASSIGNMENTS_DIR, fileName), buf);
-  const fileDoc = { fileName, originalName: `${a.title} — lövhə.png`, mimeType: "image/png", sizeBytes: buf.length, kind: "image", fromBoard: true };
-
   let sub = await Submission.findOne({ assignment: a._id, student: req.user._id });
   if (sub) {
-    sub.files.push(fileDoc);
     sub.board = board._id;
     sub.submittedAt = new Date();
     sub.status = "submitted";
@@ -417,7 +425,7 @@ const submitHomeworkBoard = asyncHandler(async (req, res) => {
       class: a.class,
       student: req.user._id,
       studentName: req.user.name || "",
-      files: [fileDoc],
+      files: [],
       board: board._id,
       submittedAt: new Date(),
       late: !!overdue,

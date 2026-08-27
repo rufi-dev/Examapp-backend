@@ -43,14 +43,6 @@ const runSaveUpload = (req, res, next) =>
     res.status(400).json({ message });
   });
 
-// Student submits a solve-board: the exported PNG (field "file"), up to 25MB.
-const runImageSubmit = (req, res, next) =>
-  upload.single("file")(req, res, (err) => {
-    if (!err) return next();
-    const message = err.code === "LIMIT_FILE_SIZE" ? "Şəkil çox böyükdür (maksimum 25MB)" : "Göndərilmədi";
-    res.status(400).json({ message });
-  });
-
 // List boards: teacher/admin get their own/all; a STUDENT gets boards shared to their
 // enrolled classes (read-only — the controller branches by role). Creating a board
 // stays teacher-only.
@@ -61,7 +53,7 @@ router.post("/", protect, teacherOnly, createBoard);
 router.get("/class/:classId", protect, listClassBoards);
 // Homework solve-boards. Declared before "/:id" so "homework" isn't a board id.
 router.get("/homework/:assignmentId/list", protect, teacherOnly, listHomeworkBoards);
-router.post("/homework/:boardId/submit", protect, runImageSubmit, submitHomeworkBoard);
+router.post("/homework/:boardId/submit", protect, submitHomeworkBoard);
 router.post("/homework/:assignmentId", protect, getOrCreateHomeworkBoard);
 // Teacher marks a submitted image on a full board (all custom tools).
 router.post("/annotate", protect, teacherOnly, getOrCreateAnnotationBoard);
