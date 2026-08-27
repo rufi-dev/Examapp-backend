@@ -194,6 +194,9 @@ app.use("/api/plan", require("./routes/planRoute"))
 // Parent portal: a parent links to a child by code, then reads that child's exam
 // results + homework (read-only). Every route is protect + parentOnly.
 app.use("/api/parent", require("./routes/parentRoute"))
+// Lessons calendar + QR attendance (teacher schedules lessons; students scan to
+// check in). Payments ledger is a sibling route below.
+app.use("/api/lessons", require("./routes/lessonRoute"))
 app.use("/api/health", healthRoute)
 // Public step-by-step "how to use the platform" guide videos (self-hosted help
 // content, NO auth — nothing sensitive). express.static gives byte-range support so
