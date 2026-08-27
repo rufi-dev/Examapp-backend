@@ -82,6 +82,8 @@ const childResults = asyncHandler(async (req, res) => {
     createdAt: r.createdAt,
     terminated: !!r.terminated,
     violations: r.violations || 0,
+    // Still being manually graded — the score isn't final, so the UI hides pass/fail.
+    pending: !!r.pendingReview,
   }));
   res.json({ results });
 });

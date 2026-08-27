@@ -55,7 +55,8 @@ const createLesson = asyncHandler(async (req, res) => {
     throw new Error("Başlama vaxtı yanlışdır");
   }
   const baseStart = new Date(startAt);
-  const baseEnd = endAt && !Number.isNaN(new Date(endAt).getTime()) ? new Date(endAt) : null;
+  let baseEnd = endAt && !Number.isNaN(new Date(endAt).getTime()) ? new Date(endAt) : null;
+  if (baseEnd && baseEnd <= baseStart) baseEnd = null; // ignore a nonsensical window
   const price0 = price != null && price !== "" ? Math.max(0, Number(price)) : null;
   const extra = Math.min(51, Math.max(0, Number(repeatWeeks) || 0)); // 0..51 extra weekly copies
   const common = {
@@ -151,6 +152,7 @@ const updateLesson = asyncHandler(async (req, res) => {
   if (note != null) lesson.note = String(note).slice(0, 2000);
   if (startAt && !Number.isNaN(new Date(startAt).getTime())) lesson.startAt = new Date(startAt);
   if (endAt !== undefined) lesson.endAt = endAt && !Number.isNaN(new Date(endAt).getTime()) ? new Date(endAt) : null;
+  if (lesson.endAt && lesson.startAt && lesson.endAt <= lesson.startAt) lesson.endAt = null; // ignore a nonsensical window
   if (price !== undefined) lesson.price = price != null && price !== "" ? Math.max(0, Number(price)) : null;
   await lesson.save();
   res.json(lesson);
