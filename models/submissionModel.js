@@ -16,6 +16,8 @@ const submittedFileSchema = new Schema(
     mimeType: { type: String, default: "" },
     sizeBytes: { type: Number, default: 0 },
     kind: { type: String, default: "other" }, // pdf | image | office | other
+    // True for the PNG snapshot of a solve-board (mark it on the live board, not here).
+    fromBoard: { type: Boolean, default: false },
   },
   { _id: false }
 );
@@ -32,6 +34,10 @@ const submissionSchema = Schema(
     files: { type: [submittedFileSchema], default: [] },
     // Optional short note the student attaches ("Sual 3-ü tam bitirə bilmədim").
     note: { type: String, trim: true, default: "" },
+
+    // The student's solve-board (when they solved on a board). Both the teacher and the
+    // student open THIS board — the teacher marks on it, the student sees the marks.
+    board: { type: Schema.Types.ObjectId, ref: "Board", default: null },
 
     submittedAt: { type: Date, default: Date.now },
     // Stamped at submit time: submittedAt was after the assignment's dueAt.

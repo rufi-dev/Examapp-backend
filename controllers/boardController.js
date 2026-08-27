@@ -127,9 +127,10 @@ const getBoard = asyncHandler(async (req, res) => {
       board.submission && canEdit
         ? { assignmentId: board.assignment, submissionId: board.submission, sourceFileName: board.sourceFileName }
         : null,
-    // Set for a student's solve-board so the editor can show "Müəllimə göndər".
+    // Set for a student's solve-board, ONLY when the viewer is that student, so the
+    // editor shows "Müəllimə göndər" for them but not for the teacher marking it.
     homework:
-      board.student && !board.submission
+      board.student && !board.submission && String(board.student) === String(req.user._id)
         ? { assignmentId: board.assignment, submitted: !!board.submitted }
         : null,
     updatedAt: board.updatedAt,
@@ -399,11 +400,12 @@ const submitHomeworkBoard = asyncHandler(async (req, res) => {
 
   const fileName = `asg-brd-${Date.now()}-${crypto.randomBytes(6).toString("hex")}.png`;
   await fsp.writeFile(path.join(ASSIGNMENTS_DIR, fileName), buf);
-  const fileDoc = { fileName, originalName: `${a.title} — lövhə.png`, mimeType: "image/png", sizeBytes: buf.length, kind: "image" };
+  const fileDoc = { fileName, originalName: `${a.title} — lövhə.png`, mimeType: "image/png", sizeBytes: buf.length, kind: "image", fromBoard: true };
 
   let sub = await Submission.findOne({ assignment: a._id, student: req.user._id });
   if (sub) {
     sub.files.push(fileDoc);
+    sub.board = board._id;
     sub.submittedAt = new Date();
     sub.status = "submitted";
     sub.seenByOwnerAt = null; // re-flag as new for the teacher
@@ -416,6 +418,7 @@ const submitHomeworkBoard = asyncHandler(async (req, res) => {
       student: req.user._id,
       studentName: req.user.name || "",
       files: [fileDoc],
+      board: board._id,
       submittedAt: new Date(),
       late: !!overdue,
       status: "submitted",
