@@ -1054,7 +1054,7 @@ const bulkUsers = asyncHandler(async (req, res) => {
   }
 
   if (action === "role") {
-    const allowed = ["student", "teacher", "admin", "suspended"];
+    const allowed = ["student", "teacher", "admin", "suspended", "parent"];
     if (!allowed.includes(role)) {
       return res.status(400).json({ message: "Yanlış rol" });
     }
@@ -1184,7 +1184,7 @@ const loginStatus = asyncHandler(async (req, res) => {
 // CR-042: this is ONE of two admin entry points; both resolve the role+capability
 // through the SHARED teacherCapability service so approval state can never drift
 // from role. `approved_legacy` is migration-owned and can never be produced here.
-const ROLE_VALUES = new Set(["student", "teacher", "admin", "suspended"]);
+const ROLE_VALUES = new Set(["student", "teacher", "admin", "suspended", "parent"]);
 const upgradeUser = asyncHandler(async (req, res) => {
   const { role, id, teacherApproval } = req.body;
 
