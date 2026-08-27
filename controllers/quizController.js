@@ -3623,6 +3623,101 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   });
 });
 
+// GET /api/parent/live — a PARENT's own approved children who are taking an exam right
+// now, with the SAME rich per-attempt telemetry the teacher monitor shows (progress,
+// per-question live correctness, violations). Scoped strictly to the parent's children
+// (never other students in the class) so it leaks nothing. Reuses the exact de-shuffle
+// + grading logic used by the teacher board (getLiveAttempts).
+const getParentLive = asyncHandler(async (req, res) => {
+  const ParentLink = require("../models/parentLinkModel");
+  const childIds = await ParentLink.find({ parent: req.user._id, status: "approved" }).distinct("student");
+  if (!childIds.length) return res.json({ live: [], violationLimit: ANTICHEAT_LIMIT, serverNow: new Date() });
+  const now = Date.now();
+  const attempts = await Attempt.find({ userId: { $in: childIds }, submitted: false, expiresAt: { $gt: new Date(now - 2 * 60 * 1000) } })
+    .populate("userId", "name photo")
+    .sort({ lastSeenAt: -1 })
+    .lean();
+  if (!attempts.length) return res.json({ live: [], violationLimit: ANTICHEAT_LIMIT, serverNow: new Date(now) });
+
+  // Load each involved exam's answer key ONCE.
+  const examIds = [...new Set(attempts.map((a) => String(a.examId)))];
+  const exams = await Exam.find({ _id: { $in: examIds } })
+    .select("name totalMarks questions antiCheat")
+    .populate({ path: "questions", select: "correctAnswers" })
+    .lean();
+  const examById = new Map(exams.map((e) => [String(e._id), e]));
+  const manualGradingOn = require("../config/featureFlags").flags.MANUAL_GRADING_ENABLED;
+
+  const gradeOne = (ca, sel) => {
+    if (!ca || ca.type === "reading") return "section";
+    if (manualGradingOn && ca.manualGrade) return "manual";
+    if (!isAnswered(sel)) return "unanswered";
+    return isCorrectAnswer(ca, sel) ? "correct" : "wrong";
+  };
+  const answeredArr = (a, total) => {
+    const ans = a && Array.isArray(a.answers) ? a.answers : [];
+    const out = [];
+    for (let i = 0; i < total; i++) out.push(isAnswered(ans[i]));
+    return out;
+  };
+  const correctnessArr = (a, correct, total) => {
+    const out = new Array(total).fill("unanswered");
+    if (!a || !Array.isArray(a.answers) || !total) return out;
+    let sel = a.answers;
+    const qperm = Array.isArray(a.questionOrder) && a.questionOrder.length ? a.questionOrder : null;
+    if (qperm) {
+      const canon = new Array(total);
+      qperm.forEach((canonIdx, dispPos) => { if (Number.isInteger(canonIdx) && canonIdx >= 0 && canonIdx < total) canon[canonIdx] = sel[dispPos]; });
+      sel = canon;
+    }
+    if (a.optionOrder) {
+      const order = a.optionOrder;
+      sel = sel.map((ans, i) => {
+        const perm = order[i];
+        if (!ans || !Array.isArray(perm)) return ans;
+        const ca = correct[i];
+        if (!ca || (ca.type !== "Cm" && ca.type !== "Cs")) return ans;
+        if (!Array.isArray(ca.choices) || ca.choices.length !== perm.length) return ans;
+        const back = (d) => { const n = Number(d); return Number.isInteger(n) && n >= 0 && n < perm.length ? perm[n] : n; };
+        if (Array.isArray(ans.answer)) return { ...ans, answer: ans.answer.map(back) };
+        if (ans.answer === "" || ans.answer == null) return ans;
+        return { ...ans, answer: back(ans.answer) };
+      });
+    }
+    const canonGrade = correct.map((ca, i) => gradeOne(ca, sel[i]));
+    if (!qperm) return canonGrade;
+    qperm.forEach((canonIdx, dispPos) => { out[dispPos] = Number.isInteger(canonIdx) && canonIdx >= 0 && canonIdx < total ? canonGrade[canonIdx] : "unanswered"; });
+    return out;
+  };
+
+  const LIVE_ACTIVE_MS = 30 * 1000;
+  const live = attempts
+    .filter((a) => a.userId && examById.has(String(a.examId)))
+    .map((a) => {
+      const exam = examById.get(String(a.examId));
+      const correct = exam.questions?.correctAnswers || [];
+      const total = correct.length;
+      const seen = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
+      return {
+        attemptId: a._id,
+        child: { _id: a.userId._id, name: a.userId.name || "", photo: a.userId.photo || "" },
+        examName: exam.name || "İmtahan",
+        totalMarks: exam.totalMarks || 0,
+        currentQuestion: a.currentQuestion || 0,
+        answered: answeredArr(a, total),
+        correctness: correctnessArr(a, correct, total),
+        answeredCount: a.answeredCount || 0,
+        total,
+        violations: a.violations || 0,
+        antiCheat: !!exam.antiCheat,
+        startedAt: a.startedAt,
+        expiresAt: a.expiresAt,
+        active: !!seen && now - seen < LIVE_ACTIVE_MS,
+      };
+    });
+  res.json({ live, violationLimit: ANTICHEAT_LIMIT, serverNow: new Date(now) });
+});
+
 // Finalize ONE attempt: load its exam + user, score from the given (or autosaved)
 // answers, and ensure the attempt ends terminal. If the exam or user was deleted,
 // the attempt can never be scored -> mark it terminal `unscorable` (never left
@@ -4967,6 +5062,7 @@ module.exports = {
   addResult,
   autosaveAttempt,
   getLiveAttempts,
+  getParentLive,
   getLiveExams,
   heartbeatAttempt,
   finalizeExpiredAttempts,

@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const { protect, parentOnly, teacherOnly } = require("../middleware/authMiddleware");
+const { getParentLive } = require("../controllers/quizController");
 const {
   linkChild,
   linkChildByEmail,
@@ -10,7 +11,6 @@ const {
   childHomework,
   childAttendance,
   childPayments,
-  childrenLive,
   teacherStudents,
   decideParentLink,
   myParentRequests,
@@ -22,7 +22,7 @@ const {
 router.post("/link", protect, parentOnly, linkChild); // by code (instant)
 router.post("/link-email", protect, parentOnly, linkChildByEmail); // by email (pending)
 router.get("/children", protect, parentOnly, listChildren);
-router.get("/live", protect, parentOnly, childrenLive); // children taking an exam now
+router.get("/live", protect, parentOnly, getParentLive); // children taking an exam now (teacher-grade telemetry, child-scoped)
 router.delete("/children/:childId", protect, parentOnly, unlinkChild);
 router.get("/children/:childId/results", protect, parentOnly, childResults);
 router.get("/children/:childId/homework", protect, parentOnly, childHomework);
