@@ -60,6 +60,13 @@ const classSchema = Schema(
       exam: { type: Boolean, default: true }, // exam result ready
       payment: { type: Boolean, default: true }, // new charge / due
     },
+    // A class-wide monthly fee that applies to EVERY approved student (and anyone who
+    // joins later). A daily sweep materialises one Payment per student per month.
+    monthlyFee: {
+      amount: { type: Number, default: 0, min: 0 },
+      dayOfMonth: { type: Number, default: 1, min: 1, max: 28 },
+      active: { type: Boolean, default: false },
+    },
     deletedAt: { type: Date, default: null, index: true },
     deletedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
     // Scalar summary only. The authoritative relationship is Exam.class; the

@@ -18,6 +18,10 @@ const paymentSchema = new Schema(
     paid: { type: Boolean, default: false, index: true },
     paidAt: { type: Date, default: null },
     dueDate: { type: Date, default: null },
+    // Auto-generated (recurring/class-fee) marker + its "YYYY-MM" period, so a monthly
+    // sweep never creates two payments for the same student+class+month.
+    auto: { type: Boolean, default: false },
+    period: { type: String, default: null },
     deletedAt: { type: Date, default: null },
   },
   { timestamps: true, minimize: false }
@@ -26,5 +30,8 @@ const paymentSchema = new Schema(
 // The teacher's ledger for a student, and the parent view (by student, newest first).
 paymentSchema.index({ student: 1, deletedAt: 1, createdAt: -1 });
 paymentSchema.index({ owner: 1, class: 1, deletedAt: 1 });
+// At most ONE auto-generated payment per (student, class, month) — the DB backstop that
+// makes the monthly sweep safe against concurrent runs.
+paymentSchema.index({ student: 1, class: 1, period: 1 }, { unique: true, partialFilterExpression: { auto: true } });
 
 module.exports = mongoose.model("Payment", paymentSchema);

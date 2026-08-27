@@ -36,7 +36,7 @@ function assertOwns(lesson, user, res) {
 // POST /api/lessons — schedule a lesson for a class. Optionally repeat it weekly
 // (same weekday/time) for `repeatWeeks` extra weeks — a quick way to lay out a term.
 const createLesson = asyncHandler(async (req, res) => {
-  const { classId, title, note, startAt, endAt, price, repeatWeeks } = req.body || {};
+  const { classId, title, note, startAt, endAt, price, repeatWeeks, monthlyFee } = req.body || {};
   if (!mongoose.isValidObjectId(classId)) {
     res.status(400);
     throw new Error("Sinif seçilməyib");
@@ -77,6 +77,14 @@ const createLesson = asyncHandler(async (req, res) => {
     });
   }
   const created = await Lesson.insertMany(docs);
+
+  // "Make this price a monthly class fee": store it on the class so the daily sweep
+  // charges every approved (and future) student each month on the lesson's day.
+  if (monthlyFee && price0 != null && price0 > 0) {
+    const day = Math.min(28, Math.max(1, baseStart.getDate()));
+    await ClassModel.updateOne({ _id: cls._id }, { $set: { "monthlyFee.amount": price0, "monthlyFee.dayOfMonth": day, "monthlyFee.active": true } });
+  }
+
   res.status(201).json({ lesson: created[0], count: created.length });
 });
 

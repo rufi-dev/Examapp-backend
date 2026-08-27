@@ -205,7 +205,10 @@ const deleteRecurring = asyncHandler(async (req, res) => {
 async function runRecurringSweep(now = new Date()) {
   const period = periodOf(now);
   const today = now.getDate();
+  const monthLabel = `${AZ_MONTHS[now.getMonth()]} ayı`;
   let created = 0;
+
+  // ── (1) Per-student plans (manual, from the payments page). ──
   const plans = await RecurringPayment.find({ active: true, lastGeneratedPeriod: { $ne: period } }).lean();
   for (const plan of plans) {
     if (today < plan.dayOfMonth) continue; // due day not reached yet this month
@@ -215,23 +218,39 @@ async function runRecurringSweep(now = new Date()) {
       { $set: { lastGeneratedPeriod: period } }
     );
     if (!claim.modifiedCount) continue;
-    // Skip if the student left the class in the meantime.
     const enrolled = await Enrollment.exists({ class: plan.class, student: plan.student, status: "approved" });
     if (!enrolled) continue;
     const dueDate = new Date(now.getFullYear(), now.getMonth(), plan.dayOfMonth);
-    const label = plan.label || `${AZ_MONTHS[now.getMonth()]} ayı`;
-    await Payment.create({
-      owner: plan.owner,
-      class: plan.class,
-      student: plan.student,
-      studentName: plan.studentName || "",
-      label,
-      amount: plan.amount,
-      paid: false,
-      dueDate,
-    });
+    const label = plan.label || monthLabel;
+    await Payment.create({ owner: plan.owner, class: plan.class, student: plan.student, studentName: plan.studentName || "", label, amount: plan.amount, paid: false, dueDate, auto: true, period });
     created += 1;
     parentNotify.payment(plan.student, plan.class, { childName: plan.studentName, label, amount: plan.amount, paid: false, dueDate }).catch(() => {});
+  }
+
+  // ── (2) Class-wide monthly fees — every approved (and newly joined) student. ──
+  const ClassModel = require("../models/classModel");
+  const User = require("../models/userModel");
+  const feeClasses = await ClassModel.find({ "monthlyFee.active": true, deletedAt: null }).select("owner monthlyFee").lean();
+  for (const cls of feeClasses) {
+    const fee = cls.monthlyFee || {};
+    if (!(fee.amount > 0)) continue;
+    if (today < (fee.dayOfMonth || 1)) continue;
+    const studentIds = await Enrollment.find({ class: cls._id, status: "approved" }).distinct("student");
+    if (!studentIds.length) continue;
+    const dueDate = new Date(now.getFullYear(), now.getMonth(), Math.min(28, fee.dayOfMonth || 1));
+    for (const sid of studentIds) {
+      // One class payment per student per month — idempotent claim via a unique-ish key.
+      const exists = await Payment.exists({ student: sid, class: cls._id, period, auto: true });
+      if (exists) continue;
+      const student = await User.findById(sid).select("name").lean();
+      try {
+        await Payment.create({ owner: cls.owner, class: cls._id, student: sid, studentName: student?.name || "", label: monthLabel, amount: fee.amount, paid: false, dueDate, auto: true, period });
+        created += 1;
+        parentNotify.payment(sid, cls._id, { childName: student?.name, label: monthLabel, amount: fee.amount, paid: false, dueDate }).catch(() => {});
+      } catch (e) {
+        /* ignore per-student failure, continue */
+      }
+    }
   }
   return created;
 }
