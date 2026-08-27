@@ -4081,7 +4081,14 @@ const reviewByResult = asyncHandler(async (req, res) => {
     const authority = frozen ? frozen.author : (result.examId && result.examId.owner);
     teacherAuthed = authority != null && String(authority) === String(user._id);
   }
-  if (!isOwner && !isAdmin && !teacherAuthed) {
+  // Parent: an APPROVED link to the result's student. A parent is not staff, so the
+  // visibility gate below then gives them exactly the student's view (answers only when
+  // the exam allows). CR: parents see what their child is allowed to see.
+  let parentAuthed = false;
+  if (!isOwner && !isAdmin && !teacherAuthed && user.role === "parent" && ownerId != null) {
+    parentAuthed = !!(await require("../models/parentLinkModel").exists({ parent: user._id, student: ownerId, status: "approved" }));
+  }
+  if (!isOwner && !isAdmin && !teacherAuthed && !parentAuthed) {
     res.status(403);
     throw new Error("Bu nəticəyə icazəniz yoxdur");
   }

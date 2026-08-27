@@ -8,6 +8,7 @@ const Submission = require("../models/submissionModel");
 const Result = require("../models/resultModel");
 const Attendance = require("../models/attendanceModel");
 const Payment = require("../models/paymentModel");
+const Attempt = require("../models/attemptModel");
 
 // Compact child DTO — never leak more of a student's account than a parent needs.
 const childDto = (u) => ({
@@ -214,6 +215,36 @@ const childPayments = asyncHandler(async (req, res) => {
   res.json({ payments, unpaidTotal });
 });
 
+// GET /api/parent/live — the parent's children who are TAKING an exam right now
+// (in-progress attempts), with lightweight progress. Mirrors the teacher live board
+// but scoped to the parent's approved children and without the live answer key.
+const childrenLive = asyncHandler(async (req, res) => {
+  const childIds = await ParentLink.find({ parent: req.user._id, status: "approved" }).distinct("student");
+  if (!childIds.length) return res.json({ live: [] });
+  const cutoff = new Date(Date.now() - 2 * 60 * 1000); // in-progress = not long-expired
+  const attempts = await Attempt.find({ userId: { $in: childIds }, submitted: false, expiresAt: { $gt: cutoff } })
+    .populate("userId", "name photo")
+    .populate("examId", "name totalMarks")
+    .sort({ lastSeenAt: -1 })
+    .lean();
+  const now = Date.now();
+  const live = attempts
+    .filter((a) => a.examId && a.userId)
+    .map((a) => ({
+      attemptId: a._id,
+      child: { _id: a.userId._id, name: a.userId.name || "", photo: a.userId.photo || "" },
+      examName: a.examId.name || "İmtahan",
+      currentQuestion: a.currentQuestion || 0,
+      answeredCount: a.answeredCount || 0,
+      violations: a.violations || 0,
+      startedAt: a.startedAt,
+      expiresAt: a.expiresAt,
+      // "writing now" if a heartbeat landed in the last 30s.
+      active: a.lastSeenAt ? now - new Date(a.lastSeenAt).getTime() < 30 * 1000 : false,
+    }));
+  res.json({ live });
+});
+
 // GET /api/parent/teacher/students — the teacher's students (across their classes),
 // each with their class(es), the owning teacher, and their linked parents + status.
 // Admins see every class (and which teacher owns it).
@@ -343,6 +374,7 @@ module.exports = {
   childHomework,
   childAttendance,
   childPayments,
+  childrenLive,
   teacherStudents,
   decideParentLink,
   myParentRequests,

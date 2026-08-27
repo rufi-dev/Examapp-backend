@@ -10,6 +10,7 @@ const {
   childHomework,
   childAttendance,
   childPayments,
+  childrenLive,
   teacherStudents,
   decideParentLink,
   myParentRequests,
@@ -21,6 +22,7 @@ const {
 router.post("/link", protect, parentOnly, linkChild); // by code (instant)
 router.post("/link-email", protect, parentOnly, linkChildByEmail); // by email (pending)
 router.get("/children", protect, parentOnly, listChildren);
+router.get("/live", protect, parentOnly, childrenLive); // children taking an exam now
 router.delete("/children/:childId", protect, parentOnly, unlinkChild);
 router.get("/children/:childId/results", protect, parentOnly, childResults);
 router.get("/children/:childId/homework", protect, parentOnly, childHomework);
