@@ -108,4 +108,20 @@ const deletePayment = asyncHandler(async (req, res) => {
   res.json({ ok: true });
 });
 
-module.exports = { createPayment, listPayments, updatePayment, deletePayment };
+// GET /api/payments/my — a STUDENT's own payment ledger + unpaid total (read-only).
+const myPayments = asyncHandler(async (req, res) => {
+  const rows = await Payment.find({ student: req.user._id, deletedAt: null }).sort({ createdAt: -1 }).limit(300).lean();
+  const payments = rows.map((p) => ({
+    _id: p._id,
+    label: p.label,
+    amount: p.amount,
+    paid: p.paid,
+    paidAt: p.paidAt,
+    dueDate: p.dueDate,
+    createdAt: p.createdAt,
+  }));
+  const unpaidTotal = rows.filter((p) => !p.paid).reduce((s, p) => s + (p.amount || 0), 0);
+  res.json({ payments, unpaidTotal });
+});
+
+module.exports = { createPayment, listPayments, updatePayment, deletePayment, myPayments };

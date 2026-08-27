@@ -10,10 +10,13 @@ const {
   toggleAttendance,
   markAttendance,
   checkin,
+  myLessons,
 } = require("../controllers/lessonController");
 
 // Student self-check-in by QR code. Declared before "/:id" so "checkin" isn't an id.
 router.post("/checkin/:code", protect, checkin);
+// A student's own lessons + attendance (declared before "/:id").
+router.get("/my", protect, myLessons);
 
 // Teacher lesson calendar CRUD.
 router.post("/", protect, teacherOnly, createLesson);

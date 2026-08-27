@@ -33,9 +33,10 @@ function assertOwns(lesson, user, res) {
   }
 }
 
-// POST /api/lessons — schedule a lesson for a class.
+// POST /api/lessons — schedule a lesson for a class. Optionally repeat it weekly
+// (same weekday/time) for `repeatWeeks` extra weeks — a quick way to lay out a term.
 const createLesson = asyncHandler(async (req, res) => {
-  const { classId, title, note, startAt, endAt, price } = req.body || {};
+  const { classId, title, note, startAt, endAt, price, repeatWeeks } = req.body || {};
   if (!mongoose.isValidObjectId(classId)) {
     res.status(400);
     throw new Error("Sinif seçilməyib");
@@ -53,17 +54,29 @@ const createLesson = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("Başlama vaxtı yanlışdır");
   }
-  const lesson = await Lesson.create({
+  const baseStart = new Date(startAt);
+  const baseEnd = endAt && !Number.isNaN(new Date(endAt).getTime()) ? new Date(endAt) : null;
+  const price0 = price != null && price !== "" ? Math.max(0, Number(price)) : null;
+  const extra = Math.min(51, Math.max(0, Number(repeatWeeks) || 0)); // 0..51 extra weekly copies
+  const common = {
     owner: cls.owner,
     class: cls._id,
     title: String(title || "").slice(0, 200),
     note: String(note || "").slice(0, 2000),
-    startAt: new Date(startAt),
-    endAt: endAt && !Number.isNaN(new Date(endAt).getTime()) ? new Date(endAt) : null,
-    price: price != null && price !== "" ? Math.max(0, Number(price)) : null,
-    attendanceCode: await uniqueAttendanceCode(),
-  });
-  res.status(201).json(lesson);
+    price: price0,
+  };
+  const WEEK = 7 * 24 * 60 * 60 * 1000;
+  const docs = [];
+  for (let i = 0; i <= extra; i++) {
+    docs.push({
+      ...common,
+      startAt: new Date(baseStart.getTime() + i * WEEK),
+      endAt: baseEnd ? new Date(baseEnd.getTime() + i * WEEK) : null,
+      attendanceCode: await uniqueAttendanceCode(),
+    });
+  }
+  const created = await Lesson.insertMany(docs);
+  res.status(201).json({ lesson: created[0], count: created.length });
 });
 
 // GET /api/lessons?classId=&from=&to= — the teacher's lessons (optionally one class,
@@ -251,6 +264,35 @@ const checkin = asyncHandler(async (req, res) => {
     .catch(() => {});
 });
 
+// GET /api/lessons/my — a STUDENT's own lessons (approved classes), recent + upcoming,
+// with their attendance status. When check-in is open, the code is returned so the
+// student can check in from inside the app (no camera needed).
+const myLessons = asyncHandler(async (req, res) => {
+  const classIds = await Enrollment.find({ student: req.user._id, status: "approved" }).distinct("class");
+  if (!classIds.length) return res.json({ lessons: [] });
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // last 30 days + future
+  const lessons = await Lesson.find({ class: { $in: classIds }, deletedAt: null, startAt: { $gte: since } })
+    .populate("class", "name")
+    .sort({ startAt: 1 })
+    .limit(300)
+    .lean();
+  const ids = lessons.map((l) => l._id);
+  const marks = ids.length ? await Attendance.find({ lesson: { $in: ids }, student: req.user._id }).lean() : [];
+  const byLesson = new Map(marks.map((m) => [String(m.lesson), m]));
+  res.json({
+    lessons: lessons.map((l) => ({
+      _id: l._id,
+      title: l.title,
+      className: l.class?.name || "",
+      startAt: l.startAt,
+      endAt: l.endAt,
+      attendanceOpen: !!l.attendanceOpen,
+      attendanceCode: l.attendanceOpen ? l.attendanceCode : null,
+      myStatus: byLesson.get(String(l._id))?.status || null,
+    })),
+  });
+});
+
 module.exports = {
   createLesson,
   listLessons,
@@ -260,4 +302,5 @@ module.exports = {
   toggleAttendance,
   markAttendance,
   checkin,
+  myLessons,
 };
