@@ -1,10 +1,14 @@
 const asyncHandler = require("express-async-handler");
 const mongoose = require("mongoose");
 const Payment = require("../models/paymentModel");
+const RecurringPayment = require("../models/recurringPaymentModel");
 const ClassModel = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 const User = require("../models/userModel");
 const parentNotify = require("../helper/parentNotify");
+
+const AZ_MONTHS = ["Yanvar", "Fevral", "Mart", "Aprel", "May", "İyun", "İyul", "Avqust", "Sentyabr", "Oktyabr", "Noyabr", "Dekabr"];
+const periodOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 
 const isAdmin = (u) => u && u.role === "admin";
 
@@ -124,4 +128,123 @@ const myPayments = asyncHandler(async (req, res) => {
   res.json({ payments, unpaidTotal });
 });
 
-module.exports = { createPayment, listPayments, updatePayment, deletePayment, myPayments };
+// ── Recurring monthly plans ──────────────────────────────────────────────────
+
+// POST /api/payments/recurring — set (or update) a student's monthly fee for a class.
+const upsertRecurring = asyncHandler(async (req, res) => {
+  const { classId, studentId, amount, label, dayOfMonth } = req.body || {};
+  if (!mongoose.isValidObjectId(classId) || !mongoose.isValidObjectId(studentId)) {
+    res.status(400);
+    throw new Error("Sinif və şagird seçin");
+  }
+  await assertClassOwner(classId, req.user, res);
+  const enrolled = await Enrollment.exists({ class: classId, student: studentId, status: "approved" });
+  if (!enrolled) {
+    res.status(400);
+    throw new Error("Şagird bu sinifdə deyil");
+  }
+  const student = await User.findById(studentId).select("name").lean();
+  const day = Math.min(28, Math.max(1, Number(dayOfMonth) || 1));
+  const plan = await RecurringPayment.findOneAndUpdate(
+    { student: studentId, class: classId },
+    {
+      $set: { amount: Math.max(0, Number(amount) || 0), label: String(label || "").slice(0, 120), dayOfMonth: day, active: true, owner: req.user._id, studentName: student?.name || "" },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+  res.status(201).json(plan);
+});
+
+// GET /api/payments/recurring?classId= — the teacher's monthly plans.
+const listRecurring = asyncHandler(async (req, res) => {
+  const q = {};
+  if (req.user.role !== "admin") q.owner = req.user._id;
+  if (req.query.classId && mongoose.isValidObjectId(req.query.classId)) q.class = req.query.classId;
+  const plans = await RecurringPayment.find(q).lean();
+  res.json(plans);
+});
+
+// PATCH /api/payments/recurring/:id — edit amount/day/label or toggle active.
+const updateRecurring = asyncHandler(async (req, res) => {
+  const plan = await RecurringPayment.findById(req.params.id);
+  if (!plan) {
+    res.status(404);
+    throw new Error("Plan tapılmadı");
+  }
+  if (req.user.role !== "admin" && String(plan.owner) !== String(req.user._id)) {
+    res.status(403);
+    throw new Error("İcazə yoxdur");
+  }
+  const { amount, label, dayOfMonth, active } = req.body || {};
+  if (amount !== undefined) plan.amount = Math.max(0, Number(amount) || 0);
+  if (label !== undefined) plan.label = String(label).slice(0, 120);
+  if (dayOfMonth !== undefined) plan.dayOfMonth = Math.min(28, Math.max(1, Number(dayOfMonth) || 1));
+  if (active !== undefined) plan.active = !!active;
+  await plan.save();
+  res.json(plan);
+});
+
+// DELETE /api/payments/recurring/:id — stop the plan (past Payments are kept).
+const deleteRecurring = asyncHandler(async (req, res) => {
+  const plan = await RecurringPayment.findById(req.params.id);
+  if (!plan) {
+    res.status(404);
+    throw new Error("Plan tapılmadı");
+  }
+  if (req.user.role !== "admin" && String(plan.owner) !== String(req.user._id)) {
+    res.status(403);
+    throw new Error("İcazə yoxdur");
+  }
+  await plan.deleteOne();
+  res.json({ ok: true });
+});
+
+// Daily sweep: for each active plan whose due day has arrived this month and whose
+// Payment hasn't been generated yet, create it (claiming the period atomically first so
+// concurrent runs never double-charge), then notify parents. Returns a count.
+async function runRecurringSweep(now = new Date()) {
+  const period = periodOf(now);
+  const today = now.getDate();
+  let created = 0;
+  const plans = await RecurringPayment.find({ active: true, lastGeneratedPeriod: { $ne: period } }).lean();
+  for (const plan of plans) {
+    if (today < plan.dayOfMonth) continue; // due day not reached yet this month
+    // Atomically claim this period so a second sweep (or the worker) can't duplicate.
+    const claim = await RecurringPayment.updateOne(
+      { _id: plan._id, lastGeneratedPeriod: { $ne: period } },
+      { $set: { lastGeneratedPeriod: period } }
+    );
+    if (!claim.modifiedCount) continue;
+    // Skip if the student left the class in the meantime.
+    const enrolled = await Enrollment.exists({ class: plan.class, student: plan.student, status: "approved" });
+    if (!enrolled) continue;
+    const dueDate = new Date(now.getFullYear(), now.getMonth(), plan.dayOfMonth);
+    const label = plan.label || `${AZ_MONTHS[now.getMonth()]} ayı`;
+    await Payment.create({
+      owner: plan.owner,
+      class: plan.class,
+      student: plan.student,
+      studentName: plan.studentName || "",
+      label,
+      amount: plan.amount,
+      paid: false,
+      dueDate,
+    });
+    created += 1;
+    parentNotify.payment(plan.student, plan.class, { childName: plan.studentName, label, amount: plan.amount, paid: false, dueDate }).catch(() => {});
+  }
+  return created;
+}
+
+module.exports = {
+  createPayment,
+  listPayments,
+  updatePayment,
+  deletePayment,
+  myPayments,
+  upsertRecurring,
+  listRecurring,
+  updateRecurring,
+  deleteRecurring,
+  runRecurringSweep,
+};

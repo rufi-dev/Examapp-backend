@@ -445,6 +445,18 @@ mongoose
         track(setTimeout(outreachTick, 60 * 1000))
         track(setInterval(outreachTick, 2 * 60 * 1000))
 
+        // Recurring monthly payments: once a day, materialise this month's Payment for
+        // each active plan whose due day has arrived (idempotent per period). Cheap and
+        // safe to always schedule — a no-op when no plans are due.
+        const recurringTick = beat("recurring-payments", 24 * 60 * 60 * 1000, async () => {
+            try {
+                const n = await require("./controllers/paymentController").runRecurringSweep()
+                if (n) console.log(`[RECURRING] generated ${n} monthly payment(s)`)
+            } catch (e) { console.warn("[RECURRING] sweep error:", e && e.message) }
+        })
+        track(setTimeout(recurringTick, 3 * 60 * 1000))
+        track(setInterval(recurringTick, 24 * 60 * 60 * 1000))
+
         // Teacher Success Journey recovery worker (CR-122/CR-125) — ONLY when the
         // flag is on. Reclaims stale AI credit reservations (crash between reserve
         // and settle) and repairs deferred referral bindings. Idempotent + bounded;
