@@ -719,6 +719,39 @@ const annotateSubmission = asyncHandler(async (req, res) => {
   res.json(populated);
 });
 
+// DELETE /api/assignments/:id/submissions/:submissionId/annotations/:fileName
+// Remove only the teacher's marked-up copy; the student's original remains.
+const deleteSubmissionAnnotation = asyncHandler(async (req, res) => {
+  const a = await Assignment.findById(req.params.id).lean();
+  if (!a || a.deletedAt) return res.status(404).json({ message: "Tapılmadı" });
+  if (!(await isClassManager(req.user, a.class))) {
+    return res.status(403).json({ message: "İcazə yoxdur" });
+  }
+
+  const requestedName = String(req.params.fileName || "");
+  const fileName = path.basename(requestedName);
+  if (!fileName || requestedName !== fileName || requestedName.includes("\\")) {
+    return res.status(404).json({ message: "Fayl tapılmadı" });
+  }
+
+  const submission = await Submission.findOneAndUpdate(
+    {
+      _id: req.params.submissionId,
+      assignment: a._id,
+      "annotations.fileName": fileName,
+    },
+    { $pull: { annotations: { fileName } } },
+    { new: true }
+  )
+    .populate("student", "name email photo")
+    .lean();
+
+  if (!submission) return res.status(404).json({ message: "Fayl tapılmadı" });
+  cleanup(path.join(ASSIGNMENTS_DIR, fileName));
+  cleanup(path.join(THUMBS_DIR, `${fileName}.webp`));
+  return res.json(submission);
+});
+
 // Stream a stored file after the caller has been authorised. Inline by default
 // (so images/PDF render in-app); `download` forces a save with the real name;
 // `thumb` serves a small cached preview for images (falls back to the original).
@@ -772,5 +805,6 @@ module.exports = {
   getAttachmentFile,
   getSubmissionFile,
   annotateSubmission,
+  deleteSubmissionAnnotation,
   isManagerRole,
 };
