@@ -182,8 +182,24 @@ async function waitingCount(now = new Date()) {
   return n;
 }
 
-// One sweep. Idempotent, bounded, safe on an interval.
+// Why the last sweep did nothing. Logged only when the reason CHANGES, so the
+// watcher's state is always visible in the logs without spamming every 2 minutes.
+let lastNote = "";
+function note(res) {
+  const k = JSON.stringify(res);
+  if (k !== lastNote) {
+    lastNote = k;
+    console.log("[OUTREACH]", k);
+  }
+  return res;
+}
+
 async function runOutreachSweep(now = new Date()) {
+  return note(await sweepInner(now));
+}
+
+// One sweep. Idempotent, bounded, safe on an interval.
+async function sweepInner(now = new Date()) {
   const { enabled, lastSentAt, since } = await getSettings();
   if (!enabled) return { skipped: "disabled" };
 

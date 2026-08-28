@@ -1,5 +1,40 @@
 const asyncHandler = require("express-async-handler")
 const Achivement = require("../models/achivementModel")
+const User = require("../models/userModel")
+const Class = require("../models/classModel")
+const Enrollment = require("../models/enrollmentModel")
+const ParentLink = require("../models/parentLinkModel")
+
+// Which teachers' success stories THIS caller may see.
+//
+// A story a teacher uploads is about their own students, so it stays inside that
+// teacher's circle: the teacher, their approved students, and those students'
+// linked parents (admins see everything). Stories with no owner are the curated
+// admin ones — those remain the public "Uğurlarımız" gallery, so an anonymous
+// visitor gets exactly those and nothing else.
+async function visibleOwnerIds(user) {
+    if (!user) return []
+    if (user.role === "admin") return "all"
+
+    const owners = new Set([String(user._id)]) // a teacher always sees their own
+
+    // The students whose classes decide what this caller may see: for a parent,
+    // their linked children; for anyone else, themselves.
+    let studentIds = [user._id]
+    if (user.role === "parent") {
+        const links = await ParentLink.find({ parent: user._id, status: "approved" }).select("student").lean()
+        studentIds = links.map((l) => l.student)
+    }
+    if (!studentIds.length) return [...owners]
+
+    // Approved enrolments → the classes they're in → those classes' owners.
+    const enrolments = await Enrollment.find({ student: { $in: studentIds }, status: "approved" }).select("class").lean()
+    if (enrolments.length) {
+        const classes = await Class.find({ _id: { $in: enrolments.map((e) => e.class) }, deletedAt: null }).select("owner").lean()
+        classes.forEach((c) => c.owner && owners.add(String(c.owner)))
+    }
+    return [...owners]
+}
 
 const addAchivement = asyncHandler(async (req, res) => {
     const { title, about, photo, size } = req.body
@@ -23,13 +58,18 @@ const addAchivement = asyncHandler(async (req, res) => {
 })
 
 const getAchivements = asyncHandler(async (req, res) => {
-    const achivements = await Achivement.find({})
+    const owners = await visibleOwnerIds(req.user)
+    // The public gallery = stories with no owner (legacy) PLUS anything an admin
+    // posted; those are curated marketing content. A TEACHER's story is about their
+    // own students, so it only reaches their circle. `$in: [null]` also matches a
+    // missing field.
+    const adminIds = (await User.find({ role: "admin" }).select("_id").lean()).map((a) => a._id)
+    const filter =
+        owners === "all"
+            ? {}
+            : { $or: [{ owner: { $in: [null, ...adminIds] } }, ...(owners.length ? [{ owner: { $in: owners } }] : [])] }
 
-    if (!achivements) {
-        res.status(404)
-        throw new Error("Couldn't fetch any achivement")
-    }
-
+    const achivements = await Achivement.find(filter).sort({ createdAt: -1 })
     res.status(200).json(achivements)
 })
 
