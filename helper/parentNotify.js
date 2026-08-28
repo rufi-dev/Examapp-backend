@@ -42,7 +42,10 @@ async function notifyParentsOf(studentId, classId, text, category) {
       if (!cls || !cls.notifyParents) return;
       if (category && cls.parentNotify && cls.parentNotify[category] === false) return;
     }
-    const parentIds = await ParentLink.find({ student: studentId }).distinct("parent");
+    // APPROVED links only. A pending request grants no data anywhere else (see
+    // parentController.isLinked); without this filter someone who merely asked to
+    // follow a child by email would receive their attendance, grades and debts.
+    const parentIds = await ParentLink.find({ student: studentId, status: "approved" }).distinct("parent");
     if (!parentIds.length) return;
     const senderId = await adminSender();
     if (!senderId) return; // no linked WhatsApp — silently skip
