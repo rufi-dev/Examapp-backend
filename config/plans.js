@@ -37,7 +37,7 @@ const PLANS = {
     credits: { welcome: num("PLAN_FREE_WELCOME_CREDITS", 60), monthly: num("PLAN_FREE_MONTHLY_CREDITS", 20) },
     // Live monitoring ("Canlı izlə") is FREE for everyone — it is not enforced by
     // plan anywhere, so the pricing card reflects that (available on every tier).
-    features: { whatsapp: false, analytics: "basic", pdfExport: false, prioritySupport: false, liveExams: true },
+    features: { whatsapp: false, teacherWhatsApp: false, analytics: "basic", pdfExport: false, prioritySupport: false, liveExams: true },
   },
   pro: {
     id: "pro",
@@ -49,7 +49,10 @@ const PLANS = {
       examCreations: Infinity,
     },
     credits: { welcome: 0, monthly: num("PLAN_PRO_MONTHLY_CREDITS", 350) },
-    features: { whatsapp: true, analytics: "full", pdfExport: true, prioritySupport: true, liveExams: true },
+    // `whatsapp` = parent notifications (sent from the platform number).
+    // `teacherWhatsApp` = linking the teacher's OWN number — Premium only, because
+    // each linked number costs a headless browser on the server.
+    features: { whatsapp: true, teacherWhatsApp: false, analytics: "full", pdfExport: true, prioritySupport: true, liveExams: true },
   },
   premium: {
     id: "premium",
@@ -61,7 +64,7 @@ const PLANS = {
       examCreations: Infinity,
     },
     credits: { welcome: 0, monthly: num("PLAN_PREMIUM_MONTHLY_CREDITS", 2000) },
-    features: { whatsapp: true, analytics: "full", pdfExport: true, prioritySupport: true, liveExams: true },
+    features: { whatsapp: true, teacherWhatsApp: true, analytics: "full", pdfExport: true, prioritySupport: true, liveExams: true },
   },
 };
 

@@ -90,6 +90,17 @@ function liveCount() {
   return n;
 }
 
+// How many live sessions there are vs. how many this server can hold. Each one is
+// a headless Chromium (~0.6 GB RAM, ~0.8 GB disk), so the cap is a hardware limit,
+// not a policy: the teacher linking UI reads this to say "no free slot" instead of
+// silently failing to produce a QR. `has` = this owner already occupies a slot.
+function capacity(ownerId) {
+  const live = liveCount();
+  const s = ownerId ? sessions.get(String(ownerId)) : null;
+  const has = !!(s && (s.client || s.starting));
+  return { live, max: MAX_SESSIONS, has, free: has || live < MAX_SESSIONS };
+}
+
 // True once a teacher has a session profile on disk — i.e. they have actually
 // been through the "Connect WhatsApp" flow (LocalAuth writes session-<ownerId>
 // on first initialize). Used to keep the new-exam notifier from EVER creating a
@@ -665,6 +676,7 @@ module.exports = {
   sendMessageFor,
   sendOutreachFor,
   firstReadyOwner,
+  capacity,
   accountKey,
   readyOwners,
   nextReadyOwner,

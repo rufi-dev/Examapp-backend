@@ -1,6 +1,8 @@
 const express = require("express");
 const router = express.Router();
-const { protect, adminOnly } = require("../middleware/authMiddleware");
+const { protect, adminOnly, teacherOnly } = require("../middleware/authMiddleware");
+const { effectivePlan } = require("../helper/planLimits");
+const { featuresFor } = require("../config/plans");
 const { sendAdminUserMessage } = require("../controllers/whatsappController");
 const User = require("../models/userModel");
 const {
@@ -13,6 +15,7 @@ const {
   sendForOwner,
   listGroupsFor,
   accountKey,
+  capacity,
 } = require("../helper/whatsapp");
 
 // ADMIN-ONLY: WhatsApp linking is an admin surface (the /connections page is
@@ -104,6 +107,65 @@ router.post("/group/test", protect, adminOnly, async (req, res) => {
     "✅ Examopia bildiriş qrupu qoşuldu. Yeni imtahanlar bura göndəriləcək."
   );
   res.json({ ok });
+});
+
+// ── TEACHER surface: link YOUR OWN number, so parent notifications go out from it ──
+//
+// Premium only. Every linked number is a headless Chromium on the server, so this
+// is capacity-bound (see `capacity`), not just a pricing choice. A teacher gets
+// exactly ONE slot and it is always derived from their own session — the slot is
+// never taken from the request, so nobody can drive another teacher's session.
+const teacherKey = (req) => accountKey(req.user._id, 1);
+
+const premiumWhatsApp = (req, res, next) => {
+  if (req.user?.role === "admin") return next();
+  if (featuresFor(effectivePlan(req.user)).teacherWhatsApp) return next();
+  return res.status(403).json({
+    ok: false,
+    code: "PLAN_REQUIRED",
+    message: "Öz WhatsApp nömrənizi qoşmaq Premium paketə daxildir.",
+  });
+};
+const teacherGate = [protect, teacherOnly, premiumWhatsApp];
+
+router.get("/teacher/status", ...teacherGate, (req, res) => {
+  res.json({ ...getStatusFor(teacherKey(req)), capacity: capacity(teacherKey(req)) });
+});
+
+router.get("/teacher/qr", ...teacherGate, (req, res) => {
+  const cap = capacity(teacherKey(req));
+  // Refuse clearly instead of returning a QR that can never appear.
+  if (!cap.free) {
+    return res.status(503).json({
+      ok: false,
+      code: "NO_SLOT",
+      message: "Hazırda boş WhatsApp yeri yoxdur. Bir az sonra yenidən cəhd edin.",
+      capacity: cap,
+    });
+  }
+  initFor(teacherKey(req));
+  res.json({ ...getStatusFor(teacherKey(req)), qr: getQrFor(teacherKey(req)), capacity: cap });
+});
+
+router.post("/teacher/qr/refresh", ...teacherGate, (req, res) => {
+  refreshFor(teacherKey(req));
+  res.json({ ok: true });
+});
+
+router.post("/teacher/logout", ...teacherGate, async (req, res) => {
+  await logoutFor(teacherKey(req));
+  res.json({ ok: true });
+});
+
+router.post("/teacher/test", ...teacherGate, async (req, res) => {
+  const phone = req.body?.phone || req.user?.phone;
+  if (!phone) return res.status(400).json({ ok: false, message: "Telefon nömrəsi yoxdur" });
+  const ok = await sendMessageFor(
+    teacherKey(req),
+    phone,
+    "✅ Examopia WhatsApp testi — bağlantı işləyir. Valideyn bildirişləri bu nömrədən gedəcək."
+  );
+  res.json({ ok, phone });
 });
 
 module.exports = router;

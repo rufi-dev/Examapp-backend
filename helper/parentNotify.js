@@ -1,7 +1,8 @@
-// Parent WhatsApp notifications. Because WhatsApp linking is admin-only, messages are
-// sent from a ready ADMIN/system session (the same pool the outreach job uses), NOT
-// from each teacher's number. Each event is gated per-class by class.notifyParents,
-// which the teacher controls. Every function is fire-and-forget and never throws.
+// Parent WhatsApp notifications. Sent from the CLASS TEACHER's own linked number
+// when they have one (Premium — see routes/whatsappRoute "teacher" surface), and
+// otherwise from a ready ADMIN/system session (the pool the outreach job uses).
+// Each event is gated per-class by class.notifyParents, which the teacher controls.
+// Every function is fire-and-forget and never throws.
 const wa = require("./whatsapp");
 const User = require("../models/userModel");
 const ClassModel = require("../models/classModel");
@@ -26,6 +27,18 @@ async function adminSender() {
   return wa.nextReadyOwner(keys);
 }
 
+// Who the message goes out from. A Premium teacher who linked their OWN number is
+// preferred — parents then see their teacher's number rather than the platform's.
+// Falls back to the system session whenever that teacher hasn't linked (or their
+// session is down), so notifications never silently stop.
+async function senderFor(ownerId) {
+  if (ownerId) {
+    const own = wa.readyOwners([wa.accountKey(ownerId, 1)]);
+    if (own.length) return own[0];
+  }
+  return adminSender();
+}
+
 async function nameOf(studentId) {
   const u = await User.findById(studentId).select("name").lean();
   return u?.name || "Şagird";
@@ -37,17 +50,19 @@ async function nameOf(studentId) {
 async function notifyParentsOf(studentId, classId, text, category) {
   try {
     if (!enabled() || !text) return;
+    let owner = null;
     if (classId) {
-      const cls = await ClassModel.findById(classId).select("notifyParents parentNotify").lean();
+      const cls = await ClassModel.findById(classId).select("notifyParents parentNotify owner").lean();
       if (!cls || !cls.notifyParents) return;
       if (category && cls.parentNotify && cls.parentNotify[category] === false) return;
+      owner = cls.owner || null; // the teacher whose number we prefer to send from
     }
     // APPROVED links only. A pending request grants no data anywhere else (see
     // parentController.isLinked); without this filter someone who merely asked to
     // follow a child by email would receive their attendance, grades and debts.
     const parentIds = await ParentLink.find({ student: studentId, status: "approved" }).distinct("parent");
     if (!parentIds.length) return;
-    const senderId = await adminSender();
+    const senderId = await senderFor(owner);
     if (!senderId) return; // no linked WhatsApp — silently skip
     const parents = await User.find({ _id: { $in: parentIds } }).select("phone").lean();
     for (const p of parents) {
