@@ -689,6 +689,9 @@ const annotateSubmission = asyncHandler(async (req, res) => {
   if (kindFromType(file.detectedType) !== "image") return fail(400, "Yalnız şəkil");
 
   const sourceFileName = String(req.body.sourceFileName || "");
+  // Present only when the teacher re-opened an already-marked image to keep
+  // editing it; identifies that annotation by its stored fileName.
+  const annotationFileName = String(req.body.annotationFileName || "");
   const doc = {
     fileName: path.basename(file.path),
     originalName: decodeUploadName(file.originalname) || "isarelenmis.png",
@@ -697,15 +700,16 @@ const annotateSubmission = asyncHandler(async (req, res) => {
     sourceFileName,
     createdAt: new Date(),
   };
-  // Replace an earlier annotation of the same source image (don't pile up).
-  if (sourceFileName) {
-    const idx = s.annotations.findIndex((x) => x.sourceFileName === sourceFileName);
-    if (idx >= 0) {
-      cleanup(path.join(ASSIGNMENTS_DIR, s.annotations[idx].fileName));
-      s.annotations.splice(idx, 1);
-    }
+  const idx = annotationFileName ? s.annotations.findIndex((x) => x.fileName === annotationFileName) : -1;
+  if (idx >= 0) {
+    // Re-editing an existing marked image → update that one in place (keep it linked).
+    cleanup(path.join(ASSIGNMENTS_DIR, s.annotations[idx].fileName));
+    doc.sourceFileName = s.annotations[idx].sourceFileName || sourceFileName;
+    Object.assign(s.annotations[idx], doc);
+  } else {
+    // Marking a student's upload → add a brand-new marked copy every time.
+    s.annotations.push(doc);
   }
-  s.annotations.push(doc);
   s.status = "returned";
   s.gradedAt = new Date();
   s.gradedBy = req.user._id;
