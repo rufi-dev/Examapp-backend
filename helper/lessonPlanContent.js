@@ -212,6 +212,10 @@ MƏCBURİ SAYLAR (pozulması qəbul edilmir):
 - "criteria": DƏQİQ 3 ədəd — nə 2, nə 4. Hər meyar "Şagird ... bacarır" formasında,
   bir-birindən fərqli və yoxlanıla bilən olsun.
 - "tasks": ${TASK_COUNT_MIN}–${TASK_COUNT_MAX} ədəd, çətinliyi TƏDRİCƏN artan.
+  RƏNGARƏNGLİK MƏCBURİDİR: tapşırıqlar bir-birinin təkrarı olmasın. Rəqəmləri elə
+  seç ki, NƏTİCƏLƏR də fərqli çıxsın — eyni cavabı (məsələn hamısında eyni bucaq
+  əmsalı) təkrarlama. Müsbət, mənfi, sıfır və kəsr hallarını qarışdır; sonuncu
+  1–2 tapşırıq isə xüsusi/istisna halı yoxlasın.
 - "stages": 4–6 mərhələ; "minutes" cəmi dərsin müddətinə BƏRABƏR olsun.
 
 HƏR TAPŞIRIQ ÜÇÜN:
