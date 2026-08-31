@@ -54,6 +54,35 @@ assertTeacherSuccessConfig()
 // exist and MIGRATION_TS is a valid timestamp. In production a failed assertion is
 // FATAL (a missing unique index silently permits duplicate Results / active
 // attempts); in dev it builds the indexes for convenience and only warns.
+const { isCurriculumEnabled } = require('./config/curriculumFlag')
+const { assertCurriculumIndexes } = require('./helper/curriculumIndexes')
+const { preflight: curriculumStoragePreflight } = require('./helper/curriculumStorage')
+const { buildManifest: buildAdaptationManifest } = require('./helper/adaptationTemplates')
+const ADAPTATION_MANIFEST = require('./config/adaptationManifest')
+
+// CR-MSO-017: a pinned template/evaluator must mean today exactly what it meant
+// when a document was published against it. Old code cannot be resurrected, so the
+// achievable guarantee is to FAIL LOUDLY instead of re-interpreting.
+function assertAdaptationManifest() {
+    const live = buildAdaptationManifest()
+    const problems = []
+    for (const [id, digest] of Object.entries(ADAPTATION_MANIFEST.templates || {})) {
+        if (live.templates[id] === undefined) problems.push(`template ${id} was REMOVED`)
+        else if (live.templates[id] !== digest) problems.push(`template ${id} changed without a new version`)
+    }
+    for (const [v, digest] of Object.entries(ADAPTATION_MANIFEST.evaluators || {})) {
+        if (live.evaluators[v] === undefined) problems.push(`evaluator ${v} was REMOVED`)
+        else if (live.evaluators[v] !== digest) problems.push(`evaluator ${v} changed without a new version`)
+    }
+    if (problems.length) {
+        throw new Error(
+            `FATAL adaptation registry: ${problems.join('; ')}. ` +
+            'Ship a NEW version (e.g. ".v2") instead of editing a published one; ' +
+            'regenerate config/adaptationManifest.js only for a deliberate addition.'
+        )
+    }
+}
+
 async function verifyStartupInvariants() {
     const isProd = process.env.NODE_ENV === 'production'
 
@@ -106,6 +135,31 @@ async function verifyStartupInvariants() {
             const rt = await verifyTeacherSuccessIndexes(mongoose.connection.db)
             // users.referralCode index is migration-owned; a dev warning is enough.
             if (!rt.ok) console.warn('[STARTUP] Teacher Success index contract:', rt.failures.map((f) => `${f.collection}.${f.name}:${f.reason}`).join(', '))
+        }
+    }
+
+    // Curriculum / lesson plans / MSO — ONLY when the flag is enabled. Flag-off is a
+    // TRUE no-op here: no curriculum collection or index is asserted or built, so a
+    // flag-off deployment boots exactly as it did before the feature existed.
+    if (isCurriculumEnabled()) {
+        // The adaptation registries are append-only. Recompute their digests and
+        // compare to the frozen manifest: editing a v1 template spec, or the v1
+        // evaluator, WITHOUT bumping the version would silently re-interpret every
+        // document already published against it, so it must refuse to boot.
+        assertAdaptationManifest()
+
+        // Private, immutable storage for the bytes every citation is pinned to. A
+        // cwd-relative directory lives in the container layer and is erased on
+        // rebuild, which would destroy those bytes — refuse it in production.
+        curriculumStoragePreflight()
+
+        if (isProd) {
+            await assertCurriculumIndexes(mongoose.connection.db)
+        } else {
+            const { verifyCurriculumIndexes, modelFor, MODEL_COLLECTIONS } = require('./helper/curriculumIndexes')
+            await Promise.all(Object.keys(MODEL_COLLECTIONS).map((c) => modelFor(c).createIndexes()))
+            const rc = await verifyCurriculumIndexes(mongoose.connection.db)
+            if (!rc.ok) console.warn('[STARTUP] Curriculum index contract:', rc.failures.map((f) => `${f.collection}.${f.name}:${f.reason}`).join(', '))
         }
     }
 }
@@ -200,6 +254,12 @@ app.use("/api/lessons", require("./routes/lessonRoute"))
 // Payments ledger: teacher tracks per-student paid/unpaid charges (monthly or
 // per-lesson). Parents see them via /api/parent.
 app.use("/api/payments", require("./routes/paymentRoute"))
+// Curriculum sources, lesson plans and MSO. Every route is flag-gated (404 when
+// off), so mounting the routers unconditionally exposes nothing while the flag is
+// off — the same arrangement the Teacher Success routes use.
+app.use("/api/curriculum", require("./routes/curriculumRoute"))
+app.use("/api/lesson-plans", require("./routes/lessonPlanRoute"))
+app.use("/api/mso", require("./routes/msoRoute"))
 app.use("/api/health", healthRoute)
 // Public step-by-step "how to use the platform" guide videos (self-hosted help
 // content, NO auth — nothing sensitive). express.static gives byte-range support so
