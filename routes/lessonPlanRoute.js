@@ -16,6 +16,7 @@ router.post("/:id/publish", requireCurriculum, protect, teacherOnly, c.publishPl
 router.post("/:id/archive", requireCurriculum, protect, teacherOnly, c.archivePlan);
 router.delete("/:id", requireCurriculum, protect, teacherOnly, c.deletePlan);
 router.post("/:id/proposal/accept", requireCurriculum, protect, teacherOnly, c.acceptProposal);
+router.post("/:id/proposal/discard", requireCurriculum, protect, teacherOnly, c.discardProposal);
 router.get("/:id/projector", requireCurriculum, protect, teacherOnly, c.projectorView);
 // Two-variant worksheet, DERIVED from the plan's tasks — no AI call, no credit.
 router.post("/:id/worksheet", requireCurriculum, protect, teacherOnly, c.worksheet);

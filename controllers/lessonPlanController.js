@@ -302,11 +302,28 @@ const worksheet = asyncHandler(async (req, res) => {
     variants: { A: out.A, B: out.B },
     unvaried: out.unvaried,
     variedCount: out.variedCount,
+    aiVaried: out.aiVaried,
+    textVaried: out.textVaried,
   });
+});
+
+/*
+ * POST /:id/proposal/discard
+ *
+ * The counterpart to accept. Without it a proposal the teacher does not want sits
+ * on the plan for ever, and the only way to clear it is to accept content they
+ * rejected.
+ */
+const discardProposal = asyncHandler(async (req, res) => {
+  const plan = await mine(req, req.params.id);
+  plan.proposal = undefined;
+  await plan.save();
+  res.json({ ok: true, revision: plan.revision });
 });
 
 module.exports = {
   worksheet,
+  discardProposal,
   listPlans,
   createPlan,
   getPlan,

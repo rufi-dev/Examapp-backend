@@ -214,15 +214,39 @@ function buildWorksheet(tasks) {
   const B = [];
   const unvaried = [];
   let textVaried = 0;
+  let aiVaried = 0;
 
   list.forEach((t, i) => {
     const no = i + 1;
-    const base = { ...t, no, pairId: `w${no}`, variant: "A", reviewStatus: t.reviewStatus || "pending" };
+    // variantB is the RECIPE for the B paper, not content of the A paper.
+    const base = { ...t, variantB: undefined, no, pairId: `w${no}`, variant: "A", reviewStatus: t.reviewStatus || "pending" };
     A.push(base);
 
-    // Prefer the template path: it recomputes the ANSWER and can be trusted. Fall
-    // back to shifting the numbers in the text, which changes the paper without
-    // claiming any answer.
+    /*
+     * Three ways to get variant B, best first:
+     *
+     *  1. the model wrote one during plan generation — the only path that yields a
+     *     WORKED SOLUTION and an answer for B, because it re-solved the task;
+     *  2. a formal template — the server recomputes the answer itself;
+     *  3. shifting the numbers in the text — changes the paper, claims no answer.
+     *
+     * Anything else is left to the teacher rather than printing A twice.
+     */
+    const authored = t.variantB && t.variantB.statement && t.variantB.statement !== t.statement;
+    if (authored) {
+      B.push({
+        ...base,
+        variant: "B",
+        statement: t.variantB.statement,
+        solution: t.variantB.solution || "",
+        answer: t.variantB.answer || "",
+        variantB: undefined,
+        variedBy: "ai",
+      });
+      aiVaried += 1;
+      return;
+    }
+
     let varied = varyTask(base, no);
     let byText = false;
     if (!varied.ok) {
@@ -249,7 +273,7 @@ function buildWorksheet(tasks) {
     }
   });
 
-  return { A, B, unvaried, textVaried, variedCount: list.length - unvaried.length };
+  return { A, B, unvaried, textVaried, aiVaried, variedCount: list.length - unvaried.length };
 }
 
 module.exports = { perturb, varyTask, varyByText, buildWorksheet };

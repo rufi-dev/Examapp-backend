@@ -51,9 +51,23 @@ function normalizeLessonPlan(raw, { lessonMinutes = 45 } = {}) {
     // A nameless stage is not a stage; dropping it beats rendering a blank block.
     .filter((s) => s.name);
 
+  const variantOf = (v) => {
+    const statement = clean(v && v.statement);
+    // A variant that repeats variant A is not a variant. Dropping it here lets the
+    // worksheet fall back to shifting the numbers itself rather than printing two
+    // identical papers and calling them A and B.
+    if (!statement) return undefined;
+    return { statement, solution: clean(v && v.solution), answer: clean(v && v.answer) };
+  };
+
   const tasks = (Array.isArray(p.tasks) ? p.tasks : []).map((t) => ({
     statement: clean(t && t.statement),
     solution: clean(t && t.solution),
+    answer: clean(t && t.answer),
+    variantB: (() => {
+      const b = variantOf(t && t.variantB);
+      return b && b.statement !== clean(t && t.statement) ? b : undefined;
+    })(),
     bloom: clean(t && t.bloom),
     sourceMode: ["verbatim", "adapted", "original"].includes(t && t.sourceMode) ? t.sourceMode : "original",
     sourceEvidence: t && t.sourceEvidence && typeof t.sourceEvidence === "object" ? t.sourceEvidence : undefined,
@@ -204,7 +218,19 @@ HƏR TAPŞIRIQ ÜÇÜN:
 - "statement": konkret rəqəmlərlə, tam şəkildə yazılmış tapşırıq.
 - "solution": ADDIM-ADDIM tam həll — düstur, əvəzetmə və nəticə. Müəllim bunu
   "Yoxla" düyməsi ilə lövhədə açacaq, ona görə yalnız cavab yazmaq KİFAYƏT DEYİL.
+- "answer": YALNIZ son cavab, qısa (məsələn "k = 2, y = 2x" və ya "V = 60 sm³").
 - "bloom": tapşırığın Blum səviyyəsi.
+- "variantB": EYNİ tapşırığın İKİNCİ variantı — yan-yana oturan şagird köçürə
+  bilməsin deyə. Qaydalar:
+  * "statement": eyni tip, eyni çətinlik, eyni ifadə tərzi — YALNIZ rəqəmlər/verilənlər
+    fərqli. Yeni mövzu, əlavə addım və ya daha çətin hal GƏTİRMƏ.
+  * "solution": bu YENİ rəqəmlərlə addım-addım tam həll. Variant A-nın həllini
+    təkrarlama — hesablamaları yenidən apar.
+  * "answer": bu yeni rəqəmlərlə son cavab.
+  * Rəqəmləri elə seç ki, tapşırığın MƏNASI pozulmasın: məsələn iki nöqtədən keçən
+    xətt tapşırığında hər iki nöqtənin absisi eyni olarsa xətt şaquli olur və bucaq
+    əmsalı yoxdur — bu halda rəqəmləri başqa cür seç.
+  * Söz tapşırığında (rəqəm yoxdursa) verilənləri dəyiş: ad, kontekst, ölçü.
 
 HƏR MƏRHƏLƏ ÜÇÜN:
 - "teacher" və "student": kimin nə etdiyi, ayrı-ayrılıqda.

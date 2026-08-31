@@ -129,6 +129,43 @@ console.log("\n3b. Prose tasks are varied by shifting their numbers:");
   ok("the count reports how many were varied by text", w.textVaried === 4, w.textVaried);
 }
 
+console.log("\n3c. A model-authored variant B is preferred, and carries its own solution:");
+{
+  const authored = {
+    statement: "Nöqtələr A(1;2) və B(3;6) verilmişdir. Xəttin tənliyini yazın.",
+    solution: "k = (6-2)/(3-1) = 2; y - 2 = 2(x - 1); y = 2x.",
+    answer: "y = 2x",
+    variantB: {
+      statement: "Nöqtələr A(2;1) və B(5;10) verilmişdir. Xəttin tənliyini yazın.",
+      solution: "k = (10-1)/(5-2) = 3; y - 1 = 3(x - 2); y = 3x - 5.",
+      answer: "y = 3x - 5",
+    },
+  };
+  const w = buildWorksheet([authored]);
+  ok("B uses the authored statement", w.B[0].statement === authored.variantB.statement);
+  ok("B carries its OWN worked solution", w.B[0].solution === authored.variantB.solution);
+  ok("B carries its own answer", w.B[0].answer === authored.variantB.answer);
+  ok("B is marked as model-authored", w.B[0].variedBy === "ai", w.B[0].variedBy);
+  ok("it is counted", w.aiVaried === 1, w.aiVaried);
+  ok("A keeps its own solution", w.A[0].solution === authored.solution);
+
+  // The B recipe must not print on the A paper, and must not recurse into B.
+  ok("A does not carry the variantB blob", w.A[0].variantB === undefined);
+  ok("B does not carry the variantB blob", w.B[0].variantB === undefined);
+
+  // The whole point is two DIFFERENT papers. A model that copies A must not be
+  // trusted just because it filled the field in.
+  const copied = { ...authored, variantB: { ...authored.variantB, statement: authored.statement } };
+  const w2 = buildWorksheet([copied]);
+  ok("a copied variant is rejected and B is varied another way", w2.B[0].statement !== authored.statement);
+  ok("and it is not counted as model-authored", w2.aiVaried === 0, w2.aiVaried);
+
+  // Falling back must still work when there is no authored variant at all.
+  const w3 = buildWorksheet([{ statement: authored.statement, solution: authored.solution }]);
+  ok("no authored variant still yields a different B", w3.B[0].statement !== authored.statement);
+  ok("and reports the path it used", w3.B[0].variedBy === "text", w3.B[0].variedBy);
+}
+
 console.log("\n4. Both variants are complete and paired:");
 {
   const w = buildWorksheet([box(5, 3, 4), box(9, 2, 6), { statement: "İzah edin." }]);

@@ -56,6 +56,21 @@ const LESSON_PLAN_SCHEMA = {
         properties: {
           statement: str,
           solution: str,
+          // The final result on its own, so "Yoxla" can show an answer without
+          // making the teacher read the whole worked solution off a projector.
+          answer: str,
+          /*
+           * The SECOND variant of this same task, solved by the model in the same
+           * call. Shifting numbers server-side changes the paper but cannot
+           * recompute an answer for a task with no formal model, which left variant
+           * B with no solution at all. Asking for it here costs no extra request.
+           */
+          variantB: {
+            type: "object",
+            additionalProperties: false,
+            properties: { statement: str, solution: str, answer: str },
+            required: ["statement", "solution", "answer"],
+          },
           // "" is REQUIRED in the enum: without it the model is forced to assign a
           // Bloom level to a task that has none.
           bloom: { type: "string", enum: BLOOM_LEVELS },
@@ -68,7 +83,10 @@ const LESSON_PLAN_SCHEMA = {
           // so the server can match it against the pinned bytes. "" otherwise.
           sourceExcerpt: str,
         },
-        required: ["statement", "solution", "bloom", "sourceMode", "printedPageLabel", "sourceTaskNo", "sourceExcerpt"],
+        required: [
+          "statement", "solution", "answer", "variantB", "bloom", "sourceMode",
+          "printedPageLabel", "sourceTaskNo", "sourceExcerpt",
+        ],
       },
     },
     reflection: str,

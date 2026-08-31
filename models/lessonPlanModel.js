@@ -52,10 +52,26 @@ const evidenceSchema = new Schema(
   { _id: false }
 );
 
+/*
+ * Variant B of a task, solved. Undeclared keys are dropped by strict mode before
+ * the write reaches Mongo, so this subschema is what makes the two-variant
+ * worksheet possible at all.
+ */
+const variantSchema = new Schema(
+  {
+    statement: { type: String, default: "" },
+    solution: { type: String, default: "" },
+    answer: { type: String, default: "" },
+  },
+  { _id: false }
+);
+
 const taskSchema = new Schema(
   {
     statement: { type: String, default: "" },
     solution: { type: String, default: "" },
+    answer: { type: String, default: "" },
+    variantB: { type: variantSchema, default: undefined },
     bloom: { type: String, default: "" },
     sourceMode: { type: String, enum: ["verbatim", "adapted", "original"], default: "original" },
     sourceEvidence: { type: evidenceSchema, default: undefined },
@@ -128,4 +144,5 @@ lessonPlanSchema.index({ owner: 1, updatedAt: -1 }, { name: "owner_1_updatedAt_-
 module.exports = mongoose.model("LessonPlan", lessonPlanSchema);
 module.exports.stageSchema = stageSchema;
 module.exports.taskSchema = taskSchema;
+module.exports.variantSchema = variantSchema;
 module.exports.evidenceSchema = evidenceSchema;
