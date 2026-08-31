@@ -142,7 +142,20 @@ async function documentWithOpenAI({
           .map((c) => c.text || "")
           .join("")
       : "");
-  return { doc: parseDoc(text), cost: computeOpenAIGenCost(data?.usage, modelId, modelId), usage: data?.usage };
+  /*
+   * The Responses API reports usage as input_tokens/output_tokens; computeOpenAIGenCost
+   * reads the chat/completions shape (prompt_tokens/completion_tokens). Without this
+   * mapping every document costs $0 — invisible on the admin AI-cost page and, worse,
+   * not counted against aiBudgetGuard daily USD cap. extractWithOpenAI already maps it
+   * the same way; this mirrors it rather than changing the shared cost function.
+   */
+  const usage = {
+    prompt_tokens: data?.usage?.input_tokens || 0,
+    completion_tokens: data?.usage?.output_tokens || 0,
+    total_tokens: data?.usage?.total_tokens || 0,
+    prompt_tokens_details: { cached_tokens: data?.usage?.input_tokens_details?.cached_tokens || 0 },
+  };
+  return { doc: parseDoc(text), cost: computeOpenAIGenCost(usage, data?.model, modelId), usage };
 }
 
 async function documentWithGemini({ prompt, parts = [], system, schema, signal, maxTokens = DOC_MAX_TOKENS }) {

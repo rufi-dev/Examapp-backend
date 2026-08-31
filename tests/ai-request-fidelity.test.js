@@ -6,6 +6,7 @@ const path = require("path");
 const {
   parseRequestedCount,
   hasMathLeak,
+  computeOpenAIGenCost,
   claudeContentParts,
   openaiContentParts,
   geminiContentParts,
@@ -105,6 +106,30 @@ const one = [PARTS[0]];
     "both Gemini call sites use the shared builder"
   );
   ok(src.includes("...openaiContentParts(parts, \"exam\")"), "the OpenAI call site uses the shared builder");
+}
+
+// The OpenAI RESPONSES API (used by extraction and by the document path) reports
+// usage as input_tokens/output_tokens, while computeOpenAIGenCost reads the
+// chat/completions shape. Without mapping, every such call costs $0 — invisible on
+// the admin cost page and, worse, not counted against aiBudgetGuard daily USD cap.
+{
+  const responsesShape = { input_tokens: 3200, output_tokens: 1400, total_tokens: 4600, input_tokens_details: { cached_tokens: 0 } };
+  ok(computeOpenAIGenCost(responsesShape, "gpt-4.1-mini", "gpt-4.1-mini").usd === 0, "raw Responses usage costs $0 — it MUST be mapped first");
+
+  const mapped = {
+    prompt_tokens: responsesShape.input_tokens,
+    completion_tokens: responsesShape.output_tokens,
+    total_tokens: responsesShape.total_tokens,
+    prompt_tokens_details: { cached_tokens: responsesShape.input_tokens_details.cached_tokens },
+  };
+  ok(computeOpenAIGenCost(mapped, "gpt-4.1-mini", "gpt-4.1-mini").usd > 0, "mapped usage produces a real cost");
+
+  // Both Responses call sites must do that mapping.
+  const src = fs.readFileSync(path.join(__dirname, "..", "controllers", "aiController.js"), "utf8");
+  const doc = fs.readFileSync(path.join(__dirname, "..", "helper", "aiDocument.js"), "utf8");
+  const MAPS_USAGE = "prompt_tokens: data?.usage?.input_tokens";
+  ok(src.includes(MAPS_USAGE), "extractWithOpenAI maps the Responses usage shape");
+  ok(doc.includes(MAPS_USAGE), "documentWithOpenAI maps the Responses usage shape");
 }
 
 console.log(`ai-request-fidelity: ${pass} assertions passed`);
