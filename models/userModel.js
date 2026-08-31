@@ -381,6 +381,15 @@ const userSchema = Schema(
         // Event flags default ON. Scope is OPT-OUT: everything notifies unless
         // its class or exam id is in an excluded list — so a newly created
         // class/exam is automatically included without any action.
+        // Per-PARENT notification switches. The class-level `parentNotify` decides
+        // what a teacher sends at all; this lets one parent mute a category without
+        // affecting the other parents of the same child. Absent = everything on.
+        parentNotifyPrefs: {
+            attendance: { type: Boolean, default: true },
+            homework: { type: Boolean, default: true },
+            exam: { type: Boolean, default: true },
+            payment: { type: Boolean, default: true },
+        },
         telegramPrefs: {
             onStart: { type: Boolean, default: true },     // student starts an exam
             onFinish: { type: Boolean, default: true },    // student finishes -> result

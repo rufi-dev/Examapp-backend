@@ -64,9 +64,12 @@ async function notifyParentsOf(studentId, classId, text, category) {
     if (!parentIds.length) return;
     const senderId = await senderFor(owner);
     if (!senderId) return; // no linked WhatsApp — silently skip
-    const parents = await User.find({ _id: { $in: parentIds } }).select("phone").lean();
+    const parents = await User.find({ _id: { $in: parentIds } }).select("phone parentNotifyPrefs").lean();
     for (const p of parents) {
       if (!wa.toDigits(p.phone)) continue;
+      // A parent can mute a category for themselves without affecting the other
+      // parents of the same child (the class switch above is the teacher's).
+      if (category && p.parentNotifyPrefs && p.parentNotifyPrefs[category] === false) continue;
       await wa.sendMessageFor(senderId, p.phone, text);
       await new Promise((r) => setTimeout(r, 1500)); // throttle, mirrors notifyStudentsNewExam
     }

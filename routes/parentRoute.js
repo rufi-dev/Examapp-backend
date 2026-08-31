@@ -19,6 +19,10 @@ const {
   myParentRequests,
   myParents,
   decideMyParentLink,
+  createParentAccount,
+  managedParents,
+  setParentNotify,
+  setManagedPassword,
 } = require("../controllers/parentController");
 
 // ── Parent portal (parentOnly) ──
@@ -37,6 +41,15 @@ router.get("/children/:childId/attendance", protect, parentOnly, childAttendance
 router.get("/children/:childId/payments", protect, parentOnly, childPayments);
 
 // ── Teacher management of parent↔student links (teacherOnly) ──
+// ── Managed parent accounts ─────────────────────────────────────────────────────
+// `protect` only: a STUDENT may create a parent for themselves and see/manage that
+// parent. The controller decides what each role may touch — a student can never
+// reach beyond their own account, a teacher never beyond their own students.
+router.post("/accounts", protect, createParentAccount);
+router.get("/managed", protect, managedParents);
+router.patch("/managed/:parentId/notify", protect, setParentNotify);
+router.patch("/managed/:userId/password", protect, setManagedPassword);
+
 router.get("/teacher/students", protect, teacherOnly, teacherStudents);
 router.patch("/teacher/link/:linkId", protect, teacherOnly, decideParentLink);
 

@@ -9,6 +9,8 @@ const Result = require("../models/resultModel");
 const Attendance = require("../models/attendanceModel");
 const Payment = require("../models/paymentModel");
 const Attempt = require("../models/attemptModel");
+const bcrypt = require("bcryptjs");
+const { validatePassword, normalizeEmail } = require("../utils/index");
 
 // Compact child DTO — never leak more of a student's account than a parent needs.
 const childDto = (u) => ({
@@ -25,6 +27,206 @@ const emailRegex = (raw) => new RegExp(`^${String(raw).trim().replace(/[.*+?^${}
 // True when this parent has an APPROVED link to this student. A pending (email) link
 // grants no data access until it is approved.
 const isLinked = (parentId, studentId) => ParentLink.exists({ parent: parentId, student: studentId, status: "approved" });
+
+// ── Managed accounts (a teacher or student creates a parent) ────────────────────
+//
+// Every rule is enforced HERE, never taken from the request body:
+//   • a TEACHER may only act on students enrolled in a class they own,
+//   • a STUDENT may only ever act on themselves,
+//   • an ADMIN may act on anyone,
+//   • no teacher or admin account can be touched through these routes at all.
+
+// Of the student ids asked for, the ones this caller is actually allowed to manage.
+async function manageableStudentIds(user, requested) {
+  const ids = [...new Set((requested || []).map(String))];
+  if (user.role === "student") return ids.filter((id) => id === String(user._id));
+  if (!ids.length) return [];
+  if (user.role === "admin") return ids;
+  const classes = await ClassModel.find({ owner: user._id, deletedAt: null }).select("_id").lean();
+  if (!classes.length) return [];
+  const rows = await Enrollment.find({
+    class: { $in: classes.map((c) => c._id) },
+    student: { $in: ids },
+    status: "approved",
+  })
+    .select("student")
+    .lean();
+  return [...new Set(rows.map((r) => String(r.student)))];
+}
+
+// Every student this caller manages — the basis for "is this parent mine?".
+async function allManagedStudentIds(user) {
+  if (user.role === "student") return [String(user._id)];
+  const filter = user.role === "admin" ? { deletedAt: null } : { owner: user._id, deletedAt: null };
+  const classes = await ClassModel.find(filter).select("_id").lean();
+  if (!classes.length) return [];
+  const rows = await Enrollment.find({ class: { $in: classes.map((c) => c._id) }, status: "approved" })
+    .select("student")
+    .lean();
+  return [...new Set(rows.map((r) => String(r.student)))];
+}
+
+// POST /api/parent/accounts { name, email, password, phone, studentIds[] }
+// A teacher creates a parent for their own students; a student creates one for
+// themselves. An email that already belongs to a parent is LINKED rather than
+// rejected — and that account's password is never touched.
+const createParentAccount = asyncHandler(async (req, res) => {
+  const name = String(req.body?.name || "").trim();
+  const email = normalizeEmail(req.body?.email);
+  const password = String(req.body?.password || "");
+  const wanted = req.user.role === "student" ? [String(req.user._id)] : req.body?.studentIds;
+
+  if (!name || !email) {
+    res.status(400);
+    throw new Error("Ad və email tələb olunur");
+  }
+  const studentIds = await manageableStudentIds(req.user, wanted);
+  if (!studentIds.length) {
+    res.status(403);
+    throw new Error("Yalnız öz şagirdiniz üçün valideyn yarada bilərsiniz");
+  }
+
+  let parent = await User.findOne({ email });
+  if (parent) {
+    // Reuse only a PARENT account: never convert a student's or teacher's login.
+    if (parent.role !== "parent") {
+      res.status(400);
+      throw new Error("Bu email başqa hesaba aiddir");
+    }
+  } else {
+    const pw = validatePassword(password);
+    if (!pw.ok) {
+      res.status(400);
+      throw new Error(pw.message);
+    }
+    parent = await User.create({
+      name,
+      email,
+      password: await bcrypt.hash(password, 10),
+      role: "parent",
+      isVerified: true, // created by someone who already knows the family
+      phone: String(req.body?.phone || "").trim() || undefined,
+    });
+  }
+
+  await Promise.all(
+    studentIds.map((sid) =>
+      ParentLink.updateOne(
+        { parent: parent._id, student: sid },
+        { $set: { status: "approved" }, $setOnInsert: { parent: parent._id, student: sid, via: "code" } },
+        { upsert: true }
+      )
+    )
+  );
+
+  res.status(201).json({
+    ok: true,
+    parent: { _id: parent._id, name: parent.name, email: parent.email },
+    linked: studentIds.length,
+  });
+});
+
+// GET /api/parent/managed — the parents of this caller's students, one row each.
+const managedParents = asyncHandler(async (req, res) => {
+  const studentIds = await allManagedStudentIds(req.user);
+  if (!studentIds.length) return res.json({ parents: [] });
+  const links = await ParentLink.find({ student: { $in: studentIds } })
+    .populate("parent", "name email photo phone createdAt parentNotifyPrefs")
+    .populate("student", "name email photo")
+    .lean();
+
+  const byParent = new Map();
+  for (const l of links) {
+    if (!l.parent) continue;
+    const pid = String(l.parent._id);
+    if (!byParent.has(pid)) {
+      const p = l.parent.parentNotifyPrefs || {};
+      byParent.set(pid, {
+        _id: l.parent._id,
+        name: l.parent.name || "",
+        email: l.parent.email || "",
+        photo: l.parent.photo || "",
+        phone: l.parent.phone || "",
+        createdAt: l.parent.createdAt,
+        notify: {
+          attendance: p.attendance !== false,
+          homework: p.homework !== false,
+          exam: p.exam !== false,
+          payment: p.payment !== false,
+        },
+        students: [],
+      });
+    }
+    if (l.student) {
+      byParent.get(pid).students.push({
+        _id: l.student._id,
+        name: l.student.name || "",
+        email: l.student.email || "",
+        photo: l.student.photo || "",
+        status: l.status,
+        linkId: l._id,
+      });
+    }
+  }
+  const parents = [...byParent.values()].sort((a, b) => {
+    const ap = a.students.some((s) => s.status === "pending") ? 0 : 1;
+    const bp = b.students.some((s) => s.status === "pending") ? 0 : 1;
+    return ap - bp || a.name.localeCompare(b.name);
+  });
+  res.json({ parents });
+});
+
+// PATCH /api/parent/managed/:parentId/notify — mute a category for ONE parent,
+// without affecting the other parents of the same child.
+const setParentNotify = asyncHandler(async (req, res) => {
+  const studentIds = await allManagedStudentIds(req.user);
+  const owns = await ParentLink.exists({ parent: req.params.parentId, student: { $in: studentIds } });
+  if (!owns) {
+    res.status(403);
+    throw new Error("İcazə yoxdur");
+  }
+  const set = {};
+  for (const k of ["attendance", "homework", "exam", "payment"]) {
+    if (req.body?.[k] !== undefined) set[`parentNotifyPrefs.${k}`] = !!req.body[k];
+  }
+  if (!Object.keys(set).length) return res.json({ ok: true });
+  await User.updateOne({ _id: req.params.parentId, role: "parent" }, { $set: set });
+  res.json({ ok: true });
+});
+
+// PATCH /api/parent/managed/:userId/password — reset the password of one of the
+// caller's own students, or of a parent attached to one of them. A teacher or admin
+// account can never be targeted here.
+const setManagedPassword = asyncHandler(async (req, res) => {
+  const password = String(req.body?.password || "");
+  const pw = validatePassword(password);
+  if (!pw.ok) {
+    res.status(400);
+    throw new Error(pw.message);
+  }
+  const target = await User.findById(req.params.userId).select("_id role");
+  if (!target) {
+    res.status(404);
+    throw new Error("İstifadəçi tapılmadı");
+  }
+  if (!["student", "parent"].includes(target.role)) {
+    res.status(403);
+    throw new Error("Yalnız şagird və valideyn şifrəsini dəyişmək olar");
+  }
+  const studentIds = await allManagedStudentIds(req.user);
+  const allowed =
+    req.user.role === "admin" ||
+    (target.role === "student"
+      ? studentIds.includes(String(target._id))
+      : !!(await ParentLink.exists({ parent: target._id, student: { $in: studentIds } })));
+  if (!allowed) {
+    res.status(403);
+    throw new Error("İcazə yoxdur");
+  }
+  target.password = await bcrypt.hash(password, 10);
+  await target.save();
+  res.json({ ok: true });
+});
 
 // POST /api/parent/link { code } — link the caller (a parent) to the student who owns
 // this parentCode. Always APPROVED (the code is the shared secret). Upgrades a prior
@@ -480,4 +682,8 @@ module.exports = {
   myParentRequests,
   myParents,
   decideMyParentLink,
+  createParentAccount,
+  managedParents,
+  setParentNotify,
+  setManagedPassword,
 };
