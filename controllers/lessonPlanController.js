@@ -96,8 +96,13 @@ const archivePlan = asyncHandler(async (req, res) => {
 
 const deletePlan = asyncHandler(async (req, res) => {
   await mine(req, req.params.id);
-  await svc.deleteDraft(req.params.id, req.user._id);
-  res.json({ deleted: true });
+  // Destroying a PUBLISHED plan takes an explicit force flag, so nothing can wipe
+  // published content by accident. Unpublished drafts delete without ceremony.
+  const out = await svc.deleteDraft(req.params.id, req.user._id, {
+    actor: req.user.email || String(req.user._id),
+    force: req.query.force === "published",
+  });
+  res.json({ deleted: true, versionsRemoved: out.versionsRemoved || 0 });
 });
 
 const acceptProposal = asyncHandler(async (req, res) => {

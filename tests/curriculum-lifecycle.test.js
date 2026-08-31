@@ -47,7 +47,8 @@ async function mkSource(state = "ready") {
   const v = await CurriculumSourceVersion.create({
     source: src._id,
     versionNumber: 1,
-    storageKey: "a".repeat(63) + (seq % 10),
+    // 64 chars and genuinely unique: seq % 10 collided once the suite grew past ten.
+    storageKey: "a".repeat(60) + String(seq).padStart(4, "0"),
     sha256: "d".repeat(64),
     pageCount: 10,
     state,
@@ -280,6 +281,88 @@ async function sec7() {
   ok("accepting applies it through the same CAS", accepted.topic === "AI-nin təklifi");
 }
 
+/*
+ * Deleting a PUBLISHED plan. This is the one path that destroys immutable rows, it
+ * cannot be undone, and getting it half-right leaves either orphan version rows or
+ * a textbook chapter nothing can ever delete because an invisible reference still
+ * holds it. So every leg is pinned.
+ */
+async function sec8() {
+  console.log("\n8. Deleting a published plan removes everything it held:");
+  const MaintenanceAudit = require("../models/maintenanceAuditModel");
+  const { src, v } = await mkSource();
+
+  const plan = await LessonPlan.create({
+    owner: OWNER,
+    title: "Silinəcək plan",
+    tasks: [{ statement: "Tapşırıq" }],
+    sourceVersions: [v._id],
+  });
+  await planSvc.setSources(plan._id, OWNER, [String(v._id)]);
+  const version = await planSvc.publish(plan._id, OWNER);
+  ok("precondition: it published", version.versionNumber === 1);
+  ok(
+    "precondition: the chapter is held by the published version",
+    (await SourceReference.countDocuments({ holderKind: "published_version", holderId: version._id })) === 1
+  );
+  ok(
+    "precondition: the chapter cannot be deleted while held",
+    (await codeOf(() => svc.claimDeletion(v._id))) === "source_in_use"
+  );
+
+  // Without the explicit flag, published content is never destroyed.
+  const refused = await codeOf(() => planSvc.deleteDraft(plan._id, OWNER, { actor: "t@x" }));
+  ok("a plain delete refuses on a published plan", refused === "plan_published_confirm", refused);
+  ok("and nothing was removed", (await LessonPlan.countDocuments({ _id: plan._id })) === 1);
+  ok("its version row is still there", (await LessonPlanVersion.countDocuments({ docId: plan._id })) === 1);
+
+  const auditsBefore = await MaintenanceAudit.countDocuments({ action: "lesson_plan_delete" });
+  const out = await planSvc.deleteDraft(plan._id, OWNER, { actor: "teacher@example.com", force: true });
+
+  ok("with force, the plan is gone", (await LessonPlan.countDocuments({ _id: plan._id })) === 0);
+  ok("its immutable version rows are gone too", (await LessonPlanVersion.countDocuments({ docId: plan._id })) === 0);
+  ok("it reports how many it destroyed", out.versionsRemoved === 1, out.versionsRemoved);
+  ok(
+    "every reference it held is released",
+    (await SourceReference.countDocuments({ holderId: version._id })) === 0 &&
+      (await SourceReference.countDocuments({ holderId: plan._id })) === 0
+  );
+
+  // The whole reason releasing matters: the chapter must become deletable again.
+  const claim = await svc.claimDeletion(v._id);
+  ok("the chapter can now be deleted", claim.version.state === "deleting");
+  await svc.finishDeletion(v._id, claim.deleteToken);
+
+  const audits = await MaintenanceAudit.find({ action: "lesson_plan_delete" }).sort({ at: -1 }).lean();
+  ok("an irreversible delete left an audit trail", audits.length === auditsBefore + 1, audits.length);
+  ok("naming the actor", audits[0] && audits[0].actor === "teacher@example.com", audits[0] && audits[0].actor);
+  ok("and the plan it destroyed", audits[0] && audits[0].target === String(plan._id));
+
+  // An unpublished draft still deletes with no ceremony and no audit.
+  const { v: v2 } = await mkSource();
+  const draft = await LessonPlan.create({ owner: OWNER, title: "Qaralama", tasks: [{ statement: "x" }] });
+  await planSvc.setSources(draft._id, OWNER, [String(v2._id)]);
+  const d = await planSvc.deleteDraft(draft._id, OWNER, { actor: "t@x" });
+  ok("a draft deletes without force", (await LessonPlan.countDocuments({ _id: draft._id })) === 0);
+  ok("and destroys no versions", d.versionsRemoved === 0);
+  ok(
+    "its draft hold is released",
+    (await SourceReference.countDocuments({ holderKind: "draft", holderId: draft._id })) === 0
+  );
+  ok(
+    "so its chapter is deletable too",
+    (await codeOf(() => svc.claimDeletion(v2._id))) === null
+  );
+
+  // Someone else's plan is not deletable, force or not.
+  const other = await LessonPlan.create({ owner: OWNER, title: "Başqasının planı" });
+  const denied = await codeOf(() =>
+    planSvc.deleteDraft(other._id, new mongoose.Types.ObjectId(), { actor: "x@y", force: true })
+  );
+  ok("another teacher cannot delete it", denied === "plan_missing", denied);
+  ok("and it survives", (await LessonPlan.countDocuments({ _id: other._id })) === 1);
+}
+
 async function main() {
   const mem = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: "wiredTiger" } });
   await mongoose.connect(mem.getUri());
@@ -295,6 +378,7 @@ async function main() {
   await sec5();
   await sec6();
   await sec7();
+  await sec8();
 
   await mongoose.disconnect();
   await mem.stop();

@@ -12,9 +12,10 @@
 const LessonPlan = require("../models/lessonPlanModel");
 const LessonPlanVersion = require("../models/lessonPlanVersionModel");
 const CurriculumSourceVersion = require("../models/curriculumSourceVersionModel");
-const { withMongoTransaction } = require("./mongoUnitOfWork");
+const { withMongoTransaction, sessionOpt } = require("./mongoUnitOfWork");
 const { publishWithRetry } = require("../helper/immutableVersion");
 const { claimNew, transferHolder, releaseHolder } = require("./curriculumSourceService");
+const { performMaintenance } = require("./versionMaintenance");
 const { httpError } = require("../utils/appError");
 
 const CONTENT_FIELDS = [
@@ -155,17 +156,66 @@ async function archive(planId, ownerId, archived = true) {
 }
 
 // Deleting a DRAFT releases its draft holds, in the same transaction.
-async function deleteDraft(planId, ownerId) {
-  return withMongoTransaction(async (session) => {
-    const plan = await LessonPlan.findOne({ _id: planId, owner: ownerId }).session(session || null);
-    if (!plan) throw httpError(404, "plan_missing", "Dərs planı tapılmadı.");
-    if (plan.activeVersionNumber > 0) {
-      throw httpError(409, "plan_published", "Dərc edilmiş planı silmək olmaz — arxivləyin.");
-    }
-    await releaseHolder({ holderKind: "draft", holderId: plan._id }, session);
-    await LessonPlan.deleteOne({ _id: plan._id }, session ? { session } : {});
-    return true;
-  });
+/*
+ * Delete a plan for real, published or not.
+ *
+ * A published plan is not just a row: it owns immutable LessonPlanVersion rows and,
+ * through them, `published_version` claims on the textbook chapters it cites. So
+ * "delete" has to unwind all three or it leaves either orphan versions or a chapter
+ * that can never be deleted because something invisible still holds it.
+ *
+ * Immutability is what protects PUBLISHED CONTENT FROM BEING REWRITTEN; it was never
+ * meant to stop the owner removing their own plan. Destroying those rows is
+ * therefore done the way the repo already requires for any authorized mutation of an
+ * immutable row — inside performMaintenance, which writes a durable MaintenanceAudit
+ * FIRST (actor, reason, target). The deletion is irreversible, so it leaves a trail.
+ *
+ * `force` is required for the published case: a stray DELETE must not be able to
+ * destroy published content, and the caller has to have asked for it deliberately.
+ */
+async function deleteDraft(planId, ownerId, { actor, force } = {}) {
+  const plan = await LessonPlan.findOne({ _id: planId, owner: ownerId });
+  if (!plan) throw httpError(404, "plan_missing", "Dərs planı tapılmadı.");
+
+  const published = (plan.activeVersionNumber || 0) > 0;
+  if (!published) {
+    return withMongoTransaction(async (session) => {
+      await releaseHolder({ holderKind: "draft", holderId: plan._id }, session);
+      await LessonPlan.deleteOne({ _id: plan._id }, session ? { session } : {});
+      return { deleted: true, versionsRemoved: 0 };
+    });
+  }
+
+  if (force !== true) {
+    throw httpError(
+      409,
+      "plan_published_confirm",
+      "Bu plan dərc edilib — silinməsi üçün açıq təsdiq tələb olunur."
+    );
+  }
+
+  const versions = await LessonPlanVersion.find({ docId: plan._id }).select("_id").lean();
+  return performMaintenance(
+    {
+      actor: String(actor || ownerId),
+      reason: `owner deleted published lesson plan "${plan.title}" (${versions.length} version row(s))`,
+      action: "lesson_plan_delete",
+      target: String(plan._id),
+      authorized: true,
+    },
+    async () =>
+      withMongoTransaction(async (session) => {
+        // Release BEFORE the version rows go: a reference whose holder no longer
+        // exists would keep a chapter undeletable with nothing left to point at.
+        for (const v of versions) {
+          await releaseHolder({ holderKind: "published_version", holderId: v._id }, session);
+        }
+        await releaseHolder({ holderKind: "draft", holderId: plan._id }, session);
+        await LessonPlanVersion.deleteMany({ docId: plan._id }, sessionOpt(session));
+        await LessonPlan.deleteOne({ _id: plan._id }, session ? { session } : {});
+        return { deleted: true, versionsRemoved: versions.length };
+      })
+  );
 }
 
 /*
