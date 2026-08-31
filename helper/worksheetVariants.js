@@ -119,7 +119,14 @@ function varyTask(task, seed = 0) {
  * two identical papers.
  */
 function buildWorksheet(tasks) {
+  // Fail loudly rather than emitting a worksheet of blank rows: a Mongoose
+  // subdocument spreads to its internals, so a caller that forgot .toObject()
+  // would silently produce numbered lines with no question on them.
   const list = Array.isArray(tasks) ? tasks : [];
+  const suspect = list.filter((t) => t && typeof t === "object" && t.$__ !== undefined);
+  if (suspect.length) {
+    throw new Error("buildWorksheet: pass PLAIN tasks (call .toObject() first) — Mongoose subdocuments do not spread");
+  }
   const A = [];
   const B = [];
   const unvaried = [];

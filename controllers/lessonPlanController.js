@@ -193,7 +193,10 @@ const generatePlan = asyncHandler(async (req, res) => {
 const worksheet = asyncHandler(async (req, res) => {
   const plan = await mine(req, req.params.id);
   const { buildWorksheet } = require("../helper/worksheetVariants");
-  const out = buildWorksheet(plan.tasks || []);
+  // PLAIN objects: spreading a Mongoose subdocument copies its internals, not its
+  // fields, so buildWorksheet would receive tasks whose statement is undefined and
+  // emit a worksheet of empty numbered rows.
+  const out = buildWorksheet(plan.toObject().tasks || []);
   res.json({
     title: plan.title,
     topic: plan.topic,
