@@ -96,8 +96,21 @@ function evaluatorFor(version) {
   return ev;
 }
 
+/*
+ * Digest of an evaluator SOURCE, normalised for line endings.
+ *
+ * Function.prototype.toString() returns the source verbatim, CRLF included — so a
+ * raw hash makes the digest depend on how the repo was CHECKED OUT rather than on
+ * what the code does. A LF working copy and a CRLF deployment then disagree, and
+ * the boot guard fires on a change nobody made (it did, in production). Line
+ * endings are never semantic; every other edit still changes the digest.
+ */
+const CR = String.fromCharCode(13);
 const evaluatorDigest = (version) =>
-  crypto.createHash("sha256").update(String(evaluatorFor(version).evaluate.toString())).digest("hex");
+  crypto
+    .createHash("sha256")
+    .update(String(evaluatorFor(version).evaluate.toString()).split(CR).join(""))
+    .digest("hex");
 
 // ------------------------------------------------------------ templates
 const round = (v, rule) => {

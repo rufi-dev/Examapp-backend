@@ -271,7 +271,22 @@ console.log("\n7. CR-MSO-007/013/017 — adaptation is server-computed and versi
   const src = require("fs").readFileSync(require("path").join(__dirname, "..", "helper", "adaptationTemplates.js"), "utf8");
   ok("the module contains no eval/Function/vm", !/\beval\s*\(|new Function\s*\(|require\(["']vm["']\)/.test(src));
 
-  // The frozen manifest is what makes an in-place edit fail at BOOT.
+  // The frozen manifest is what makes an in-place edit fail at BOOT — but the
+  // digest must depend on the CODE, not on how the repo was checked out. Hashing
+  // raw Function.toString() output made a LF working copy and a CRLF deployment
+  // disagree, and the guard refused to boot production on a change nobody made.
+  {
+    const crypto = require("crypto");
+    const CR = String.fromCharCode(13);
+    const src = t.EVALUATORS.v1.evaluate.toString();
+    const digest = (x) => crypto.createHash("sha256").update(x.split(CR).join("")).digest("hex");
+    const LF = String.fromCharCode(10);
+    const asCrlf = src.split(LF).join(CR + LF);
+    ok("a CRLF checkout digests the same as a LF one", digest(src) === digest(asCrlf));
+    ok("but a REAL edit still changes the digest", digest(src) !== digest(src.replace("add", "plus")));
+    ok("the live evaluator digest is the frozen one", t.evaluatorDigest("v1") === MANIFEST.evaluators.v1);
+  }
+
   const live = t.buildManifest();
   ok("the frozen manifest matches the live registries", JSON.stringify(live) === JSON.stringify(MANIFEST));
   ok("the manifest carries a digest per EVALUATOR version too", Object.keys(MANIFEST.evaluators).length >= 1 && typeof MANIFEST.evaluators.v1 === "string");
