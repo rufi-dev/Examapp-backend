@@ -1216,7 +1216,14 @@ function sanitizeQuestionItem(q) {
     out.leftCount = q.leftCount;
     out.rightCount = q.rightCount;
   }
-  // NOTE: q.correct, q.pairs, q.key and q.answer are intentionally omitted.
+  // Curriculum metadata. Azerbaijani practice PRINTS the sub-standard and the
+  // assessment criterion on the paper, so those two are shown.
+  if (q.subStandard !== undefined) out.subStandard = q.subStandard;
+  if (q.criterion !== undefined) out.criterion = q.criterion;
+  // NOTE: q.correct, q.pairs, q.key and q.answer are intentionally omitted — and so
+  // are q.bloom (reveals the difficulty intent), q.sourceMode and q.sourceEvidence
+  // (a textbook page + task number points straight at the printed answer key).
+  // A hallucinated citation therefore can never reach a student's paper.
   return out;
 }
 
@@ -1700,11 +1707,14 @@ const addQuestion = asyncHandler(async (req, res) => {
   const wasUpdate = Boolean(exam.questions);
   const newQuestion = await withMongoTransaction(async (session) => {
     const writeOpts = session ? { session } : {};
+    // runValidators: the update path is the builder's ONLY save path once an exam
+    // has questions, so without it the schema's bounds (e.g. maxPlays 1..20) would
+    // be enforced on the very first save and never again.
     let question = exam.questions
       ? await Question.findOneAndUpdate(
           { _id: exam.questions, exam: exam._id },
           { $set: { correctAnswers } },
-          { new: true, ...writeOpts }
+          { new: true, runValidators: true, ...writeOpts }
         )
       : null;
 

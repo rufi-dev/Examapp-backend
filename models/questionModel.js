@@ -76,6 +76,47 @@ const questionSchema = Schema(
         // the multi-blank all-or-nothing path. Cell `answers` are SERVER-ONLY and
         // stripped before the grid is sent to students.
         table: { type: Schema.Types.Mixed, default: undefined },
+        // Gap-fill flags. BOTH are load-bearing for scoring, so they must be
+        // declared here: `correctAnswers` is a typed subdocument array, and strict
+        // mode drops any undeclared key BEFORE the write reaches Mongo (on
+        // Question.create AND on the builder's findOneAndUpdate($set)).
+        //   inline  -> an inline gap-fill whose text is already anonymised. It may
+        //              have a SINGLE blank and is still graded per-blank against
+        //              blankAnswers (isMultiBlank, quizController.js).
+        //   gapfill -> a gap-fill reading (cloze): a "reading" block that IS scored,
+        //              so isRead() (helper/scoring.js) must see it and give it points.
+        inline: { type: Boolean, default: undefined },
+        gapfill: { type: Boolean, default: undefined },
+        // Listening-section playback rules (type "reading", kind "listening").
+        // maxPlays is bounded so a malformed/hostile payload can neither disable the
+        // limit nor store a fractional count the player cannot honour. ABSENT is the
+        // only way to say "unlimited" -- `null` is REJECTED, because the player reads
+        // `Number(maxPlays) > 0` (LimitedAudio.jsx) and Number(null) is 0, so a stored
+        // null would silently lift the very limit the teacher set. The builder already
+        // sends undefined for unlimited (StructuredBuilder.jsx buildPayload).
+        maxPlays: {
+          type: Number,
+          default: undefined,
+          validate: {
+            validator: (v) => v === undefined || (Number.isSafeInteger(v) && v >= 1 && v <= 20),
+            message: "maxPlays 1..20 araliginda tam eded olmalidir",
+          },
+        },
+        allowPause: { type: Boolean, default: undefined },
+        // ---- curriculum metadata (optional; absent on ordinary exams) ----
+        // Declared HERE for the same reason as the gap-fill flags above: strict mode
+        // drops undeclared keys on both write paths, so an undeclared field would be
+        // saved by the builder, read by the server, and silently never persisted.
+        //
+        // There is deliberately NO flat sourcePage/sourceNo pair. `sourceEvidence`
+        // is the single citation authority, and its page is a STRING label
+        // (printedPageLabel) because real books use "iv", "A-12" and "124a".
+        subStandard: { type: String, default: undefined },
+        bloom: { type: String, default: undefined },
+        criterion: { type: String, default: undefined },
+        sourceMode: { type: String, enum: ["verbatim", "adapted", "original"], default: undefined },
+        sourceEvidence: { type: Schema.Types.Mixed, default: undefined },
+
         // Legacy PDF letters (a/b/c/d) for Cm in pdf mode.
         options: {
           type: [String],
