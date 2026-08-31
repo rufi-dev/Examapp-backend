@@ -159,6 +159,13 @@ MƏNBƏ YOXDUR: bu sorğuya HEÇ BİR dərslik faylı əlavə edilməyib.
   səhifə/nömrə ilə YOX.`;
 
 const WITH_SOURCE_RULES = `
+DƏRSLİK ÜSTÜNDÜR: müəllim fəsil yükləyib və o fayl BİRİNCİ mənbədir.
+- Tapşırıqları ÖZÜN QURMA — faylda olan çalışmaları götür. Müəllimin mətndəki
+  göstərişi mövzunu və səviyyəni müəyyən edir, tapşırıqların MƏNBƏYİNİ yox.
+- Faylda mövzuya uyğun çalışma tapmasan, tapşırıq UYDURMA: həmin tapşırığı yazma
+  və ya sourceMode="original" qoyub bütün istinad sahələrini boş saxla. Serverdə
+  hər səhifə fayl ilə yoxlanılır, uydurulmuş nömrə silinir.
+
 MƏNBƏ VAR: yüklənmiş fəsil/şəkillər YEGANƏ istinad mənbəyidir.
 - "printedPageLabel" = tapşırığın GÖRÜNDÜYÜ səhifənin ÜZƏRİNDƏ ÇAP OLUNMUŞ nömrə
   (mətn kimi: "124", "iv", "A-12"). Səhifədə nömrə görünmürsə "" yaz —
