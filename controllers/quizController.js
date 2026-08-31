@@ -2066,9 +2066,56 @@ const autosaveAttempt = asyncHandler(async (req, res) => {
 // question they're on, progress, time, and live violations. The runner pushes a
 // heartbeat via autosave; this reads the active attempts.
 const LIVE_ACTIVE_MS = 30 * 1000; // heartbeat within 30s → "active"
+// "Canlı imtahan" overview — every exam this teacher/admin owns that CURRENTLY has
+// students taking it right now (one card per exam on the hub). Light aggregate so it
+// can be polled every few seconds.
+const getLiveExams = asyncHandler(async (req, res) => {
+  const now = Date.now();
+  const activeCutoff = new Date(now - 2 * 60 * 1000); // in-progress (not long-expired)
+  const writingCutoff = new Date(now - 20 * 1000); // "writing now" = seen in last ~20s
+  const grouped = await Attempt.aggregate([
+    { $match: { submitted: false, expiresAt: { $gt: activeCutoff } } },
+    {
+      $group: {
+        _id: "$examId",
+        activeCount: { $sum: 1 },
+        writingCount: { $sum: { $cond: [{ $gt: ["$lastSeenAt", writingCutoff] }, 1, 0] } },
+        lastSeenAt: { $max: "$lastSeenAt" },
+      },
+    },
+  ]);
+  if (!grouped.length) return res.json({ exams: [] });
+  const byExam = new Map(grouped.map((g) => [String(g._id), g]));
+  const isAdmin = req.user.role === "admin";
+  const filter = { _id: { $in: grouped.map((g) => g._id) }, deletedAt: null };
+  if (!isAdmin) filter.owner = req.user._id; // a teacher only monitors their own exams
+  const exams = await Exam.find(filter).select("name class owner totalMarks").populate("class", "name").lean();
+  const list = exams.map((e) => {
+    const g = byExam.get(String(e._id)) || {};
+    return {
+      examId: e._id,
+      name: e.name,
+      className: e.class?.name || "",
+      totalMarks: e.totalMarks || 0,
+      activeCount: g.activeCount || 0,
+      writingCount: g.writingCount || 0,
+      lastSeenAt: g.lastSeenAt || null,
+    };
+  });
+  // Most actively-written first, then most-recent activity.
+  list.sort(
+    (a, b) => b.writingCount - a.writingCount || new Date(b.lastSeenAt || 0) - new Date(a.lastSeenAt || 0)
+  );
+  res.json({ exams: list });
+});
+
 const getLiveAttempts = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const exam = await Exam.findById(examId).populate("questions");
+  // Polled every ~2s while a teacher watches, so keep it light: only the fields the
+  // live view needs (ownership + name + how many questions), not the full paper.
+  const exam = await Exam.findById(examId)
+    .select("name owner class questions totalMarks antiCheat")
+    .populate({ path: "questions", select: "correctAnswers" });
   if (!exam) {
     res.status(404);
     throw new Error("Exam not found");
@@ -2076,11 +2123,80 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   if (!ownsOrAdmin(req.user, exam)) {
     return res.status(403).json({ message: "Bu imtahan sizə aid deyil" });
   }
-  const total = (exam.questions?.correctAnswers || []).length;
+  const correct = exam.questions?.correctAnswers || [];
+  const total = correct.length;
   const now = Date.now();
-  // Live attempts only: unsubmitted and not long-expired (the finalizer clears
-  // dead ones within a minute, but exclude clearly-past ones from the view).
-  const attempts = await Attempt.find({
+
+  const buildAnswered = (a) => {
+    const ans = a && Array.isArray(a.answers) ? a.answers : [];
+    const arr = [];
+    for (let i = 0; i < total; i++) arr.push(isAnswered(ans[i]));
+    return arr;
+  };
+
+  // LIVE per-question correctness ("correct" | "wrong" | "unanswered" | "manual" |
+  // "section"), in DISPLAY order so it lines up 1:1 with `answered`. Reuses the pure
+  // grader `isCorrectAnswer`; best-effort against the LIVE key. Reading/listening
+  // section blocks (and manual-graded questions, when that feature is on) are non-auto
+  // and never shown red/green.
+  let manualGradingOn = false;
+  try {
+    manualGradingOn = require("../config/featureFlags").flags.MANUAL_GRADING_ENABLED;
+  } catch (_) {
+    manualGradingOn = false; // no feature-flag config in this project
+  }
+  const gradeOne = (ca, sel) => {
+    if (!ca || ca.type === "reading") return "section";
+    if (manualGradingOn && ca.manualGrade) return "manual";
+    if (!isAnswered(sel)) return "unanswered";
+    return isCorrectAnswer(ca, sel) ? "correct" : "wrong";
+  };
+  // Must DE-SHUFFLE first: `answers` is display-order, the key is canonical, and each
+  // attempt stores its own question/option permutations (same mapping
+  // scoreAndCreateResult applies before grading). Without this, every shuffled attempt
+  // would grade garbage. (This project shuffles options only; question-order de-shuffle
+  // is a no-op when an attempt has no questionOrder, and harmless.)
+  const buildCorrectness = (a) => {
+    const out = new Array(total).fill("unanswered");
+    if (!a || !Array.isArray(a.answers) || !total) return out;
+    let sel = a.answers;
+    const qperm = Array.isArray(a.questionOrder) && a.questionOrder.length ? a.questionOrder : null;
+    if (qperm) {
+      const canon = new Array(total);
+      qperm.forEach((canonIdx, dispPos) => {
+        if (Number.isInteger(canonIdx) && canonIdx >= 0 && canonIdx < total) canon[canonIdx] = sel[dispPos];
+      });
+      sel = canon;
+    }
+    if (a.optionOrder) {
+      const order = a.optionOrder;
+      sel = sel.map((ans, i) => {
+        const perm = order[i];
+        if (!ans || !Array.isArray(perm)) return ans;
+        const ca = correct[i];
+        if (!ca || (ca.type !== "Cm" && ca.type !== "Cs")) return ans;
+        if (!Array.isArray(ca.choices) || ca.choices.length !== perm.length) return ans;
+        const back = (d) => {
+          const n = Number(d);
+          return Number.isInteger(n) && n >= 0 && n < perm.length ? perm[n] : n;
+        };
+        if (Array.isArray(ans.answer)) return { ...ans, answer: ans.answer.map(back) };
+        if (ans.answer === "" || ans.answer == null) return ans;
+        return { ...ans, answer: back(ans.answer) };
+      });
+    }
+    const canonGrade = correct.map((ca, i) => gradeOne(ca, sel[i]));
+    if (!qperm) return canonGrade;
+    qperm.forEach((canonIdx, dispPos) => {
+      out[dispPos] =
+        Number.isInteger(canonIdx) && canonIdx >= 0 && canonIdx < total ? canonGrade[canonIdx] : "unanswered";
+    });
+    return out;
+  };
+  const uid = (u) => String((u && u._id) || u || ""); // works for a populated user OR a raw id
+
+  // ── Active writers: the CURRENT unsubmitted attempts (one per student). ──
+  const activeAttempts = await Attempt.find({
     examId,
     submitted: false,
     expiresAt: { $gt: new Date(now - 2 * 60 * 1000) },
@@ -2088,7 +2204,7 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
     .populate("userId", "name email grade")
     .sort({ lastSeenAt: -1, startedAt: -1 })
     .lean();
-  const students = attempts.map((a) => {
+  const activeStudents = activeAttempts.map((a) => {
     const seen = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
     return {
       attemptId: a._id,
@@ -2096,6 +2212,8 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
       email: a.userId?.email || "",
       grade: a.userId?.grade || "",
       currentQuestion: a.currentQuestion || 0,
+      answered: buildAnswered(a),
+      correctness: buildCorrectness(a), // live per-question right/wrong for the teacher
       answeredCount: a.answeredCount || 0,
       total,
       violations: a.violations || 0,
@@ -2104,12 +2222,91 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
       expiresAt: a.expiresAt,
       lastSeenAt: a.lastSeenAt || null,
       active: !!seen && now - seen < LIVE_ACTIVE_MS,
+      finished: false,
+      finishedAt: null,
+      score: null,
+      resultId: null,
+      pendingReview: false,
+      attemptNo: 1, // patched below once each student's finished count is known
     };
   });
+
+  // ── Finished: driven by RESULTS, not raw submitted attempts. A student is only
+  // "finished" once they have a graded Result — abandoned/superseded attempts (the
+  // previous run that gets frozen when a student restarts) have NO Result and must
+  // NOT show up as fake finishers. EVERY result becomes its OWN card: no per-user
+  // dedup (a retake ADDS a card, never replaces the old one) and no time expiry
+  // (cards stay on the board until the page is closed). Ordered oldest→newest so
+  // each student's attempts can be numbered 1..N. ──
+  const resultRows = await Result.find({ examId })
+    .select("attemptId userId earnPoints pendingReview terminated violations createdAt")
+    .populate("userId", "name email grade")
+    .sort({ createdAt: 1 })
+    .lean();
+  // Per-student attempt numbering: the k-th chronological result is that student's
+  // "Cəhd k". After the loop, attemptsByUser holds each student's FINISHED count.
+  const attemptsByUser = new Map();
+  for (const r of resultRows) {
+    const u = uid(r.userId);
+    const n = (attemptsByUser.get(u) || 0) + 1;
+    attemptsByUser.set(u, n);
+    r._attemptNo = n;
+  }
+  const finList = resultRows;
+  // A student mid-retake is on their (finished + 1)-th attempt — label the active card too.
+  for (let i = 0; i < activeStudents.length; i++) {
+    const done = attemptsByUser.get(uid(activeAttempts[i].userId)) || 0;
+    activeStudents[i].attemptNo = done + 1;
+  }
+  // Pull each finisher's attempt for the answered count / start time.
+  const finAttemptIds = finList.map((r) => r.attemptId).filter(Boolean);
+  const attById = new Map(
+    (finAttemptIds.length
+      ? await Attempt.find({ _id: { $in: finAttemptIds } })
+          .select("answers answeredCount violations startedAt")
+          .lean()
+      : []
+    ).map((a) => [String(a._id), a])
+  );
+  const finishedStudents = finList.map((r) => {
+    const a = r.attemptId ? attById.get(String(r.attemptId)) : null;
+    return {
+      attemptId: r.attemptId || r._id,
+      name: r.userId?.name || "—",
+      email: r.userId?.email || "",
+      grade: r.userId?.grade || "",
+      currentQuestion: 0,
+      answered: buildAnswered(a),
+      answeredCount: a ? a.answeredCount || 0 : 0,
+      total,
+      violations: (r.violations != null ? r.violations : a?.violations) || 0,
+      terminated: !!r.terminated,
+      startedAt: a?.startedAt || null,
+      expiresAt: null,
+      lastSeenAt: null,
+      active: false,
+      finished: true,
+      finishedAt: r.createdAt,
+      score: typeof r.earnPoints === "number" ? r.earnPoints : null,
+      resultId: r._id,
+      pendingReview: !!r.pendingReview,
+      attemptNo: r._attemptNo || 1,
+    };
+  });
+  // Finished section doubles as a live mini-leaderboard: highest score first.
+  finishedStudents.sort((x, y) => (y.score ?? -1) - (x.score ?? -1));
+
+  const students = [...activeStudents, ...finishedStudents];
   res.status(200).json({
     examName: exam.name,
     total,
-    activeCount: students.filter((s) => s.active).length,
+    totalMarks: exam.totalMarks || 0,
+    // Anti-cheat: whether it's ON for this exam + the exit/violation limit, so the
+    // monitor can show each student's live "X/limit" violation count.
+    antiCheat: !!exam.antiCheat,
+    violationLimit: ANTICHEAT_LIMIT,
+    activeCount: activeStudents.filter((s) => s.active).length,
+    finishedCount: finishedStudents.length,
     serverNow: new Date(now),
     students,
   });
@@ -3026,6 +3223,7 @@ module.exports = {
   addResult,
   autosaveAttempt,
   getLiveAttempts,
+  getLiveExams,
   finalizeExpiredAttempts,
   finalizeAttempt,
   scoreAndCreateResult,

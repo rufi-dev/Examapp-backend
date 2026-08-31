@@ -32,6 +32,7 @@ const {
   addResult,
   autosaveAttempt,
   getLiveAttempts,
+  getLiveExams,
   startAttempt,
   attemptStatus,
   reportViolation,
@@ -172,6 +173,8 @@ router.post("/exam/:examId/autosave", protect, autosaveAttempt);
 router.get("/exam/:examId/attemptStatus", protect, attemptStatus);
 // Live exam watch — owner/admin sees who is currently writing + their progress.
 router.get("/exam/:examId/live", protect, getLiveAttempts);
+// "Canlı imtahan" hub — every exam this teacher/admin owns with students taking it now.
+router.get("/live-exams", protect, getLiveExams);
 router.post("/exam/:examId/violation", protect, reportViolation);
 router.get("/exam/:examId/rank", protect, getExamRank);
 router.post("/addResult/:examId", protect, verifiedOnly, addResult);
