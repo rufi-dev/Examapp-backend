@@ -122,6 +122,18 @@ function validateCitations(plan, { hasSource = false, allowedSubStandards = null
   if (!hasSource && homeworkClaims.length) {
     issues.push({ code: "homework_citation_without_source", claims: homeworkClaims });
   }
+  // A padded-out blank renders as nothing, so a plan with 2 criteria LOOKS like it
+  // met the "exactly 3" rule. Say so instead.
+  if (out.objectives.filter(Boolean).length !== OBJECTIVES) {
+    issues.push({ code: "objectives_count", want: OBJECTIVES, got: out.objectives.filter(Boolean).length });
+  }
+  if (out.criteria.filter(Boolean).length !== CRITERIA) {
+    issues.push({ code: "criteria_count", want: CRITERIA, got: out.criteria.filter(Boolean).length });
+  }
+  const withoutSolution = (out.tasks || []).filter((t) => !t.solution).length;
+  if (withoutSolution) issues.push({ code: "tasks_without_solution", count: withoutSolution });
+  if (!out.reflection) issues.push({ code: "reflection_missing" });
+
   return { plan: out, issues };
 }
 
@@ -157,12 +169,54 @@ MƏNBƏ VAR: yüklənmiş fəsil/şəkillər YEGANƏ istinad mənbəyidir.
 - Sənəddə OLMAYAN, özün yaratdığın tapşırıq üçün: sourceMode="original" və bütün
   istinad sahələri "".`;
 
+/*
+ * The teacher's own prompt asks for a great deal that a thin plan does not deliver:
+ * exactly 2 objectives and exactly 3 criteria, tasks she can actually run a lesson
+ * from, a WORKED SOLUTION behind every "Yoxla", invented example tasks on the
+ * motivation sheet ("nümunə üçün tapşırıqları özün uydur"), and explicit attention
+ * to reflection and assessment. Ask for all of it, in the order she wrote it.
+ */
+const TASK_COUNT_MIN = Number(process.env.LESSON_PLAN_MIN_TASKS) || 6;
+const TASK_COUNT_MAX = Number(process.env.LESSON_PLAN_MAX_TASKS) || 8;
+
 const BASE_RULES = `
-Sən Azərbaycan kurikulumu üzrə DƏRS PLANI hazırlayan köməkçisən. Cavabı YALNIZ
-verilmiş JSON sxemi ilə qaytar. Bütün mətn Azərbaycan dilində olsun.
-- DƏQİQ 2 "objectives" və DƏQİQ 3 "criteria" yaz.
-- "stages" mərhələlərinin "minutes" cəmi dərsin müddətinə bərabər olsun.
-- "subStandards" massivinə YALNIZ müəllimin verdiyi kodları yaz; yeni kod UYDURMA.`;
+Sən Azərbaycan kurikulumu üzrə DƏRS PLANI hazırlayan təcrübəli metodistsən.
+Cavabı YALNIZ verilmiş JSON sxemi ilə qaytar. Bütün mətn Azərbaycan dilində olsun.
+Plan lövhəyə proyeksiya ediləcək və çap olunacaq — mətnlər aydın, tam cümlələrlə,
+müəllimin dərsdə oxuyub tətbiq edə biləcəyi səviyyədə olsun.
+
+MƏCBURİ SAYLAR (pozulması qəbul edilmir):
+- "objectives": DƏQİQ 2 ədəd. Hər biri ölçülə bilən nəticə ("...bacarığını inkişaf
+  etdirmək" yox, "...hesablayır və tənliyi yazır" kimi konkret davranış).
+- "criteria": DƏQİQ 3 ədəd — nə 2, nə 4. Hər meyar "Şagird ... bacarır" formasında,
+  bir-birindən fərqli və yoxlanıla bilən olsun.
+- "tasks": ${TASK_COUNT_MIN}–${TASK_COUNT_MAX} ədəd, çətinliyi TƏDRİCƏN artan.
+- "stages": 4–6 mərhələ; "minutes" cəmi dərsin müddətinə BƏRABƏR olsun.
+
+HƏR TAPŞIRIQ ÜÇÜN:
+- "statement": konkret rəqəmlərlə, tam şəkildə yazılmış tapşırıq.
+- "solution": ADDIM-ADDIM tam həll — düstur, əvəzetmə və nəticə. Müəllim bunu
+  "Yoxla" düyməsi ilə lövhədə açacaq, ona görə yalnız cavab yazmaq KİFAYƏT DEYİL.
+- "bloom": tapşırığın Blum səviyyəsi.
+
+HƏR MƏRHƏLƏ ÜÇÜN:
+- "teacher" və "student": kimin nə etdiyi, ayrı-ayrılıqda.
+- "resources": istifadə olunan vasitələr.
+- "checks": həmin mərhələdə öyrənmənin NECƏ yoxlandığı (sual, qısa tapşırıq, müşahidə).
+- "differentiation": çətinlik çəkən və irəli gedən şagird üçün nə dəyişir.
+
+MOTİVASİYA:
+- "motivation" həm qısa maraq oyadan giriş, HƏM DƏ nümunə üçün 1–2 sadə tapşırıq
+  ehtiva etsin — bunları özün uydur, sırf lövhədə göstərmək üçün.
+
+REFLEKSİYA VƏ QİYMƏTLƏNDİRMƏ (xüsusi diqqət):
+- "reflection": dərsin sonunda veriləcək 2–3 konkret sual VƏ hər qiymətləndirmə
+  meyarının necə yoxlanacağı. Ümumi ifadələr ("şagirdlər fikirlərini bildirir")
+  yazma — konkret sual və konkret yoxlama üsulu yaz.
+- "homework": məzmunu ilə təsvir olunmuş konkret ev tapşırığı.
+- "materials": dərsdə lazım olan bütün vasitələrin siyahısı.
+
+- "subStandards" massivinə YALNIZ müəllimin verdiyi kodları yaz; yeni kod UYDURMA.`
 
 function buildLessonPlanPrompt({ hasSource = false, topic = "", grade = "", subject = "", subStandards = [], lessonMinutes = 45, instructions = "" } = {}) {
   const system = [BASE_RULES, hasSource ? WITH_SOURCE_RULES : NO_SOURCE_RULES].join("\n");
@@ -172,6 +226,10 @@ function buildLessonPlanPrompt({ hasSource = false, topic = "", grade = "", subj
     `Fənn: ${subject || "(qeyd olunmayıb)"}`,
     `Dərsin müddəti: ${lessonMinutes} dəqiqə`,
     subStandards.length ? `Alt-standartlar (YALNIZ bunlar): ${subStandards.join(", ")}` : "Alt-standart verilməyib: massivi boş saxla.",
+    `Tapşırıq sayı: ${TASK_COUNT_MIN}–${TASK_COUNT_MAX}, hər birinin addım-addım həlli ilə.`,
+    hasSource
+      ? "Tapşırıqları YÜKLƏNMİŞ dərslikdən götür və hər biri üçün səhifə ilə çalışma nömrəsini yaz."
+      : "Dərslik yüklənməyib: tapşırıqları özün qur, lakin heç bir səhifə/nömrə istinadı yazma.",
     instructions ? `Müəllimin əlavə göstərişi: ${String(instructions).slice(0, 2000)}` : "",
   ]
     .filter(Boolean)
@@ -209,6 +267,8 @@ module.exports = {
   ALLOWED_TAGS,
   OBJECTIVES,
   CRITERIA,
+  TASK_COUNT_MIN,
+  TASK_COUNT_MAX,
   clean,
   cleanList,
   fixedLength,
