@@ -112,6 +112,89 @@ function varyTask(task, seed = 0) {
 }
 
 /*
+ * FALLBACK: vary the numbers written in the statement itself.
+ *
+ * Most lesson-plan tasks carry no formal template — the AI wrote prose with numbers
+ * in it. Without this the "two variants" were the SAME PAPER TWICE, which is worse
+ * than no feature: a teacher hands out A and B believing pupils cannot copy.
+ *
+ * So the numbers in the text are shifted. No answer is produced or claimed for
+ * these — there is nothing to recompute against, and inventing one would be the
+ * dishonesty the template path exists to avoid. The teacher works the answers out,
+ * which is what a worksheet is for.
+ */
+const NUM_RE = /-?\d+(?:[.,]\d+)?/g;
+
+/*
+ * Shift is decided PER DISTINCT VALUE, not per position.
+ *
+ * That preserves the pattern of equality in both directions, which is what keeps a
+ * task solvable and keeps its point intact:
+ *   - A(2;3) B(5;11) must not become A(4;6) B(4;9): two equal x-coordinates make a
+ *     vertical line, and the slope the pupil is asked for does not exist;
+ *   - E(2;5) F(2;10) must STAY vertical, because the teacher chose that case on
+ *     purpose to test it.
+ * Equal values move together; different values keep different shifts, and a
+ * collision falls back to a wider spread.
+ */
+function shiftFor(value, seed, spread = 0) {
+  const steps = [1, 2, 3, -1, -2, 4, -3];
+  const step = steps[(seed + spread) % steps.length] * (spread ? 2 : 1);
+  let next = Number.isInteger(value) ? value + step : Number((value + step).toFixed(2));
+  // Never flip a positive quantity to zero or negative — that can turn a sensible
+  // task into nonsense (a length of -1, a division by zero).
+  if (value > 0 && next <= 0) next = value + Math.abs(step);
+  return next;
+}
+
+function varyByText(task, seed = 0) {
+  const text = String(task.statement || "");
+  const found = [...text.matchAll(NUM_RE)];
+  if (!found.length) return { ok: false, reason: "no_numbers_in_text" };
+
+  const values = found.map((m) => Number(m[0].replace(",", ".")));
+  const distinct = [...new Set(values)];
+
+  // One shift per distinct value, widened until no two distinct values collide.
+  let map = null;
+  for (let spread = 0; spread <= 6 && !map; spread++) {
+    const candidate = new Map();
+    distinct.forEach((v, i) => candidate.set(v, shiftFor(v, seed + i, spread)));
+    const produced = [...candidate.values()];
+    const collides = new Set(produced).size !== produced.length;
+    const unchanged = distinct.every((v) => candidate.get(v) === v);
+    if (!collides && !unchanged) map = candidate;
+  }
+  if (!map) return { ok: false, reason: "could_not_vary_safely" };
+
+  let out = "";
+  let last = 0;
+  found.forEach((m, i) => {
+    const dec = m[0].includes(",") ? "," : ".";
+    const rendered = String(map.get(values[i])).replace(".", dec);
+    out += text.slice(last, m.index) + rendered;
+    last = m.index + m[0].length;
+  });
+  out += text.slice(last);
+
+  if (out === text) return { ok: false, reason: "numbers_unchanged" };
+  return {
+    ok: true,
+    task: {
+      ...task,
+      variant: "B",
+      statement: out,
+      // Nothing here was recomputed, so nothing is asserted: no answer, no solution.
+      answer: "",
+      solution: "",
+      adaptation: undefined,
+      reviewStatus: "pending",
+      reviewNotes: undefined,
+    },
+  };
+}
+
+/*
  * Two variants of a whole worksheet.
  *
  * `unvaried` lists the tasks that could not be varied and why, so the UI can say
@@ -130,15 +213,28 @@ function buildWorksheet(tasks) {
   const A = [];
   const B = [];
   const unvaried = [];
+  let textVaried = 0;
 
   list.forEach((t, i) => {
     const no = i + 1;
     const base = { ...t, no, pairId: `w${no}`, variant: "A", reviewStatus: t.reviewStatus || "pending" };
     A.push(base);
 
-    const varied = varyTask(base, no);
+    // Prefer the template path: it recomputes the ANSWER and can be trusted. Fall
+    // back to shifting the numbers in the text, which changes the paper without
+    // claiming any answer.
+    let varied = varyTask(base, no);
+    let byText = false;
+    if (!varied.ok) {
+      const alt = varyByText(base, no);
+      // Report why the TEXT path failed — "no_formal_model" is about the template
+      // path and tells the teacher nothing about a task written in words.
+      varied = alt.ok ? alt : alt;
+      byText = alt.ok;
+    }
     if (varied.ok) {
-      B.push({ ...varied.task, no, pairId: `w${no}` });
+      B.push({ ...varied.task, no, pairId: `w${no}`, ...(byText ? { variedBy: "text" } : { variedBy: "template" }) });
+      if (byText) textVaried += 1;
     } else {
       unvaried.push({ no, reason: varied.reason });
       B.push({
@@ -153,7 +249,7 @@ function buildWorksheet(tasks) {
     }
   });
 
-  return { A, B, unvaried, variedCount: list.length - unvaried.length };
+  return { A, B, unvaried, textVaried, variedCount: list.length - unvaried.length };
 }
 
-module.exports = { perturb, varyTask, buildWorksheet };
+module.exports = { perturb, varyTask, varyByText, buildWorksheet };

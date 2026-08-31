@@ -75,7 +75,7 @@ console.log("\n3. A task with no formal model is flagged, never faked:");
 {
   const prose = { statement: "Öz sözlərinizlə həcm anlayışını izah edin." };
   const w = buildWorksheet([box(5, 3, 4), prose]);
-  ok("it is reported as unvaried, with a reason", w.unvaried.length === 1 && w.unvaried[0].reason === "no_formal_model", JSON.stringify(w.unvaried));
+  ok("it is reported as unvaried, with a reason", w.unvaried.length === 1 && w.unvaried[0].reason === "no_numbers_in_text", JSON.stringify(w.unvaried));
   ok("variant B carries it unchanged", w.B[1].statement === prose.statement);
   ok("and marks it for the teacher", w.B[1].reviewStatus === "needs_teacher_review");
   ok("the note says what the teacher must do", (w.B[1].reviewNotes || []).some((n) => /variant B/i.test(n)));
@@ -89,6 +89,44 @@ console.log("\n3. A task with no formal model is flagged, never faked:");
   const unknown = box(5, 3, 4);
   unknown.adaptation.templateId = "nope.v1";
   ok("an unknown template refuses to vary", varyTask(unknown, 1).reason === "template_unknown");
+}
+
+console.log("\n3b. Prose tasks are varied by shifting their numbers:");
+{
+  const nums = (t) => (String(t).match(/-?\d+/g) || []).map(Number);
+  const cases = [
+    "Verilmiş nöqtələr A(2;3) və B(5;11). Bucaq əmsalını hesablayın.",
+    "Nöqtələr A(-1;4) və B(3;0) verilmişdir. Bucaq əmsalını hesablayın.",
+    // Deliberately vertical: both x are 2, and that IS the point of the task.
+    "Nöqtələr E(2;5) və F(2;10) verilmişdir. Xəttin tənliyini müəyyən edin.",
+    "Nöqtələr C(0;0) və D(4;4) verilmişdir. Tənliyi tapın.",
+  ];
+  const w = buildWorksheet(cases.map((statement) => ({ statement })));
+  ok("every prose task gets a genuinely different variant B", w.A.every((a, i) => a.statement !== w.B[i].statement));
+  ok("none is left for manual work", w.unvaried.length === 0, JSON.stringify(w.unvaried));
+
+  /*
+   * The guard that matters. Shifting must not change WHICH numbers are equal:
+   *   A(2;3) B(5;11) -> A(4;6) B(4;9) makes both x equal, a vertical line whose
+   *   slope the task asks for and which does not exist;
+   *   E(2;5) F(2;10) must STAY vertical, because that is the case being taught.
+   */
+  let broken = 0;
+  w.A.forEach((a, i) => {
+    const A = nums(a.statement);
+    const B = nums(w.B[i].statement);
+    if (A.length !== B.length) { broken += 1; return; }
+    for (let x = 0; x < A.length; x++) {
+      for (let y = x + 1; y < A.length; y++) {
+        if ((A[x] === A[y]) !== (B[x] === B[y])) broken += 1;
+      }
+    }
+  });
+  ok("the pattern of equal numbers is preserved exactly", broken === 0, `${broken} mismatches`);
+  ok("a vertical-line task stays vertical", nums(w.B[2].statement)[0] === nums(w.B[2].statement)[2]);
+  ok("distinct points stay distinct", nums(w.B[0].statement)[0] !== nums(w.B[0].statement)[2]);
+  ok("no answer is claimed for a text-varied task", w.B.every((t) => !t.answer && !t.solution));
+  ok("the count reports how many were varied by text", w.textVaried === 4, w.textVaried);
 }
 
 console.log("\n4. Both variants are complete and paired:");

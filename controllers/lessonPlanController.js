@@ -140,12 +140,60 @@ const studentPlanView = asyncHandler(async (req, res) => {
  * router, so this handler is currently unreachable; it is written and wired so the
  * only remaining work when the owner sets a price is flipping `active: true`.
  */
+/*
+ * Caps on what can be handed to a provider in one request. A whole 200MB textbook
+ * cannot go into a prompt, and pretending otherwise produces exactly the failure
+ * this endpoint had: the model is told it has a book, given nothing, and invents a
+ * page number.
+ */
+const MAX_SOURCE_PROMPT_MB = Number(process.env.LESSON_PLAN_MAX_SOURCE_MB) || 20;
+const MAX_SOURCE_PROMPT_PAGES = Number(process.env.LESSON_PLAN_MAX_SOURCE_PAGES) || 60;
+
+/*
+ * POST /:id/generate
+ *
+ * When a chapter is attached its BYTES are sent with the prompt, and every page it
+ * claims afterwards is checked against that file. Previously `parts` was always
+ * empty while the prompt still said "MƏNBƏ VAR", so the model was told it had a
+ * textbook, handed nothing, and produced citations to pages that do not exist.
+ */
 const generatePlan = asyncHandler(async (req, res) => {
   const plan = await mine(req, req.params.id);
   const { runDocument } = require("../helper/aiDocument");
-  const { buildLessonPlanPrompt, normalizeLessonPlan, validateCitations } = content;
-  const hasSource = Boolean((plan.sourceVersions || []).length);
-  const { system, prompt } = buildLessonPlanPrompt({
+  const { LESSON_PLAN_SCHEMA, LESSON_PLAN_GEMINI_SCHEMA } = require("../helper/lessonPlanSchema");
+  const CurriculumSourceVersion = require("../models/curriculumSourceVersionModel");
+  const storage = require("../helper/curriculumStorage");
+  const evidence = require("../helper/curriculumEvidence");
+  const geometry = require("../helper/curriculumGeometry");
+  const fsp = require("fs").promises;
+
+  // ---- attach the chapter, if one is pinned ----
+  const parts = [];
+  let sourceVersion = null;
+  if ((plan.sourceVersions || []).length) {
+    sourceVersion = await CurriculumSourceVersion.findById(plan.sourceVersions[0]);
+    if (!sourceVersion || !["ready", "superseded"].includes(sourceVersion.state)) {
+      throw httpError(409, "source_unavailable", "Bağlanmış dərslik faylı əlçatan deyil.");
+    }
+    if (sourceVersion.pageCount > MAX_SOURCE_PROMPT_PAGES) {
+      throw httpError(
+        413,
+        "source_too_long",
+        `Bu dərslik ${sourceVersion.pageCount} səhifədir — bir sorğuya sığmır. Yalnız lazım olan fəsli (ən çox ${MAX_SOURCE_PROMPT_PAGES} səhifə) ayrıca yükləyin.`
+      );
+    }
+    if (sourceVersion.bytes > MAX_SOURCE_PROMPT_MB * 1024 * 1024) {
+      throw httpError(413, "source_too_large", `Fayl ${MAX_SOURCE_PROMPT_MB}MB-dan böyükdür.`);
+    }
+    // Read the PINNED bytes and confirm they are the ones the plan pinned.
+    const file = storage.pathForKey(sourceVersion.storageKey, sourceVersion.ext);
+    const intact = await storage.verifyBytes(sourceVersion.storageKey, sourceVersion.ext, sourceVersion.sha256);
+    if (!intact.ok) throw httpError(409, "source_bytes_changed", "Dərslik faylı dəyişib və ya itib.");
+    parts.push({ mime: "application/pdf", data: (await fsp.readFile(file)).toString("base64"), isPdf: true });
+  }
+
+  const hasSource = parts.length > 0;
+  const { system, prompt } = content.buildLessonPlanPrompt({
     hasSource,
     topic: plan.topic,
     grade: plan.grade,
@@ -154,41 +202,91 @@ const generatePlan = asyncHandler(async (req, res) => {
     lessonMinutes: plan.lessonMinutes,
     instructions: req.body.instructions,
   });
-  const { LESSON_PLAN_SCHEMA, LESSON_PLAN_GEMINI_SCHEMA } = require("../helper/lessonPlanSchema");
+
   const out = await runDocument({
     prompt,
-    parts: [],
+    parts,
     system,
     schema: LESSON_PLAN_SCHEMA,
     geminiSchema: LESSON_PLAN_GEMINI_SCHEMA,
     model: req.body.model,
   });
-  const normalized = normalizeLessonPlan(out.doc, { lessonMinutes: plan.lessonMinutes });
-  const checked = validateCitations(normalized, {
+
+  const normalized = content.normalizeLessonPlan(out.doc, { lessonMinutes: plan.lessonMinutes });
+  const checked = content.validateCitations(normalized, {
     hasSource,
     allowedSubStandards: new Set(plan.subStandards || []),
   });
-  // Charge only now, once a usable document exists and is stored. A generation
-  // that failed upstream, or came back empty, costs the teacher nothing.
+
+  /*
+   * VERIFY every page the model claims, against the file it was given. A page
+   * number inside the document is not acceptance: the excerpt must actually appear
+   * on that page. Anything unproven loses its citation rather than being printed as
+   * fact — a wrong "səh. 124" on a teacher's paper is worse than no reference.
+   */
+  if (hasSource && sourceVersion) {
+    const file = storage.pathForKey(sourceVersion.storageKey, sourceVersion.ext);
+    const pageTextCache = new Map();
+    for (const t of checked.plan.tasks) {
+      const label = t.sourceEvidence && t.sourceEvidence.printedPageLabel;
+      if (!label) continue;
+
+      const idx = geometry.fileIndexForLabel(sourceVersion.pageMap, label, sourceVersion.pageCount);
+      if (idx < 0) {
+        // The book has no such printed page — the number was invented.
+        t.sourceEvidence = undefined;
+        t.sourceMode = "original";
+        t.reviewStatus = "needs_teacher_review";
+        t.reviewNotes = [...(t.reviewNotes || []), `Dərslikdə "${label}" səhifəsi tapılmadı — istinad silindi.`];
+        checked.issues.push({ code: "citation_page_not_found", label });
+        continue;
+      }
+      if (!pageTextCache.has(idx)) pageTextCache.set(idx, await evidence.pdfPageText(file, idx));
+      const match = evidence.matchExcerpt(pageTextCache.get(idx), {
+        excerpt: t.sourceEvidence.sourceExcerpt || t.sourceEvidence.excerpt,
+        sourceTaskNo: t.sourceEvidence.sourceTaskNo,
+      });
+      t.sourceEvidence = {
+        ...t.sourceEvidence,
+        source: sourceVersion.source,
+        sourceVersion: sourceVersion._id,
+        sourceHash: sourceVersion.sha256,
+        filePageIndex: idx,
+        verifyStatus: match.status,
+        verifyReason: match.reason || "",
+      };
+      if (match.status !== evidence.VERIFY_STATUS.MACHINE_MATCHED) {
+        t.reviewStatus = "needs_teacher_review";
+        checked.issues.push({ code: "citation_unverified", label, reason: match.reason });
+      }
+    }
+
+    // Free text can carry an invented page too ("127-ci səhifədəki 18-ci tapşırıq").
+    const homeworkClaims = require("../helper/curriculumEvidence").findCitationClaims(checked.plan.homework);
+    for (const c of homeworkClaims) {
+      const num = (c.match(/\d+/) || [])[0];
+      if (num && geometry.fileIndexForLabel(sourceVersion.pageMap, num, sourceVersion.pageCount) < 0) {
+        checked.issues.push({ code: "homework_page_not_found", label: num });
+      }
+    }
+  }
+
   const usable = (normalized.stages || []).length > 0 || (normalized.tasks || []).length > 0;
   if (req.aiCredit && usable) req.aiCredit.usable();
 
-  // Never an in-place overwrite: the teacher gets a proposal and a diff.
   const proposal = await svc.proposeRegeneration(plan._id, req.user._id, checked.plan, {
     provider: out.provider,
     issues: checked.issues,
+    hasSource,
   });
-  res.json({ ...proposal, issues: checked.issues, provider: out.provider });
+  res.json({ ...proposal, issues: checked.issues, provider: out.provider, hasSource });
 });
 
 /*
- * POST /:id/worksheet — the document's "iki variantda iş vərəqi generatoru".
+ * POST /:id/worksheet — the two-variant sheet her prompt asks for.
  *
- * Derived from the plan's own tasks, never generated again: variant B perturbs the
- * approved variables of each task's server-owned template and recomputes with the
- * pinned evaluator. No AI call, no credit, and no possibility of the worksheet
- * disagreeing with the plan. Tasks with no formal model come back flagged for the
- * teacher rather than silently duplicated.
+ * Derived from the plan own tasks, never generated again: no AI call, no credit,
+ * and no possibility of the worksheet disagreeing with the plan it came from.
  */
 const worksheet = asyncHandler(async (req, res) => {
   const plan = await mine(req, req.params.id);
