@@ -216,7 +216,13 @@ REFLEKSİYA VƏ QİYMƏTLƏNDİRMƏ (xüsusi diqqət):
 - "homework": məzmunu ilə təsvir olunmuş konkret ev tapşırığı.
 - "materials": dərsdə lazım olan bütün vasitələrin siyahısı.
 
-- "subStandards" massivinə YALNIZ müəllimin verdiyi kodları yaz; yeni kod UYDURMA.`
+TERMİNOLOGİYA:
+- Azərbaycan məktəb dərsliklərində işlənən STANDART terminlərdən istifadə et.
+  İngilis terminini hərfi tərcümə etmə (məsələn "slope" üçün "kəskinlik" YOX,
+  "bucaq əmsalı" düzgündür). Əmin olmadığın halda terminin əvəzinə anlayışı
+  izah edən sadə ifadə yaz.
+
+- "subStandards" massivinə YALNIZ müəllimin verdiyi kodları yaz; yeni kod UYDURMA.`;
 
 function buildLessonPlanPrompt({ hasSource = false, topic = "", grade = "", subject = "", subStandards = [], lessonMinutes = 45, instructions = "" } = {}) {
   const system = [BASE_RULES, hasSource ? WITH_SOURCE_RULES : NO_SOURCE_RULES].join("\n");
