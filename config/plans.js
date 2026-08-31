@@ -74,12 +74,13 @@ const CREDIT_TOPUPS = [
   { credits: 300, priceAzn: num("PLAN_TOPUP_300_AZN", 12) },
 ];
 
-// Per-action AI credit costs (Phase 2 — informational on the pricing page now).
-const AI_ACTION_COSTS = {
-  generateExam: 10,
-  rewriteQuestion: 2,
-  supportChat: 0,
-};
+// Per-action AI credit costs shown on the pricing page. DERIVED from the one
+// canonical registry (config/aiOperations.js) so the published number is always
+// the number actually charged. aiOperations requires nothing, so importing it
+// here cannot create a cycle — tests/ai-operations-config.test.js proves it.
+const { displayCosts } = require("./aiOperations");
+
+const AI_ACTION_COSTS = displayCosts();
 
 // Card the teacher transfers to for a manual upgrade. All env-driven so the
 // number/holder can change without a code deploy (edit .env + restart backend).

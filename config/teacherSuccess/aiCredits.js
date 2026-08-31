@@ -9,19 +9,16 @@
  * cannot double-charge (D12). Essential grading/finalization is NOT here (D13).
  */
 
-// stable operation name -> integer credit weight
-const WEIGHTS = {
-  "ai.extract.questions": 5, // POST /extractQuestions[/Stream]/:examId
-  "ai.generate.questions": 5, // POST /generateQuestions[/Stream]/:examId
-  "ai.regenerate.question": 1, // POST /regenerateQuestion/:examId
-  "ai.chat.message": 1, // POST /chat
-  "ai.transcribe.audio": 2, // POST /transcribe
-  "ai.realtime.session": 5, // POST /realtime-token
-  "ai.models.list": 0, // GET /ai/models — no provider call, not chargeable
-};
+// stable operation name -> integer credit weight. DERIVED from the one canonical
+// registry (config/aiOperations.js) so the ledger weight, the enforced price and
+// the published price can no longer drift apart. Declared-but-unpriced operations
+// are deliberately absent — see the registry's `active` flag.
+const { ledgerWeightTable, confirmBeforeSet } = require("../aiOperations");
+
+const WEIGHTS = ledgerWeightTable();
 
 // Operations a large-action UI must show the cost for before confirming.
-const CONFIRM_BEFORE = new Set(["ai.extract.questions", "ai.generate.questions", "ai.realtime.session"]);
+const CONFIRM_BEFORE = confirmBeforeSet();
 
 const OPERATIONS = Object.keys(WEIGHTS);
 const isOperation = (op) => Object.prototype.hasOwnProperty.call(WEIGHTS, op);

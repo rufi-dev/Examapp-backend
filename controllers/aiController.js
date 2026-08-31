@@ -235,6 +235,9 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 // this a model the key actually has quota for AND that accepts the extraction
 // config — the Pro tier does; gemini-2.0-flash is retired / limit:0.
 const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-pro";
+// Document generation (lesson plans / MSO) — its own knob so tuning it can never
+// disturb question extraction, which shares neither prompt nor schema.
+const GEMINI_DOC_MODEL = process.env.GEMINI_DOC_MODEL || GEMINI_MODEL;
 // Approx USD per 1M tokens, by model tier (env-overridable). 2.5 Pro is pricier
 // than Flash but far more faithful; both are well under Claude Opus (5 / 25).
 const GEMINI_PRICES = {
@@ -324,6 +327,27 @@ function computeGeminiCost(u, model) {
   };
 }
 
+// ---- provider content-part builders (pure; exported for tests) ----
+// The ONE place each provider's file/image block shape is written. They were
+// inlined at five call sites, which is how extractWithClaude drifted into
+// emitting an EMPTY text block for a single file (see the note there).
+const claudeContentParts = (parts) =>
+  parts.map((p) =>
+    p.isPdf
+      ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: p.data } }
+      : { type: "image", source: { type: "base64", media_type: p.mime, data: p.data } }
+  );
+
+const openaiContentParts = (parts, prefix = "file") =>
+  parts.map((p, i) =>
+    p.isPdf
+      ? { type: "input_file", filename: `${prefix}-${i + 1}.pdf`, file_data: `data:application/pdf;base64,${p.data}` }
+      : { type: "input_image", image_url: `data:${p.mime};base64,${p.data}` }
+  );
+
+const geminiContentParts = (parts) =>
+  parts.map((p) => ({ inline_data: { mime_type: p.mime, data: p.data } }));
+
 // Build an error carrying an HTTP status + Azerbaijani user message.
 function aiError(status, userMessage, fallback = false) {
   const e = new Error(userMessage);
@@ -356,16 +380,15 @@ async function extractWithClaude(parts, instructions = "") {
         messages: [
           {
             role: "user",
+            // The multi-file hint is only ADDED when there is more than one file.
+            // It used to be a block whose text was "" for a single file, which the
+            // Anthropic API rejects — so single-file non-streaming Claude
+            // extraction 400'd and was masked by the provider fallback chain.
             content: [
-              ...parts.map((p) =>
-                p.isPdf
-                  ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: p.data } }
-                  : { type: "image", source: { type: "base64", media_type: p.mime, data: p.data } }
-              ),
-              {
-                type: "text",
-                text: parts.length > 1 ? `Bu ${parts.length} faylın HAMISINDAKI sualları çıxar.` : "",
-              },
+              ...claudeContentParts(parts),
+              ...(parts.length > 1
+                ? [{ type: "text", text: `Bu ${parts.length} faylın HAMISINDAKI sualları çıxar.` }]
+                : []),
               { type: "text", text: "Bu PDF-dəki bütün sualları çıxar." },
             ],
           },
@@ -441,11 +464,7 @@ async function extractWithOpenAI(parts, instructions = "", modelId) {
           {
             role: "user",
             content: [
-              ...parts.map((p, i) =>
-                p.isPdf
-                  ? { type: "input_file", filename: `exam-${i + 1}.pdf`, file_data: `data:application/pdf;base64,${p.data}` }
-                  : { type: "input_image", image_url: `data:${p.mime};base64,${p.data}` }
-              ),
+              ...openaiContentParts(parts, "exam"),
               { type: "input_text", text: "Yüklənmiş fayl(lar)dakı bütün sualları çıxar." },
             ],
           },
@@ -520,7 +539,7 @@ async function extractWithGemini(parts, instructions = "") {
         {
           role: "user",
           parts: [
-            ...parts.map((p) => ({ inline_data: { mime_type: p.mime, data: p.data } })),
+            ...geminiContentParts(parts),
             { text: "Bu PDF-dəki bütün sualları çıxar." },
           ],
         },
@@ -1455,7 +1474,7 @@ async function streamGemini(parts, instructions, onText) {
         {
           role: "user",
           parts: [
-            ...parts.map((p) => ({ inline_data: { mime_type: p.mime, data: p.data } })),
+            ...geminiContentParts(parts),
             { text: "Bu PDF-dəki bütün sualları çıxar." },
           ],
         },
@@ -1555,11 +1574,7 @@ async function streamClaude(parts, instructions, onText) {
       {
         role: "user",
         content: [
-          ...parts.map((p) =>
-            p.isPdf
-              ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: p.data } }
-              : { type: "image", source: { type: "base64", media_type: p.mime, data: p.data } }
-          ),
+          ...claudeContentParts(parts),
           { type: "text", text: "Bu PDF-dəki bütün sualları çıxar." },
         ],
       },
@@ -3445,6 +3460,17 @@ module.exports = {
   detectPassageCount,
   extractWithGemini,
   extractWithOpenAI,
+  // exported for helper/aiDocument.js (the parallel document path) and its tests
+  claudeContentParts,
+  openaiContentParts,
+  geminiContentParts,
+  computeCost,
+  computeGeminiCost,
+  computeOpenAIGenCost,
+  findAiModel,
+  DEFAULT_AI_MODEL,
+  GEMINI_DOC_MODEL,
+  GEMINI_SCHEMA,
   // exported for tests
   cleanQuestions,
   auditQuestions,

@@ -14,26 +14,23 @@
  */
 const User = require("../models/userModel");
 const { httpError } = require("../utils/appError");
-const { isOperation } = require("../config/teacherSuccess/aiCredits");
 
 const BILLING_ENABLED = String(process.env.AI_BILLING_ENABLED ?? "true").toLowerCase() !== "false";
 
-// Phase-2 credit cost per AI operation — matches the published pricing
-// (config/plans.js AI_ACTION_COSTS): a full exam (AI or PDF) = 10, one rewrite
-// = 2, chat + voice = free. Kept HERE (not the retired TSJ weight table) so the
-// commercial pricing and the legacy ledger stay independent.
-const OP_COST = {
-  "ai.extract.questions": 10,
-  "ai.generate.questions": 10,
-  "ai.regenerate.question": 2,
-  "ai.chat.message": 0,
-  "ai.transcribe.audio": 0,
-  "ai.realtime.session": 0,
-  "ai.models.list": 0,
-};
+// Phase-2 credit cost per AI operation. DERIVED from the one canonical registry
+// (config/aiOperations.js), which also feeds the ledger weights and the published
+// pricing page — so the three can no longer disagree. A declared-but-unpriced
+// operation is absent here on purpose and must be refused by the route
+// (middleware/aiOperation.js requireActiveOperation), never charged 0.
+const { costTable, isDeclared, isActive } = require("../config/aiOperations");
+
+const OP_COST = costTable();
 
 function chargeAi(operation) {
-  if (!isOperation(operation)) throw new Error(`Unknown AI operation "${operation}"`); // fail fast at wire time
+  // Fail fast at WIRE time: an unknown operation is a typo in a route, and an
+  // inactive one has no price yet — neither may reach a request and charge 0.
+  if (!isDeclared(operation)) throw new Error(`Unknown AI operation "${operation}"`);
+  if (!isActive(operation)) throw new Error(`AI operation "${operation}" is declared but not priced yet`);
   const cost = OP_COST[operation] || 0;
   return (req, res, next) => {
     req.aiCredit = null;
