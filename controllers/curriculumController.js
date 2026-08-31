@@ -48,8 +48,12 @@ const listSources = asyncHandler(async (req, res) => {
     if (!bySource.has(String(v.source))) bySource.set(String(v.source), []);
     bySource.get(String(v.source)).push(v);
   }
+  // A source with no versions left is a leftover, not a textbook — do not show a
+  // title with no file under it.
   res.json({
-    sources: sources.map((s) => ({ ...s, versions: bySource.get(String(s._id)) || [] })),
+    sources: sources
+      .map((s) => ({ ...s, versions: bySource.get(String(s._id)) || [] }))
+      .filter((s) => s.versions.length > 0),
   });
 });
 
@@ -308,8 +312,30 @@ const deleteVersion = asyncHandler(async (req, res) => {
     }
   }
   await finishDeletion(version._id, token);
+
+  /*
+   * Tidy up what the version left behind. Without this the source row survives
+   * with an activeVersion pointing at a row that no longer exists, and the list
+   * shows a title with no file under it and no way to act on it.
+   */
+  const left = await CurriculumSourceVersion.find({ source: src._id })
+    .sort({ versionNumber: -1 })
+    .select("_id versionNumber state")
+    .lean();
+  if (!left.length) {
+    // The last file is gone, so the source itself is nothing. Remove it.
+    await CurriculumSource.deleteOne({ _id: src._id });
+    return res.json({ deleted: true, sourceRemoved: true });
+  }
+  if (String(src.activeVersion) === String(version._id)) {
+    const next = left.find((v) => v.state === "ready") || left[0];
+    await CurriculumSource.updateOne(
+      { _id: src._id },
+      { $set: { activeVersion: next._id, activeVersionNumber: next.versionNumber } }
+    );
+  }
   await syncRefCount(src._id);
-  res.json({ deleted: true });
+  res.json({ deleted: true, sourceRemoved: false });
 });
 
 // GET .../versions/:vid/holders — who is blocking a delete, and why.
