@@ -17,6 +17,10 @@ services:
       EXAM_PDF_DIR: /app/examPdfs
       BOARD_FILES_DIR: /app/boardFiles
       GUIDES_DIR: /app/guide-videos
+      # Curriculum sources are the bytes every textbook CITATION is pinned to, so
+      # they must outlive a rebuild: the startup preflight refuses a non-absolute
+      # CURRICULUM_DIR in production for exactly the same reason as EXAM_PDF_DIR.
+      CURRICULUM_DIR: /app/lessonAssets
     # tini as PID 1 reaps zombie Chromium processes and forwards signals so the
     # browser shuts down cleanly (avoids stale profile locks on restart).
     init: true
@@ -34,6 +38,7 @@ services:
       - guidevideos:/app/guide-videos # persist public "how to use" guide videos across rebuilds
       - wa_auth:/app/.wwebjs_auth # persist the linked WhatsApp session
       - live_journal:/app/live-journal # durable write-ahead journal for live whiteboard sessions
+      - curriculum:/app/lessonAssets # persist textbook sources + page crops across rebuilds
     networks:
       - web
 
@@ -46,6 +51,7 @@ services:
     env_file: .env
     environment:
       EXAM_PDF_DIR: /app/examPdfs
+      CURRICULUM_DIR: /app/lessonAssets
       RUN_BACKGROUND_JOBS: "false"
       WHATSAPP_WEB_ENABLED: "false"
     init: true
@@ -55,6 +61,7 @@ services:
       - materials:/app/materials
       - assignments:/app/assignments
       - videos:/app/videos
+      - curriculum:/app/lessonAssets
     networks:
       - web
 
@@ -89,5 +96,6 @@ volumes:
   guidevideos:
   wa_auth:
   live_journal:
+  curriculum:
   caddy_data:
   caddy_config:
