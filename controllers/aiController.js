@@ -333,7 +333,7 @@ function aiError(status, userMessage, fallback = false) {
   return e;
 }
 
-async function extractWithClaude(base64, instructions = "") {
+async function extractWithClaude(parts, instructions = "") {
   const client = getClient();
   if (!client) throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)");
   const instr = clampInstr(instructions);
@@ -357,9 +357,14 @@ async function extractWithClaude(base64, instructions = "") {
           {
             role: "user",
             content: [
+              ...parts.map((p) =>
+                p.isPdf
+                  ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: p.data } }
+                  : { type: "image", source: { type: "base64", media_type: p.mime, data: p.data } }
+              ),
               {
-                type: "document",
-                source: { type: "base64", media_type: "application/pdf", data: base64 },
+                type: "text",
+                text: parts.length > 1 ? `Bu ${parts.length} faylın HAMISINDAKI sualları çıxar.` : "",
               },
               { type: "text", text: "Bu PDF-dəki bütün sualları çıxar." },
             ],
@@ -412,7 +417,7 @@ const isRetriable = (e) => {
 // Uses the Responses API rather than chat completions: that is the endpoint
 // that takes a PDF as an input_file, so the whole paper goes over in one call
 // exactly as it does for the other two providers.
-async function extractWithOpenAI(base64, instructions = "", modelId) {
+async function extractWithOpenAI(parts, instructions = "", modelId) {
   if (!process.env.OPENAI_API_KEY)
     throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (OPENAI_API_KEY)", true);
   const model = modelId || DEFAULT_AI_MODEL;
@@ -436,12 +441,12 @@ async function extractWithOpenAI(base64, instructions = "", modelId) {
           {
             role: "user",
             content: [
-              {
-                type: "input_file",
-                filename: "exam.pdf",
-                file_data: `data:application/pdf;base64,${base64}`,
-              },
-              { type: "input_text", text: "Bu PDF-dəki bütün sualları çıxar." },
+              ...parts.map((p, i) =>
+                p.isPdf
+                  ? { type: "input_file", filename: `exam-${i + 1}.pdf`, file_data: `data:application/pdf;base64,${p.data}` }
+                  : { type: "input_image", image_url: `data:${p.mime};base64,${p.data}` }
+              ),
+              { type: "input_text", text: "Yüklənmiş fayl(lar)dakı bütün sualları çıxar." },
             ],
           },
         ],
@@ -505,7 +510,7 @@ async function extractWithOpenAI(base64, instructions = "", modelId) {
   };
 }
 
-async function extractWithGemini(base64, instructions = "") {
+async function extractWithGemini(parts, instructions = "") {
   if (!process.env.GEMINI_API_KEY) throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (GEMINI_API_KEY)");
   const instr = clampInstr(instructions);
   const buildBody = (model) =>
@@ -515,7 +520,7 @@ async function extractWithGemini(base64, instructions = "") {
         {
           role: "user",
           parts: [
-            { inline_data: { mime_type: "application/pdf", data: base64 } },
+            ...parts.map((p) => ({ inline_data: { mime_type: p.mime, data: p.data } })),
             { text: "Bu PDF-dəki bütün sualları çıxar." },
           ],
         },
@@ -1218,6 +1223,43 @@ async function applyAnswerMode({ questions, mode, preset, model, signal, onStatu
 // the provider; size is the cheap pre-check that catches the common "uploaded a
 // 70MB book" case.)
 const MAX_EXTRACT_PDF_MB = 32;
+
+// Teachers photograph or screenshot a worksheet far more often than they have a
+// tidy PDF, so extraction accepts images too — and several files at once, since a
+// test is usually more than one page.
+const EXTRACT_IMAGE_TYPES = ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif", "image/heic", "image/heif"];
+const MAX_EXTRACT_FILES = Number(process.env.AI_EXTRACT_MAX_FILES) || 10;
+const isExtractableType = (m) => m === "application/pdf" || EXTRACT_IMAGE_TYPES.includes(m);
+
+// Normalise whatever was uploaded (single or multiple, PDF or image) into
+// provider-agnostic parts. Throws a clear message for anything unsupported.
+function extractParts(req, res) {
+  const files = req.files && req.files.length ? req.files : req.file ? [req.file] : [];
+  if (!files.length || !files.some((f) => f.buffer && f.buffer.length)) {
+    res.status(400);
+    throw new Error("PDF və ya şəkil faylı lazımdır");
+  }
+  if (files.length > MAX_EXTRACT_FILES) {
+    res.status(400);
+    throw new Error(`Ən çox ${MAX_EXTRACT_FILES} fayl yükləyə bilərsiniz.`);
+  }
+  return files.map((f) => {
+    const mime = (f.mimetype || "").toLowerCase();
+    if (mime && !isExtractableType(mime)) {
+      res.status(400);
+      throw new Error("Yalnız PDF və ya şəkil (PNG, JPG, WEBP, HEIC) dəstəklənir");
+    }
+    assertPdfExtractable(f, res); // the size ceiling applies to images too
+    return {
+      // heic/heif are not accepted by the vision APIs; send them as jpeg, which is
+      // what phones actually produce behind that container in practice.
+      mime: mime === "image/heic" || mime === "image/heif" ? "image/jpeg" : mime || "application/pdf",
+      data: f.buffer.toString("base64"),
+      isPdf: !mime || mime === "application/pdf",
+    };
+  });
+}
+
 function assertPdfExtractable(file, res) {
   const bytes = file.size || (file.buffer ? file.buffer.length : 0);
   if (bytes > MAX_EXTRACT_PDF_MB * 1024 * 1024) {
@@ -1230,17 +1272,7 @@ function assertPdfExtractable(file, res) {
 }
 
 const extractQuestions = asyncHandler(async (req, res) => {
-  if (!req.file || !req.file.buffer || !req.file.buffer.length) {
-    res.status(400);
-    throw new Error("PDF fayl lazımdır");
-  }
-  if (req.file.mimetype && req.file.mimetype !== "application/pdf") {
-    res.status(400);
-    throw new Error("Yalnız PDF fayl dəstəklənir");
-  }
-  assertPdfExtractable(req.file, res);
-
-  const base64 = req.file.buffer.toString("base64");
+  const parts = extractParts(req, res);
   // The builder sends the model id it picked. An OpenAI id routes to OpenAI;
   // "gemini"/"claude" keep working as the plain provider names they always were.
   const asked = String(req.body?.provider || "").toLowerCase();
@@ -1260,9 +1292,9 @@ const extractQuestions = asyncHandler(async (req, res) => {
   let usedProvider = provider;
   let fellBack = false;
   const extractors = {
-    openai: () => extractWithOpenAI(base64, instructions, openaiModel),
-    gemini: () => extractWithGemini(base64, instructions),
-    claude: () => extractWithClaude(base64, instructions),
+    openai: () => extractWithOpenAI(parts, instructions, openaiModel),
+    gemini: () => extractWithGemini(parts, instructions),
+    claude: () => extractWithClaude(parts, instructions),
   };
   // Try the picked provider, then fall through the OTHERS on an availability
   // failure so one engine being down / out of credit does not dead-end the
@@ -1410,7 +1442,7 @@ async function readSSEBody(body, onPayload) {
   }
 }
 
-async function streamGemini(base64, instructions, onText) {
+async function streamGemini(parts, instructions, onText) {
   if (!process.env.GEMINI_API_KEY)
     throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (GEMINI_API_KEY)", true);
   const instr = clampInstr(instructions);
@@ -1423,7 +1455,7 @@ async function streamGemini(base64, instructions, onText) {
         {
           role: "user",
           parts: [
-            { inline_data: { mime_type: "application/pdf", data: base64 } },
+            ...parts.map((p) => ({ inline_data: { mime_type: p.mime, data: p.data } })),
             { text: "Bu PDF-dəki bütün sualları çıxar." },
           ],
         },
@@ -1506,7 +1538,7 @@ async function streamGemini(base64, instructions, onText) {
   );
 }
 
-async function streamClaude(base64, instructions, onText) {
+async function streamClaude(parts, instructions, onText) {
   const client = getClient();
   if (!client) throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)");
   const instr = clampInstr(instructions);
@@ -1523,7 +1555,11 @@ async function streamClaude(base64, instructions, onText) {
       {
         role: "user",
         content: [
-          { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
+          ...parts.map((p) =>
+            p.isPdf
+              ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: p.data } }
+              : { type: "image", source: { type: "base64", media_type: p.mime, data: p.data } }
+          ),
           { type: "text", text: "Bu PDF-dəki bütün sualları çıxar." },
         ],
       },
@@ -1540,16 +1576,7 @@ async function streamClaude(base64, instructions, onText) {
 }
 
 const extractQuestionsStream = asyncHandler(async (req, res) => {
-  if (!req.file || !req.file.buffer || !req.file.buffer.length) {
-    res.status(400);
-    throw new Error("PDF fayl lazımdır");
-  }
-  if (req.file.mimetype && req.file.mimetype !== "application/pdf") {
-    res.status(400);
-    throw new Error("Yalnız PDF fayl dəstəklənir");
-  }
-  assertPdfExtractable(req.file, res);
-  const base64 = req.file.buffer.toString("base64");
+  const parts = extractParts(req, res);
   // The builder sends the model id it picked. An OpenAI id routes to OpenAI;
   // "gemini"/"claude" keep working as the plain provider names they always were.
   const asked = String(req.body?.provider || "").toLowerCase();
@@ -1611,11 +1638,11 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     // OpenAI's Responses API returns the whole paper at once (no token stream) —
     // the loader still animates, questions just don't land one by one.
     openai: async () => {
-      const one = await extractWithOpenAI(base64, instructions, openaiModel);
+      const one = await extractWithOpenAI(parts, instructions, openaiModel);
       return { full: JSON.stringify({ questions: one.questions }), usage: one.usage, model: one.cost?.model, openaiCost: one.cost };
     },
-    gemini: () => streamGemini(base64, instructions, mkOnText()),
-    claude: () => streamClaude(base64, instructions, mkOnText()),
+    gemini: () => streamGemini(parts, instructions, mkOnText()),
+    claude: () => streamClaude(parts, instructions, mkOnText()),
   };
   // Try the picked provider, then fall through the others on an availability
   // failure (Gemini right after the pick — cheap + good at PDFs) so one engine

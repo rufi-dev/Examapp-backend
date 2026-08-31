@@ -225,7 +225,14 @@ async function sweepInner(now = new Date()) {
   const graceCutoff = new Date(now.getTime() - WATCH_MINUTES * 60 * 1000);
   const base = { role: "teacher", phone: { $nin: [null, ""] }, outreachStatus: { $in: [null] } };
   const sel = "_id name phone createdAt outreachAttempts";
-  const cap = ATTEMPTS_PER_SWEEP * 6;
+  // Scan the WHOLE waiting list, not a 48-row slice of it. "Stuck" cannot be
+  // expressed as a query (it depends on the teacher's exams/classes), so it is
+  // computed after fetching — which means a slice can be filled entirely with
+  // teachers who already finished setting up, and the sweep then reports "nothing
+  // to do" forever while the people who need the message sit behind them. That is
+  // exactly what happened: 0 stuck inside the window, 137 stuck outside it.
+  // This runs at most once per GAP_MIN (the gap check is above), so it is cheap.
+  const cap = Number(process.env.OUTREACH_SCAN_CAP) || 500;
   let candidates;
   if (since) {
     const [fresh, backlog] = await Promise.all([

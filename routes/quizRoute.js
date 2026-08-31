@@ -133,7 +133,7 @@ router.post(
   teacherOnly,
   aiRateLimit,
   aiBudgetGuard,
-  memUpload.single("pdf"),
+  memUpload.array("pdf", 10),
   chargeAi("ai.extract.questions"),
   extractQuestions
 );
@@ -144,7 +144,7 @@ router.post(
   teacherOnly,
   aiRateLimit,
   aiBudgetGuard,
-  memUpload.single("pdf"),
+  memUpload.array("pdf", 10),
   chargeAi("ai.extract.questions"),
   extractQuestionsStream
 );
