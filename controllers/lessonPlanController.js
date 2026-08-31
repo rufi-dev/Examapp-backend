@@ -168,6 +168,11 @@ const generatePlan = asyncHandler(async (req, res) => {
     hasSource,
     allowedSubStandards: new Set(plan.subStandards || []),
   });
+  // Charge only now, once a usable document exists and is stored. A generation
+  // that failed upstream, or came back empty, costs the teacher nothing.
+  const usable = (normalized.stages || []).length > 0 || (normalized.tasks || []).length > 0;
+  if (req.aiCredit && usable) req.aiCredit.usable();
+
   // Never an in-place overwrite: the teacher gets a proposal and a diff.
   const proposal = await svc.proposeRegeneration(plan._id, req.user._id, checked.plan, {
     provider: out.provider,

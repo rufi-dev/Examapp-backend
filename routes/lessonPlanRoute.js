@@ -4,6 +4,7 @@ const { protect, teacherOnly } = require("../middleware/authMiddleware");
 const { requireCurriculum } = require("../middleware/curriculumFlag");
 const { requireActiveOperation } = require("../middleware/aiOperation");
 const { aiRateLimit, aiBudgetGuard } = require("../middleware/aiLimit");
+const { chargeAi } = require("../middleware/aiCredit");
 const c = require("../controllers/lessonPlanController");
 
 router.get("/", requireCurriculum, protect, teacherOnly, c.listPlans);
@@ -27,9 +28,12 @@ router.get("/:id/student", requireCurriculum, protect, c.studentPlanView);
  * is priced: it is what makes a future unpriced operation fail closed instead of
  * generating for free.
  *
- * There is deliberately NO chargeAi here: credits for document work are reserved
- * and committed through services/aiCreditService (claim-before-charge), and using
- * both mechanisms on one route would double-charge.
+ * chargeAi is the RIGHT tool here, and is what every other AI route in this app
+ * uses: one request, one document, one charge, committed only at the genuine
+ * success point so a failed generation is free. The reserve/commit protocol in
+ * services/aiCreditService exists for the BATCHED MSO job, where a single request
+ * spans many provider calls and a crash between them must not forgive the charge.
+ * Using both on one route would double-charge, so this route uses exactly one.
  */
 router.post(
   "/:id/generate",
@@ -39,6 +43,7 @@ router.post(
   requireActiveOperation("ai.generate.lessonplan"),
   aiRateLimit,
   aiBudgetGuard,
+  chargeAi("ai.generate.lessonplan"),
   c.generatePlan
 );
 
