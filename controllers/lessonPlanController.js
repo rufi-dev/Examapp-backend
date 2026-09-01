@@ -266,12 +266,44 @@ const generatePlan = asyncHandler(async (req, res) => {
       }
     }
 
-    // Free text can carry an invented page too ("127-ci səhifədəki 18-ci tapşırıq").
+    /*
+     * Free text carries invented pages too ("125 və 126 səhifələrdəki tapşırıqlar").
+     * The prose is NOT rewritten (CR-MSO-003) — it is LABELLED, because an invented
+     * page printed on a teacher's handout without comment is the actual harm.
+     */
     const homeworkClaims = require("../helper/curriculumEvidence").findCitationClaims(checked.plan.homework);
+    const missing = [];
     for (const c of homeworkClaims) {
       const num = (c.match(/\d+/) || [])[0];
       if (num && geometry.fileIndexForLabel(sourceVersion.pageMap, num, sourceVersion.pageCount) < 0) {
         checked.issues.push({ code: "homework_page_not_found", label: num });
+        if (!missing.includes(num)) missing.push(num);
+      }
+    }
+    if (missing.length) {
+      checked.plan.homeworkWarning =
+        `Bu istinad yoxlanılmadı: bağlanmış faylda ${missing.map((m) => `${m}-ci`).join(", ")} ` +
+        `səhifə yoxdur (fayl ${sourceVersion.pageCount} səhifədir). Ev tapşırığını özünüz dəqiqləşdirin.`;
+    }
+
+    /*
+     * A task may only CLAIM the textbook if its citation was actually verified
+     * against the pinned bytes. Otherwise "dərslik əsasında uyğunlaşdırılıb" is
+     * provenance nothing backs — which is what printed on every task of a maths
+     * plan whose attached file was a German speaking guide.
+     */
+    for (const t of checked.plan.tasks) {
+      const verified =
+        t.sourceEvidence &&
+        [evidence.VERIFY_STATUS.MACHINE_MATCHED, evidence.VERIFY_STATUS.TEACHER_VERIFIED].includes(
+          t.sourceEvidence.verifyStatus
+        );
+      if (!verified && t.sourceMode !== "original") {
+        t.sourceMode = "original";
+        t.reviewNotes = [
+          ...(t.reviewNotes || []),
+          "Dərslikdən götürüldüyü təsdiqlənmədi — mənbə göstərilmir.",
+        ];
       }
     }
   }

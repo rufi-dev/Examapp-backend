@@ -90,6 +90,7 @@ function normalizeLessonPlan(raw, { lessonMinutes = 45 } = {}) {
     tasks,
     reflection: clean(p.reflection),
     homework: clean(p.homework),
+    homeworkWarning: "",
     materials: cleanList(p.materials),
     lessonMinutes,
   };
@@ -118,6 +119,16 @@ function validateCitations(plan, { hasSource = false, allowedSubStandards = null
   for (const [i, t] of out.tasks.entries()) {
     const claimsInProse = [...findCitationClaims(t.statement), ...findCitationClaims(t.solution)];
     const hasStructured = Boolean(t.sourceEvidence && (t.sourceEvidence.printedPageLabel || t.sourceEvidence.sourceTaskNo));
+
+    /*
+     * "derslik esasinda uygunlasdirilib" is a claim about provenance. With no file
+     * attached there is nothing it could have been adapted FROM, so the mode is
+     * corrected even when the model made no explicit citation — otherwise every
+     * task prints a textbook badge that nothing backs.
+     */
+    if (!hasSource && t.sourceMode !== "original") {
+      t.sourceMode = "original";
+    }
 
     if (!hasSource && (hasStructured || claimsInProse.length)) {
       // No source was uploaded, so no citation can possibly be real.

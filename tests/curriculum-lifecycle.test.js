@@ -279,6 +279,16 @@ async function sec7() {
 
   const accepted = await planSvc.acceptProposal(plan._id, OWNER, after.revision);
   ok("accepting applies it through the same CAS", accepted.topic === "AI-nin təklifi");
+
+  /*
+   * And the proposal is GONE. $set: { proposal: undefined } is dropped by Mongoose
+   * before it reaches Mongo, so the accepted proposal used to stay on the document
+   * and the "AI has a new version" panel never went away.
+   */
+  ok("the accepted proposal is cleared from the returned doc", !accepted.proposal, JSON.stringify(accepted.proposal));
+  const reloaded = await LessonPlan.findById(plan._id).lean();
+  ok("and cleared in the database", reloaded.proposal === undefined || reloaded.proposal === null, JSON.stringify(reloaded.proposal));
+  ok("accepting twice is refused", (await codeOf(() => planSvc.acceptProposal(plan._id, OWNER, reloaded.revision))) === "no_proposal");
 }
 
 /*

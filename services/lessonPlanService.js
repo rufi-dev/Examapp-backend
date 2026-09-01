@@ -21,7 +21,7 @@ const { httpError } = require("../utils/appError");
 const CONTENT_FIELDS = [
   "title", "grade", "subject", "topic", "subStandards", "objectives", "criteria",
   "motivation", "motivationOrigin", "stages", "tasks", "reflection", "homework",
-  "materials", "lessonMinutes", "sourceMode",
+  "materials", "lessonMinutes", "sourceMode", "homeworkWarning",
 ];
 
 /*
@@ -44,7 +44,7 @@ const snapshotOf = (plan) => {
  * Draft write with compare-and-set on `revision`. A caller that omits the revision
  * is refused outright: a blind write is how one tab silently discards another's.
  */
-async function updateDraft(planId, ownerId, patch, expectedRevision) {
+async function updateDraft(planId, ownerId, patch, expectedRevision, unset) {
   if (expectedRevision === undefined || expectedRevision === null || expectedRevision === "") {
     throw httpError(400, "revision_required", "Dəyişikliyi göndərərkən `revision` göndərilməlidir.");
   }
@@ -53,9 +53,18 @@ async function updateDraft(planId, ownerId, patch, expectedRevision) {
     throw httpError(400, "bad_revision", "`revision` düzgün deyil.");
   }
   const revMatch = expected === 0 ? { $in: [0, null] } : expected;
+  /*
+   * $unset is separate on purpose. `$set: { proposal: undefined }` is dropped by
+   * Mongoose before it reaches Mongo, so accepting a proposal left the proposal on
+   * the document and the "AI yeni variant hazırladı" panel never went away.
+   */
+  const update = { $set: patch, $inc: { revision: 1 } };
+  const drop = (Array.isArray(unset) ? unset : []).filter(Boolean);
+  if (drop.length) update.$unset = Object.fromEntries(drop.map((f) => [f, ""]));
+
   const updated = await LessonPlan.findOneAndUpdate(
     { _id: planId, owner: ownerId, revision: revMatch },
-    { $set: patch, $inc: { revision: 1 } },
+    update,
     { new: true }
   );
   if (!updated) {
@@ -247,8 +256,9 @@ async function acceptProposal(planId, ownerId, expectedRevision) {
   if (!plan.proposal || !plan.proposal.content) {
     throw httpError(409, "no_proposal", "Qəbul ediləcək təklif yoxdur.");
   }
-  const patch = { ...plan.proposal.content, proposal: undefined };
-  return updateDraft(planId, ownerId, patch, expectedRevision);
+  const patch = { ...plan.proposal.content };
+  delete patch.proposal;
+  return updateDraft(planId, ownerId, patch, expectedRevision, ["proposal"]);
 }
 
 module.exports = {

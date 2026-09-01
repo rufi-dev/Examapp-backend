@@ -104,6 +104,10 @@ const lessonPlanSchema = new Schema(
     tasks: { type: [taskSchema], default: undefined },
     reflection: { type: String, default: "" },
     homework: { type: String, default: "" },
+    // Set when the homework text cites a page the pinned file does not contain.
+    // The prose is never rewritten (CR-MSO-003), so the falsehood is LABELLED
+    // instead — otherwise an invented "seh. 125" prints on a handout as fact.
+    homeworkWarning: { type: String, default: "" },
     materials: { type: [String], default: undefined },
     lessonMinutes: { type: Number, default: 45 },
     // Pinned sources — an ARRAY, because a chapter can span several uploads.
