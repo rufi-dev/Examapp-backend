@@ -51,6 +51,34 @@ function normalizeLessonPlan(raw, { lessonMinutes = 45 } = {}) {
     // A nameless stage is not a stage; dropping it beats rendering a blank block.
     .filter((s) => s.name);
 
+  /*
+   * The stages must add up to the lesson. The model is asked for a sum equal to the
+   * duration and routinely misses by a few minutes ("42 / 45 dəq — uyğun deyil"),
+   * which is a warning the teacher can do nothing useful with: they did not choose
+   * those numbers. So the shortfall is settled here instead of being reported.
+   *
+   * Largest-remainder, on the stages the model actually wrote: scale to the target,
+   * keep every stage at 1 minute or more, and give the rounding leftovers to the
+   * longest stages, which is where a minute matters least.
+   */
+  const target = Math.max(1, Math.round(Number(lessonMinutes) || 45));
+  const total = stages.reduce((a, x) => a + x.minutes, 0);
+  if (stages.length && total !== target) {
+    const share = stages.map((x) => (total > 0 ? (x.minutes / total) * target : target / stages.length));
+    const floors = share.map((v) => Math.max(1, Math.floor(v)));
+    let left = target - floors.reduce((a, b) => a + b, 0);
+    // Hand out (or claw back) the remainder one minute at a time, biggest first.
+    const order = share
+      .map((v, i) => ({ i, frac: v - Math.floor(v), size: v }))
+      .sort((x, y) => y.frac - x.frac || y.size - x.size);
+    for (let k = 0; left > 0; k = (k + 1) % order.length) { floors[order[k].i] += 1; left -= 1; }
+    for (let k = order.length - 1; left < 0; k = (k - 1 + order.length) % order.length) {
+      if (floors[order[k].i] > 1) { floors[order[k].i] -= 1; left += 1; }
+      else if (floors.every((f) => f <= 1)) break; // cannot go lower without a 0-minute stage
+    }
+    stages.forEach((x, i) => { x.minutes = floors[i]; });
+  }
+
   const variantOf = (v) => {
     const statement = clean(v && v.statement);
     // A variant that repeats variant A is not a variant. Dropping it here lets the
@@ -272,6 +300,42 @@ TERMİNOLOGİYA:
 
 - "subStandards" massivinə YALNIZ müəllimin verdiyi kodları yaz; yeni kod UYDURMA.`;
 
+/*
+ * A TARGETED EDIT. The teacher says what they want changed and everything else must
+ * survive byte-for-byte — a full regeneration would quietly rewrite tasks they were
+ * happy with. The current plan travels in the prompt, and the schema is the same, so
+ * the model returns a whole document of which only the requested part differs.
+ */
+const EDIT_RULES = `
+REDAKTƏ REJİMİ — DİQQƏT:
+- Aşağıda müəllimin HAZIRKI planı var. Onu yenidən yazma.
+- YALNIZ müəllimin istədiyi dəyişikliyi et. Qalan bütün sahələri (məqsədlər,
+  meyarlar, mərhələlər, tapşırıqlar, həllər, refleksiya, ev tapşırığı, materiallar)
+  OLDUĞU KİMİ, eyni sözlərlə qaytar.
+- Dəyişiklik bir tapşırığa aiddirsə, yalnız o tapşırığı dəyiş; digərlərinə toxunma.
+- Dəyişiklikdən sonra da bütün məcburi saylar və qaydalar keçərlidir.
+`;
+
+function buildLessonPlanEditPrompt({ plan = {}, instructions = "", hasSource = false } = {}) {
+  const system = [BASE_RULES, hasSource ? WITH_SOURCE_RULES : NO_SOURCE_RULES, EDIT_RULES].join("\n");
+  const current = {
+    title: plan.title, grade: plan.grade, subject: plan.subject, topic: plan.topic,
+    subStandards: plan.subStandards || [], objectives: plan.objectives || [],
+    criteria: plan.criteria || [], motivation: plan.motivation || "",
+    stages: plan.stages || [], tasks: plan.tasks || [],
+    reflection: plan.reflection || "", homework: plan.homework || "",
+    materials: plan.materials || [],
+  };
+  const prompt = [
+    `Dərsin müddəti: ${Number(plan.lessonMinutes) || 45} dəqiqə`,
+    "HAZIRKI PLAN (JSON):",
+    JSON.stringify(current),
+    "",
+    `MÜƏLLİMİN İSTƏDİYİ DƏYİŞİKLİK: ${String(instructions || "").slice(0, 2000)}`,
+  ].join("\n");
+  return { system, prompt };
+}
+
 function buildLessonPlanPrompt({ hasSource = false, topic = "", grade = "", subject = "", subStandards = [], lessonMinutes = 45, instructions = "" } = {}) {
   const system = [BASE_RULES, hasSource ? WITH_SOURCE_RULES : NO_SOURCE_RULES].join("\n");
   const prompt = [
@@ -330,6 +394,7 @@ module.exports = {
   validateCitations,
   validateDuration,
   buildLessonPlanPrompt,
+  buildLessonPlanEditPrompt,
   studentView,
   NO_SOURCE_RULES,
   WITH_SOURCE_RULES,

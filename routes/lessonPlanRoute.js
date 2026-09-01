@@ -36,8 +36,7 @@ router.get("/:id/student", requireCurriculum, protect, c.studentPlanView);
  * spans many provider calls and a crash between them must not forgive the charge.
  * Using both on one route would double-charge, so this route uses exactly one.
  */
-router.post(
-  "/:id/generate",
+const aiChain = [
   requireCurriculum,
   protect,
   teacherOnly,
@@ -45,7 +44,11 @@ router.post(
   aiRateLimit,
   aiBudgetGuard,
   chargeAi("ai.generate.lessonplan"),
-  c.generatePlan
-);
+];
+
+router.post("/:id/generate", ...aiChain, c.generatePlan);
+// A targeted edit is the same request with a different prompt, so it is priced,
+// rate-limited and budget-guarded identically.
+router.post("/:id/edit", ...aiChain, c.editPlan);
 
 module.exports = router;

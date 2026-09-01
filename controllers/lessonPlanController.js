@@ -162,7 +162,7 @@ const MAX_SOURCE_PROMPT_PAGES = Number(process.env.LESSON_PLAN_MAX_SOURCE_PAGES)
  * empty while the prompt still said "MƏNBƏ VAR", so the model was told it had a
  * textbook, handed nothing, and produced citations to pages that do not exist.
  */
-const generatePlan = asyncHandler(async (req, res) => {
+const runPlanGeneration = async (req, res, buildPrompt) => {
   const plan = await mine(req, req.params.id);
   const { runDocument } = require("../helper/aiDocument");
   const { LESSON_PLAN_SCHEMA, LESSON_PLAN_GEMINI_SCHEMA } = require("../helper/lessonPlanSchema");
@@ -198,15 +198,7 @@ const generatePlan = asyncHandler(async (req, res) => {
   }
 
   const hasSource = parts.length > 0;
-  const { system, prompt } = content.buildLessonPlanPrompt({
-    hasSource,
-    topic: plan.topic,
-    grade: plan.grade,
-    subject: plan.subject,
-    subStandards: plan.subStandards || [],
-    lessonMinutes: plan.lessonMinutes,
-    instructions: req.body.instructions,
-  });
+  const { system, prompt } = buildPrompt(plan, hasSource);
 
   const out = await runDocument({
     prompt,
@@ -311,12 +303,46 @@ const generatePlan = asyncHandler(async (req, res) => {
   const usable = (normalized.stages || []).length > 0 || (normalized.tasks || []).length > 0;
   if (req.aiCredit && usable) req.aiCredit.usable();
 
-  const proposal = await svc.proposeRegeneration(plan._id, req.user._id, checked.plan, {
-    provider: out.provider,
-    issues: checked.issues,
-    hasSource,
-  });
-  res.json({ ...proposal, issues: checked.issues, provider: out.provider, hasSource });
+  /*
+   * APPLIED, not proposed. The propose/accept/discard round-trip was one screen of
+   * buttons for a decision the teacher had already made by pressing the button, and
+   * it silently stranded good output when they did not notice the panel. Targeted
+   * edits keep the rest of the plan intact by construction (see the edit prompt), so
+   * there is nothing to protect against here.
+   */
+  const patch = { ...checked.plan };
+  delete patch.proposal;
+  const saved = await svc.updateDraft(plan._id, req.user._id, patch, plan.revision, ["proposal"]);
+  res.json({ plan: saved, issues: checked.issues, provider: out.provider, hasSource });
+};
+
+const generatePlan = asyncHandler((req, res) =>
+  runPlanGeneration(req, res, (plan, hasSource) =>
+    content.buildLessonPlanPrompt({
+      hasSource,
+      topic: plan.topic,
+      grade: plan.grade,
+      subject: plan.subject,
+      subStandards: plan.subStandards || [],
+      lessonMinutes: plan.lessonMinutes,
+      instructions: req.body.instructions,
+    })
+  )
+);
+
+/*
+ * POST /:id/edit — change ONE thing and leave the rest alone.
+ *
+ * Same model call and same verification as a generation; the difference is entirely
+ * in the prompt, which carries the current plan and instructs that everything the
+ * teacher did not ask about comes back unchanged.
+ */
+const editPlan = asyncHandler(async (req, res) => {
+  const wanted = String((req.body && req.body.instructions) || "").trim();
+  if (!wanted) throw httpError(400, "edit_empty", "Nə dəyişmək istədiyinizi yazın.");
+  return runPlanGeneration(req, res, (plan, hasSource) =>
+    content.buildLessonPlanEditPrompt({ plan: plan.toObject(), instructions: wanted, hasSource })
+  );
 });
 
 /*
@@ -360,6 +386,7 @@ const discardProposal = asyncHandler(async (req, res) => {
 
 module.exports = {
   worksheet,
+  editPlan,
   discardProposal,
   listPlans,
   createPlan,
