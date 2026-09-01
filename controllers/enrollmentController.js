@@ -78,10 +78,17 @@ const joinClass = asyncHandler(async (req, res) => {
   res.status(201).json({ status: "pending", waitlisted: true, classId: cls._id, message: WAITLIST_MSG });
 });
 
-// The student's own enrollments (any status), with class info.
+/*
+ * The student's own enrollments (any status), with class info.
+ *
+ * The TEACHER's name is populated because of `frozenByPlan`: when a teacher's plan
+ * stops covering a student, that student loses access to everything and previously
+ * had no way to find out why — the class simply vanished. They need to know who to
+ * ask, and only the teacher can fix it.
+ */
 const myEnrollments = asyncHandler(async (req, res) => {
   const rows = await Enrollment.find({ student: req.user._id })
-    .populate({ path: "class", select: "name level" })
+    .populate({ path: "class", select: "name level owner", populate: { path: "owner", select: "name" } })
     .sort({ createdAt: -1 })
     .lean();
   res.status(200).json(rows || []);
