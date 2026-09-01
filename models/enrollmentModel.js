@@ -16,6 +16,17 @@ const enrollmentSchema = Schema(
       default: "pending",
       index: true,
     },
+    /*
+     * Set when a student was moved back to the waitlist because the TEACHER's plan
+     * no longer covers them — not because the teacher rejected them. Two different
+     * things that would otherwise look identical in the UI, and only one of them is
+     * the teacher's decision.
+     *
+     * `default: undefined` so no existing enrollment is rewritten. Declared here
+     * because Mongoose strict mode drops undeclared keys before the write reaches
+     * Mongo — silently, which is how the question flags were lost.
+     */
+    frozenByPlan: { type: Boolean, default: undefined },
   },
   { timestamps: true, minimize: false }
 );

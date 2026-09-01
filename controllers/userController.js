@@ -1737,14 +1737,20 @@ const setUserPlan = asyncHandler(async (req, res) => {
     if (Number.isFinite(n) && n >= 0) user.examCreatesLeft = Math.round(n);
   }
   await user.save();
-  // Upgrading raises the student cap → let waitlisted students in automatically.
+  /*
+   * Reconcile the roster against the NEW cap, in both directions.
+   *
+   * Upgrading raises the cap, so the waitlist is let in. Downgrading lowers it, and
+   * used to do nothing at all — which is how one month of Premium bought a permanent
+   * unlimited roster: the caps were only ever checked when ADDING a student. Both
+   * halves are no-ops when they do not apply, so both always run.
+   */
   let promoted = 0;
-  if (plan !== "free") {
-    try {
-      promoted = await require("../helper/planLimits").promoteWaitlisted(user._id);
-    } catch (e) {
-      console.error("[PLAN] promoteWaitlisted failed:", e.message);
-    }
+  let frozen = 0;
+  try {
+    ({ frozen, promoted } = await require("../helper/planLimits").reconcileStudentCap(user._id));
+  } catch (e) {
+    console.error("[PLAN] reconcileStudentCap failed:", e.message);
   }
   res.json({
     _id: user._id,
@@ -1754,6 +1760,7 @@ const setUserPlan = asyncHandler(async (req, res) => {
     examCreatesLeft: user.examCreatesLeft,
     aiCredits: user.aiCredits,
     promoted,
+    frozen,
   });
 });
 

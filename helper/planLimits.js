@@ -58,6 +58,18 @@ async function classCount(userId) {
   return Class.countDocuments({ owner: userId, deletedAt: null });
 }
 
+// Students parked on the waitlist by a plan change (not by the teacher).
+async function frozenStudentCount(ownerId) {
+  const classIds = await Class.find({ owner: ownerId, deletedAt: null }).distinct("_id");
+  if (!classIds.length) return 0;
+  const ids = await Enrollment.find({
+    class: { $in: classIds },
+    status: "pending",
+    frozenByPlan: true,
+  }).distinct("student");
+  return ids.length;
+}
+
 async function studentCount(ownerId) {
   const classIds = await Class.find({ owner: ownerId, deletedAt: null }).distinct("_id");
   if (!classIds.length) return 0;
@@ -110,6 +122,71 @@ async function hasStudentRoom(ownerId, joiningStudentId) {
   return ids.length < cap;
 }
 
+/*
+ * Bring an OVER-CAP roster back down to the cap.
+ *
+ * The gap this closes: every cap was checked only at the moment of adding, and
+ * nothing ever re-checked. So a teacher could buy Premium for one month, enrol two
+ * hundred students, drop to Pro, and keep running a two-hundred-student business on
+ * the forty-student price for ever — the comment above this file called that
+ * "grandfathering", but it was really a one-off payment for a permanent allowance.
+ *
+ * Nothing is deleted. Students over the cap go back to the SAME waitlist the system
+ * already uses when a teacher has no room, so their enrollments, history and results
+ * are untouched, and `promoteWaitlisted` restores them automatically the moment the
+ * cap rises again. Access stops because 62 call sites gate on status "approved".
+ *
+ * Newest first, so the students a teacher had BEFORE upgrading keep their places and
+ * the ones added under the bigger plan are the ones that wait. This is the exact
+ * mirror of promoteWaitlisted, which lets the oldest back in first.
+ *
+ * Returns the number of distinct students frozen.
+ */
+async function enforceStudentCap(ownerId) {
+  const owner = await User.findById(ownerId).select("plan planExpiresAt role").lean();
+  if (!owner || owner.role === "admin") return 0;
+  const cap = limitsFor(effectivePlan(owner)).students;
+  if (!Number.isFinite(cap)) return 0; // unlimited: nothing to enforce
+
+  const classIds = await Class.find({ owner: ownerId, deletedAt: null }).distinct("_id");
+  if (!classIds.length) return 0;
+
+  // Distinct students, ordered by their EARLIEST approved enrollment with this
+  // teacher — a student in three classes is one student against the cap.
+  const rows = await Enrollment.find({ class: { $in: classIds }, status: "approved" })
+    .sort({ createdAt: 1 })
+    .select("student")
+    .lean();
+  const seen = [];
+  const known = new Set();
+  for (const r of rows) {
+    const sid = String(r.student);
+    if (!known.has(sid)) { known.add(sid); seen.push(r.student); }
+  }
+  if (seen.length <= cap) return 0;
+
+  const freeze = seen.slice(cap);
+  // EVERY enrollment of those students under this teacher, or the distinct count
+  // would not actually fall.
+  await Enrollment.updateMany(
+    { class: { $in: classIds }, student: { $in: freeze }, status: "approved" },
+    { $set: { status: "pending", frozenByPlan: true } }
+  );
+  return freeze.length;
+}
+
+/*
+ * Run after ANY change to a teacher's plan. The two halves are complementary and
+ * both are no-ops when they do not apply, so calling both is always correct: a
+ * downgrade freezes the excess and promotes nobody, an upgrade frees room and
+ * promotes the waitlist.
+ */
+async function reconcileStudentCap(ownerId) {
+  const frozen = await enforceStudentCap(ownerId);
+  const promoted = await promoteWaitlisted(ownerId);
+  return { frozen, promoted };
+}
+
 // After a plan upgrade/renewal raises the cap, promote waitlisted ("pending")
 // students to approved — oldest first — until the room is used up. Distinct
 // students already approved elsewhere don't consume room. Returns count promoted.
@@ -125,13 +202,19 @@ async function promoteWaitlisted(ownerId) {
   const approvedSet = new Set(approvedIds);
   let room = Number.isFinite(cap) ? Math.max(0, cap - approvedSet.size) : Infinity;
   if (room <= 0) return 0;
-  const pending = await Enrollment.find({ class: { $in: classIds }, status: "pending" }).sort({ createdAt: 1 });
+  // Students frozen by a plan change were approved once already, so they come back
+  // before someone who has never been let in — then oldest request first.
+  const pending = await Enrollment.find({ class: { $in: classIds }, status: "pending" }).sort({
+    frozenByPlan: -1,
+    createdAt: 1,
+  });
   let promoted = 0;
   for (const e of pending) {
     const sid = String(e.student);
     const alreadyCounted = approvedSet.has(sid);
     if (!alreadyCounted && room <= 0) continue; // no room for a NEW distinct student
     e.status = "approved";
+    e.frozenByPlan = undefined;
     await e.save();
     promoted += 1;
     if (!alreadyCounted) {
@@ -169,12 +252,22 @@ async function consumeExamCreate(user, session) {
 async function usageFor(user) {
   const expired = isExpired(user);
   const limits = limitsFor(effectivePlan(user));
-  const [classes, students] = await Promise.all([classCount(user._id), studentCount(user._id)]);
+  const [classes, students, frozen] = await Promise.all([
+    classCount(user._id),
+    studentCount(user._id),
+    frozenStudentCount(user._id),
+  ]);
   const examCap = limits.examCreations;
   return {
     expired,
     classes: { used: classes, limit: Number.isFinite(limits.classes) ? limits.classes : null },
-    students: { used: students, limit: Number.isFinite(limits.students) ? limits.students : null },
+    students: {
+      used: students,
+      limit: Number.isFinite(limits.students) ? limits.students : null,
+      // Waiting because the PLAN does not cover them, not because the teacher
+      // has not approved them. The UI must say which.
+      frozen,
+    },
     examCreates: {
       left: expired
         ? 0
@@ -198,6 +291,9 @@ module.exports = {
   assertUnderStudentCap,
   hasStudentRoom,
   promoteWaitlisted,
+  enforceStudentCap,
+  reconcileStudentCap,
+  frozenStudentCount,
   consumeExamCreate,
   usageFor,
 };

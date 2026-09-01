@@ -250,6 +250,9 @@ const userSchema = Schema(
         // visible in a "downgraded" panel (not silently gone from the list).
         // Cleared when they upgrade to a paid plan again.
         planDowngradedAt: { type: Date, default: null },
+        // When the roster was last brought down to the plan's cap. Lets the
+        // lapse sweep skip accounts it has already settled.
+        planCapEnforcedAt: { type: Date, default: null },
         // Decrementing LIFETIME exam-creation allowance for the free tier: each
         // successful create decrements it, and deleting an exam does NOT restore
         // it. `null` = not yet initialised → lazily set to the free cap on the

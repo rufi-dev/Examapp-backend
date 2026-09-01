@@ -1,5 +1,6 @@
 const { beat } = require("../utils/heartbeat");
 const { runDueExamReports } = require("./examReports");
+const { sweepExpiredPlans } = require("./planExpiry");
 const {
   finalizeExpiredAttempts,
   purgeExpiredArchived,
@@ -28,6 +29,13 @@ function startBackgroundJobs({
     handles.push({ kind: "timeout", value: setTimeoutFn(tick, firstMs) });
     handles.push({ kind: "interval", value: setIntervalFn(tick, intervalMs) });
   };
+
+  // A lapsed plan must stop covering an over-cap roster promptly, and nothing else
+  // in the system notices expiry — enforcement is otherwise lazy, per request.
+  schedule("plan-lapse-sweep",
+    positiveMs(env.PLAN_SWEEP_INTERVAL_MS, 15 * 60 * 1000),
+    positiveMs(env.PLAN_SWEEP_FIRST_MS, 45 * 1000, { allowZero: true }),
+    jobs.sweepExpiredPlans || sweepExpiredPlans);
 
   schedule("telegram-reports",
     positiveMs(env.REPORT_INTERVAL_MS, 10 * 60 * 1000),
