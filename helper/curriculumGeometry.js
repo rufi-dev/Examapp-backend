@@ -39,14 +39,35 @@ function printedLabelFor(pageMap, filePageIndex) {
   const map = pageMap && typeof pageMap === "object" ? pageMap : {};
 
   const overrides = map.overrides && typeof map.overrides === "object" ? map.overrides : {};
+  const anchorList = Array.isArray(map.anchors) ? map.anchors : [];
+  const rangeList = Array.isArray(map.ranges) ? map.ranges : [];
+
+  /*
+   * NO MAP AT ALL means "the file's own order" — page 1 of the file is "1".
+   *
+   * That is true of every ordinary PDF (notes, printed worksheets, a chapter
+   * exported from a digital book), which is almost everything teachers upload. It
+   * used to return "" instead, so an unmapped file resolved EVERY printed label to
+   * -1 and silently rejected every citation the model produced. Confirming page
+   * numbers was therefore a mandatory chore before the feature worked at all.
+   *
+   * This is only a fallback for a completely empty map. As soon as a map exists,
+   * the rules below are exact and an unmapped page stays "" rather than being
+   * guessed — a scanned book must not have numbers invented for it. And a wrong
+   * guess still cannot fabricate evidence: the excerpt has to match that page's
+   * real text, or the citation is flagged for review.
+   */
+  if (!rangeList.length && !anchorList.length && !Object.keys(overrides).length) {
+    return String(idx + 1);
+  }
+
   if (Object.prototype.hasOwnProperty.call(overrides, String(idx))) return String(overrides[String(idx)] ?? "");
 
-  const anchors = Array.isArray(map.anchors) ? map.anchors : [];
+  const anchors = anchorList;
   const hit = anchors.find((a) => Number(a.filePageIndex) === idx);
   if (hit) return String(hit.label ?? "");
 
-  const ranges = Array.isArray(map.ranges) ? map.ranges : [];
-  for (const r of ranges) {
+  for (const r of rangeList) {
     const from = Number(r.fromFileIndex);
     const to = Number(r.toFileIndex);
     if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || idx < from || idx > to) continue;

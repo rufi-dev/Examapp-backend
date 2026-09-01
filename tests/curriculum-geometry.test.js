@@ -128,6 +128,40 @@ console.log("\n4. Rotation is applied server-side and round-trips:");
   ok("an unrotated box stays inside the page", (() => { const u = unrotateBox(box, 90); return u.x >= 0 && u.y >= 0 && u.x + u.w <= 1 + 1e-9 && u.y + u.h <= 1 + 1e-9; })());
 }
 
+console.log("\nAn unmapped file uses its own order, so nothing has to be confirmed:");
+{
+  /*
+   * Almost everything a teacher uploads is an ordinary PDF whose pages are simply
+   * 1..N. Returning "" for those made every printed label resolve to -1, so every
+   * citation was rejected until the teacher had confirmed page numbers by hand.
+   */
+  for (const empty of [undefined, null, {}, { ranges: [], anchors: [], overrides: {} }]) {
+    const what = JSON.stringify(empty) || "undefined";
+    ok(`${what}: page 1 of the file is "1"`, printedLabelFor(empty, 0) === "1");
+    ok(`${what}: page 3 of the file is "3"`, printedLabelFor(empty, 2) === "3");
+    ok(`${what}: "3" resolves to file index 2`, fileIndexForLabel(empty, "3", 6) === 2);
+    ok(`${what}: the last page resolves`, fileIndexForLabel(empty, "6", 6) === 5);
+    // The guarantee that matters: a page the file does not have is STILL refused.
+    ok(`${what}: an invented page is still rejected`, fileIndexForLabel(empty, "127", 6) === -1);
+    ok(`${what}: page 0 does not exist`, fileIndexForLabel(empty, "0", 6) === -1);
+  }
+
+  // The fallback applies ONLY to a completely empty map. Once a map exists it is
+  // exact, and an unnumbered page must never have a number invented for it.
+  const scanned = {
+    ranges: [{ fromFileIndex: 5, toFileIndex: 20, style: "arabic", startLabel: "120" }],
+    anchors: [{ filePageIndex: 5, label: "120" }],
+  };
+  ok("a mapped book's cover stays blank, not '1'", printedLabelFor(scanned, 0) === "");
+  ok("a mapped book still resolves its printed pages", fileIndexForLabel(scanned, "124", 21) === 9);
+  ok("a mapped book does not answer for file position", fileIndexForLabel(scanned, "3", 21) === -1);
+
+  // A map with only overrides is a map: no identity fallback underneath it.
+  const overridesOnly = { ranges: [], anchors: [], overrides: { 0: "A-1" } };
+  ok("an overrides-only map is exact", printedLabelFor(overridesOnly, 0) === "A-1");
+  ok("and its other pages stay blank", printedLabelFor(overridesOnly, 1) === "");
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 assert.strictEqual(failed, 0, `${failed} curriculum-geometry assertions failed`);
 process.exit(failed ? 1 : 0);
