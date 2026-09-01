@@ -81,17 +81,25 @@ const joinClass = asyncHandler(async (req, res) => {
 /*
  * The student's own enrollments (any status), with class info.
  *
- * The TEACHER's name is populated because of `frozenByPlan`: when a teacher's plan
- * stops covering a student, that student loses access to everything and previously
- * had no way to find out why — the class simply vanished. They need to know who to
- * ask, and only the teacher can fix it.
+ * The teacher's name is populated because a student whose access has been paused
+ * needs to know who to ask — only the teacher can restore it.
+ *
+ * `frozenByPlan` is deliberately NOT sent. Why a teacher's roster shrank is the
+ * TEACHER's business: their billing state must not be readable by their students,
+ * and a field named after the reason leaks it to anyone who opens the network tab.
+ * The student gets a neutral `accessPaused` instead — enough to explain what they
+ * are seeing and who to contact, and nothing more.
  */
 const myEnrollments = asyncHandler(async (req, res) => {
   const rows = await Enrollment.find({ student: req.user._id })
     .populate({ path: "class", select: "name level owner", populate: { path: "owner", select: "name" } })
     .sort({ createdAt: -1 })
     .lean();
-  res.status(200).json(rows || []);
+  const safe = (rows || []).map(({ frozenByPlan, ...row }) => ({
+    ...row,
+    accessPaused: frozenByPlan === true,
+  }));
+  res.status(200).json(safe);
 });
 
 // Leave a class (or cancel a pending request).
