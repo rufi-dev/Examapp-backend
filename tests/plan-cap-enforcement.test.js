@@ -27,6 +27,7 @@ const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 const Exam = require("../models/examModel");
 const Assignment = require("../models/assignmentModel");
+const Material = require("../models/materialModel");
 const planLimits = require("../helper/planLimits");
 const { sweepExpiredPlans } = require("../jobs/planExpiry");
 
@@ -190,6 +191,61 @@ async function sec7() {
   ok("usage reports homework", usage.assignments.used === 9 && usage.assignments.limit === 2, JSON.stringify(usage.assignments));
 }
 
+
+async function sec8b() {
+  console.log("\n8. Library files are capped; video is Premium only:");
+  const t = await teacher("free");
+  const refused = async (fn) => {
+    try { await fn(); return null; } catch (e) { return e.code || e.message; }
+  };
+  const addFile = (title) =>
+    Material.create({ owner: t._id, ownerName: "T", title, kind: "pdf", fileName: `${title}.pdf`, filePath: `/x/${title}.pdf` });
+
+  // ── files: free 5 ────────────────────────────────────────────────────────
+  ok("an empty library may upload", (await refused(() => planLimits.assertUnderMaterialCap(t))) === null);
+  for (let i = 0; i < 5; i++) await addFile(`Fayl ${i}`);
+  ok("at the cap (5) → refused", (await refused(() => planLimits.assertUnderMaterialCap(t))) === "plan_limit");
+
+  // Already over when the cap arrived: keeps everything, cannot add.
+  for (let i = 0; i < 4; i++) await addFile(`Köhnə ${i}`);
+  ok("an over-cap library is refused", (await refused(() => planLimits.assertUnderMaterialCap(t))) === "plan_limit");
+  ok("and keeps every file", (await Material.countDocuments({ owner: t._id })) === 9);
+
+  await User.updateOne({ _id: t._id }, { $set: { plan: "pro" } });
+  let u = await User.findById(t._id).lean();
+  ok("pro (50) lets them continue", (await refused(() => planLimits.assertUnderMaterialCap(u))) === null);
+
+  await User.updateOne({ _id: t._id }, { $set: { plan: "premium" } });
+  u = await User.findById(t._id).lean();
+  ok("premium is unlimited", (await refused(() => planLimits.assertUnderMaterialCap(u, 1000))) === null);
+
+  // ── video: a FEATURE, premium only ───────────────────────────────────────
+  ok("premium may add video", (await refused(() => planLimits.assertVideoAllowed(u))) === null);
+
+  await User.updateOne({ _id: t._id }, { $set: { plan: "pro" } });
+  u = await User.findById(t._id).lean();
+  ok("pro may NOT add video", (await refused(() => planLimits.assertVideoAllowed(u))) === "plan_limit");
+
+  await User.updateOne({ _id: t._id }, { $set: { plan: "free" } });
+  u = await User.findById(t._id).lean();
+  ok("free may NOT add video", (await refused(() => planLimits.assertVideoAllowed(u))) === "plan_limit");
+
+  // A lapsed Premium falls back to free for BOTH, like every other limit.
+  await User.updateOne({ _id: t._id }, { $set: { plan: "premium", planExpiresAt: new Date(Date.now() - DAY) } });
+  u = await User.findById(t._id).lean();
+  ok("a lapsed premium loses video", (await refused(() => planLimits.assertVideoAllowed(u))) === "plan_limit");
+  ok("and falls back to the free file cap", (await refused(() => planLimits.assertUnderMaterialCap(u))) === "plan_limit");
+
+  const adm = await User.findOne({ role: "admin" }).lean();
+  if (adm) {
+    ok("an admin is never file-capped", (await refused(() => planLimits.assertUnderMaterialCap(adm, 999))) === null);
+    ok("an admin may always add video", (await refused(() => planLimits.assertVideoAllowed(adm))) === null);
+  }
+
+  const usage = await planLimits.usageFor(await User.findById(t._id).lean());
+  ok("usage reports files", usage.materials.used === 9 && usage.materials.limit === 5, JSON.stringify(usage.materials));
+}
+
 async function main() {
   const mem = await MongoMemoryServer.create();
   await mongoose.connect(mem.getUri());
@@ -318,6 +374,7 @@ async function main() {
 
   await sec6();
   await sec7();
+  await sec8b();
 
   await mongoose.disconnect();
   await mem.stop();

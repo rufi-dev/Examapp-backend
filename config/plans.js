@@ -37,11 +37,13 @@ const PLANS = {
       // live tasks a teacher holds, so deleting one frees a slot and an account
       // already over the cap simply cannot post another.
       assignments: num("PLAN_FREE_ASSIGNMENTS", 2),
+      // Files in the library ("Materiallar"). Concurrent, like assignments.
+      materials: num("PLAN_FREE_MATERIALS", 5),
     },
     credits: { welcome: num("PLAN_FREE_WELCOME_CREDITS", 60), monthly: num("PLAN_FREE_MONTHLY_CREDITS", 20) },
     // Live monitoring ("Canlı izlə") is FREE for everyone — it is not enforced by
     // plan anywhere, so the pricing card reflects that (available on every tier).
-    features: { whatsapp: false, teacherWhatsApp: false, analytics: "basic", pdfExport: false, prioritySupport: false, liveExams: true },
+    features: { whatsapp: false, teacherWhatsApp: false, analytics: "basic", pdfExport: false, prioritySupport: false, liveExams: true, videos: false },
   },
   pro: {
     id: "pro",
@@ -52,12 +54,13 @@ const PLANS = {
       students: num("PLAN_PRO_STUDENTS", 40),
       examCreations: Infinity,
       assignments: num("PLAN_PRO_ASSIGNMENTS", 30),
+      materials: num("PLAN_PRO_MATERIALS", 50),
     },
     credits: { welcome: 0, monthly: num("PLAN_PRO_MONTHLY_CREDITS", 350) },
     // `whatsapp` = parent notifications (sent from the platform number).
     // `teacherWhatsApp` = linking the teacher's OWN number — Premium only, because
     // each linked number costs a headless browser on the server.
-    features: { whatsapp: true, teacherWhatsApp: false, analytics: "full", pdfExport: true, prioritySupport: true, liveExams: true },
+    features: { whatsapp: true, teacherWhatsApp: false, analytics: "full", pdfExport: true, prioritySupport: true, liveExams: true, videos: false },
   },
   premium: {
     id: "premium",
@@ -68,9 +71,12 @@ const PLANS = {
       students: Infinity,
       examCreations: Infinity,
       assignments: Infinity,
+      materials: Infinity,
     },
     credits: { welcome: 0, monthly: num("PLAN_PREMIUM_MONTHLY_CREDITS", 2000) },
-    features: { whatsapp: true, teacherWhatsApp: true, analytics: "full", pdfExport: true, prioritySupport: true, liveExams: true },
+    // `videos` = the video library. Premium only: hosting and range-streaming video
+    // is the most expensive thing a teacher can put on the server.
+    features: { whatsapp: true, teacherWhatsApp: true, analytics: "full", pdfExport: true, prioritySupport: true, liveExams: true, videos: true },
   },
 };
 

@@ -14,13 +14,15 @@ const User = require("../models/userModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 const { httpError } = require("../utils/appError");
-const { normalizePlan, limitsFor } = require("../config/plans");
+const { normalizePlan, limitsFor, planDef } = require("../config/plans");
 
 const LIMIT_MSG = {
   classes: "Paketinizin sinif limitinə çatdınız. Daha çox sinif üçün paketi yüksəldin.",
   students: "Bu sinif şagird limitinə çatıb. Zəhmət olmasa müəlliminizlə əlaqə saxlayın.",
   exams: "Paketinizin imtahan yaratma limitinə çatdınız. Daha çox imtahan üçün paketi yüksəldin.",
   assignments: "Paketinizin tapşırıq limitinə çatdınız. Köhnə tapşırığı silin və ya paketi yüksəldin.",
+  materials: "Paketinizin fayl limitinə çatdınız. Köhnə faylı silin və ya paketi yüksəldin.",
+  videos: "Video kitabxanası yalnız Premium paketdə mövcuddur.",
 };
 const EXPIRED_MSG =
   "Paketinizin müddəti bitib. Davam etmək üçün «Planım» səhifəsindən paketi yeniləyin.";
@@ -88,6 +90,12 @@ async function assignmentCount(ownerId) {
   return Assignment.countDocuments({ owner: ownerId, deletedAt: null });
 }
 
+// Files a teacher holds in the library. Concurrent, like assignments.
+async function materialCount(ownerId) {
+  const Material = require("../models/materialModel");
+  return Material.countDocuments({ owner: ownerId });
+}
+
 // ── guards (throw 402 when at/over cap) ──────────────────────────────────────
 /*
  * Homework cap. Counted from what EXISTS, which is what makes it apply to accounts
@@ -104,6 +112,31 @@ async function assertUnderAssignmentCap(user, n = 1) {
   if (!Number.isFinite(cap)) return; // unlimited
   const used = await assignmentCount(user._id);
   if (used + n > cap) throw planLimitError("assignments", cap, used, storedPlan(user), isExpired(user));
+}
+
+// Library files. Counted from what exists, so an account already over the cap
+// keeps its files and simply cannot upload another.
+async function assertUnderMaterialCap(user, n = 1) {
+  if (isAdmin(user)) return;
+  const cap = limitsFor(effectivePlan(user)).materials;
+  if (!Number.isFinite(cap)) return;
+  const used = await materialCount(user._id);
+  if (used + n > cap) throw planLimitError("materials", cap, used, storedPlan(user), isExpired(user));
+}
+
+/*
+ * The video library is a FEATURE, not a quota: hosting and range-streaming video is
+ * the most expensive thing a teacher can put on the server, so it belongs to Premium
+ * outright rather than being rationed on the cheaper tiers.
+ *
+ * Existing videos are left alone — this refuses new ones, which is what "affects
+ * existing users" means for a feature nobody should silently lose.
+ */
+async function assertVideoAllowed(user) {
+  if (isAdmin(user)) return;
+  const plan = effectivePlan(user);
+  const allowed = Boolean(planDef(plan).features && planDef(plan).features.videos);
+  if (!allowed) throw planLimitError("videos", 0, 0, storedPlan(user), isExpired(user));
 }
 
 async function assertUnderClassCap(user) {
@@ -345,11 +378,12 @@ async function consumeExamCreate(user, session) {
 async function usageFor(user) {
   const expired = isExpired(user);
   const limits = limitsFor(effectivePlan(user));
-  const [classes, students, frozen, assignments] = await Promise.all([
+  const [classes, students, frozen, assignments, materials] = await Promise.all([
     classCount(user._id),
     studentCount(user._id),
     frozenStudentCount(user._id),
     assignmentCount(user._id),
+    materialCount(user._id),
   ]);
   const examCap = limits.examCreations;
   return {
@@ -365,6 +399,10 @@ async function usageFor(user) {
     assignments: {
       used: assignments,
       limit: Number.isFinite(limits.assignments) ? limits.assignments : null,
+    },
+    materials: {
+      used: materials,
+      limit: Number.isFinite(limits.materials) ? limits.materials : null,
     },
     examCreates: {
       left: expired
@@ -386,8 +424,11 @@ module.exports = {
   classCount,
   studentCount,
   assignmentCount,
+  materialCount,
   assertUnderClassCap,
   assertUnderAssignmentCap,
+  assertUnderMaterialCap,
+  assertVideoAllowed,
   assertUnderStudentCap,
   hasStudentRoom,
   promoteWaitlisted,

@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const jwt = require("jsonwebtoken");
 const Video = require("../models/videoModel");
+const { assertVideoAllowed } = require("../helper/planLimits");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 const { pageLimit, withCursor, pageResult, wantsEnvelope } = require("../utils/cursorPagination");
@@ -187,6 +188,19 @@ const getVideos = asyncHandler(async (req, res) => {
 // uploaded MP4/WebM file (multipart, field "file"). Owned by the caller.
 const addVideo = asyncHandler(async (req, res) => {
   const file = req.file;
+
+  /*
+   * The video library is Premium only — hosting and range-streaming video is the
+   * most expensive thing a teacher can put on this server. Checked FIRST, before
+   * anything else, so a refused upload never leaves bytes behind.
+   */
+  try {
+    await assertVideoAllowed(req.user);
+  } catch (e) {
+    cleanup(file?.path);
+    return res.status(e.statusCode || 402).json({ message: e.message, code: e.code, details: e.details });
+  }
+
   const title = String(req.body.title || "").trim();
   if (!title) {
     cleanup(file?.path);
