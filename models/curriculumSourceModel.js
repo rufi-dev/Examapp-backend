@@ -13,6 +13,13 @@ const { Schema } = mongoose;
 const curriculumSourceSchema = new Schema(
   {
     owner: { type: Schema.Types.ObjectId, ref: "User", required: true, index: false },
+    // Set when this source was imported from a library material, so importing the
+    // same file twice re-uses the copy instead of duplicating the bytes. Declared
+    // because strict mode drops undeclared keys before the write reaches Mongo.
+    // NOT indexed: the lookup is always scoped by owner first and a teacher has a
+    // handful of sources, so an index here would only be drift the contract must
+    // then carry (helper/curriculumIndexes.js owns every index on this collection).
+    fromMaterial: { type: Schema.Types.ObjectId, ref: "Material", default: undefined },
     title: { type: String, required: true, trim: true, maxlength: 300 },
     subject: { type: String, trim: true, maxlength: 120, default: "" },
     grade: { type: String, trim: true, maxlength: 40, default: "" },

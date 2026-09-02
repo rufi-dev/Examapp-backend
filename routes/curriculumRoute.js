@@ -26,6 +26,8 @@ const runUpload = (req, res, next) =>
 
 router.get("/sources", requireCurriculum, protect, teacherOnly, c.listSources);
 router.post("/sources", requireCurriculum, protect, teacherOnly, uploadRateLimit, runUpload, c.createSource);
+// Re-use a PDF already in the teacher's library instead of uploading it twice.
+router.post("/sources/from-material/:materialId", requireCurriculum, protect, teacherOnly, c.importSourceFromMaterial);
 
 router.patch("/sources/:id/versions/:vid/page-map", requireCurriculum, protect, teacherOnly, c.setPageMap);
 router.get("/sources/:id/versions/:vid/pages/:page/text", requireCurriculum, protect, teacherOnly, c.pageText);

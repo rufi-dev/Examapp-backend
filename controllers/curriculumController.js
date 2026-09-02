@@ -129,6 +129,98 @@ const createSource = asyncHandler(async (req, res) => {
  * The teacher confirms a handful of anchors; ranges interpolate between them and
  * any page can be overridden. No model is ever asked to guess an offset.
  */
+/*
+ * POST /sources/from-material/:materialId
+ *
+ * Use a PDF the teacher ALREADY has in "Dərs materialları" as a lesson-plan source.
+ *
+ * "Dərsliklər" was a second place to upload the same chapter, which is why it felt
+ * redundant: a teacher who had already put the textbook in her library was asked to
+ * upload it again somewhere else before the AI could read it.
+ *
+ * The bytes are COPIED into the curriculum store rather than referenced in place.
+ * That is deliberate and not duplication for its own sake: a citation is pinned to
+ * an immutable sha256, and materials are rewritten in place by the PDF optimiser
+ * and deleted without ceremony. Pointing citations at a file that can change under
+ * them would break the one guarantee this whole feature rests on. Deleting the
+ * material afterwards leaves the plan's evidence intact.
+ */
+const importSourceFromMaterial = asyncHandler(async (req, res) => {
+  const Material = require("../models/materialModel");
+  const material = await Material.findById(req.params.materialId).lean();
+  if (!material) throw httpError(404, "material_missing", "Material tapılmadı.");
+
+  const isOwner = String(material.owner || "") === String(req.user._id);
+  if (!isOwner && req.user.role !== "admin") {
+    throw httpError(403, "material_forbidden", "Bu material sizə aid deyil.");
+  }
+  if (material.kind !== "pdf") {
+    throw httpError(422, "material_not_pdf", "Yalnız PDF materialı dərslik kimi bağlana bilər.");
+  }
+
+  // Already imported? Re-use it rather than making a second copy of the same file.
+  const existing = await CurriculumSource.findOne({ owner: req.user._id, fromMaterial: material._id }).lean();
+  if (existing && existing.activeVersion) {
+    return res.status(200).json({ source: existing, versionId: existing.activeVersion, reused: true });
+  }
+
+  /*
+   * Materials store only the random basename; the directory is the controller's
+   * own MATERIALS_DIR. Resolving through path.basename keeps a crafted fileName
+   * from escaping that directory.
+   */
+  const src = path.join(process.cwd(), "materials", path.basename(String(material.fileName || "")));
+  const readable = material.fileName
+    ? await fsp.access(src).then(() => true).catch(() => false)
+    : false;
+  if (!readable) throw httpError(422, "material_file_missing", "Materialın faylı tapılmadı.");
+
+  const key = storage.newKey();
+  const ext = ".pdf";
+  const staged = storage.stagingPathFor(key, ext);
+  await fsp.copyFile(src, staged);
+
+  const check = await validateUploadFile(staged, ext);
+  if (!check || !check.ok) {
+    await fsp.unlink(staged).catch(() => {});
+    throw httpError(400, "file_type_invalid", "Bu material həqiqi PDF deyil.");
+  }
+
+  const source = await CurriculumSource.create({
+    owner: req.user._id,
+    title: String(material.title || "Dərslik").slice(0, 300),
+    fromMaterial: material._id,
+  });
+  const version = await CurriculumSourceVersion.create({
+    source: source._id,
+    versionNumber: 1,
+    storageKey: key,
+    ext,
+    state: "staged",
+    mime: "application/pdf",
+  });
+
+  try {
+    const committed = await storage.commitStaged(key, ext, staged);
+    version.sha256 = committed.sha256;
+    version.bytes = committed.bytes;
+    version.pageCount = await evidence.pdfPageCount(committed.path);
+    version.state = "ready";
+    version.readyAt = new Date();
+    await version.save();
+    source.activeVersion = version._id;
+    source.activeVersionNumber = 1;
+    await source.save();
+  } catch (e) {
+    await CurriculumSourceVersion.deleteOne({ _id: version._id });
+    await CurriculumSource.deleteOne({ _id: source._id });
+    await fsp.unlink(staged).catch(() => {});
+    throw httpError(422, "source_unreadable", "Fayl oxunmadı — PDF zədəli ola bilər.");
+  }
+
+  res.status(201).json({ source, versionId: version._id, reused: false });
+});
+
 const setPageMap = asyncHandler(async (req, res) => {
   const src = await mine(req, req.params.id);
   const version = await CurriculumSourceVersion.findOne({ _id: req.params.vid, source: src._id });
@@ -349,6 +441,7 @@ const versionHolders = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  importSourceFromMaterial,
   MAX_SOURCE_MB,
   MAX_SELECTED_PAGES,
   listSources,
