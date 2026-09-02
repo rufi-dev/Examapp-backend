@@ -1,6 +1,7 @@
 const { beat } = require("../utils/heartbeat");
 const { runDueExamReports } = require("./examReports");
 const { sweepExpiredPlans } = require("./planExpiry");
+const { runMsoJobs } = require("./msoWorker");
 const {
   finalizeExpiredAttempts,
   purgeExpiredArchived,
@@ -32,6 +33,13 @@ function startBackgroundJobs({
 
   // A lapsed plan must stop covering an over-cap roster promptly, and nothing else
   // in the system notices expiry — enforcement is otherwise lazy, per request.
+  // MSO generation. One job per tick: generation is slow and a second concurrent
+  // job would only compete for the same provider budget.
+  schedule("mso-generation",
+    positiveMs(env.MSO_INTERVAL_MS, 30 * 1000),
+    positiveMs(env.MSO_FIRST_MS, 25 * 1000, { allowZero: true }),
+    jobs.runMsoJobs || runMsoJobs);
+
   schedule("plan-lapse-sweep",
     positiveMs(env.PLAN_SWEEP_INTERVAL_MS, 15 * 60 * 1000),
     positiveMs(env.PLAN_SWEEP_FIRST_MS, 45 * 1000, { allowZero: true }),
