@@ -44,7 +44,16 @@ async function renderPdf(html, { timeoutMs = 30000 } = {}) {
     // Without this the first render can use fallback metrics and reflow wrongly.
     await page.evaluateHandle("document.fonts.ready");
 
-    return await page.pdf({
+    /*
+     * Buffer.from is load-bearing, not tidiness. Puppeteer 24 returns a Uint8Array
+     * where older versions returned a Buffer, and Express's res.send() sends a
+     * Buffer as bytes but falls through to res.json() for ANY other object — so a
+     * Uint8Array was delivered as {"0":37,"1":80,…} under a Content-Type of
+     * application/pdf. The client received a 143KB JSON document instead of a 13KB
+     * PDF and showed "Failed to load PDF document" against a body that had arrived
+     * perfectly intact. Converting here means no caller can reintroduce it.
+     */
+    return Buffer.from(await page.pdf({
       format: "A4",
       printBackground: true, // the design is tinted blocks; without this it is blank boxes
       displayHeaderFooter: true,
@@ -53,7 +62,7 @@ async function renderPdf(html, { timeoutMs = 30000 } = {}) {
       margin: MARGIN,
       preferCSSPageSize: false,
       timeout: timeoutMs,
-    });
+    }));
   } finally {
     if (browser) await browser.close().catch(() => {});
   }

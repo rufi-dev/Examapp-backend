@@ -155,6 +155,35 @@ console.log("\n6. It survives real-world content:");
   ok("junk input does not throw", typeof buildLessonPlanHtml(null) === "string" && typeof buildLessonPlanHtml(undefined, undefined) === "string");
 }
 
+console.log("\n8. The renderer must hand Express a Buffer:");
+{
+  /*
+   * Puppeteer 24 returns a Uint8Array where older versions returned a Buffer, and
+   * Express's res.send() sends a Buffer as bytes but falls through to res.json()
+   * for ANY other object. A Uint8Array therefore reached the browser as
+   * {"0":37,"1":80,…} under a Content-Type of application/pdf — ten times the size
+   * and not a PDF, which is "Failed to load PDF document" against a body that had
+   * arrived perfectly intact.
+   *
+   * Chromium is not launched here: the contract is textual, and what this guards
+   * against is a silent revert on the next upgrade.
+   */
+  const fs = require("fs");
+  const path = require("path");
+  const src = fs.readFileSync(path.join(__dirname, "../helper/lessonPlanPdf.js"), "utf8");
+
+  ok("the pdf result is wrapped in Buffer.from", /return Buffer\.from\(await page\.pdf\(/.test(src));
+  ok("printBackground is on, or every tint prints blank", /printBackground:\s*true/.test(src));
+  ok("our own footer replaces the browser's", /footerTemplate:\s*FOOTER/.test(src));
+  ok("the header template is emptied", /headerTemplate:\s*"<div><\/div>"/.test(src));
+  ok("fonts are awaited before rendering", /document\.fonts\.ready/.test(src));
+  ok("the browser is always closed", /finally\s*\{[\s\S]*browser\.close/.test(src));
+
+  const ctl = fs.readFileSync(path.join(__dirname, "../controllers/lessonPlanController.js"), "utf8");
+  ok("the response declares application/pdf", /application\/pdf/.test(ctl));
+  ok("and is not cached", /private, no-store/.test(ctl));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 assert.strictEqual(failed, 0, `${failed} lesson-plan-print assertions failed`);
 process.exit(failed ? 1 : 0);
