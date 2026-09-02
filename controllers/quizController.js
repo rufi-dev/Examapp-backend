@@ -5056,34 +5056,114 @@ const serverTime = asyncHandler(async (req, res) => {
 });
 
 /*
- * POST /:examId/variant-b — the second paper.
+ * Copying an exam — as an exact duplicate, or as a B variant.
  *
- * A summative assessment is handed out in two variants so neighbours cannot copy.
- * The brief is exact about what that means: same structure, same skills, same
- * wording and difficulty, ONLY the numbers differ.
+ * Both produce a second exam in the same class from the same source, so they share
+ * everything except what happens to the questions: a duplicate copies them
+ * verbatim, a variant sends them to the model to be re-solved with new numbers.
+ */
+
+// Fields that belong to the SOURCE exam's life, not to a copy of its content:
+// identity, delivery bookkeeping, its frozen published version, and enrolment.
+const COPY_STRIP = [
+  "_id", "createdAt", "updatedAt", "__v", "questions", "creationKey",
+  "activeVersionId", "activeVersionNumber", "pdf", "users",
+  "reportSentAt", "reportDeliveredKeys", "reportLeaseOwner", "reportLeaseUntil",
+  "reportNextAttemptAt", "reportAttempts", "reportDeadLetterAt", "reportLastFailure",
+  "studentsNotifiedAt", "purging", "purgedAt", "deletedAt", "deletedBy",
+];
+
+/*
+ * Create the twin, then its questions.
  *
- * B is derived from the FINISHED A paper rather than generated alongside it. That
- * is the stronger guarantee — B cannot drift from a paper it was handed as input —
- * and it leaves the shared extraction schema, which every ordinary quiz uses,
- * completely untouched.
+ * The order is load-bearing and was the cause of a 500 in the first version of
+ * this: Question requires an `exam`, so building the question document first
+ * cannot work — there is no exam id to give it yet. The exam is created without
+ * questions, the questions are created against it, and the pointer is set last. If
+ * anything fails in between, the half-made exam is removed rather than left in the
+ * class as an empty paper.
+ */
+async function spawnTwin(source, items, name) {
+  const copy = source.toObject();
+  for (const k of COPY_STRIP) delete copy[k];
+
+  const twin = await Exam.create({
+    ...copy,
+    name,
+    owner: source.owner,
+    class: source.class,
+    creationKey: `twin-${source._id}-${Date.now()}`,
+  });
+
+  try {
+    const questionDoc = await Question.create({ exam: twin._id, correctAnswers: items });
+    await Exam.updateOne({ _id: twin._id }, { $set: { questions: questionDoc._id } });
+    await Class.updateOne({ _id: source.class }, { $inc: { examCount: 1 } });
+    twin.questions = questionDoc._id;
+    return twin;
+  } catch (e) {
+    await Exam.deleteOne({ _id: twin._id });
+    throw e;
+  }
+}
+
+// The base name, with any variant/duplicate suffix removed so labels never stack
+// into "Riyaziyyat (A variantı) (B variantı) (dublikat)".
+const baseNameOf = (name) =>
+  String(name || "İmtahan")
+    .replace(/\s*\((A|B) variantı\)\s*$/u, "")
+    .replace(/\s*\(dublikat( \d+)?\)\s*$/u, "")
+    .trim() || "İmtahan";
+
+async function loadOwnedExam(req) {
+  const exam = await Exam.findById(req.params.examId).populate("questions");
+  if (!exam) throw httpError(404, "exam_missing", "İmtahan tapılmadı.");
+  if (!(isAdminUser(req.user) || String(exam.owner) === String(req.user._id))) {
+    throw httpError(403, "not_owner", "Bu imtahan sizə aid deyil.");
+  }
+  return exam;
+}
+
+const plainItems = (exam) =>
+  ((exam.questions && exam.questions.correctAnswers) || []).map((q) =>
+    typeof q.toObject === "function" ? q.toObject() : q
+  );
+
+/*
+ * POST /:examId/duplicate — the same exam again, immediately.
  *
- * The model re-SOLVES each question rather than shifting its digits, because
+ * No model call and no cost: every question, option and answer is copied verbatim.
+ * This is the honest answer to "I want another one of these", and it is what most
+ * teachers actually want when they reach for a variant.
+ */
+const duplicateExam = asyncHandler(async (req, res) => {
+  const source = await loadOwnedExam(req);
+  const items = plainItems(source);
+
+  const base = baseNameOf(source.name);
+  // A second duplicate must not collide with the first.
+  const taken = await Exam.countDocuments({ owner: source.owner, name: new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(dublikat`, "u"), deletedAt: null });
+  const suffix = taken ? ` (dublikat ${taken + 1})` : " (dublikat)";
+
+  const twin = await spawnTwin(source, items, `${base}${suffix}`);
+  res.status(201).json({ exam: { _id: twin._id, name: twin.name }, copied: items.length });
+});
+
+/*
+ * POST /:examId/variant-b — the second paper for a two-variant handout.
+ *
+ * Same structure, same skills, same wording and difficulty; only the numbers
+ * differ. B is derived from the FINISHED A paper rather than generated alongside
+ * it, which is the stronger guarantee — B cannot drift from a paper it was handed
+ * as input — and it leaves the shared extraction schema untouched.
+ *
+ * The model RE-SOLVES each question rather than shifting its digits, because
  * changing "4 sm" to "6 sm" invalidates the answer key of every closed question
- * computed from it. Carrying A's key across would mark the whole B paper wrongly.
+ * computed from it.
  */
 const createVariantB = asyncHandler(async (req, res) => {
-  const { examId } = req.params;
-  const source = await Exam.findById(examId).populate("questions");
-  if (!source) {
-    res.status(404);
-    throw new Error("Exam not found");
-  }
-  if (!(isAdminUser(req.user) || String(source.owner) === String(req.user._id))) {
-    res.status(403);
-    throw new Error("Bu imtahan sizə aid deyil");
-  }
-
-  const items = (source.questions && source.questions.correctAnswers) || [];
+  const source = await loadOwnedExam(req);
+  const items = plainItems(source);
   if (!items.length) {
     throw httpError(422, "exam_empty", "Əvvəlcə suallar yaradın — boş imtahanın variantı olmur.");
   }
@@ -5092,49 +5172,29 @@ const createVariantB = asyncHandler(async (req, res) => {
   const { runDocument } = require("../helper/aiDocument");
   const { toGeminiSchema } = require("../helper/curriculumSchema");
 
-  const plain = items.map((q) => (typeof q.toObject === "function" ? q.toObject() : q));
   const out = await runDocument({
     system: variant.SYSTEM,
-    prompt: variant.buildVariantPrompt(plain),
+    prompt: variant.buildVariantPrompt(items),
     parts: [],
     schema: variant.VARIANT_SCHEMA,
     geminiSchema: toGeminiSchema(variant.VARIANT_SCHEMA),
   });
 
-  const { B, varied } = variant.applyVariant(plain, (out.doc && out.doc.questions) || []);
+  const { B, varied } = variant.applyVariant(items, (out.doc && out.doc.questions) || []);
   if (!varied) {
     throw httpError(422, "variant_not_differentiated", "B variantı hazırlana bilmədi — heç bir sual dəyişmədi.");
   }
   if (req.aiCredit) req.aiCredit.usable();
 
-  // A gets its label so the pair is obvious in the class list; done first, because
-  // a teacher seeing "(B variantı)" beside an unlabelled exam is the confusing half.
-  const baseName = String(source.name || "").replace(/\s*\((A|B) variantı\)\s*$/u, "").trim();
-  if (source.name !== `${baseName} (A variantı)`) {
-    await Exam.updateOne({ _id: source._id }, { $set: { name: `${baseName} (A variantı)` } });
-  }
+  const base = baseNameOf(source.name);
+  const twin = await spawnTwin(source, B, `${base} (B variantı)`);
 
-  const questionDoc = await Question.create({ correctAnswers: B });
-  const copy = source.toObject();
-  for (const k of [
-    "_id", "createdAt", "updatedAt", "__v", "questions", "creationKey",
-    "activeVersionId", "activeVersionNumber", "pdf", "users",
-    "reportSentAt", "reportDeliveredKeys", "reportLeaseOwner", "reportLeaseUntil",
-    "reportNextAttemptAt", "reportAttempts", "reportDeadLetterAt", "reportLastFailure",
-    "studentsNotifiedAt", "purging", "purgedAt", "deletedAt", "deletedBy",
-  ]) {
-    delete copy[k];
+  // Label A only AFTER B exists, so a failed generation never leaves a lone exam
+  // renamed "(A variantı)" with no partner — which is exactly what happened while
+  // this was broken.
+  if (source.name !== `${base} (A variantı)`) {
+    await Exam.updateOne({ _id: source._id }, { $set: { name: `${base} (A variantı)` } });
   }
-
-  const twin = await Exam.create({
-    ...copy,
-    name: `${baseName} (B variantı)`,
-    questions: questionDoc._id,
-    owner: source.owner,
-    class: source.class,
-    creationKey: `variant-b-${source._id}`,
-  });
-  await Class.updateOne({ _id: source.class }, { $inc: { examCount: 1 } });
 
   res.status(201).json({
     exam: { _id: twin._id, name: twin.name },
@@ -5146,6 +5206,7 @@ const createVariantB = asyncHandler(async (req, res) => {
 
 module.exports = {
   createVariantB,
+  duplicateExam,
   serverTime,
   buildQuestionOrder, // exported for tests
   addExam,

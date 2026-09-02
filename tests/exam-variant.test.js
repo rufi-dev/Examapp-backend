@@ -124,6 +124,35 @@ console.log("\n6. The prompt gives the model what it needs to re-solve:");
   ok("and require re-solving", /YENİDƏN HƏLL ET/.test(v.SYSTEM));
 }
 
+console.log("\n7. Labels never stack up:");
+{
+  /*
+   * A duplicate of a B variant of a duplicate must not become
+   * "Riyaziyyat (dublikat) (B variantı) (dublikat 2)". The base name is recovered
+   * before any label is applied, so every suffix lands on the original title.
+   */
+  const fs = require("fs");
+  const path = require("path");
+  const src = fs.readFileSync(path.join(__dirname, "../controllers/quizController.js"), "utf8");
+  const m = src.match(/const baseNameOf = \(name\) =>[\s\S]*?\|\| "İmtahan";/);
+  ok("baseNameOf is defined in the controller", !!m);
+
+  // eslint-disable-next-line no-new-func
+  const baseNameOf = new Function(`${m[0]} return baseNameOf;`)();
+
+  ok("a plain name is unchanged", baseNameOf("Riyaziyyat") === "Riyaziyyat");
+  ok("(A variantı) is stripped", baseNameOf("Riyaziyyat (A variantı)") === "Riyaziyyat");
+  ok("(B variantı) is stripped", baseNameOf("Riyaziyyat (B variantı)") === "Riyaziyyat");
+  ok("(dublikat) is stripped", baseNameOf("Riyaziyyat (dublikat)") === "Riyaziyyat");
+  ok("a numbered duplicate is stripped", baseNameOf("Riyaziyyat (dublikat 3)") === "Riyaziyyat");
+  ok("an empty name falls back", baseNameOf("") === "İmtahan" && baseNameOf(null) === "İmtahan");
+  ok("Azerbaijani letters survive", baseNameOf("Fəza fiqurları (B variantı)") === "Fəza fiqurları");
+  ok(
+    "a title that merely CONTAINS the words is untouched",
+    baseNameOf("B variantı haqqında dərs") === "B variantı haqqında dərs"
+  );
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 assert.strictEqual(failed, 0, `${failed} exam-variant assertions failed`);
 process.exit(failed ? 1 : 0);

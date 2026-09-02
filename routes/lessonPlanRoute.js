@@ -19,6 +19,9 @@ router.delete("/:id", requireCurriculum, protect, teacherOnly, c.deletePlan);
 router.post("/:id/proposal/accept", requireCurriculum, protect, teacherOnly, c.acceptProposal);
 router.post("/:id/proposal/discard", requireCurriculum, protect, teacherOnly, c.discardProposal);
 router.get("/:id/projector", requireCurriculum, protect, teacherOnly, c.projectorView);
+// The printable document, rendered by our own Chromium so the browser cannot
+// stamp its date and URL onto every sheet.
+router.get("/:id/pdf", requireCurriculum, protect, teacherOnly, c.planPdf);
 // Two-variant worksheet, DERIVED from the plan's tasks — no AI call, no credit.
 router.post("/:id/worksheet", requireCurriculum, protect, teacherOnly, c.worksheet);
 

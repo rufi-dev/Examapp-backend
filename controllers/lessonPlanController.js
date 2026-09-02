@@ -441,8 +441,41 @@ const discardProposal = asyncHandler(async (req, res) => {
   res.json({ ok: true, revision: plan.revision });
 });
 
+/*
+ * GET /:id/pdf — the printable document.
+ *
+ * Rendered server-side rather than through the browser's print dialog, which
+ * stamps its own date/title/URL onto every sheet and cannot be told not to. The
+ * worksheet variants are built from the SAME tasks, so the paper a teacher hands
+ * out can never disagree with the plan it came from.
+ */
+const planPdf = asyncHandler(async (req, res) => {
+  const plan = await mine(req, req.params.id);
+  const { buildLessonPlanHtml } = require("../helper/lessonPlanPrintHtml");
+  const { renderPdf } = require("../helper/lessonPlanPdf");
+  const { buildWorksheet } = require("../helper/worksheetVariants");
+
+  const doc = plan.toObject();
+  let variants = null;
+  try {
+    const w = buildWorksheet(doc.tasks || []);
+    if ((w.A || []).length) variants = { A: w.A, B: w.B };
+  } catch (e) {
+    // A worksheet that cannot be built must not cost the teacher the plan itself.
+    console.error("[PLAN PDF] worksheet skipped:", e.message);
+  }
+
+  const pdf = await renderPdf(buildLessonPlanHtml(doc, variants));
+  const safe = String(doc.title || "ders-plani").replace(/[^\p{L}\p{N}\s._-]/gu, "").trim().slice(0, 80) || "ders-plani";
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(safe)}.pdf`);
+  res.setHeader("Cache-Control", "private, no-store");
+  res.send(pdf);
+});
+
 module.exports = {
   worksheet,
+  planPdf,
   duplicatePlan,
   editPlan,
   discardProposal,
