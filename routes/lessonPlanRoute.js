@@ -13,6 +13,7 @@ router.get("/:id", requireCurriculum, protect, teacherOnly, c.getPlan);
 router.patch("/:id", requireCurriculum, protect, teacherOnly, c.updatePlan);
 router.put("/:id/sources", requireCurriculum, protect, teacherOnly, c.setSources);
 router.post("/:id/publish", requireCurriculum, protect, teacherOnly, c.publishPlan);
+router.post("/:id/duplicate", requireCurriculum, protect, teacherOnly, c.duplicatePlan);
 router.post("/:id/archive", requireCurriculum, protect, teacherOnly, c.archivePlan);
 router.delete("/:id", requireCurriculum, protect, teacherOnly, c.deletePlan);
 router.post("/:id/proposal/accept", requireCurriculum, protect, teacherOnly, c.acceptProposal);

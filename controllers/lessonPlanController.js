@@ -22,12 +22,69 @@ const mine = async (req, id) => {
   return plan;
 };
 
+/*
+ * The list card could only show a title and a status, so every plan looked alike
+ * and none of them said whether it was actually finished. The counts come from an
+ * aggregation rather than loading the documents: a plan carries its tasks WITH
+ * worked solutions, and shipping all of that to render "6 tapşırıq" would send
+ * hundreds of kilobytes to draw one number.
+ */
 const listPlans = asyncHandler(async (req, res) => {
-  const plans = await LessonPlan.find({ owner: req.user._id })
-    .select("title topic grade subject status revision activeVersionNumber archivedAt updatedAt")
-    .sort({ updatedAt: -1 })
-    .lean();
+  const plans = await LessonPlan.aggregate([
+    { $match: { owner: req.user._id } },
+    { $sort: { updatedAt: -1 } },
+    {
+      $project: {
+        title: 1, topic: 1, grade: 1, subject: 1, status: 1, revision: 1,
+        activeVersionNumber: 1, archivedAt: 1, updatedAt: 1, lessonMinutes: 1,
+        taskCount: { $size: { $ifNull: ["$tasks", []] } },
+        stageCount: { $size: { $ifNull: ["$stages", []] } },
+        objectiveCount: {
+          $size: {
+            $filter: { input: { $ifNull: ["$objectives", []] }, as: "o", cond: { $ne: ["$$o", ""] } },
+          },
+        },
+        hasSource: { $gt: [{ $size: { $ifNull: ["$sourceVersions", []] } }, 0] },
+        // How many tasks still carry a worked solution — the difference between a
+        // plan you can teach from and one you still have to finish.
+        solvedCount: {
+          $size: {
+            $filter: {
+              input: { $ifNull: ["$tasks", []] },
+              as: "t",
+              cond: { $and: [{ $ne: ["$$t.solution", ""] }, { $ne: ["$$t.solution", null] }] },
+            },
+          },
+        },
+      },
+    },
+  ]);
   res.json({ plans });
+});
+
+/*
+ * POST /:id/duplicate — the same lesson for another class or another year.
+ *
+ * Teachers re-run a plan constantly with small changes, and the only way to do it
+ * was to generate a new one and pay for the AI call again. The copy is a plain
+ * draft: no published version, no proposal, and the pinned chapter comes with it so
+ * a regeneration still has its source.
+ */
+const duplicatePlan = asyncHandler(async (req, res) => {
+  const plan = await mine(req, req.params.id);
+  const src = plan.toObject();
+  for (const k of ["_id", "createdAt", "updatedAt", "__v", "proposal", "activeVersionNumber", "archivedAt", "revision", "status", "planCapEnforcedAt"]) {
+    delete src[k];
+  }
+  const copy = await LessonPlan.create({
+    ...src,
+    title: `${plan.title} (nüsxə)`,
+    owner: req.user._id,
+    ownerName: req.user.name || "",
+    status: "draft",
+    revision: 0,
+  });
+  res.status(201).json({ plan: copy });
 });
 
 const createPlan = asyncHandler(async (req, res) => {
@@ -386,6 +443,7 @@ const discardProposal = asyncHandler(async (req, res) => {
 
 module.exports = {
   worksheet,
+  duplicatePlan,
   editPlan,
   discardProposal,
   listPlans,
