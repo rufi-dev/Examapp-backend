@@ -25,6 +25,7 @@ const { MongoMemoryServer } = require("mongodb-memory-server");
 const User = require("../models/userModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
+const Exam = require("../models/examModel");
 const planLimits = require("../helper/planLimits");
 const { sweepExpiredPlans } = require("../jobs/planExpiry");
 
@@ -75,6 +76,66 @@ async function enrol(cls, n, from = 0) {
 }
 
 const approvedCount = (ownerId) => planLimits.studentCount(ownerId);
+
+
+console.log("\n6. Exams beyond the allowance are blocked, newest first:");
+async function sec6() {
+  const t = await teacher("premium");
+  const cls = await Class.create({ owner: t._id, name: "Exams" });
+  const made = [];
+  for (let i = 0; i < 8; i++) {
+    made.push(
+      await Exam.create({
+        name: `İmtahan ${i + 1}`,
+        owner: t._id,
+        class: cls._id,
+        duration: 30,
+        totalMarks: 10,
+        passingMarks: 5,
+        createdAt: new Date(Date.now() - (100 - i) * 60000),
+      })
+    );
+  }
+  ok("premium blocks nothing", (await planLimits.enforceExamCap(t._id)) === 0);
+
+  await User.updateOne({ _id: t._id }, { $set: { plan: "free" } });
+  const blocked = await planLimits.enforceExamCap(t._id);
+  ok("free (allowance 3) blocks the other five", blocked === 5, blocked);
+
+  const live = await Exam.find({ owner: t._id }).sort({ createdAt: 1 }).lean();
+  ok("the first three stay open", live.slice(0, 3).every((e) => e.blockedByPlan !== true));
+  ok("the last five are blocked", live.slice(3).every((e) => e.blockedByPlan === true));
+  ok("nothing was deleted", live.length === 8);
+  ok("re-running changes nothing", (await planLimits.enforceExamCap(t._id)) === 5);
+
+  // Upgrading gives them straight back.
+  await User.updateOne({ _id: t._id }, { $set: { plan: "premium" } });
+  const r = await planLimits.reconcileStudentCap(t._id);
+  ok("upgrading releases every blocked exam", r.examsReleased === 5, JSON.stringify(r));
+  ok("none is left blocked", (await Exam.countDocuments({ owner: t._id, blockedByPlan: true })) === 0);
+
+  // Pro is unlimited for exams too, so it must release rather than block.
+  await User.updateOne({ _id: t._id }, { $set: { plan: "free" } });
+  await planLimits.enforceExamCap(t._id);
+  ok("precondition: blocked again on free", (await Exam.countDocuments({ owner: t._id, blockedByPlan: true })) === 5);
+  await User.updateOne({ _id: t._id }, { $set: { plan: "pro" } });
+  await planLimits.reconcileStudentCap(t._id);
+  ok("pro releases them (unlimited exams)", (await Exam.countDocuments({ owner: t._id, blockedByPlan: true })) === 0);
+
+  // A deleted exam does not consume the allowance.
+  await User.updateOne({ _id: t._id }, { $set: { plan: "free" } });
+  await Exam.updateMany({ _id: { $in: made.slice(0, 4).map((e) => e._id) } }, { $set: { deletedAt: new Date() } });
+  const after = await planLimits.enforceExamCap(t._id);
+  ok("only live exams count against the allowance", after === 1, after);
+  ok(
+    "and a deleted exam is never marked blocked",
+    (await Exam.countDocuments({ _id: { $in: made.slice(0, 4).map((e) => e._id) }, blockedByPlan: true })) === 0
+  );
+
+  // An admin is never capped.
+  const adm = await User.findOne({ role: "admin" }).lean();
+  if (adm) ok("an admin is never exam-capped", (await planLimits.enforceExamCap(adm._id)) === 0);
+}
 
 async function main() {
   const mem = await MongoMemoryServer.create();
@@ -201,6 +262,8 @@ async function main() {
     const empty = await teacher("free");
     ok("a teacher with no classes is a no-op", (await planLimits.enforceStudentCap(empty._id)) === 0);
   }
+
+  await sec6();
 
   await mongoose.disconnect();
   await mem.stop();

@@ -130,6 +130,16 @@ const examSchema = Schema({
     // Soft-delete: when set, the exam is in the Trash (recoverable for 30 days,
     // then auto-purged). Excluded from every listing. null = active.
     deletedAt: { type: Date, default: null, index: true },
+    /*
+     * Blocked because the owner's plan no longer covers this many exams. The exam
+     * and every result on it are untouched — students simply cannot see or sit it,
+     * and it comes back the moment the plan does.
+     *
+     * `default: undefined` so no existing exam is rewritten, and declared here
+     * because Mongoose strict mode drops undeclared keys before the write reaches
+     * Mongo — silently, which is how the question flags were lost.
+     */
+    blockedByPlan: { type: Boolean, default: undefined, index: true },
     // Who archived it (audit trail for accidental/disputed deletions).
     deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     // A permanent purge removes live resources and private bytes but retains

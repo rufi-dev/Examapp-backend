@@ -1275,7 +1275,12 @@ const getExamsByClass = asyncHandler(async (req, res) => {
   // No questions populate: the exam-card listing doesn't render any question
   // data, so sending populated question/option arrays per card is wasted payload.
   // Class IS populated (name/level) so the card can show the category chip.
-  const exams = await Exam.find({ class: exists._id, deletedAt: null }).populate("class", "name level");
+  // A plan-blocked exam stays fully visible to the teacher who owns it (with a
+  // badge saying why), and does not exist as far as students are concerned.
+  const canSeeBlocked = isAdminUser(req.user) || String(exists.owner) === String(req.user._id);
+  const examFilter = { class: exists._id, deletedAt: null };
+  if (!canSeeBlocked) examFilter.blockedByPlan = { $ne: true };
+  const exams = await Exam.find(examFilter).populate("class", "name level");
 
   // Question count per exam for the card stats — a cheap $size aggregation that
   // does NOT load the (heavy) answer arrays.
@@ -1912,6 +1917,17 @@ const startAttempt = asyncHandler(async (req, res) => {
   if (!exam) {
     res.status(404);
     throw new Error("Exam not found");
+  }
+
+  /*
+   * The one gate that actually matters: a plan-blocked exam cannot be SAT, however
+   * a student reached it — a stale link, a bookmark, a cached list. Hiding it from
+   * listings is presentation; this is the enforcement. The owner may still open
+   * their own exam to work on it.
+   */
+  if (exam.blockedByPlan === true && !isAdminUser(req.user) && String(exam.owner) !== String(req.user._id)) {
+    res.status(403);
+    throw new Error("Bu imtahan hazırda əlçatan deyil. Müəlliminizlə əlaqə saxlayın.");
   }
 
   const now = Date.now();
@@ -4996,6 +5012,9 @@ const getLatestExams = asyncHandler(async (req, res) => {
     // Dedupe (a public class the teacher owns would otherwise appear twice).
     const classIds = [...new Set([...owned, ...enrolled, ...publicIds].map(String))];
     filter = { class: { $in: classIds } };
+    // Someone else's plan-blocked exam is not on anyone's home page. The owner
+    // still sees their own, because `owned` classes are theirs.
+    if (!isStaffUser(user)) filter.blockedByPlan = { $ne: true };
   }
   // Students never see drafts (hidden exams).
   if (!isStaffUser(user)) filter.hidden = { $ne: true };

@@ -176,6 +176,64 @@ async function enforceStudentCap(ownerId) {
 }
 
 /*
+ * Bring an OVER-CAP set of exams down to the plan's allowance.
+ *
+ * The allowance was only ever spent at CREATE time, so exams made before a plan
+ * shrank — or before the caps existed at all — kept working for ever. Existing
+ * exams now count too: the ones beyond the allowance are blocked, newest first, so
+ * a teacher keeps the exams they built up before the limit applied and loses the
+ * most recent ones.
+ *
+ * Nothing is deleted. The exam, its questions and every result stay exactly as they
+ * are; students cannot see or sit it, and it returns intact when the plan does.
+ *
+ * Returns the number of exams blocked (negative is impossible; unblocking is
+ * reported separately by releaseExamCap).
+ */
+async function enforceExamCap(ownerId) {
+  const owner = await User.findById(ownerId).select("plan planExpiresAt role").lean();
+  if (!owner || owner.role === "admin") return 0;
+  const cap = limitsFor(effectivePlan(owner)).examCreations;
+  if (!Number.isFinite(cap)) return 0; // unlimited tier
+
+  const Exam = require("../models/examModel");
+  const live = await Exam.find({ owner: ownerId, deletedAt: null })
+    .sort({ createdAt: 1, _id: 1 })
+    .select("_id blockedByPlan")
+    .lean();
+
+  const keep = live.slice(0, cap).map((e) => e._id);
+  const block = live.slice(cap).map((e) => e._id);
+
+  // Idempotent both ways: a re-run with the same cap changes nothing, and a cap
+  // that has risen releases exactly the exams that fit again.
+  if (keep.length) {
+    await Exam.updateMany(
+      { _id: { $in: keep }, blockedByPlan: true },
+      { $unset: { blockedByPlan: "" } }
+    );
+  }
+  if (block.length) {
+    await Exam.updateMany(
+      { _id: { $in: block }, blockedByPlan: { $ne: true } },
+      { $set: { blockedByPlan: true } }
+    );
+  }
+  return block.length;
+}
+
+// An unlimited tier must actively RELEASE what a smaller one blocked, since
+// enforceExamCap returns early before it can unblock anything.
+async function releaseExamCap(ownerId) {
+  const Exam = require("../models/examModel");
+  const res = await Exam.updateMany(
+    { owner: ownerId, blockedByPlan: true },
+    { $unset: { blockedByPlan: "" } }
+  );
+  return res.modifiedCount || 0;
+}
+
+/*
  * Run after ANY change to a teacher's plan. The two halves are complementary and
  * both are no-ops when they do not apply, so calling both is always correct: a
  * downgrade freezes the excess and promotes nobody, an upgrade frees room and
@@ -184,7 +242,17 @@ async function enforceStudentCap(ownerId) {
 async function reconcileStudentCap(ownerId) {
   const frozen = await enforceStudentCap(ownerId);
   const promoted = await promoteWaitlisted(ownerId);
-  return { frozen, promoted };
+
+  // Exams: an unlimited tier releases everything, a finite one blocks the excess.
+  const owner = await User.findById(ownerId).select("plan planExpiresAt role").lean();
+  const cap = owner ? limitsFor(effectivePlan(owner)).examCreations : 0;
+  let examsBlocked = 0;
+  let examsReleased = 0;
+  if (owner && owner.role !== "admin") {
+    if (Number.isFinite(cap)) examsBlocked = await enforceExamCap(ownerId);
+    else examsReleased = await releaseExamCap(ownerId);
+  }
+  return { frozen, promoted, examsBlocked, examsReleased };
 }
 
 // After a plan upgrade/renewal raises the cap, promote waitlisted ("pending")
@@ -292,6 +360,8 @@ module.exports = {
   hasStudentRoom,
   promoteWaitlisted,
   enforceStudentCap,
+  enforceExamCap,
+  releaseExamCap,
   reconcileStudentCap,
   frozenStudentCount,
   consumeExamCreate,
