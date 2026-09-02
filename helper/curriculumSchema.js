@@ -48,7 +48,23 @@ function toGeminiSchema(node) {
   if (!node || typeof node !== "object") return node;
   const out = {};
   if (node.type) out.type = GEMINI_TYPES[node.type] || String(node.type).toUpperCase();
-  if (node.enum) out.enum = node.enum.slice();
+  /*
+   * Gemini rejects an empty string inside an enum outright:
+   *   response_schema.properties[tasks].items.properties[bloom].enum[0]: cannot be empty
+   *
+   * OpenAI strict mode needs "" there — without it the model is FORCED to give a
+   * Bloom level to a reading passage that has none. So the two providers want
+   * different things, and the derivation resolves it by dropping the constraint
+   * entirely for Gemini rather than dropping the empty value: keeping the other
+   * options would force exactly the tagging "" exists to prevent. The field stays a
+   * plain string and the server normalises it, which it does for every provider
+   * anyway.
+   *
+   * Until this, the Gemini fallback could never run a lesson plan — it 400d on the
+   * schema before it saw the prompt, so an OpenAI outage took the whole feature
+   * down instead of falling back.
+   */
+  if (Array.isArray(node.enum) && !node.enum.some((v) => v === "")) out.enum = node.enum.slice();
   if (node.properties) {
     out.properties = {};
     for (const [k, v] of Object.entries(node.properties)) out.properties[k] = toGeminiSchema(v);

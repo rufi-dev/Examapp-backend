@@ -114,6 +114,49 @@ console.log("\n4. The Gemini mirror is derivable (prove now, flip later):");
   ok("the composed schema also derives cleanly", assertStrict(withCurriculum(EXTRACTION_SCHEMA)).ok && noAP(toGeminiSchema(withCurriculum(EXTRACTION_SCHEMA))));
 }
 
+
+console.log("\nGemini cannot take an empty enum value:");
+{
+  /*
+   * Gemini 400s on an empty string inside an enum, and OpenAI strict mode NEEDS one
+   * or the model is forced to Bloom-tag a reading passage that has none. The
+   * derivation drops the whole constraint for Gemini rather than dropping the empty
+   * value, because keeping the rest would force exactly the tagging "" prevents.
+   *
+   * Until this, the Gemini FALLBACK could never run a lesson plan: it 400d on the
+   * schema before it saw the prompt, so an OpenAI outage took the feature down
+   * instead of falling back — which is precisely what happened.
+   */
+  const { LESSON_PLAN_SCHEMA, LESSON_PLAN_GEMINI_SCHEMA } = require("../helper/lessonPlanSchema");
+  const { toGeminiSchema } = require("../helper/curriculumSchema");
+
+  const enums = [];
+  const walk = (n, p = "") => {
+    if (!n || typeof n !== "object") return;
+    if (Array.isArray(n.enum)) enums.push([p, n.enum]);
+    for (const [k, v] of Object.entries(n.properties || {})) walk(v, p + "." + k);
+    if (n.items) walk(n.items, p + "[]");
+  };
+  walk(LESSON_PLAN_GEMINI_SCHEMA);
+
+  ok("no Gemini enum contains an empty value", enums.every(([, e]) => !e.includes("")), JSON.stringify(enums));
+  ok(
+    "bloom keeps its empty option on the OpenAI side",
+    LESSON_PLAN_SCHEMA.properties.tasks.items.properties.bloom.enum.includes("")
+  );
+  ok(
+    "and carries NO enum on the Gemini side",
+    !("enum" in LESSON_PLAN_GEMINI_SCHEMA.properties.tasks.items.properties.bloom)
+  );
+  ok(
+    "an enum with no empty value survives untouched",
+    JSON.stringify((enums.find(([p]) => p.endsWith(".sourceMode")) || [])[1]) ===
+      JSON.stringify(["verbatim", "adapted", "original"])
+  );
+  ok("a plain enum passes through", JSON.stringify(toGeminiSchema({ type: "string", enum: ["a", "b"] }).enum) === '["a","b"]');
+  ok("one containing an empty value loses the constraint", !("enum" in toGeminiSchema({ type: "string", enum: ["", "a"] })));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 assert.strictEqual(failed, 0, `${failed} curriculum-schema assertions failed`);
 process.exit(failed ? 1 : 0);
