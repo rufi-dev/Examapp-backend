@@ -5055,7 +5055,97 @@ const serverTime = asyncHandler(async (req, res) => {
   res.status(200).json({ now: Date.now() });
 });
 
+/*
+ * POST /:examId/variant-b — the second paper.
+ *
+ * A summative assessment is handed out in two variants so neighbours cannot copy.
+ * The brief is exact about what that means: same structure, same skills, same
+ * wording and difficulty, ONLY the numbers differ.
+ *
+ * B is derived from the FINISHED A paper rather than generated alongside it. That
+ * is the stronger guarantee — B cannot drift from a paper it was handed as input —
+ * and it leaves the shared extraction schema, which every ordinary quiz uses,
+ * completely untouched.
+ *
+ * The model re-SOLVES each question rather than shifting its digits, because
+ * changing "4 sm" to "6 sm" invalidates the answer key of every closed question
+ * computed from it. Carrying A's key across would mark the whole B paper wrongly.
+ */
+const createVariantB = asyncHandler(async (req, res) => {
+  const { examId } = req.params;
+  const source = await Exam.findById(examId).populate("questions");
+  if (!source) {
+    res.status(404);
+    throw new Error("Exam not found");
+  }
+  if (!(isAdminUser(req.user) || String(source.owner) === String(req.user._id))) {
+    res.status(403);
+    throw new Error("Bu imtahan sizə aid deyil");
+  }
+
+  const items = (source.questions && source.questions.correctAnswers) || [];
+  if (!items.length) {
+    throw httpError(422, "exam_empty", "Əvvəlcə suallar yaradın — boş imtahanın variantı olmur.");
+  }
+
+  const variant = require("../helper/examVariantSchema");
+  const { runDocument } = require("../helper/aiDocument");
+  const { toGeminiSchema } = require("../helper/curriculumSchema");
+
+  const plain = items.map((q) => (typeof q.toObject === "function" ? q.toObject() : q));
+  const out = await runDocument({
+    system: variant.SYSTEM,
+    prompt: variant.buildVariantPrompt(plain),
+    parts: [],
+    schema: variant.VARIANT_SCHEMA,
+    geminiSchema: toGeminiSchema(variant.VARIANT_SCHEMA),
+  });
+
+  const { B, varied } = variant.applyVariant(plain, (out.doc && out.doc.questions) || []);
+  if (!varied) {
+    throw httpError(422, "variant_not_differentiated", "B variantı hazırlana bilmədi — heç bir sual dəyişmədi.");
+  }
+  if (req.aiCredit) req.aiCredit.usable();
+
+  // A gets its label so the pair is obvious in the class list; done first, because
+  // a teacher seeing "(B variantı)" beside an unlabelled exam is the confusing half.
+  const baseName = String(source.name || "").replace(/\s*\((A|B) variantı\)\s*$/u, "").trim();
+  if (source.name !== `${baseName} (A variantı)`) {
+    await Exam.updateOne({ _id: source._id }, { $set: { name: `${baseName} (A variantı)` } });
+  }
+
+  const questionDoc = await Question.create({ correctAnswers: B });
+  const copy = source.toObject();
+  for (const k of [
+    "_id", "createdAt", "updatedAt", "__v", "questions", "creationKey",
+    "activeVersionId", "activeVersionNumber", "pdf", "users",
+    "reportSentAt", "reportDeliveredKeys", "reportLeaseOwner", "reportLeaseUntil",
+    "reportNextAttemptAt", "reportAttempts", "reportDeadLetterAt", "reportLastFailure",
+    "studentsNotifiedAt", "purging", "purgedAt", "deletedAt", "deletedBy",
+  ]) {
+    delete copy[k];
+  }
+
+  const twin = await Exam.create({
+    ...copy,
+    name: `${baseName} (B variantı)`,
+    questions: questionDoc._id,
+    owner: source.owner,
+    class: source.class,
+    creationKey: `variant-b-${source._id}`,
+  });
+  await Class.updateOne({ _id: source.class }, { $inc: { examCount: 1 } });
+
+  res.status(201).json({
+    exam: { _id: twin._id, name: twin.name },
+    varied,
+    total: items.length,
+    provider: out.provider,
+  });
+});
+
 module.exports = {
+  createVariantB,
   serverTime,
   buildQuestionOrder, // exported for tests
   addExam,

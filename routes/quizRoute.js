@@ -56,8 +56,7 @@ const {
   getResultsByExam,
   deleteResult,
   getPendingReviews,
-  gradeManualAnswer
-} = require("../controllers/quizController");
+  gradeManualAnswer, createVariantB } = require("../controllers/quizController");
 const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions, generateQuestionsStream, transcribeAudio, realtimeToken, listAiModels, regenerateQuestion } = require("../controllers/aiController");
 const { aiRateLimit, aiBudgetGuard } = require("../middleware/aiLimit");
 // Teacher Success Journey — per-teacher AI credit metering (flag-gated; passthrough when off).
@@ -154,6 +153,9 @@ router.get("/aiUsage", protect, adminOnly, getAiUsage);
 router.post("/chat", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.chat.message"), chatAssistant);
 // AI: generate questions from a text description (for the in-chat exam wizard).
 router.post("/generateQuestions/:examId", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.generate.questions"), generateQuestions);
+// The B variant of a finished paper: one provider call, priced and rate-limited
+// exactly like a generation, because that is what it is.
+router.post("/variant-b/:examId", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.generate.questions"), createVariantB);
 router.post("/generateQuestionsStream/:examId", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.generate.questions"), generateQuestionsStream);
 
 // Which engines the builder may offer for question generation.
