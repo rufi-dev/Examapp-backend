@@ -39,9 +39,16 @@ async function visibleOwnerIds(user) {
 const addAchivement = asyncHandler(async (req, res) => {
     const { title, about, photo, size } = req.body
 
-    if (!title || !about || !photo) {
+    // Name the field that is actually missing, in the language the teacher is
+    // using. "All fields are required" told her nothing — every field she could
+    // SEE was filled, because the form never marked the story as required.
+    const missing = []
+    if (!String(title || "").trim()) missing.push("başlıq")
+    if (!String(about || "").trim()) missing.push("uğur hekayəsi")
+    if (!String(photo || "").trim()) missing.push("şəkil")
+    if (missing.length) {
         res.status(400)
-        throw new Error("All fields are required")
+        throw new Error(`Bu sahələr doldurulmalıdır: ${missing.join(", ")}`)
     }
     const achivement = await Achivement.create({
         title, about, photo, size,
