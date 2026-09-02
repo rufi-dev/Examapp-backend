@@ -20,6 +20,7 @@ const LIMIT_MSG = {
   classes: "Paketinizin sinif limitinə çatdınız. Daha çox sinif üçün paketi yüksəldin.",
   students: "Bu sinif şagird limitinə çatıb. Zəhmət olmasa müəlliminizlə əlaqə saxlayın.",
   exams: "Paketinizin imtahan yaratma limitinə çatdınız. Daha çox imtahan üçün paketi yüksəldin.",
+  assignments: "Paketinizin tapşırıq limitinə çatdınız. Köhnə tapşırığı silin və ya paketi yüksəldin.",
 };
 const EXPIRED_MSG =
   "Paketinizin müddəti bitib. Davam etmək üçün «Planım» səhifəsindən paketi yeniləyin.";
@@ -80,7 +81,31 @@ async function studentCount(ownerId) {
   return ids.length;
 }
 
+// Live homework tasks a teacher holds. A CONCURRENT cap, so a deleted task frees
+// its slot — unlike the exam allowance, which is spent for good.
+async function assignmentCount(ownerId) {
+  const Assignment = require("../models/assignmentModel");
+  return Assignment.countDocuments({ owner: ownerId, deletedAt: null });
+}
+
 // ── guards (throw 402 when at/over cap) ──────────────────────────────────────
+/*
+ * Homework cap. Counted from what EXISTS, which is what makes it apply to accounts
+ * that were already over it when the cap arrived: nothing of theirs is touched, but
+ * they cannot post another until they delete one or upgrade.
+ *
+ * `n` is how many this request would create — the hub posts one task per selected
+ * class in a single submit, and letting three through on the last free slot would
+ * be a hole the size of the class list.
+ */
+async function assertUnderAssignmentCap(user, n = 1) {
+  if (isAdmin(user)) return;
+  const cap = limitsFor(effectivePlan(user)).assignments;
+  if (!Number.isFinite(cap)) return; // unlimited
+  const used = await assignmentCount(user._id);
+  if (used + n > cap) throw planLimitError("assignments", cap, used, storedPlan(user), isExpired(user));
+}
+
 async function assertUnderClassCap(user) {
   if (isAdmin(user)) return;
   const cap = limitsFor(effectivePlan(user)).classes;
@@ -320,10 +345,11 @@ async function consumeExamCreate(user, session) {
 async function usageFor(user) {
   const expired = isExpired(user);
   const limits = limitsFor(effectivePlan(user));
-  const [classes, students, frozen] = await Promise.all([
+  const [classes, students, frozen, assignments] = await Promise.all([
     classCount(user._id),
     studentCount(user._id),
     frozenStudentCount(user._id),
+    assignmentCount(user._id),
   ]);
   const examCap = limits.examCreations;
   return {
@@ -335,6 +361,10 @@ async function usageFor(user) {
       // Waiting because the PLAN does not cover them, not because the teacher
       // has not approved them. The UI must say which.
       frozen,
+    },
+    assignments: {
+      used: assignments,
+      limit: Number.isFinite(limits.assignments) ? limits.assignments : null,
     },
     examCreates: {
       left: expired
@@ -355,7 +385,9 @@ module.exports = {
   effectivePlan,
   classCount,
   studentCount,
+  assignmentCount,
   assertUnderClassCap,
+  assertUnderAssignmentCap,
   assertUnderStudentCap,
   hasStudentRoom,
   promoteWaitlisted,

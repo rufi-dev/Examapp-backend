@@ -33,6 +33,10 @@ const PLANS = {
       classes: num("PLAN_FREE_CLASSES", 1),
       students: num("PLAN_FREE_STUDENTS", 10),
       examCreations: num("PLAN_FREE_EXAMS", 3), // lifetime allowance, non-restoring
+      // Homework ("Tapşırıq"). A CONCURRENT cap, not an allowance: it counts the
+      // live tasks a teacher holds, so deleting one frees a slot and an account
+      // already over the cap simply cannot post another.
+      assignments: num("PLAN_FREE_ASSIGNMENTS", 2),
     },
     credits: { welcome: num("PLAN_FREE_WELCOME_CREDITS", 60), monthly: num("PLAN_FREE_MONTHLY_CREDITS", 20) },
     // Live monitoring ("Canlı izlə") is FREE for everyone — it is not enforced by
@@ -47,6 +51,7 @@ const PLANS = {
       classes: num("PLAN_PRO_CLASSES", 5),
       students: num("PLAN_PRO_STUDENTS", 40),
       examCreations: Infinity,
+      assignments: num("PLAN_PRO_ASSIGNMENTS", 30),
     },
     credits: { welcome: 0, monthly: num("PLAN_PRO_MONTHLY_CREDITS", 350) },
     // `whatsapp` = parent notifications (sent from the platform number).
@@ -62,6 +67,7 @@ const PLANS = {
       classes: Infinity,
       students: Infinity,
       examCreations: Infinity,
+      assignments: Infinity,
     },
     credits: { welcome: 0, monthly: num("PLAN_PREMIUM_MONTHLY_CREDITS", 2000) },
     features: { whatsapp: true, teacherWhatsApp: true, analytics: "full", pdfExport: true, prioritySupport: true, liveExams: true },

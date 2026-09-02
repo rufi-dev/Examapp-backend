@@ -7,6 +7,7 @@ const Submission = require("../models/submissionModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 const parentNotify = require("../helper/parentNotify");
+const { assertUnderAssignmentCap } = require("../helper/planLimits");
 
 // Shared by the route-level upload guard and the re-submission merge check so
 // new submissions and edits always enforce the same student file limit.
@@ -228,6 +229,19 @@ const createAssignment = asyncHandler(async (req, res) => {
   if (!classIds.length) return fail(400, "Sinif seçilməyib");
   for (const cid of classIds) {
     if (!(await isClassManager(req.user, cid))) return fail(403, "Sinif sizə aid deyil");
+  }
+
+  /*
+   * Plan gate. Counted from EXISTING tasks, so a teacher already over the cap when
+   * it arrived keeps everything they have and simply cannot post another.
+   * `classIds.length` is passed because this endpoint creates one task PER class in
+   * a single submit.
+   */
+  try {
+    await assertUnderAssignmentCap(req.user, classIds.length);
+  } catch (e) {
+    files.forEach((f) => cleanup(f.path));
+    return res.status(e.statusCode || 402).json({ message: e.message, code: e.code, details: e.details });
   }
 
   const title = String(req.body.title || "").trim();

@@ -26,6 +26,7 @@ const User = require("../models/userModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 const Exam = require("../models/examModel");
+const Assignment = require("../models/assignmentModel");
 const planLimits = require("../helper/planLimits");
 const { sweepExpiredPlans } = require("../jobs/planExpiry");
 
@@ -135,6 +136,58 @@ async function sec6() {
   // An admin is never capped.
   const adm = await User.findOne({ role: "admin" }).lean();
   if (adm) ok("an admin is never exam-capped", (await planLimits.enforceExamCap(adm._id)) === 0);
+}
+
+
+async function sec7() {
+  console.log("\n7. The homework cap counts what already exists:");
+  const t = await teacher("free");
+  const cls = await Class.create({ owner: t._id, name: "HW" });
+  const post = (title) =>
+    Assignment.create({ owner: t._id, class: cls._id, title, ownerName: "T" });
+
+  const refused = async (fn) => {
+    try { await fn(); return null; } catch (e) { return e.code || e.message; }
+  };
+
+  ok("an empty account may post", (await refused(() => planLimits.assertUnderAssignmentCap(t))) === null);
+  await post("Tapşırıq 1");
+  ok("one posted, still room", (await refused(() => planLimits.assertUnderAssignmentCap(t))) === null);
+  await post("Tapşırıq 2");
+  ok("at the cap (2) → refused", (await refused(() => planLimits.assertUnderAssignmentCap(t))) === "plan_limit");
+
+  /*
+   * The hub posts one task PER selected class in a single submit. Counting the
+   * request as one would let a teacher on their last slot create three at once.
+   */
+  await Assignment.updateOne({ title: "Tapşırıq 2" }, { $set: { deletedAt: new Date() } });
+  ok("deleting one frees a slot", (await refused(() => planLimits.assertUnderAssignmentCap(t, 1))) === null);
+  ok("but a 2-class submit still exceeds it", (await refused(() => planLimits.assertUnderAssignmentCap(t, 2))) === "plan_limit");
+
+  // The point of a count-based cap: an account ALREADY over it keeps everything
+  // and simply cannot add more.
+  for (let i = 0; i < 8; i++) await post(`Köhnə ${i}`);
+  ok("an over-cap account is refused", (await refused(() => planLimits.assertUnderAssignmentCap(t))) === "plan_limit");
+  ok("and keeps every task it has", (await Assignment.countDocuments({ owner: t._id, deletedAt: null })) === 9);
+
+  await User.updateOne({ _id: t._id }, { $set: { plan: "pro" } });
+  const pro = await User.findById(t._id).lean();
+  ok("pro (30) lets them continue", (await refused(() => planLimits.assertUnderAssignmentCap(pro))) === null);
+
+  await User.updateOne({ _id: t._id }, { $set: { plan: "premium" } });
+  const prem = await User.findById(t._id).lean();
+  ok("premium is unlimited", (await refused(() => planLimits.assertUnderAssignmentCap(prem, 500))) === null);
+
+  // An expired paid plan falls back to the FREE cap, like every other limit.
+  await User.updateOne({ _id: t._id }, { $set: { plan: "premium", planExpiresAt: new Date(Date.now() - DAY) } });
+  const lapsed = await User.findById(t._id).lean();
+  ok("a lapsed plan is capped at free again", (await refused(() => planLimits.assertUnderAssignmentCap(lapsed))) === "plan_limit");
+
+  const adm = await User.findOne({ role: "admin" }).lean();
+  if (adm) ok("an admin is never capped", (await refused(() => planLimits.assertUnderAssignmentCap(adm, 999))) === null);
+
+  const usage = await planLimits.usageFor(await User.findById(t._id).lean());
+  ok("usage reports homework", usage.assignments.used === 9 && usage.assignments.limit === 2, JSON.stringify(usage.assignments));
 }
 
 async function main() {
@@ -264,6 +317,7 @@ async function main() {
   }
 
   await sec6();
+  await sec7();
 
   await mongoose.disconnect();
   await mem.stop();
