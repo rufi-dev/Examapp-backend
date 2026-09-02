@@ -184,6 +184,26 @@ const presetHint = (presetId) => {
   if (p === "buraxilis-9") {
     return "SUBJECT: This is a MATH (Riyaziyyat) 9th-grade DİM buraxılış exam. Structure: a CLOSED (Qapalı) multiple-choice section, then an OPEN (Açıq) short-answer section, then a final 'solution-required' section (labelled '…saylı tapşırıqları ətraflı yazın' / həlli tələb olunan). Type the solution-required questions as \"Cd\" (NOT \"Co\"); the short open ones as \"Co\"; the multiple-choice ones as \"Cm\".";
   }
+  /*
+   * MSO — summativ qiymətləndirmə. The teacher's brief, as rules the model can
+   * follow. Structure and points are NOT stated here: the preset owns those and
+   * the server scores from the preset id, so a model that miscounts cannot change
+   * the paper. What the prompt owns is everything a schema cannot express — where
+   * the tasks must come from, how the citation is written, the Bloom order, and
+   * the report the teacher needs afterwards.
+   */
+  if (p === "mso-15") {
+    return [
+      "SUBJECT: Bu, Azərbaycan kurikulumu üzrə SUMMATİV QİYMƏTLƏNDİRMƏDİR (MSO). Bütün mətn Azərbaycan dilində.",
+      "STRUKTUR: DƏQİQ 15 tapşırıq. 1–11 qapalı tip (4 cavab variantı, YALNIZ 1 düzgün cavab). 12–15 açıq tip (qısa cavab). Bu struktur dəyişdirilə bilməz.",
+      "MƏNBƏ: Yüklənmiş dərslikdən başqa heç bir yerdən tapşırıq götürmə. Dərslikdən kənar tapşırıq uydurmaq QADAĞANDIR. Uyğun çalışma tapmasan, dərslikdəki ən yaxın çalışmanı götür — uydurma.",
+      "İSTİNAD: Hər tapşırığın \"title\" sahəsinə mənbəni bu formatda yaz: \"(Dərslik, səh. 124, № 8) · Səviyyə: Tətbiq · Alt-standart: 3.4.1\". Səhifə nömrəsi kitabın ÜZƏRİNDƏ çap olunmuş nömrədir — faylın neçənci səhifəsi olduğu YOX. Səhifəni göstərməyi buraxmaq olmaz.",
+      "BLUM SIRASI (pozulmamalıdır): 1–3 Yadda saxlama · 4–6 Anlama · 7–11 Tətbiq · 12–13 Təhlil · 14 Qiymətləndirmə · 15 Yaratma. Səviyyələri qarışdırmaq olmaz.",
+      "AÇIQ TAPŞIRIQLAR (12–15): tam düzgün cavabı yaz və qiymətləndirmə meyarını — hansı addıma neçə bal verildiyini — tapşırıq mətninin sonunda \"Qiymətləndirmə meyarı:\" kimi göstər.",
+      "KEYFİYYƏT: Distraktorlar inandırıcı olsun — tipik şagird səhvlərindən yaransın, təsadüfi ədəd olmasın. Çətinlik tədricən artsın. Ardıcıl tapşırıqlarda eyni hərfli düzgün cavab təkrarlanmasın. İki düzgün cavabı olan tapşırıq QADAĞANDIR. İfadələr aydın, artıq mətnsiz, məlumatlar realistik.",
+    ].join("\n");
+  }
+
   if (p === "ielts-reading") {
     return "SUBJECT: This is an IELTS Academic Reading exam — write EVERYTHING in English. Each reading passage must be a LONG, multi-paragraph academic text (~700–900 words) on a real academic topic, extracted as a reading block. For each passage use a realistic IELTS question mix — choose the appropriate ones from: True/False/Not Given, Yes/No/Not Given, Matching Headings to paragraphs, Matching Information to paragraphs, Multiple Choice, Sentence Completion, Summary Completion, Short Answer (no more than three words). For sentence/summary completion, write the sentence(s) as a reading block with the gaps inline as [[answer]] (do NOT make separate questions for those gaps). Each statement is a SEPARATE question. Aim for a realistic full IELTS test — roughly 13 questions per passage. You decide the topics and the exact question mix.";
   }

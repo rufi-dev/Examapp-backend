@@ -73,6 +73,33 @@ function equalPlan(count, totalMarks) {
   return n > 0 ? Array.from({ length: n }, () => totalMarks / n) : [];
 }
 
+/*
+ * MSO — summativ qiymətləndirmə (Azərbaycan kurikulumu).
+ *
+ * 15 tasks: 1-11 closed multiple-choice with four options and exactly one correct
+ * answer, 12-15 open short answer. The points are a LADDER, not an equal split,
+ * and it sums to exactly 100 by construction:
+ *
+ *   1-4  -> 5    (20)
+ *   5-9  -> 6    (30)
+ *   10-11-> 7    (14)
+ *   12-13-> 8    (16)
+ *   14-15-> 10   (20)          total 100
+ *
+ * Stated per position rather than derived, because the teacher's brief gives it
+ * that way and "15 sualdan ibarət strukturu dəyişmək olmaz" is one of its explicit
+ * prohibitions. A shorter or longer paper falls back to the same ladder truncated,
+ * so a teacher who deletes a question still gets a coherent total instead of NaN.
+ */
+const MSO_LADDER = [5, 5, 5, 5, 6, 6, 6, 6, 6, 7, 7, 8, 8, 10, 10];
+function msoPlan(count) {
+  const n = Number(count) || 0;
+  if (n <= 0) return [];
+  const pts = new Array(n);
+  for (let i = 0; i < n; i++) pts[i] = MSO_LADDER[i] !== undefined ? MSO_LADDER[i] : MSO_LADDER[MSO_LADDER.length - 1];
+  return pts;
+}
+
 const PRESETS = {
   // Custom — no fixed blueprint. The teacher builds from scratch; for PDF+AI the
   // model auto-detects the actual question count and open/closed types. Scoring
@@ -241,6 +268,18 @@ const PRESETS = {
   // scored 1 mark per question (band conversion is external). The AI writes the
   // real structure; these slots are only a light fallback for manual building.
   // Reading blocks are content, not scored.
+  "mso-15": {
+    id: "mso-15",
+    label: "MSO — Summativ qiymətləndirmə (15 sual)",
+    subject: "MSO",
+    totalMarks: 100,
+    slots: [
+      { type: "Cm", count: 11 },
+      { type: "Co", count: 4 },
+    ],
+    pointsPlan: (count) => msoPlan(count),
+    negativeMarking: null,
+  },
   "ielts-reading": {
     id: "ielts-reading",
     label: "IELTS Academic Reading",
