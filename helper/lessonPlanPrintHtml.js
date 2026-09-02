@@ -50,11 +50,11 @@ body{font-family:var(--sans);font-size:10pt;line-height:1.45;color:var(--ink);
 /* A long unbroken word must not push the gutter out of alignment. */
 .stage>div,.task>div,.detail,.roles dd,.callout-box,.q{overflow-wrap:anywhere}
 
-.masthead{border-top:2.5pt solid var(--teal);padding-top:7pt;margin-bottom:12pt}
+.masthead{border-top:2.5pt solid var(--teal);padding-top:6pt;margin-bottom:9pt}
 .brandline{display:flex;justify-content:space-between;align-items:baseline;font-size:8pt;
   letter-spacing:.09em;font-weight:600;color:var(--teal);margin-bottom:8pt}
 .brandline .doctype{color:var(--muted);font-weight:500;letter-spacing:.06em}
-h1{font-family:var(--serif);font-size:19pt;line-height:1.18;font-weight:700;margin:0 0 4pt;max-width:34em}
+h1{font-family:var(--serif);font-size:17pt;line-height:1.18;font-weight:700;margin:0 0 4pt;max-width:34em}
 .subtitle{font-size:10.5pt;font-weight:500;color:var(--teal-soft);margin:0 0 11pt}
 
 .meta{display:grid;grid-template-columns:repeat(4,1fr);border:.75pt solid var(--rule);border-radius:2pt;overflow:hidden}
@@ -64,7 +64,7 @@ h1{font-family:var(--serif);font-size:19pt;line-height:1.18;font-weight:700;marg
 .meta dd{margin:0;font-size:10pt;font-weight:500;min-height:12pt}
 .meta dd.blank{border-bottom:.75pt dotted var(--rule);color:transparent}
 
-.section{margin-top:14pt}
+.section{margin-top:10pt}
 .section-head{display:flex;align-items:baseline;gap:8pt;border-bottom:1pt solid var(--teal);
   padding-bottom:3pt;margin-bottom:8pt}
 .section-head h2{font-family:var(--serif);font-size:11.5pt;font-weight:700;margin:0;color:var(--teal)}
@@ -81,10 +81,10 @@ ul.tight li:last-child{margin-bottom:0}
 
 .timebar{display:flex;height:7pt;border-radius:3.5pt;overflow:hidden;margin-bottom:3pt}
 .timebar span{display:block}
-.timebar-legend{display:flex;font-size:7.5pt;color:var(--muted);margin-bottom:10pt}
+.timebar-legend{display:flex;font-size:7.5pt;color:var(--muted);margin-bottom:7pt}
 .timebar-legend span{text-align:center}
 
-.stage{display:grid;grid-template-columns:38pt 1fr;column-gap:12pt;padding:8pt 0 9pt;
+.stage{display:grid;grid-template-columns:38pt 1fr;column-gap:12pt;padding:6pt 0 6.5pt;
   border-top:.75pt solid var(--rule-soft);break-inside:avoid;page-break-inside:avoid}
 .stage:first-of-type{border-top:0;padding-top:0}
 .gutter{text-align:right;border-right:1.5pt solid var(--teal-tint);padding-right:10pt}
@@ -92,7 +92,7 @@ ul.tight li:last-child{margin-bottom:0}
 .gutter .unit{font-size:7.5pt;color:var(--muted);letter-spacing:.04em}
 .stage h3{font-family:var(--serif);font-size:11pt;font-weight:600;margin:0 0 5pt;line-height:1.25}
 .detail{margin:0 0 7pt;font-size:9.5pt;line-height:1.5;color:var(--slate)}
-.roles{margin:0;display:grid;grid-template-columns:52pt 1fr;column-gap:9pt;row-gap:3.5pt;
+.roles{margin:0;display:grid;grid-template-columns:52pt 1fr;column-gap:9pt;row-gap:2.5pt;
   font-size:9pt;line-height:1.4}
 .roles dt{font-weight:600;font-size:8pt;color:var(--teal);padding-top:1pt}
 .roles dd{margin:0;color:var(--slate)}
@@ -105,7 +105,7 @@ ul.tight li:last-child{margin-bottom:0}
 .notice.info{background:var(--teal-tint);color:var(--teal)}
 .notice.warn{background:var(--ochre-tint);color:var(--ochre);border-left:2pt solid var(--ochre)}
 
-.task{display:grid;grid-template-columns:20pt 1fr;column-gap:8pt;padding:7pt 0;
+.task{display:grid;grid-template-columns:20pt 1fr;column-gap:8pt;padding:5.5pt 0;
   border-top:.75pt solid var(--rule-soft);break-inside:avoid;page-break-inside:avoid}
 .task:first-of-type{border-top:0}
 .task .no{font-family:var(--serif);font-size:11pt;font-weight:700;color:var(--teal);line-height:1.3}
