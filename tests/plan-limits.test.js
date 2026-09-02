@@ -25,6 +25,19 @@ async function throws402(fn, resource) {
   ok("premium unlimited", (() => { const l = plans.limitsFor("premium"); return l.classes === Infinity && l.students === Infinity; })());
   ok("isUnlimited(Infinity/null)", plans.isUnlimited(Infinity) && plans.isUnlimited(null));
 
+  // ── the public catalog must expose EVERY limit ──────────────────────────────
+  // A hand-written field list in planController dropped the homework cap from the
+  // pricing page the day it was added. This fails the moment that happens again.
+  {
+    const { PLANS: P, PLAN_IDS: IDS } = plans;
+    const controllerSrc = require("fs").readFileSync(require("path").join(__dirname, "../controllers/planController.js"), "utf8");
+    ok("catalog limits are derived, not a hand-written list", /Object\.entries\(l\)/.test(controllerSrc));
+    const keys = new Set();
+    for (const id of IDS) Object.keys(P[id].limits).forEach((k) => keys.add(k));
+    ok("every tier declares the same limit keys", IDS.every((id) => [...keys].every((k) => k in P[id].limits)), [...keys].join(","));
+    ok("assignments is one of them", keys.has("assignments"));
+  }
+
   // ── planLimitError shape ────────────────────────────────────────────────────
   {
     const e = planLimits.planLimitError("classes", 1, 3, "free");

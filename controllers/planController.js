@@ -6,11 +6,11 @@ const { sendTelegram, esc } = require("../helper/telegram");
 
 // GET /api/plan/catalog — public plan/pricing catalog for the pricing page.
 // (Limits use Infinity → serialize as null = "unlimited" for JSON.)
-const jsonLimits = (l) => ({
-  classes: Number.isFinite(l.classes) ? l.classes : null,
-  students: Number.isFinite(l.students) ? l.students : null,
-  examCreations: Number.isFinite(l.examCreations) ? l.examCreations : null,
-});
+// DERIVED, never a hand-written field list: a whitelist here silently dropped the
+// homework cap from the pricing page the day it was added, and would drop the next
+// one too. tests/plan-limits.test.js asserts the catalog exposes every limit.
+const jsonLimits = (l) =>
+  Object.fromEntries(Object.entries(l).map(([k, v]) => [k, Number.isFinite(v) ? v : null]));
 const getCatalog = asyncHandler(async (req, res) => {
   res.json({
     plans: PLAN_IDS.map((id) => ({
