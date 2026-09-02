@@ -45,7 +45,6 @@ const AI_OPERATIONS = {
   // ai.generate.questions. A lesson plan is one smaller document: it sits between
   // a rewrite (2) and a full exam (10). The ledger weights keep the same 2:1 ratio
   // to cost that every existing operation uses.
-  "ai.generate.mso": { cost: 10, ledgerWeight: 5, confirmBefore: true, active: true, display: "generateMso" },
   "ai.generate.lessonplan": { cost: 6, ledgerWeight: 3, confirmBefore: true, active: true, display: "generateLessonPlan" },
 };
 

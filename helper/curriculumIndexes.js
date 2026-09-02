@@ -29,12 +29,6 @@ const INDEXES = [
   { collection: "lesson_plan_versions", name: "uniq_plan_content", key: { docId: 1, contentHash: 1 }, unique: true, partialFilterExpression: null },
 
   // ---- MSO ----
-  { collection: "mso_blueprints", name: "owner_1_updatedAt_-1", key: { owner: 1, updatedAt: -1 }, unique: false, partialFilterExpression: null },
-  { collection: "mso_documents", name: "owner_1_updatedAt_-1", key: { owner: 1, updatedAt: -1 }, unique: false, partialFilterExpression: null },
-  { collection: "mso_versions", name: "uniq_mso_version", key: { docId: 1, versionNumber: 1 }, unique: true, partialFilterExpression: null },
-  { collection: "mso_versions", name: "uniq_mso_content", key: { docId: 1, contentHash: 1 }, unique: true, partialFilterExpression: null },
-  { collection: "mso_generation_jobs", name: "uniq_owner_clientReqId", key: { owner: 1, clientReqId: 1 }, unique: true, partialFilterExpression: null },
-  { collection: "mso_generation_jobs", name: "state_1_nextAttemptAt_1_leaseUntil_1", key: { state: 1, nextAttemptAt: 1, leaseUntil: 1 }, unique: false, partialFilterExpression: null },
 ];
 
 // collection -> the model file whose schema.indexes() must match exactly.
@@ -46,10 +40,6 @@ const MODEL_COLLECTIONS = {
   curriculum_source_references: "sourceReferenceModel",
   lesson_plans: "lessonPlanModel",
   lesson_plan_versions: "lessonPlanVersionModel",
-  mso_blueprints: "msoBlueprintModel",
-  mso_documents: "msoDocumentModel",
-  mso_versions: "msoVersionModel",
-  mso_generation_jobs: "msoGenerationJobModel",
 };
 
 function modelFor(collection) {

@@ -41,7 +41,6 @@ eq("OP_COST projection (existing operations unchanged)", reg.costTable(), {
   "ai.transcribe.audio": 0,
   "ai.realtime.session": 0,
   "ai.models.list": 0,
-  "ai.generate.mso": 10,
   "ai.generate.lessonplan": 6,
 });
 eq("WEIGHTS projection (existing operations unchanged)", WEIGHTS, {
@@ -52,14 +51,12 @@ eq("WEIGHTS projection (existing operations unchanged)", WEIGHTS, {
   "ai.transcribe.audio": 2,
   "ai.realtime.session": 5,
   "ai.models.list": 0,
-  "ai.generate.mso": 5,
   "ai.generate.lessonplan": 3,
 });
-eq("AI_ACTION_COSTS projection", AI_ACTION_COSTS, { generateExam: 10, rewriteQuestion: 2, supportChat: 0, generateMso: 10, generateLessonPlan: 6 });
+eq("AI_ACTION_COSTS projection", AI_ACTION_COSTS, { generateExam: 10, rewriteQuestion: 2, supportChat: 0, generateLessonPlan: 6 });
 eq("CONFIRM_BEFORE projection", [...CONFIRM_BEFORE].sort(), [
   "ai.extract.questions",
   "ai.generate.lessonplan",
-  "ai.generate.mso",
   "ai.generate.questions",
   "ai.realtime.session",
 ]);
@@ -96,7 +93,7 @@ ok(
 
 // ---------------- 3. declared-but-inactive operations fail closed ------------
 console.log("\n3. Document operations are priced and chargeable:");
-for (const op of ["ai.generate.mso", "ai.generate.lessonplan"]) {
+for (const op of ["ai.generate.lessonplan"]) {
   ok(`${op} is declared`, reg.isDeclared(op));
   ok(`${op} is active`, reg.isActive(op));
   ok(`${op} has a positive cost`, reg.costFor(op) > 0, reg.costFor(op));
@@ -107,20 +104,20 @@ for (const op of ["ai.generate.mso", "ai.generate.lessonplan"]) {
 // The mechanism that protected them before they were priced must still work, or a
 // FUTURE operation could silently charge 0.
 {
-  const saved = reg.AI_OPERATIONS["ai.generate.mso"].active;
-  reg.AI_OPERATIONS["ai.generate.mso"].active = false;
-  ok("an inactive op disappears from OP_COST", reg.costTable()["ai.generate.mso"] === undefined);
-  ok("costFor throws rather than returning 0", (() => { try { reg.costFor("ai.generate.mso"); return false; } catch { return true; } })());
-  ok("chargeAi refuses at WIRE time", (() => { try { chargeAi("ai.generate.mso"); return false; } catch { return true; } })());
+  const saved = reg.AI_OPERATIONS["ai.generate.lessonplan"].active;
+  reg.AI_OPERATIONS["ai.generate.lessonplan"].active = false;
+  ok("an inactive op disappears from OP_COST", reg.costTable()["ai.generate.lessonplan"] === undefined);
+  ok("costFor throws rather than returning 0", (() => { try { reg.costFor("ai.generate.lessonplan"); return false; } catch { return true; } })());
+  ok("chargeAi refuses at WIRE time", (() => { try { chargeAi("ai.generate.lessonplan"); return false; } catch { return true; } })());
   ok(
     "requireActiveOperation answers a typed 503",
     (() => {
       let err = null;
-      requireActiveOperation("ai.generate.mso")({}, {}, (e) => (err = e));
+      requireActiveOperation("ai.generate.lessonplan")({}, {}, (e) => (err = e));
       return err && err.statusCode === 503 && err.code === "operation_not_configured";
     })()
   );
-  reg.AI_OPERATIONS["ai.generate.mso"].active = saved;
+  reg.AI_OPERATIONS["ai.generate.lessonplan"].active = saved;
 }
 ok(
   "chargeAi still wires for a priced operation",
@@ -135,7 +132,7 @@ ok(
 console.log("\n4. requireActiveOperation passes a priced operation through:");
 {
   let passedThrough = false;
-  requireActiveOperation("ai.generate.mso")({}, {}, (e) => { passedThrough = !e; });
+  requireActiveOperation("ai.generate.lessonplan")({}, {}, (e) => { passedThrough = !e; });
   ok("a priced op passes through", passedThrough);
   ok(
     "an unknown op throws at wire time",

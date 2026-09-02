@@ -259,7 +259,6 @@ app.use("/api/payments", require("./routes/paymentRoute"))
 // off — the same arrangement the Teacher Success routes use.
 app.use("/api/curriculum", require("./routes/curriculumRoute"))
 app.use("/api/lesson-plans", require("./routes/lessonPlanRoute"))
-app.use("/api/mso", require("./routes/msoRoute"))
 app.use("/api/health", healthRoute)
 // Public step-by-step "how to use the platform" guide videos (self-hosted help
 // content, NO auth — nothing sensitive). express.static gives byte-range support so

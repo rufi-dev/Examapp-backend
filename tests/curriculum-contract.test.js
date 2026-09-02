@@ -64,16 +64,20 @@ console.log("\n3. shapeReason names every drift kind:");
 
 console.log("\n4. buildArgs gives the migration the exact createIndex arguments:");
 {
-  const uniq = c.specsFor("mso_generation_jobs").find((s) => s.name === "uniq_owner_clientReqId");
+  const uniq = c.specsFor("lesson_plan_versions").find((s) => s.name === "uniq_plan_version");
   const [key, opts] = c.buildArgs(uniq);
-  ok("key is passed through", JSON.stringify(key) === JSON.stringify({ owner: 1, clientReqId: 1 }));
-  ok("an explicit stable name is always set", opts.name === "uniq_owner_clientReqId");
+  ok("key is passed through", JSON.stringify(key) === JSON.stringify({ docId: 1, versionNumber: 1 }));
+  ok("an explicit stable name is always set", opts.name === "uniq_plan_version");
   ok("uniqueness is carried", opts.unique === true);
   const plain = c.specsFor("lesson_plans")[0];
   ok("a non-unique index does not set unique", c.buildArgs(plain)[1].unique === undefined);
   ok("every spec has an explicit name", c.INDEXES.every((s) => typeof s.name === "string" && s.name.length > 0));
   ok("every spec states partialFilterExpression explicitly", c.INDEXES.every((s) => Object.prototype.hasOwnProperty.call(s, "partialFilterExpression")));
-  ok("all nine collections are covered", c.collectionsOf().length === 9, c.collectionsOf().length);
+  // Every collection the contract declares has a model behind it, and vice versa —
+  // derived rather than counted, so removing a feature does not need the number
+  // edited and adding one cannot slip through without a model.
+  ok("every declared collection resolves to a model", c.collectionsOf().every((col) => !!c.modelFor(col)), c.collectionsOf().join(","));
+  ok("every spec belongs to a declared collection", c.INDEXES.every((s) => c.collectionsOf().includes(s.collection)));
 }
 
 console.log("\n5. Flag OFF is a true no-op:");
