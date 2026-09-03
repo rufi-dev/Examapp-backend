@@ -178,6 +178,9 @@ console.log("\nB. A similar NEW question, not A with one value swapped:");
   ok("the language example keeps the same rule", /Yoxlanılan qayda eynidir/.test(v.SYSTEM));
 
   ok("the new question must stay on topic", /eyni fəsil, eyni mövzu/.test(v.SYSTEM));
+  // The live B variant lost the marking criterion on one of four open tasks, which
+  // leaves the teacher grading that one with no scheme.
+  ok("the marking criterion must survive into B", /Qiymətləndirmə meyarı:" sətri varsa/.test(v.SYSTEM));
   ok("it must still be re-solved", /YENİDƏN HƏLL ET/.test(v.SYSTEM));
 }
 

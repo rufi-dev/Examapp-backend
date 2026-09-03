@@ -89,6 +89,8 @@ MÜTLƏQ QAYDALAR:
 - Qapalı suallarda variantların sayı A ilə eyni qalır; distraktorlar yeni suala
   uyğun və inandırıcı olmalıdır.
 - Mətn blokları (oxu mətnləri) OLDUĞU KİMİ qaytarılır.
+- Açıq tapşırıqda A variantında "Qiymətləndirmə meyarı:" sətri varsa, B variantında
+  da OLMALIDIR — yeni suala uyğun yazılmış halda. Onu buraxmaq olmaz.
 - Sual mövzudan kənara çıxmamalıdır: eyni fəsil, eyni mövzu, eyni lüğət səviyyəsi.
 - Sualın mənasını pozma: kvadratın tərəfi mənfi ola bilməz, situasiya real olmalıdır.
 `.trim();

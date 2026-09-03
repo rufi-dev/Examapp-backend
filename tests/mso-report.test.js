@@ -114,6 +114,9 @@ console.log("\n6. The rendered document:");
   ok("all five column headers are present",
     ["Dərslikdə səh. və №", "Alt-standart", "Qiymətləndirmə meyarı", "Tapşırıq nəyi yoxlayır"]
       .every((h) => html.includes(h)));
+  // "Hər sualdan əvvəl Blum səviyyəsi göstərilməlidir" — it was parsed and then
+  // thrown away, so the one document that records the paper never showed it.
+  ok("the Bloom level is shown per task", html.includes("Blum") && html.includes("Tətbiq"));
   ok("the exam name is in the masthead", html.includes("MSO 1"));
   ok("the class line renders", html.includes("Riyaziyyat · 6-ci sinif"));
   ok("the point total is stated", html.includes("bal"));

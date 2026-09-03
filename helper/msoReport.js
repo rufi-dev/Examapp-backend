@@ -131,6 +131,7 @@ tr{break-inside:avoid;page-break-inside:avoid}
 .no{font-family:var(--serif);font-weight:700;color:var(--teal);width:24pt}
 .src{width:80pt;white-space:nowrap}
 .sub-col{width:66pt}
+.bloom-col{width:62pt;color:var(--teal);font-weight:600}
 .pts{width:26pt;text-align:right;font-variant-numeric:tabular-nums}
 .q{color:var(--slate)}
 tfoot td{padding-top:7pt;font-size:8pt;color:var(--muted)}
@@ -150,6 +151,7 @@ ${thin ? `<div class="notice"><b>!</b><span>Cədvəlin ${cov.cells - cov.filled}
   <thead><tr>
     <th class="no">№</th>
     <th class="src">Dərslikdə səh. və №</th>
+    <th class="bloom-col">Blum</th>
     <th class="sub-col">Alt-standart</th>
     <th>Qiymətləndirmə meyarı</th>
     <th>Tapşırıq nəyi yoxlayır</th>
@@ -162,6 +164,7 @@ ${thin ? `<div class="notice"><b>!</b><span>Cədvəlin ${cov.cells - cov.filled}
         (r) => `<tr>
       <td class="no">${r.no}</td>
       <td class="src">${esc(r.source)}</td>
+      <td class="bloom-col">${esc(r.bloom)}</td>
       <td class="sub-col">${esc(r.subStandard)}</td>
       <td>${esc(r.criterion)}</td>
       <td>${esc(r.skill)}</td>

@@ -1238,6 +1238,22 @@ async function topUpToCount({ prompt, preset, model, signal, questions, target }
 //   ai-solve    — the AI solves each question and proposes the answers, run
 //                 through the same audit → critic → audit gate as generation
 const ANSWER_MODES = new Set(["has-answers", "manual", "ai-solve"]);
+/*
+ * "Ardıcıl olaraq təkrarlanan düzgün cavablar olmamalıdır" — the brief's rule, and
+ * one the model does not reliably keep. The live German paper came back
+ * B A A B B A C D B C D, with a run at 2→3 and another at 4→5.
+ *
+ * Enforced here rather than only asked for in the prompt, because it is a property
+ * that can be checked and repaired exactly: rotating a question's options together
+ * with its key leaves the same TEXT correct, so the repair cannot alter the paper's
+ * meaning. Scoped to the summative preset, whose brief states the requirement.
+ */
+const spreadKeysIfNeeded = (questions, preset) => {
+  if (preset !== "mso-15") return questions;
+  const { spreadAnswerKeys } = require("../helper/answerKeySpread");
+  return spreadAnswerKeys(questions).items;
+};
+
 async function applyAnswerMode({ questions, mode, preset, model, signal, onStatus }) {
   const m = ANSWER_MODES.has(mode) ? mode : "has-answers";
   if (m === "manual") {
@@ -1255,9 +1271,15 @@ async function applyAnswerMode({ questions, mode, preset, model, signal, onStatu
       signal,
       onStatus,
     });
-    return { ...v, mode: m };
+    return { ...v, questions: spreadKeysIfNeeded(v.questions, preset), mode: m };
   }
-  return { questions, issues: null, reviewCost: null, rounds: 0, mode: m };
+  return {
+    questions: spreadKeysIfNeeded(questions, preset),
+    issues: null,
+    reviewCost: null,
+    rounds: 0,
+    mode: m,
+  };
 }
 
 // The AI reads a PDF INLINE; Claude caps a document at ~32MB (and 100 pages), so
