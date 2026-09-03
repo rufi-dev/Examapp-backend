@@ -129,8 +129,8 @@ tbody td{font-size:8.5pt;padding:5pt 6pt;border-bottom:.75pt solid var(--rule-so
 tbody tr:nth-child(even){background:#FBFCFD}
 tr{break-inside:avoid;page-break-inside:avoid}
 .no{font-family:var(--serif);font-weight:700;color:var(--teal);width:24pt}
-.src{width:74pt;white-space:nowrap}
-.sub-col{width:52pt}
+.src{width:80pt;white-space:nowrap}
+.sub-col{width:66pt}
 .pts{width:26pt;text-align:right;font-variant-numeric:tabular-nums}
 .q{color:var(--slate)}
 tfoot td{padding-top:7pt;font-size:8pt;color:var(--muted)}

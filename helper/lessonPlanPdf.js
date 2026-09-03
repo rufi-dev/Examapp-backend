@@ -16,14 +16,18 @@ const MARGIN = { top: "14mm", right: "15mm", bottom: "15mm", left: "15mm" };
 
 // Our own footer, which is what displaces the browser's. The header template must
 // still be non-empty or Chromium falls back to printing its default one.
-const FOOTER = `
+// The label is a parameter because this renderer is shared: an exam's analytic
+// table carrying "dərs planı" in its footer is a small error a teacher would
+// notice immediately, on a document they hand to a methodologist.
+const footerFor = (label) => `
   <div style="font-family:'Open Sans',sans-serif;font-size:7pt;color:#77848F;width:100%;
               padding:0 15mm;display:flex;justify-content:space-between;">
-    <span>Examopia · dərs planı</span>
+    <span>Examopia · ${label}</span>
     <span><span class="pageNumber"></span>/<span class="totalPages"></span></span>
   </div>`;
+const FOOTER = footerFor("dərs planı");
 
-async function renderPdf(html, { timeoutMs = 30000 } = {}) {
+async function renderPdf(html, { timeoutMs = 30000, footerLabel = "dərs planı", landscape = false } = {}) {
   let browser;
   try {
     browser = await puppeteer.launch({
@@ -58,7 +62,8 @@ async function renderPdf(html, { timeoutMs = 30000 } = {}) {
       printBackground: true, // the design is tinted blocks; without this it is blank boxes
       displayHeaderFooter: true,
       headerTemplate: "<div></div>",
-      footerTemplate: FOOTER,
+      footerTemplate: footerFor(footerLabel),
+      landscape,
       margin: MARGIN,
       preferCSSPageSize: false,
       timeout: timeoutMs,
@@ -68,4 +73,4 @@ async function renderPdf(html, { timeoutMs = 30000 } = {}) {
   }
 }
 
-module.exports = { renderPdf, FOOTER, MARGIN };
+module.exports = { renderPdf, footerFor, FOOTER, MARGIN };

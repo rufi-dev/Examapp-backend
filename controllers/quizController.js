@@ -5227,7 +5227,8 @@ const msoReport = asyncHandler(async (req, res) => {
 
   const cls = exam.class ? await Class.findById(exam.class).select("name level").lean() : null;
   const pdf = await renderPdf(
-    report.buildReportHtml({ ...exam.toObject(), className: cls?.name || "", classLevel: cls?.level || "" }, rows)
+    report.buildReportHtml({ ...exam.toObject(), className: cls?.name || "", classLevel: cls?.level || "" }, rows),
+    { footerLabel: "analitik cədvəl", landscape: true }
   );
   const safe = String(exam.name || "mso").replace(/[^\p{L}\p{N}\s._-]/gu, "").trim().slice(0, 80) || "mso";
   res.setHeader("Content-Type", "application/pdf");

@@ -174,7 +174,11 @@ console.log("\n8. The renderer must hand Express a Buffer:");
 
   ok("the pdf result is wrapped in Buffer.from", /return Buffer\.from\(await page\.pdf\(/.test(src));
   ok("printBackground is on, or every tint prints blank", /printBackground:\s*true/.test(src));
-  ok("our own footer replaces the browser's", /footerTemplate:\s*FOOTER/.test(src));
+  // The renderer is shared with the MSO analytic table, so the label is a
+  // parameter — but a footer of OUR making must still be what displaces the
+  // browser's date/title/URL stamp.
+  ok("our own footer replaces the browser's", /footerTemplate:\s*footerFor\(footerLabel\)/.test(src));
+  ok("the lesson plan's own label is still the default", /footerLabel = "dərs planı"/.test(src));
   ok("the header template is emptied", /headerTemplate:\s*"<div><\/div>"/.test(src));
   ok("fonts are awaited before rendering", /document\.fonts\.ready/.test(src));
   ok("the browser is always closed", /finally\s*\{[\s\S]*browser\.close/.test(src));
