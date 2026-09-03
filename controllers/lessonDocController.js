@@ -385,12 +385,14 @@ const exportDoc = asyncHandler(async (req, res) => {
   const format = wanted === "docx" ? "docx" : "pdf";
   const plain = doc.toObject();
   const { safeName } = require("../helper/lessonDocDocx");
+  const { withRasterFigures } = require("../helper/lessonDocHtml");
 
   let body;
   let mime;
   if (format === "docx") {
     const { htmlToDocx } = require("../helper/lessonDocDocx");
-    body = await htmlToDocx(buildLessonDocHtml(plain, { forWord: true }));
+    // Figures become PNGs first; LibreOffice cannot be trusted with inline SVG.
+    body = await htmlToDocx(buildLessonDocHtml(await withRasterFigures(plain), { forWord: true }));
     mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
   } else {
     const { renderPdf } = require("./../helper/lessonPlanPdf");

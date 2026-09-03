@@ -70,6 +70,10 @@ th{font-size:8.5pt;font-weight:700;letter-spacing:.04em;text-transform:uppercase
   color:var(--teal);text-align:left;border-bottom:1pt solid var(--teal);padding:0 6pt 3pt 0}
 td{font-size:10pt;padding:4pt 6pt 4pt 0;border-bottom:.5pt solid var(--rule-soft);vertical-align:top}
 
+.fig{margin:0 0 12pt;padding:8pt 0;text-align:center;break-inside:avoid}
+.fig svg{max-width:100%;height:auto}
+.fig figcaption{margin-top:5pt;color:var(--muted);font-size:8.5pt;font-style:italic}
+
 @page{size:A4;margin:16mm 16mm 18mm}
 `;
 
@@ -100,6 +104,8 @@ li{margin-bottom:3pt}
 table{border-collapse:collapse;width:100%;margin:0 0 10pt}
 th{font-size:9pt;color:#0F4C5C;text-align:left;border-bottom:1pt solid #0F4C5C;padding:4pt 6pt 4pt 0}
 td{font-size:10.5pt;padding:4pt 6pt;border-bottom:0.5pt solid #ECF0F2}
+.fig{margin:0 0 12pt;text-align:center}
+.fig figcaption{margin-top:4pt;color:#77848F;font-size:9pt;font-style:italic}
 `;
 
 /* ------------------------------------------------------------ the content --- */
@@ -189,6 +195,25 @@ function renderBlock(b, forWord) {
         : `<div class="note ${esc(tone)}"><p>${esc(b.text)}</p></div>`;
     }
 
+    /*
+     * A drawing. Inline SVG for the PDF, because Chromium renders it perfectly and
+     * it stays sharp at any print size. For Word the caller has already rasterised
+     * it to a PNG and put it on `pngSrc` — LibreOffice's HTML import cannot be
+     * relied on for inline SVG, and a missing diagram in a handout is worse than a
+     * slightly softer one.
+     */
+    case "figure": {
+      const art = forWord
+        ? b.pngSrc
+          ? `<img src="${b.pngSrc}" alt="${esc(b.text)}" style="width:100%;max-width:460pt"/>`
+          : ""
+        : b.svg || "";
+      if (!art) return "";
+      return `<figure class="fig">${art}${
+        has(b.text) ? `<figcaption>${esc(b.text)}</figcaption>` : ""
+      }</figure>`;
+    }
+
     case "table": {
       const head = (b.columns || []).map((c) => `<th>${esc(c)}</th>`).join("");
       const body = (b.rows || [])
@@ -225,6 +250,27 @@ function renderBlock(b, forWord) {
   }
 }
 
+/*
+ * Rasterise every figure for the Word path. Async, so it is a separate step the
+ * export awaits before rendering — buildLessonDocHtml itself stays synchronous,
+ * which keeps it usable from a test with no image toolchain.
+ */
+async function withRasterFigures(doc = {}) {
+  const blocks = Array.isArray(doc.blocks) ? doc.blocks : [];
+  if (!blocks.some((b) => b && b.kind === "figure")) return doc;
+  const { svgToPngDataUri } = require("./lessonDocSvg");
+  const out = [];
+  for (const b of blocks) {
+    if (b && b.kind === "figure" && b.svg) {
+      // eslint-disable-next-line no-await-in-loop
+      out.push({ ...b, pngSrc: await svgToPngDataUri(b.svg) });
+    } else {
+      out.push(b);
+    }
+  }
+  return { ...doc, blocks: out };
+}
+
 function buildLessonDocHtml(rawDoc = {}, { forWord = false } = {}) {
   const doc = rawDoc && typeof rawDoc === "object" ? rawDoc : {};
   const blocks = Array.isArray(doc.blocks) ? doc.blocks : [];
@@ -250,4 +296,4 @@ ${body || '<p class="meta">Bu materialda hələ məzmun yoxdur.</p>'}
 </body></html>`;
 }
 
-module.exports = { buildLessonDocHtml, renderBlock, esc, CSS_PDF, CSS_DOCX };
+module.exports = { buildLessonDocHtml, withRasterFigures, renderBlock, esc, CSS_PDF, CSS_DOCX };

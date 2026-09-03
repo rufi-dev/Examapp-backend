@@ -16,7 +16,7 @@ const BLOCK = {
   properties: {
     kind: {
       type: "string",
-      enum: ["heading", "text", "list", "definition", "example", "task", "note", "table"],
+      enum: ["heading", "text", "list", "definition", "example", "task", "note", "table", "figure"],
     },
     text: { type: "string" },
     term: { type: "string" },
@@ -26,8 +26,10 @@ const BLOCK = {
     columns: { type: "array", items: { type: "string" } },
     rows: { type: "array", items: { type: "array", items: { type: "string" } } },
     tone: { type: "string", enum: ["info", "warning", "success"] },
+    // A drawing, authored as SVG. Sanitised hard on arrival — see helper/lessonDocSvg.
+    svg: { type: "string" },
   },
-  required: ["kind", "text", "term", "items", "ordered", "solution", "columns", "rows", "tone"],
+  required: ["kind", "text", "term", "items", "ordered", "solution", "columns", "rows", "tone", "svg"],
 };
 
 const DOC_SCHEMA = {
@@ -59,6 +61,17 @@ BLOK TİPLƏRİ və nə vaxt istifadə edilir:
 - task — şagirdin özünün edəcəyi tapşırıq. Cavabı bilirsənsə "solution"-a yaz.
 - note — qeyd: "tone" = info (məsləhət), warning (tez-tez edilən səhv), success (yadda saxla).
 - table — müqayisə və ya cədvəl. "columns" başlıqlar, "rows" sətirlər.
+- figure — ŞƏKİL/SXEM. "svg" sahəsinə SVG kodu yaz, "text" sahəsinə şəklin altyazısı.
+  Riyaziyyat, həndəsə, fizika, biologiya üçün: ədəd oxu, üçbucaq, dairə və radius,
+  koordinat müstəvisi, diaqram, kəsr zolağı, hüceyrə sxemi və s.
+
+FİQUR (figure) QAYDALARI:
+- Mütləq viewBox olmalıdır, məsələn: <svg viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg">
+- YALNIZ bu elementlərdən istifadə et: line, path, rect, circle, ellipse, polygon,
+  polyline, text, g, defs, marker. Script, style, foreignObject, image QADAĞANDIR.
+- Rəngləri birbaşa fill/stroke atributunda yaz (style atributu işləmir).
+- Şəkil izahı asanlaşdırırsa əlavə et. Sadəcə bəzək üçün fiqur çəkmə.
+- Yazıları <text> ilə əlavə et ki, şəkil özü özünü izah etsin.
 
 MÜTLƏQ QAYDALAR:
 - Materialın strukturu olmalıdır: giriş izahı → anlayışlar → nümunələr → tapşırıqlar.
@@ -128,6 +141,9 @@ function buildEditPrompt({ doc = {}, instructions = "" } = {}) {
       columns: b.columns || [],
       rows: b.rows || [],
       tone: b.tone || "info",
+      // Without this the model never sees the drawing it made last turn, and an
+      // unrelated edit silently loses every figure in the document.
+      svg: b.svg || "",
     })),
   };
   return {
@@ -202,6 +218,14 @@ function normalizeDoc(rawDoc = {}, { keepIds = [] } = {}) {
       case "task": {
         const solution = clean(b.solution);
         if (text) blocks.push({ id, kind, text, solution });
+        break;
+      }
+      case "figure": {
+        // The drawing is only worth keeping if it survives sanitising; a figure
+        // block with no picture is an empty frame in a handout.
+        const { sanitizeSvg } = require("./lessonDocSvg");
+        const svg = sanitizeSvg(b.svg);
+        if (svg) blocks.push({ id, kind, svg, text });
         break;
       }
       case "table": {

@@ -27,6 +27,7 @@ const BLOCK_KINDS = [
   "task", // something for the student to do
   "note", // an aside: a warning, a tip, a reminder
   "table", // rows and columns
+  "figure", // a diagram the model drew, as sanitised SVG
 ];
 
 const blockSchema = new Schema(
@@ -46,6 +47,9 @@ const blockSchema = new Schema(
     rows: { type: [[String]], default: undefined },
     // note: what kind of aside it is, which drives the colour in print.
     tone: { type: String, enum: ["info", "warning", "success"], default: "info" },
+    // figure: sanitised SVG. Stored as text because that is what it is — and what
+    // lets a teacher edit a label without regenerating the drawing.
+    svg: { type: String, default: "" },
   },
   { _id: false }
 );
