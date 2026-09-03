@@ -35,7 +35,9 @@ const EXTRACTION_SCHEMA = {
           // reading = a passage block (not a question) shown before its questions.
           type: { type: "string", enum: ["Cm", "Cs", "Co", "Cd", "Cma", "reading"] },
           text: { type: "string" },
-          // Reading passage heading (e.g. "Mətn 1"); "" for normal questions.
+          // A heading for a reading passage (e.g. "Mətn 1"). For the mso-15 preset
+          // this also carries the citation line the analytic table is built from —
+          // see the presetHint below and helper/msoReport.js. "" otherwise.
           title: { type: "string" },
           latex: { type: "string" },
           choices: {
@@ -197,7 +199,9 @@ const presetHint = (presetId) => {
       "SUBJECT: Bu, Azərbaycan kurikulumu üzrə SUMMATİV QİYMƏTLƏNDİRMƏDİR (MSO). Bütün mətn Azərbaycan dilində.",
       "STRUKTUR: DƏQİQ 15 tapşırıq. 1–11 qapalı tip (4 cavab variantı, YALNIZ 1 düzgün cavab). 12–15 açıq tip (qısa cavab). Bu struktur dəyişdirilə bilməz.",
       "MƏNBƏ: Yüklənmiş dərslikdən başqa heç bir yerdən tapşırıq götürmə. Dərslikdən kənar tapşırıq uydurmaq QADAĞANDIR. Uyğun çalışma tapmasan, dərslikdəki ən yaxın çalışmanı götür — uydurma.",
-      "İSTİNAD: Hər tapşırığın \"title\" sahəsinə mənbəni bu formatda yaz: \"(Dərslik, səh. 124, № 8) · Səviyyə: Tətbiq · Alt-standart: 3.4.1\". Səhifə nömrəsi kitabın ÜZƏRİNDƏ çap olunmuş nömrədir — faylın neçənci səhifəsi olduğu YOX. Səhifəni göstərməyi buraxmaq olmaz.",
+      "İSTİNAD VƏ ANALİTİKA: Hər tapşırığın \"title\" sahəsini DƏQİQ bu formatda doldur (sıra və ayırıcı · dəyişməz):",
+      "(Dərslik, səh. 124, № 8) · Blum: Tətbiq · Alt-standart: 3.4.1 · Meyar: Sahəni hesablayır · Yoxlayır: Sahə düsturunun bilinməsi",
+      "Bu sətir sonda hazırlanan ANALİTİK CƏDVƏLİN mənbəyidir — beş hissənin hamısı olmalıdır. Səhifə nömrəsi kitabın ÜZƏRİNDƏ çap olunmuş nömrədir, faylın neçənci səhifəsi olduğu YOX. Səhifəni göstərməyi buraxmaq olmaz.",
       "BLUM SIRASI (pozulmamalıdır): 1–3 Yadda saxlama · 4–6 Anlama · 7–11 Tətbiq · 12–13 Təhlil · 14 Qiymətləndirmə · 15 Yaratma. Səviyyələri qarışdırmaq olmaz.",
       "AÇIQ TAPŞIRIQLAR (12–15): tam düzgün cavabı yaz və qiymətləndirmə meyarını — hansı addıma neçə bal verildiyini — tapşırıq mətninin sonunda \"Qiymətləndirmə meyarı:\" kimi göstər.",
       "KEYFİYYƏT: Distraktorlar inandırıcı olsun — tipik şagird səhvlərindən yaransın, təsadüfi ədəd olmasın. Çətinlik tədricən artsın. Ardıcıl tapşırıqlarda eyni hərfli düzgün cavab təkrarlanmasın. İki düzgün cavabı olan tapşırıq QADAĞANDIR. İfadələr aydın, artıq mətnsiz, məlumatlar realistik.",

@@ -56,7 +56,7 @@ const {
   getResultsByExam,
   deleteResult,
   getPendingReviews,
-  gradeManualAnswer, createVariantB, duplicateExam } = require("../controllers/quizController");
+  gradeManualAnswer, createVariantB, duplicateExam, msoReport } = require("../controllers/quizController");
 const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions, generateQuestionsStream, transcribeAudio, realtimeToken, listAiModels, regenerateQuestion } = require("../controllers/aiController");
 const { aiRateLimit, aiBudgetGuard } = require("../middleware/aiLimit");
 // Teacher Success Journey — per-teacher AI credit metering (flag-gated; passthrough when off).
@@ -157,6 +157,8 @@ router.post("/generateQuestions/:examId", protect, requireCapability("ai:use:own
 // exactly like a generation, because that is what it is.
 // An exact copy: no model call, so no AI capability, no rate limit and no charge.
 router.post("/duplicate/:examId", protect, duplicateExam);
+// The analytic table. No model call — it reads what generation already wrote.
+router.get("/mso-report/:examId", protect, msoReport);
 router.post("/variant-b/:examId", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.generate.questions"), createVariantB);
 router.post("/generateQuestionsStream/:examId", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.generate.questions"), generateQuestionsStream);
 

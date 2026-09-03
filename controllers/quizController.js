@@ -5204,8 +5204,41 @@ const createVariantB = asyncHandler(async (req, res) => {
   });
 });
 
+/*
+ * GET /mso-report/:examId — the analytic table the brief requires at the end.
+ *
+ * Landscape A4, one row per task: page and number in the textbook, sub-standard,
+ * assessment criterion and what the task tests. Rendered by the same Chromium as
+ * the lesson plan, so it carries no browser date or URL.
+ *
+ * Reading blocks are skipped and the numbering counts only real tasks, so the
+ * table cannot disagree with the paper it describes.
+ */
+const msoReport = asyncHandler(async (req, res) => {
+  const exam = await loadOwnedExam(req);
+  const report = require("../helper/msoReport");
+  const { renderPdf } = require("../helper/lessonPlanPdf");
+
+  const items = plainItems(exam);
+  // The same points array grading uses, so the table cannot disagree with the marks.
+  const plan = computePointsPlan(items, { preset: exam.preset, typePoints: exam.typePoints });
+  const rows = report.buildReportRows(items, plan);
+  if (!rows.length) throw httpError(422, "exam_empty", "İmtahanda tapşırıq yoxdur.");
+
+  const cls = exam.class ? await Class.findById(exam.class).select("name level").lean() : null;
+  const pdf = await renderPdf(
+    report.buildReportHtml({ ...exam.toObject(), className: cls?.name || "", classLevel: cls?.level || "" }, rows)
+  );
+  const safe = String(exam.name || "mso").replace(/[^\p{L}\p{N}\s._-]/gu, "").trim().slice(0, 80) || "mso";
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(safe)} - analitik cedvel.pdf`);
+  res.setHeader("Cache-Control", "private, no-store");
+  res.send(pdf);
+});
+
 module.exports = {
   createVariantB,
+  msoReport,
   duplicateExam,
   serverTime,
   buildQuestionOrder, // exported for tests
