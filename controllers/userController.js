@@ -146,6 +146,11 @@ const registerUser = asyncHandler(async (req, res) => {
       teacherApproval,
       teacherApprovalMeta: selfCap.teacherApprovalMeta || undefined,
       grade: role === "student" ? grade : undefined,
+      // A brand-new account starts caught up. The changelog exists for people who
+      // used the product BEFORE a change; greeting a first-time sign-up with a
+      // backlog of announcements about features they have never seen the old
+      // version of is noise, not news.
+      updatesSeenAt: new Date(),
       // Welcome AI credits (free plan bonus) so a new teacher can try AI at once.
       aiCredits: role === "teacher" ? planDef("free").credits.welcome || 0 : 0,
       onboarded: true, // role + profile chosen at sign-up, so don't re-prompt
@@ -1465,6 +1470,11 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
       userAgent,
       isVerified: true,
       acquisition: cleanAcquisition(req.body.acquisition),
+      // A brand-new account starts caught up. The changelog exists for people who
+      // used the product BEFORE a change; greeting a first-time sign-up with a
+      // backlog of announcements about features they have never seen the old
+      // version of is noise, not news.
+      updatesSeenAt: new Date(),
     });
 
     if (newUser) {

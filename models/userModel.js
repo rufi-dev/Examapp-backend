@@ -199,6 +199,20 @@ const userSchema = Schema(
         onboarding: {
             invitedAt: { type: Date },
         },
+        /*
+         * How far through the changelog this account has read.
+         *
+         * A DATE rather than a list of ids: the question is only ever "what shipped
+         * after you last looked", and a date answers it without growing forever or
+         * needing a migration when an entry is added.
+         *
+         * ABSENT means "show everything", which is deliberate — an account with no
+         * mark predates the feature, and those are exactly the people who have been
+         * using the product and missed the changes. A new sign-up is stamped at
+         * registration so it starts caught up rather than being greeted by a
+         * backlog of announcements about a product it has never seen.
+         */
+        updatesSeenAt: { type: Date },
         userAgent: {
             type: Array,
             required: true,
