@@ -12,3 +12,8 @@ sbom.cdx.json
 
 # Live whiteboard write-ahead journal (runtime, per-instance)
 live-journal/
+
+# Curriculum source store (CURRICULUM_DIR). Teachers' uploaded textbook chapters —
+# other people's copyrighted material, sometimes hundreds of MB, and the bytes every
+# published citation is pinned to. It belongs on a volume, never in the repo.
+lessonAssets/

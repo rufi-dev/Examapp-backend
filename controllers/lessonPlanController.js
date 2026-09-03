@@ -257,7 +257,21 @@ const runPlanGeneration = async (req, res, buildPrompt) => {
     // Read the PINNED bytes and confirm they are the ones the plan pinned.
     const file = storage.pathForKey(sourceVersion.storageKey, sourceVersion.ext);
     const intact = await storage.verifyBytes(sourceVersion.storageKey, sourceVersion.ext, sourceVersion.sha256);
-    if (!intact.ok) throw httpError(409, "source_bytes_changed", "Dərslik faylı dəyişib və ya itib.");
+    /*
+     * These are two different problems and were reported as one sentence.
+     *
+     * MISSING means the file is not in this deployment's store at all — which is
+     * what a developer sees running against the production database with an empty
+     * local CURRICULUM_DIR, and what a teacher would see only after a genuine loss.
+     * CHANGED means the bytes are there but no longer hash to what the plan pinned,
+     * which is corruption and a different conversation entirely. Saying which one
+     * it is turns "Dərslik faylı dəyişib və ya itib" into something actionable.
+     */
+    if (!intact.ok) {
+      throw intact.missing
+        ? httpError(409, "source_file_missing", "Bağlanmış dərslik faylı bu serverdə tapılmadı. Fəsli yenidən yükləyib plana bağlayın.")
+        : httpError(409, "source_bytes_changed", "Dərslik faylı dəyişib — plan onun ilkin variantına bağlanmışdı. Fəsli yenidən yükləyin.");
+    }
     parts.push({ mime: "application/pdf", data: (await fsp.readFile(file)).toString("base64"), isPdf: true });
   }
 
