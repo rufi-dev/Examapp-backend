@@ -68,6 +68,17 @@ const PRODUCT_UPDATES = [
     scene: "analyticTable",
   },
   {
+    id: "lesson-plan",
+    publishedAt: "2026-09-01",
+    kind: "feature",
+    title: "Dərs planı — mövzunu yazın, qalanını AI yazsın",
+    summary:
+      "Məqsədlər, qiymətləndirmə meyarları, dərsin mərhələləri dəqiqələri ilə, tapşırıqlar və hər birinin addım-addım həlli. Dərslik fəslini bağlasanız, tapşırıqlar oradan götürülür və səhifə nömrəsi ilə göstərilir.",
+    where: "Yan menyu → Tədris → Dərs planı",
+    to: "/ders-planlari",
+    scene: "lessonPlan",
+  },
+  {
     id: "exam-ab-variants",
     publishedAt: "2026-09-02",
     kind: "feature",
