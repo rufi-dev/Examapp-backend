@@ -62,6 +62,8 @@ const messageSchema = new Schema(
     // What the assistant did, so the transcript can show it without re-deriving:
     // "created" | "edited" | "failed".
     action: { type: String, default: "" },
+    // Counts beside the words, so the UI can show a receipt without re-deriving it.
+    stats: { type: Schema.Types.Mixed, default: undefined },
     at: { type: Date, default: Date.now },
   },
   { _id: false }

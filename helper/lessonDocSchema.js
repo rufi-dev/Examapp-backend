@@ -35,9 +35,13 @@ const DOC_SCHEMA = {
   additionalProperties: false,
   properties: {
     title: { type: "string" },
+    // What the model says to the teacher. Counting blocks is a receipt, not an
+    // answer — a teacher who asks "make it simpler for weaker students" wants to
+    // hear what was actually done about it.
+    reply: { type: "string" },
     blocks: { type: "array", items: BLOCK },
   },
-  required: ["title", "blocks"],
+  required: ["title", "reply", "blocks"],
 };
 
 const BASE_RULES = `
@@ -63,6 +67,11 @@ MÜTLƏQ QAYDALAR:
   Məsələn "text" blokunda "term", "items", "columns", "rows" boş olmalıdır.
 - Uydurma fakt, uydurma tarix, uydurma sitat YAZMA. Bilmirsənsə, ümumi izah ver.
 - Başlıq (title) qısa və mövzunu bildirən olsun.
+
+"reply" SAHƏSİ: müəllimə 1–2 cümlə yaz — nə etdiyini və niyə. Söhbət tonunda, sadə.
+Blokları sadalama, rəqəm hesabatı vermə (onu sistem özü göstərir). Nümunə:
+"Mövzunu üç bölməyə ayırdım və hər qaydaya bir nümunə verdim. Tapşırıqları asandan
+çətinə düzdüm." Nəyisə edə bilmədinsə, bunu da açıq yaz.
 `.trim();
 
 const EDIT_RULES = `
@@ -208,7 +217,7 @@ function normalizeDoc(rawDoc = {}, { keepIds = [] } = {}) {
     }
   });
 
-  return { title: clean(raw.title), blocks };
+  return { title: clean(raw.title), reply: clean(raw.reply), blocks };
 }
 
 // What the teacher is told after a pass, so "it did something" is never the whole

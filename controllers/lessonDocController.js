@@ -144,14 +144,22 @@ const sendMessage = asyncHandler(async (req, res) => {
   doc.status = "ready";
   doc.revision = (doc.revision || 0) + 1;
   doc.aiMeta = { provider: out.provider, at: new Date() };
+  /*
+   * The model's own words, with the counts kept separately as a receipt beside
+   * them. A teacher who asks for something subtle — "simpler for weaker students" —
+   * cannot tell from "12 blok" whether it was understood.
+   */
   doc.messages = [
     ...(doc.messages || []),
     {
       role: "assistant",
-      text: hadBlocks
-        ? `Dəyişdirildi — ${sum.blocks} blok, ${sum.examples} nümunə, ${sum.tasks} tapşırıq.`
-        : `Hazırdır — ${sum.sections} bölmə, ${sum.examples} nümunə, ${sum.tasks} tapşırıq.`,
+      text:
+        next.reply ||
+        (hadBlocks
+          ? "Dəyişdirildi."
+          : "Material hazırdır."),
       action: hadBlocks ? "edited" : "created",
+      stats: sum,
       at: new Date(),
     },
   ];
