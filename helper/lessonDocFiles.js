@@ -36,6 +36,26 @@ const ACCEPT = {
   "image/gif": "gif",
 };
 
+/*
+ * multer 1.x (busboy) decodes multipart filenames as latin1, so a UTF-8 name like
+ * "Üçbucaqlar.pdf" arrives mojibaked ("Ã¼Ã§bucaqlar.pdf") — the same defect fixed
+ * for assignment uploads in controllers/assignmentController.js. Re-decode the raw
+ * bytes as UTF-8 to recover the real name; if that introduces a replacement
+ * character that was not already there, the bytes were not valid UTF-8 in the
+ * first place, so keep the original rather than corrupting it further.
+ */
+const decodeUploadName = (name) => {
+  const raw = String(name || "");
+  if (!raw) return "";
+  try {
+    const utf8 = Buffer.from(raw, "latin1").toString("utf8");
+    if (utf8.includes("�") && !raw.includes("�")) return raw;
+    return utf8;
+  } catch {
+    return raw;
+  }
+};
+
 const isValidKey = (k) => typeof k === "string" && /^[a-f0-9]{64}$/.test(k);
 
 function pathForKey(key, ext) {
@@ -68,7 +88,7 @@ async function saveFile({ buffer, mime, name }) {
     ext,
     mime,
     bytes: buffer.length,
-    name: String(name || "fayl").slice(0, 120),
+    name: decodeUploadName(name).slice(0, 120) || "fayl",
     at: new Date(),
   };
 }

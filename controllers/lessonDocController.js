@@ -122,7 +122,8 @@ const sendMessage = asyncHandler(async (req, res) => {
       parts,
       schema: S.DOC_SCHEMA,
       geminiSchema: toGeminiSchema(S.DOC_SCHEMA),
-      maxTokens: 8000,
+      // No override — inherit aiDocument's own ceiling. A full-document rewrite
+      // grows with the document; the fixed 8000 here used to truncate long edits.
     });
   } catch (e) {
     doc.messages = [
@@ -240,12 +241,35 @@ const streamMessage = asyncHandler(async (req, res) => {
     }
   }, 7000);
 
+  /*
+   * A stop button, and one that actually stops billing.
+   *
+   * Closing the browser tab or clicking Stop only ever closed the SOCKET before
+   * this existed — the Claude request kept running on Anthropic's side, still
+   * generating and still being paid for, for output nobody would ever read.
+   * `req.on("close")` fires on exactly that disconnect (a deliberate abort from
+   * the client, same as a real network drop), so the one signal aborts both the
+   * plan call and the write call, whichever is in flight.
+   */
+  const ac = new AbortController();
+  let clientGone = false;
+  req.on("close", () => {
+    clientGone = true;
+    clearInterval(hb);
+    ac.abort();
+  });
+
   const { runDocument } = require("../helper/aiDocument");
   const { toGeminiSchema } = require("../helper/curriculumSchema");
   const hadBlocks = (doc.blocks || []).length > 0;
   // Attached references travel with every turn, and with the PLAN too — deciding
   // what to write from a page the model cannot see is deciding blind.
   const parts = await require("../helper/lessonDocFiles").toParts(doc.files || []);
+
+  // Declared outside the try so a stop mid-write can still see what the plan
+  // committed to and what had actually been written, and salvage it below.
+  let plan = null;
+  let lastSnapshot = "";
 
   try {
     /*
@@ -257,7 +281,6 @@ const streamMessage = asyncHandler(async (req, res) => {
      * teacher is actually asking while they wait: what did you understand, and
      * what are you about to do to my document.
      */
-    let plan = null;
     send("phase", { phase: "plan", editing: hadBlocks });
     try {
       const p = await runDocument({
@@ -266,12 +289,17 @@ const streamMessage = asyncHandler(async (req, res) => {
         schema: S.PLAN_SCHEMA,
         geminiSchema: toGeminiSchema(S.PLAN_SCHEMA),
         maxTokens: 1200,
+        signal: ac.signal,
       });
       plan = S.normalizePlan(p.doc || {});
       if (plan.sections.length) send("plan", { ...plan, editing: hadBlocks });
-    } catch {
-      // A failed plan is not a failed turn — the writing pass can still run, it
-      // just runs without a preview.
+    } catch (e) {
+      // A stop must stop the TURN, not just this one call — swallowing it here
+      // would run the far more expensive write pass anyway, right after the
+      // teacher asked to cancel.
+      if (ac.signal.aborted) throw e;
+      // Any other failed plan is not a failed turn — the writing pass can still
+      // run, it just runs without a preview.
       plan = null;
     }
 
@@ -314,8 +342,10 @@ ${S.SOURCE_RULES}`;
       parts,
       schema: S.DOC_SCHEMA,
       geminiSchema: toGeminiSchema(S.DOC_SCHEMA),
-      maxTokens: 8000,
+      // No override — see the sibling call in sendMessage above.
+      signal: ac.signal,
       onText: (snapshot) => {
+        lastSnapshot = snapshot;
         for (const b of readBlocks(snapshot)) {
           seen += 1;
           // The block itself, so the client can name what just landed rather than
@@ -345,11 +375,22 @@ ${S.SOURCE_RULES}`;
     doc.status = "ready";
     doc.revision = (doc.revision || 0) + 1;
     doc.aiMeta = { provider: out.provider, at: new Date() };
+    /*
+     * A response cut off by the token ceiling used to be a total failure — every
+     * block the teacher had already watched arrive was thrown away because the
+     * FULL response never became valid JSON. It now survives (helper/aiDocument
+     * repairs what closed cleanly and reports the rest as missing), so what is
+     * saved here is real, but it may be short. Say so, with something to do about
+     * it, rather than presenting a partial document as a finished one.
+     */
+    const reply = next.reply || (hadBlocks ? "Dəyişdirildi." : "Material hazırdır.");
     doc.messages = [
       ...(doc.messages || []),
       {
         role: "assistant",
-        text: next.reply || (hadBlocks ? "Dəyişdirildi." : "Material hazırdır."),
+        text: out.truncated
+          ? `${reply} Qeyd: cavab tam gəlmədi, material yarımçıq qala bilər — "davam et" yazaraq tamamlaya bilərsiniz.`
+          : reply,
         action: hadBlocks ? "edited" : "created",
         stats: sum,
         at: new Date(),
@@ -357,14 +398,63 @@ ${S.SOURCE_RULES}`;
     ];
     await doc.save();
 
-    send("done", { doc, summary: sum, provider: out.provider });
+    send("done", { doc, summary: sum, provider: out.provider, truncated: !!out.truncated });
   } catch (e) {
-    doc.messages = [
-      ...(doc.messages || []),
-      { role: "assistant", text: e?.userMessage || "Alınmadı — bir az sonra yenidən cəhd edin.", action: "failed", at: new Date() },
-    ];
-    await doc.save().catch(() => {});
-    send("failed", { message: e?.userMessage || e?.message || "Material hazırlanmadı." });
+    // A deliberate stop is not a failure — it must not read like "Alınmadı" in
+    // the transcript, and there is no client left to send an SSE frame to.
+    if (ac.signal.aborted || e?.aiStatus === 499) {
+      /*
+       * Salvage whatever had actually been written before the stop landed.
+       *
+       * The same repair that recovers a response cut off by the token ceiling
+       * recovers one cut off by a deliberate Stop click — both are "valid JSON up
+       * to some point, then nothing." The blocks the teacher watched arrive in the
+       * live progress view were real; discarding them because the LAST one never
+       * finished would make Stop punish the teacher for using it.
+       */
+      let salvaged = false;
+      if (lastSnapshot) {
+        try {
+          const repaired = require("../helper/aiDocument").repairTruncatedJson(lastSnapshot);
+          const keepIds = (doc.blocks || []).map((b) => b.id);
+          const next = repaired ? S.normalizeDoc(repaired, { keepIds }) : null;
+          if (next?.blocks?.length) {
+            const sum = S.summarize(next.blocks);
+            doc.blocks = next.blocks;
+            if (next.title) doc.title = next.title;
+            if (!doc.topic) doc.topic = next.title;
+            if (plan?.audience && !doc.audience) doc.audience = plan.audience;
+            doc.status = "ready";
+            doc.revision = (doc.revision || 0) + 1;
+            doc.aiMeta = { provider: "claude", at: new Date() };
+            doc.messages = [
+              ...(doc.messages || []),
+              {
+                role: "assistant",
+                text: "Dayandırıldı — buraya qədər olan hissə saxlanıldı.",
+                action: hadBlocks ? "edited" : "created",
+                stats: sum,
+                at: new Date(),
+              },
+            ];
+            salvaged = true;
+          }
+        } catch {
+          /* nothing usable in the partial snapshot — fall through to the plain stop message */
+        }
+      }
+      if (!salvaged) {
+        doc.messages = [...(doc.messages || []), { role: "assistant", text: "Dayandırıldı.", action: "stopped", at: new Date() }];
+      }
+      await doc.save().catch(() => {});
+    } else {
+      doc.messages = [
+        ...(doc.messages || []),
+        { role: "assistant", text: e?.userMessage || "Alınmadı — bir az sonra yenidən cəhd edin.", action: "failed", at: new Date() },
+      ];
+      await doc.save().catch(() => {});
+      send("failed", { message: e?.userMessage || e?.message || "Material hazırlanmadı." });
+    }
   } finally {
     clearInterval(hb);
     res.end();

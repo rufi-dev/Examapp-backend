@@ -31,7 +31,20 @@ const AnthropicPkg = require("@anthropic-ai/sdk");
 
 const Anthropic = AnthropicPkg.default || AnthropicPkg;
 
-const DOC_MAX_TOKENS = 8000;
+/*
+ * 32K, not 8K. An edit reproduces the WHOLE document verbatim plus whatever is
+ * new — the older, lower ceiling was tuned for a first draft and never revisited
+ * as documents grew. A 40-block handout plus a request to add a section from an
+ * attached textbook page routinely needs more than 8K output tokens; hitting the
+ * ceiling mid-response doesn't shorten the document, it TRUNCATES it — the
+ * response stops mid-JSON and the whole turn used to fail outright, discarding
+ * every block already streamed to the teacher. Claude Opus supports up to 128K
+ * output tokens; 32K is generous headroom without inviting multi-minute turns.
+ * parseDoc's truncation repair below is the second, independent line of defence
+ * for whatever ceiling is chosen — this number reduces how often it is needed,
+ * it does not replace it.
+ */
+const DOC_MAX_TOKENS = 32000;
 
 let _client = null;
 function anthropic() {
@@ -48,17 +61,171 @@ function docError(status, userMessage, fallback = false) {
   return e;
 }
 
-function parseDoc(text) {
-  let parsed;
+/*
+ * Recover a document from JSON that was cut off mid-write.
+ *
+ * A response that hits its token ceiling stops in the middle of a string, a
+ * number, or a half-open object — the model does not get to close its own
+ * brackets. The old behaviour treated that exactly like garbage output: the
+ * whole turn failed with "AI cavabı oxunmadı", discarding every block that had
+ * already streamed to the teacher and had already been shown on screen. That is
+ * real, already-generated content being thrown away for the crime of being
+ * followed by more content that didn't arrive in time.
+ *
+ * This walks the text as real JSON (tracking the container stack and string/
+ * escape state, not schema field names — a lesson document and a lesson plan use
+ * this same repair), and remembers the LAST point at which everything closed so
+ * far — the end of a complete string, number, literal, or nested container —
+ * along with the stack needed to close from there. It then truncates to that
+ * point and appends the matching closers. A value cut mid-way (a half-written
+ * sentence, a number with no digits yet) is dropped rather than guessed at;
+ * everything before it survives intact.
+ */
+function repairTruncatedJson(text) {
+  const src = String(text || "");
+  const n = src.length;
+  const stack = []; // 'obj' | 'arr', outermost first
+  // start | obj-key | obj-colon | obj-value | obj-comma | arr-value | arr-comma | done
+  let state = "start";
+  let safeEnd = -1;
+  let safeStack = [];
+
+  const afterValue = () => {
+    const top = stack[stack.length - 1];
+    return top === "obj" ? "obj-comma" : top === "arr" ? "arr-comma" : "done";
+  };
+  const markSafe = (end) => {
+    safeEnd = end;
+    safeStack = stack.slice();
+  };
+  const canStartValue = () => state === "start" || state === "obj-value" || state === "arr-value";
+
+  let i = 0;
+  while (i < n && state !== "done") {
+    const c = src[i];
+    if (c === " " || c === "\n" || c === "\t" || c === "\r") {
+      i += 1;
+      continue;
+    }
+
+    if (c === '"') {
+      const isKey = state === "obj-key";
+      if (!isKey && !canStartValue()) break;
+      let j = i + 1;
+      let closed = false;
+      while (j < n) {
+        if (src[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (src[j] === '"') {
+          closed = true;
+          break;
+        }
+        j += 1;
+      }
+      if (!closed) break; // truncated mid-string — nothing more to salvage here
+      if (isKey) {
+        state = "obj-colon";
+      } else {
+        markSafe(j + 1);
+        state = afterValue();
+      }
+      i = j + 1;
+      continue;
+    }
+
+    if (c === "{" || c === "[") {
+      if (!canStartValue()) break;
+      stack.push(c === "{" ? "obj" : "arr");
+      state = c === "{" ? "obj-key" : "arr-value";
+      i += 1;
+      continue;
+    }
+    if (c === "}" || c === "]") {
+      const want = c === "}" ? "obj" : "arr";
+      if (stack[stack.length - 1] !== want) break;
+      stack.pop();
+      markSafe(i + 1);
+      state = afterValue();
+      i += 1;
+      continue;
+    }
+    if (c === ":") {
+      if (state !== "obj-colon") break;
+      state = "obj-value";
+      i += 1;
+      continue;
+    }
+    if (c === ",") {
+      if (state === "obj-comma") state = "obj-key";
+      else if (state === "arr-comma") state = "arr-value";
+      else break;
+      i += 1;
+      continue;
+    }
+
+    if (c === "-" || (c >= "0" && c <= "9")) {
+      if (!canStartValue()) break;
+      let j = c === "-" ? i + 1 : i;
+      while (j < n && src[j] >= "0" && src[j] <= "9") j += 1;
+      if (j < n && src[j] === ".") {
+        j += 1;
+        while (j < n && src[j] >= "0" && src[j] <= "9") j += 1;
+      }
+      if (j < n && (src[j] === "e" || src[j] === "E")) {
+        let k = j + 1;
+        if (k < n && (src[k] === "+" || src[k] === "-")) k += 1;
+        if (k < n && src[k] >= "0" && src[k] <= "9") {
+          j = k;
+          while (j < n && src[j] >= "0" && src[j] <= "9") j += 1;
+        }
+      }
+      // A number at the very end of the buffer might be one digit short of what
+      // the model meant to write — an acceptable approximation for a value we are
+      // salvaging, never a structural problem for the JSON around it.
+      markSafe(j);
+      state = afterValue();
+      i = j;
+      continue;
+    }
+
+    const lit = ["true", "false", "null"].find((w) => src.startsWith(w, i));
+    if (lit && canStartValue()) {
+      markSafe(i + lit.length);
+      state = afterValue();
+      i += lit.length;
+      continue;
+    }
+
+    break; // a half-written keyword or a stray byte — stop, nothing more to read
+  }
+
+  if (safeEnd < 0) return null;
+  let repaired = src.slice(0, safeEnd);
+  for (let k = safeStack.length - 1; k >= 0; k -= 1) repaired += safeStack[k] === "obj" ? "}" : "]";
   try {
-    parsed = JSON.parse(text || "{}");
+    return JSON.parse(repaired);
   } catch {
-    throw docError(502, "AI cavabı oxunmadı. Yenidən cəhd edin.", true);
+    return null;
+  }
+}
+
+function parseDoc(text) {
+  const raw = text || "{}";
+  let parsed;
+  let truncated = false;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = repairTruncatedJson(raw);
+    if (!parsed) throw docError(502, "AI cavabı oxunmadı. Yenidən cəhd edin.", true);
+    truncated = true;
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw docError(502, "AI gözlənilən sənəd formatını qaytarmadı.", true);
   }
-  return parsed;
+  return { value: parsed, truncated };
 }
 
 async function documentWithClaude({ prompt, parts = [], system, schema, signal, maxTokens = DOC_MAX_TOKENS, onText }) {
@@ -74,8 +241,8 @@ async function documentWithClaude({ prompt, parts = [], system, schema, signal, 
      * caller can report what has actually been written instead of animating a
      * guess.
      */
-    const run = client.messages
-      .stream({
+    const run = client.messages.stream(
+      {
         model: "claude-opus-4-8",
         max_tokens: maxTokens,
         system: [{ type: "text", text: system }],
@@ -88,7 +255,12 @@ async function documentWithClaude({ prompt, parts = [], system, schema, signal, 
             content: [...claudeContentParts(parts), { type: "text", text: prompt }],
           },
         ],
-      });
+      },
+      // Cancelling in the browser only closed the socket before this existed; the
+      // request kept generating (and billing) for output nobody would read. This is
+      // the same signal the controller aborts on the client's disconnect.
+      signal ? { signal } : undefined
+    );
     if (typeof onText === "function") {
       // Never let a reporting callback take down the generation it is reporting on.
       run.on("text", (_delta, snapshot) => {
@@ -101,12 +273,21 @@ async function documentWithClaude({ prompt, parts = [], system, schema, signal, 
     }
     message = await run.finalMessage();
   } catch (e) {
+    if (signal?.aborted) throw docError(499, "Ləğv edildi");
     console.error("AI document (claude) error:", e?.status, e?.message);
     throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
   }
   if (message.stop_reason === "refusal") throw docError(422, "AI bu sorğunu emal edə bilmədi.");
   const textBlock = message.content.find((b) => b.type === "text");
-  return { doc: parseDoc(textBlock?.text), cost: computeCost(message.usage), usage: message.usage };
+  /*
+   * Note: `stop_reason === "max_tokens"` is NOT treated as truncation on its own —
+   * strict JSON-schema mode cannot close the top-level object until every required
+   * field is filled, so the rare case where the token ceiling lands exactly on the
+   * closing brace is a genuinely complete document, not a cut one. Only a JSON
+   * parse that actually needed repair counts.
+   */
+  const parsed = parseDoc(textBlock?.text);
+  return { doc: parsed.value, truncated: parsed.truncated, cost: computeCost(message.usage), usage: message.usage };
 }
 
 async function documentWithOpenAI({
@@ -172,7 +353,8 @@ async function documentWithOpenAI({
     total_tokens: data?.usage?.total_tokens || 0,
     prompt_tokens_details: { cached_tokens: data?.usage?.input_tokens_details?.cached_tokens || 0 },
   };
-  return { doc: parseDoc(text), cost: computeOpenAIGenCost(usage, data?.model, modelId), usage };
+  const parsed = parseDoc(text);
+  return { doc: parsed.value, truncated: parsed.truncated, cost: computeOpenAIGenCost(usage, data?.model, modelId), usage };
 }
 
 async function documentWithGemini({ prompt, parts = [], system, schema, signal, maxTokens = DOC_MAX_TOKENS }) {
@@ -211,7 +393,8 @@ async function documentWithGemini({ prompt, parts = [], system, schema, signal, 
   }
   const data = await r.json().catch(() => null);
   const text = (data?.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
-  return { doc: parseDoc(text), cost: computeGeminiCost(data?.usageMetadata, model), usage: data?.usageMetadata };
+  const parsed = parseDoc(text);
+  return { doc: parsed.value, truncated: parsed.truncated, cost: computeGeminiCost(data?.usageMetadata, model), usage: data?.usageMetadata };
 }
 
 /*
@@ -261,5 +444,6 @@ module.exports = {
   documentWithGemini,
   runDocument,
   parseDoc,
+  repairTruncatedJson,
   docError,
 };

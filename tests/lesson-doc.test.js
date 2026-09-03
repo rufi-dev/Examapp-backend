@@ -491,6 +491,96 @@ console.log("\n14. The figure brief is specific enough to follow:");
   ok("with a palette that matches the handout", S.BASE_RULES.includes("#2563eb"));
 }
 
+
+console.log("\n15. A response cut off by the token ceiling is salvaged, not discarded:");
+{
+  /*
+   * Real production report: a 40-block edit, asked to add more from an attached
+   * PDF, hit the token ceiling and came back "AI cavabı oxunmadı" — every block
+   * the teacher had already watched stream in was thrown away because the FULL
+   * response never became valid JSON. repairTruncatedJson recovers everything
+   * that closed cleanly before the cut.
+   */
+  const A = require("../helper/aiDocument");
+
+  const cut = (s, n) => s.slice(0, n);
+  const full = JSON.stringify({
+    title: "Faiz",
+    reply: "Üç bölmə əlavə etdim.",
+    blocks: [
+      { kind: "heading", text: "Giriş", term: "", items: [], ordered: false, solution: "", columns: [], rows: [], tone: "info", svg: "" },
+      { kind: "text", text: "Faiz hesablamaq üçün...", term: "", items: [], ordered: false, solution: "", columns: [], rows: [], tone: "info", svg: "" },
+      { kind: "task", text: "100 manatın 20%-i neçədir?", term: "", items: [], ordered: false, solution: "20", columns: [], rows: [], tone: "info", svg: "" },
+    ],
+  });
+
+  // Cut mid-way through the third block's "text" string — the exact shape a
+  // token-ceiling cutoff produces.
+  const midString = cut(full, full.indexOf("100 manat") + 4);
+  const repaired = A.repairTruncatedJson(midString);
+  ok("recovers a document object", repaired && typeof repaired === "object");
+  ok("keeps the title", repaired?.title === "Faiz");
+  ok("keeps the reply", repaired?.reply === "Üç bölmə əlavə etdim.");
+  // The cut lands right after `"kind":"task"` closed but before its "text" did,
+  // so the third block survives as a bare stub (kind only) — the repair layer is
+  // schema-agnostic and does not know a task needs text. It IS the normaliser's
+  // job to drop a block with nothing in it, checked next.
+  ok("keeps the two blocks that fully closed before the cut, plus the open stub", repaired?.blocks?.length === 3);
+  ok("does not invent the cut-off block's content", (repaired?.blocks || []).every((b) => !String(b.text || "").includes("100 manat")));
+
+  const throughPipeline = S.normalizeDoc(repaired, { keepIds: [] });
+  ok("the normaliser drops the content-less stub the teacher never saw finish", throughPipeline.blocks.length === 2);
+  ok("and keeps the two the teacher actually watched arrive", throughPipeline.blocks.every((b) => b.text));
+
+  // Cut cleanly at a container boundary — nothing to repair, JSON.parse alone
+  // must succeed and no fabricated closers get appended.
+  ok("a complete document needs no repair", JSON.parse(full).blocks.length === 3);
+
+  // Cut before ANYTHING closed (e.g. truncated inside the very first string).
+  ok("nothing safe to recover returns null, not a guess", A.repairTruncatedJson('{"title":"Fa') === null);
+
+  // Non-JSON input (a refusal written as prose, an empty string) must not throw
+  // and must not be mistaken for a document.
+  ok("prose is refused, not salvaged", A.repairTruncatedJson("Bağışlayın, bunu edə bilmərəm.") === null);
+  ok("empty input is refused", A.repairTruncatedJson("") === null);
+
+  // parseDoc's own contract: truncated=true only when repair was actually used.
+  const clean = JSON.stringify({ a: 1 });
+  ok("parseDoc reports untruncated on a clean parse", A.parseDoc(clean).truncated === false);
+  ok("parseDoc reports truncated when repair kicked in", A.parseDoc('{"a":1,"b":2').truncated === true);
+  ok("parseDoc still throws when nothing is recoverable", (() => {
+    try {
+      A.parseDoc("{");
+      return false;
+    } catch (e) {
+      return e.aiStatus === 502;
+    }
+  })());
+
+  // The higher ceiling this repair was paired with.
+  ok("the write pass has real headroom now, not 8000", A.DOC_MAX_TOKENS >= 32000);
+}
+
+console.log("\n16. Stop actually stops the bill, and salvages what streamed:");
+{
+  const fs2 = require("fs");
+  const path2 = require("path");
+  const ctl = fs2.readFileSync(path2.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+
+  ok("the stream route aborts the upstream call on client disconnect", /req\.on\("close"/.test(ctl) && /ac\.abort\(\)/.test(ctl));
+  ok("both the plan and write calls carry the signal", (ctl.match(/signal: ac\.signal/g) || []).length === 2);
+  ok("an abort during planning does not fall through to the write pass", /if \(ac\.signal\.aborted\) throw e;/.test(ctl));
+  ok("a stop is recorded as its own outcome, not a failure", /"Dayandırıldı/.test(ctl) && /action: "stopped"/.test(ctl));
+  ok("a stop still tries to save whatever had streamed", /repairTruncatedJson\(lastSnapshot\)/.test(ctl));
+  ok("salvaged content is saved through the same normaliser as a real turn", /next\?\.blocks\?\.length/.test(ctl));
+
+  // documentWithClaude must actually forward the signal into the SDK call — the
+  // whole point is that stopping in the browser stops the bill, not just the UI.
+  const aiDoc = fs2.readFileSync(path2.join(__dirname, "../helper/aiDocument.js"), "utf8");
+  ok("the Claude call is given the abort signal", /signal \? \{ signal \} : undefined/.test(aiDoc));
+  ok("an abort during the Claude call surfaces as a stop, not a generic failure", /if \(signal\?\.aborted\) throw docError\(499/.test(aiDoc));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 assert.strictEqual(failed, 0, `${failed} lesson-doc assertions failed`);
 process.exit(failed ? 1 : 0);
