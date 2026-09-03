@@ -12,6 +12,7 @@ router.get("/:id", c.getDoc);
 router.patch("/:id", c.updateDoc);
 router.delete("/:id", c.removeDoc);
 router.post("/:id/message", c.sendMessage);
+router.post("/:id/message/stream", c.streamMessage);
 router.get("/:id/export", c.exportDoc);
 
 module.exports = router;

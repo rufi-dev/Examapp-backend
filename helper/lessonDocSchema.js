@@ -232,8 +232,126 @@ function summarize(blocks = []) {
   };
 }
 
+
+/*
+ * PHASE 1 — decide what to write, before writing it.
+ *
+ * A single call that goes straight to prose gives the teacher nothing to look at
+ * for forty seconds and no say in what is coming. This asks the model to read the
+ * request and commit to a shape first: the title, who it is for, and the sections
+ * it will write with a reason for each. It is small and fast, it is shown in the
+ * chat immediately, and the writing pass is then held to it.
+ */
+const PLAN_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    title: { type: "string" },
+    audience: { type: "string" },
+    sections: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: { heading: { type: "string" }, why: { type: "string" } },
+        required: ["heading", "why"],
+      },
+    },
+  },
+  required: ["title", "audience", "sections"],
+};
+
+const PLAN_RULES = `
+Sən Azərbaycan məktəbləri üçün dərs materialı hazırlayan metodistsən.
+Hələ material YAZMIRSAN — yalnız planlaşdırırsan.
+
+Müəllimin istəyini oxu və qərar ver:
+- "title": materialın qısa adı.
+- "audience": kimin üçündür (sinif və səviyyə). Müəllim deməyibsə, mövzuya görə özün müəyyən et.
+- "sections": 3–6 bölmə. Hər birinin "heading" adı və "why" — bir cümlə: bu bölmə nə üçün lazımdır.
+
+Müəllim konkret şeylər istəyibsə (cədvəl, neçə nümunə, neçə tapşırıq, hansı səhvi
+göstərmək), onları bölmələrdə əks etdir. Uydurma bölmə əlavə etmə.
+`.trim();
+
+function buildPlanPrompt({ doc = {}, instructions = "" } = {}) {
+  return {
+    system: PLAN_RULES,
+    prompt: [describe(doc), "", `MÜƏLLİMİN İSTƏYİ: ${String(instructions || "").slice(0, 4000)}`]
+      .filter(Boolean)
+      .join("\n"),
+  };
+}
+
+const normalizePlan = (raw = {}) => {
+  const r = raw && typeof raw === "object" ? raw : {};
+  return {
+    title: clean(r.title),
+    audience: clean(r.audience),
+    sections: (Array.isArray(r.sections) ? r.sections : [])
+      .map((x) => ({ heading: clean(x && x.heading), why: clean(x && x.why) }))
+      .filter((x) => x.heading),
+  };
+};
+
+/*
+ * Reads blocks out of a half-finished JSON response, so progress can be reported
+ * from what has actually been written rather than a timer. Same technique as the
+ * exam streamer: walk the array, emit each object the moment it closes cleanly, and
+ * wait for more bytes when it does not.
+ */
+function makeBlockStreamer() {
+  let emitted = 0;
+  return (buf) => {
+    const key = buf.indexOf('"blocks"');
+    if (key < 0) return [];
+    const arrStart = buf.indexOf("[", key);
+    if (arrStart < 0) return [];
+    const fresh = [];
+    let depth = 0;
+    let objStart = -1;
+    let inStr = false;
+    let esc = false;
+    let idx = 0;
+    for (let i = arrStart + 1; i < buf.length; i += 1) {
+      const c = buf[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') inStr = true;
+      else if (c === "{") {
+        if (depth === 0) objStart = i;
+        depth += 1;
+      } else if (c === "}") {
+        depth -= 1;
+        if (depth === 0 && objStart >= 0) {
+          idx += 1;
+          if (idx > emitted) {
+            try {
+              fresh.push(JSON.parse(buf.slice(objStart, i + 1)));
+              emitted = idx;
+            } catch {
+              return fresh; // not closed cleanly yet — wait for more bytes
+            }
+          }
+          objStart = -1;
+        }
+      } else if (c === "]" && depth === 0) break;
+    }
+    return fresh;
+  };
+}
+
 module.exports = {
   DOC_SCHEMA,
+  PLAN_SCHEMA,
+  PLAN_RULES,
+  buildPlanPrompt,
+  normalizePlan,
+  makeBlockStreamer,
   BLOCK,
   BASE_RULES,
   EDIT_RULES,

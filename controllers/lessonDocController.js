@@ -169,6 +169,168 @@ const sendMessage = asyncHandler(async (req, res) => {
 });
 
 /*
+ * POST /:id/message/stream — the same turn, reported as it happens.
+ *
+ * TWO REAL PHASES, and both are the model's own work rather than an animation:
+ *
+ *   1. PLAN. A small, fast call reads the teacher's request and commits to a shape:
+ *      the title, who it is for, and the sections it will write with a reason for
+ *      each. It is emitted the moment it lands, so within a couple of seconds the
+ *      teacher can see what was understood — and say so if it is wrong — instead of
+ *      staring at a spinner for forty.
+ *
+ *   2. WRITE. The document call, streamed. Each block is emitted AS IT CLOSES in
+ *      the response, so the progress is the number of blocks actually written. Not
+ *      a timer, not a guess.
+ *
+ * Streaming is Claude's today. On a fallback provider no block events arrive and the
+ * client shows the plan with an indeterminate wait — which is the truth about that
+ * request rather than motion invented to cover it.
+ */
+const streamMessage = asyncHandler(async (req, res) => {
+  const doc = await mine(req, req.params.id);
+  const text = String((req.body && req.body.text) || "").trim();
+  if (!text) throw httpError(400, "message_empty", "Nə yaratmaq istədiyinizi yazın.");
+  if (text.length > 4000) throw httpError(422, "message_long", "Mesaj çox uzundur.");
+
+  doc.messages = [...(doc.messages || []), { role: "user", text, at: new Date() }];
+  await doc.save();
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    // Caddy buffers by default, which would hold every event until the end and
+    // turn a live report into one silent wait followed by everything at once.
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders?.();
+
+  const send = (event, data) => {
+    try {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      /* client gone */
+    }
+  };
+  res.write(": ok\n\n");
+  // Mobile networks and proxies drop an idle connection; the plan call alone can
+  // take longer than some of them tolerate.
+  const hb = setInterval(() => {
+    try {
+      res.write(": ping\n\n");
+    } catch {
+      /* ignore */
+    }
+  }, 7000);
+
+  const { runDocument } = require("../helper/aiDocument");
+  const { toGeminiSchema } = require("../helper/curriculumSchema");
+  const hadBlocks = (doc.blocks || []).length > 0;
+
+  try {
+    // ---- phase 1: what are we writing? -------------------------------------
+    let plan = null;
+    if (!hadBlocks) {
+      send("phase", { phase: "plan" });
+      try {
+        const p = await runDocument({
+          ...S.buildPlanPrompt({ doc: doc.toObject(), instructions: text }),
+          parts: [],
+          schema: S.PLAN_SCHEMA,
+          geminiSchema: toGeminiSchema(S.PLAN_SCHEMA),
+          maxTokens: 1200,
+        });
+        plan = S.normalizePlan(p.doc || {});
+        if (plan.sections.length) send("plan", plan);
+      } catch {
+        // A failed plan is not a failed turn — the writing pass can still run, it
+        // just runs without a preview.
+        plan = null;
+      }
+    }
+
+    // ---- phase 2: write it, reporting each block -----------------------------
+    send("phase", { phase: "write", sections: plan?.sections?.length || 0 });
+
+    const base = hadBlocks
+      ? S.buildEditPrompt({ doc: doc.toObject(), instructions: text })
+      : S.buildCreatePrompt({ doc: doc.toObject(), instructions: text });
+
+    // Hold the writing pass to what it just committed to.
+    const prompt =
+      plan && plan.sections.length
+        ? `${base.prompt}\n\nRAZILAŞDIRILMIŞ PLAN — bölmələr məhz bunlar olmalıdır:\n${plan.sections
+            .map((sx, i) => `${i + 1}. ${sx.heading} — ${sx.why}`)
+            .join("\n")}`
+        : base.prompt;
+
+    const readBlocks = S.makeBlockStreamer();
+    let seen = 0;
+    const out = await runDocument({
+      system: base.system,
+      prompt,
+      parts: [],
+      schema: S.DOC_SCHEMA,
+      geminiSchema: toGeminiSchema(S.DOC_SCHEMA),
+      maxTokens: 8000,
+      onText: (snapshot) => {
+        for (const b of readBlocks(snapshot)) {
+          seen += 1;
+          // The block itself, so the client can name what just landed rather than
+          // counting anonymously.
+          send("block", { n: seen, kind: String(b.kind || ""), text: String(b.text || b.term || "").slice(0, 90) });
+        }
+      },
+    });
+
+    const keepIds = (doc.blocks || []).map((b) => b.id);
+    const next = S.normalizeDoc(out.doc || {}, { keepIds });
+    if (!next.blocks.length) {
+      doc.messages = [
+        ...(doc.messages || []),
+        { role: "assistant", text: "Məzmun qaytarılmadı — istəyinizi bir az dəqiqləşdirin.", action: "failed", at: new Date() },
+      ];
+      await doc.save();
+      send("failed", { message: "Material boş qayıtdı — istəyinizi dəqiqləşdirin." });
+      return;
+    }
+
+    const sum = S.summarize(next.blocks);
+    doc.blocks = next.blocks;
+    if (next.title) doc.title = next.title;
+    if (!doc.topic) doc.topic = next.title;
+    if (plan?.audience && !doc.audience) doc.audience = plan.audience;
+    doc.status = "ready";
+    doc.revision = (doc.revision || 0) + 1;
+    doc.aiMeta = { provider: out.provider, at: new Date() };
+    doc.messages = [
+      ...(doc.messages || []),
+      {
+        role: "assistant",
+        text: next.reply || (hadBlocks ? "Dəyişdirildi." : "Material hazırdır."),
+        action: hadBlocks ? "edited" : "created",
+        stats: sum,
+        at: new Date(),
+      },
+    ];
+    await doc.save();
+
+    send("done", { doc, summary: sum, provider: out.provider });
+  } catch (e) {
+    doc.messages = [
+      ...(doc.messages || []),
+      { role: "assistant", text: e?.userMessage || "Alınmadı — bir az sonra yenidən cəhd edin.", action: "failed", at: new Date() },
+    ];
+    await doc.save().catch(() => {});
+    send("failed", { message: e?.userMessage || e?.message || "Material hazırlanmadı." });
+  } finally {
+    clearInterval(hb);
+    res.end();
+  }
+});
+
+/*
  * PATCH /:id — the teacher's own edit.
  *
  * Free, exact and never routed through the model: fixing a typo should not cost a
@@ -247,4 +409,4 @@ const exportDoc = asyncHandler(async (req, res) => {
   res.send(body);
 });
 
-module.exports = { listDocs, createDoc, getDoc, sendMessage, updateDoc, removeDoc, exportDoc };
+module.exports = { listDocs, createDoc, getDoc, sendMessage, streamMessage, updateDoc, removeDoc, exportDoc };

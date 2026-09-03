@@ -61,13 +61,20 @@ function parseDoc(text) {
   return parsed;
 }
 
-async function documentWithClaude({ prompt, parts = [], system, schema, signal, maxTokens = DOC_MAX_TOKENS }) {
+async function documentWithClaude({ prompt, parts = [], system, schema, signal, maxTokens = DOC_MAX_TOKENS, onText }) {
   const { claudeContentParts, computeCost } = require("../controllers/aiController");
   const client = anthropic();
   if (!client) throw docError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)", true);
   let message;
   try {
-    message = await client.messages
+    /*
+     * The stream was already here and its text was being thrown away — only
+     * .finalMessage() was used. Listening to it costs nothing and is the ONLY
+     * source of real progress: the document's blocks arrive one at a time, so a
+     * caller can report what has actually been written instead of animating a
+     * guess.
+     */
+    const run = client.messages
       .stream({
         model: "claude-opus-4-8",
         max_tokens: maxTokens,
@@ -81,8 +88,18 @@ async function documentWithClaude({ prompt, parts = [], system, schema, signal, 
             content: [...claudeContentParts(parts), { type: "text", text: prompt }],
           },
         ],
-      })
-      .finalMessage();
+      });
+    if (typeof onText === "function") {
+      // Never let a reporting callback take down the generation it is reporting on.
+      run.on("text", (_delta, snapshot) => {
+        try {
+          onText(snapshot);
+        } catch {
+          /* progress is decoration; the document is not */
+        }
+      });
+    }
+    message = await run.finalMessage();
   } catch (e) {
     console.error("AI document (claude) error:", e?.status, e?.message);
     throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
@@ -203,13 +220,16 @@ async function documentWithGemini({ prompt, parts = [], system, schema, signal, 
  * for three times); and on an aborted signal throw 499 immediately rather than
  * billing two more providers for output nobody is waiting for.
  */
-async function runDocument({ prompt, parts = [], system, schema, geminiSchema, model, signal, maxTokens }) {
+async function runDocument({ prompt, parts = [], system, schema, geminiSchema, model, signal, maxTokens, onText }) {
   const { findAiModel, DEFAULT_AI_MODEL } = require("../controllers/aiController");
   const picked = findAiModel(String(model || "")) || findAiModel(DEFAULT_AI_MODEL);
   const runners = {
     openai: () => documentWithOpenAI({ prompt, parts, system, schema, model: picked?.id, signal, maxTokens }),
     gemini: () => documentWithGemini({ prompt, parts, system, schema: geminiSchema || schema, signal, maxTokens }),
-    claude: () => documentWithClaude({ prompt, parts, system, schema, signal, maxTokens }),
+    // Only Claude streams today. The others simply do not call back, so a caller
+    // sees no per-block progress on a fallback — which is the truth, and better
+    // than inventing motion for a request that is not reporting any.
+    claude: () => documentWithClaude({ prompt, parts, system, schema, signal, maxTokens, onText }),
   };
   const keyFor = {
     openai: process.env.OPENAI_API_KEY,
