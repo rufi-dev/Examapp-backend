@@ -150,7 +150,11 @@ const newId = () => crypto.randomBytes(6).toString("hex");
  * with no content cannot be rendered or edited, and an empty box in a handout is
  * worse than one fewer paragraph.
  */
-function normalizeDoc(raw = {}, { keepIds = [] } = {}) {
+function normalizeDoc(rawDoc = {}, { keepIds = [] } = {}) {
+  // A default parameter only fires for `undefined`, so an explicit null — which a
+  // provider can absolutely return — reached the property access and threw. A print
+  // request is not the place to 500.
+  const raw = rawDoc && typeof rawDoc === "object" ? rawDoc : {};
   const blocks = [];
   const src = Array.isArray(raw.blocks) ? raw.blocks : [];
 
