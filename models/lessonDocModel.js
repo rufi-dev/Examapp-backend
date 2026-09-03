@@ -68,6 +68,18 @@ const messageSchema = new Schema(
     action: { type: String, default: "" },
     // Counts beside the words, so the UI can show a receipt without re-deriving it.
     stats: { type: Schema.Types.Mixed, default: undefined },
+    /*
+     * Which references were in front of the model on THIS turn.
+     *
+     * Not derivable from `files`, which is the document's current attachment list:
+     * a teacher who attaches a textbook, asks two questions, removes it and asks a
+     * third would otherwise see the book on all three turns or none. It is also
+     * the answer to "did it actually get my PDF?" — a question the transcript
+     * could not answer before, so the teacher had to guess.
+     *
+     * Names and keys only; the bytes stay in the file store.
+     */
+    files: { type: [{ _id: false, key: String, name: String, mime: String }], default: undefined },
     at: { type: Date, default: Date.now },
   },
   { _id: false }

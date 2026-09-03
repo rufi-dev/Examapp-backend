@@ -293,6 +293,204 @@ console.log("\n9. Attached references travel with every turn:");
   ok("and not to invent unreadable parts", S.SOURCE_RULES.includes("[oxunmadı]"));
 }
 
+
+console.log("\n10. Figures that actually draw:");
+{
+  /*
+   * The bug this section exists for, reported from production: a percentage grid
+   * where the 25 red cells were invisible and the title was cut in half.
+   *
+   * Neither was the model's fault. It wrote `<defs><rect id="s"/></defs>` and a
+   * hundred `<use href="#s">`, which is the correct way to draw a grid — and the
+   * sanitiser dropped `href` as a fetch vector, leaving a hundred elements that
+   * referenced nothing. The drawing looked authored and rendered empty, and nothing
+   * anywhere said it had been broken.
+   */
+  const { sanitizeSvg } = require("../helper/lessonDocSvg");
+
+  const grid =
+    '<svg viewBox="0 0 220 220" xmlns="http://www.w3.org/2000/svg">' +
+    '<defs><rect id="s" width="20" height="20"/></defs>' +
+    '<g fill="red"><use href="#s" x="0" y="0"/><use href="#s" x="20" y="0"/></g>' +
+    "</svg>";
+  const gridOut = sanitizeSvg(grid);
+  ok("a use reference survives", /<use[^>]*href="#/.test(gridOut));
+  ok("and still points at a shape that exists", (() => {
+    const ref = /href="#([^"]+)"/.exec(gridOut);
+    return ref && gridOut.includes(`id="${ref[1]}"`);
+  })());
+
+  const arrow =
+    '<svg viewBox="0 0 400 150" xmlns="http://www.w3.org/2000/svg">' +
+    '<line x1="10" y1="70" x2="150" y2="70" stroke="black" marker-end="url(#a)"/>' +
+    '<defs><marker id="a" markerWidth="10" markerHeight="7"><polygon points="0 0, 10 3.5, 0 7" fill="black"/></marker></defs>' +
+    "</svg>";
+  const arrowOut = sanitizeSvg(arrow);
+  ok("a marker reference survives", /marker-end="url\(#/.test(arrowOut));
+  ok("and resolves inside the same figure", (() => {
+    const ref = /marker-end="url\(#([^)"]+)\)"/.exec(arrowOut);
+    return ref && arrowOut.includes(`id="${ref[1]}"`);
+  })());
+
+  // Two figures in one handout both defining #arrowhead used to collide, and the
+  // second drawing silently borrowed the first one's marker.
+  const idOf = (s) => /id="([^"]+)"/.exec(s)[1];
+  ok("two figures do not share ids", idOf(sanitizeSvg(arrow)) !== idOf(sanitizeSvg(arrow)));
+
+  // Fragments are namespaced precisely so a reference cannot reach the host page.
+  const escape = '<svg viewBox="0 0 10 10"><use href="#login-form"/></svg>';
+  ok("a reference to the page is dropped", !sanitizeSvg(escape).includes("login-form"));
+  const escapeUrl = '<svg viewBox="0 0 10 10"><rect fill="url(#page-thing)" width="5" height="5"/></svg>';
+  ok("a url() into the page is dropped", !sanitizeSvg(escapeUrl).includes("page-thing"));
+  // The dangerous case is the figure with NO ids of its own: every reference in it
+  // necessarily points outside itself.
+  ok("even when the figure defines nothing of its own", !/href|url\(/.test(sanitizeSvg(escape)));
+
+  const external = '<svg viewBox="0 0 10 10"><use href="https://evil/x.svg#a"/></svg>';
+  ok("an external href is dropped", !sanitizeSvg(external).includes("evil"));
+  ok("a javascript href is dropped", !sanitizeSvg('<svg viewBox="0 0 10 10"><use href="javascript:alert(1)"/></svg>').includes("javascript"));
+  ok("a protocol-relative href is dropped", !sanitizeSvg('<svg viewBox="0 0 10 10"><use xlink:href="//evil/x#a"/></svg>').includes("evil"));
+  ok("an external url() fill is dropped", !sanitizeSvg('<svg viewBox="0 0 10 10"><rect fill="url(http://evil/a#b)" width="5" height="5"/></svg>').includes("evil"));
+  // The whole point of the allow-list still has to hold.
+  ok("script is still stripped", !sanitizeSvg('<svg viewBox="0 0 1 1"><script>alert(1)</script><circle r="1"/></svg>').includes("alert"));
+  ok("handlers are still stripped", !sanitizeSvg('<svg viewBox="0 0 1 1"><circle r="1" onload="alert(1)"/></svg>').includes("onload"));
+
+  // A plain colour must not be mistaken for a reference and thrown away.
+  ok("a plain fill is untouched", sanitizeSvg('<svg viewBox="0 0 10 10"><rect fill="#2563eb" width="5" height="5"/></svg>').includes('fill="#2563eb"'));
+  ok("a named colour is untouched", sanitizeSvg('<svg viewBox="0 0 10 10"><rect fill="red" width="5" height="5"/></svg>').includes('fill="red"'));
+  ok("none is untouched", sanitizeSvg('<svg viewBox="0 0 10 10"><rect fill="none" stroke="black" width="5" height="5"/></svg>').includes('fill="none"'));
+}
+
+console.log("\n11. Nothing is drawn outside the frame:");
+{
+  /*
+   * An SVG clips to its viewport, so a title at `y="-5"` loses its top half against
+   * the edge of the figure — the second half of the same production report. The
+   * model is told to leave margins, but a rule it may forget is not a guarantee,
+   * and the cost of forgetting is a handout that looks unfinished.
+   */
+  const { sanitizeSvg } = require("../helper/lessonDocSvg");
+  const vbOf = (s) => (/viewBox="([^"]+)"/.exec(s) || [])[1];
+
+  const clipped =
+    '<svg viewBox="0 0 220 220" xmlns="http://www.w3.org/2000/svg">' +
+    '<text x="100" y="-5" text-anchor="middle" font-size="12">Bütöv (100%)</text>' +
+    '<rect x="10" y="10" width="200" height="200" fill="none" stroke="black"/></svg>';
+  const box = vbOf(sanitizeSvg(clipped)).split(/\s+/).map(Number);
+  ok("a title above the frame widens the frame", box[1] < 0);
+  ok("far enough to clear the glyphs", box[1] <= -12);
+  ok("and the drawing still starts where it did", box[0] <= 0);
+
+  // Only ever enlarged. A drawing that fits must come back byte-identical, or every
+  // existing figure in every saved document shifts.
+  const fits =
+    '<svg viewBox="0 0 200 100" xmlns="http://www.w3.org/2000/svg">' +
+    '<rect x="10" y="10" width="100" height="50" fill="#2563eb"/></svg>';
+  ok("a drawing that fits is left alone", vbOf(sanitizeSvg(fits)) === "0 0 200 100");
+
+  // Translation is the common case: the grid drew its title inside translate(10,10).
+  const translated =
+    '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">' +
+    '<g transform="translate(10,10)"><rect x="0" y="0" width="120" height="20" fill="red"/></g></svg>';
+  const tb = vbOf(sanitizeSvg(translated)).split(/\s+/).map(Number);
+  ok("a translated overflow is measured through the transform", tb[2] > 100);
+
+  // Anything that cannot be placed exactly must leave the drawing alone rather than
+  // compute a box it cannot stand behind.
+  const rotated =
+    '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">' +
+    '<g transform="rotate(45)"><rect x="0" y="0" width="400" height="20" fill="red"/></g></svg>';
+  ok("a rotate makes it decline to guess", vbOf(sanitizeSvg(rotated)) === "0 0 100 100");
+
+  // A shape inside <defs> is a template painted wherever `use` puts it, never at
+  // its own coordinates — measuring it would inflate the box for nothing.
+  const defsOnly =
+    '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">' +
+    '<defs><rect id="t" x="0" y="0" width="900" height="900"/></defs>' +
+    '<use href="#t" x="0" y="0"/></svg>';
+  ok("a template in defs does not inflate the frame", vbOf(sanitizeSvg(defsOnly)) === "0 0 100 100");
+
+  // A measurement several times the declared size is the measurement being wrong.
+  const wild =
+    '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">' +
+    '<rect x="0" y="0" width="9000" height="9000" fill="red"/></svg>';
+  ok("a wild measurement is not trusted", vbOf(sanitizeSvg(wild)) === "0 0 100 100");
+
+  ok("a figure with no viewBox is still refused", sanitizeSvg('<svg><circle r="1"/></svg>') === "");
+}
+
+console.log("\n12. An edit says what it is about to do:");
+{
+  /*
+   * An edit used to run straight to the writing pass, so a long change showed
+   * nothing but "Dəyişirəm…" — a spinner with a word on it. It never said what was
+   * understood, so a misunderstanding surfaced only after the rewrite had landed.
+   */
+  const doc = {
+    topic: "Faiz",
+    blocks: [
+      { kind: "heading", text: "Faiz nədir" },
+      { kind: "text", text: "İzah" },
+      { kind: "heading", text: "Məsələlər" },
+    ],
+  };
+  const edit = S.buildPlanPrompt({ doc, instructions: "alman nümunələri əlavə et", editing: true });
+  const create = S.buildPlanPrompt({ doc: { topic: "Faiz" }, instructions: "material yaz" });
+
+  ok("an edit plan is a different brief", edit.system !== create.system);
+  ok("it plans operations, not sections", edit.system.includes("ƏMƏLİYYAT"));
+  ok("it is told not to rewrite everything", /Bütün materialı yenidən yazmağı planlaşdırma/.test(edit.system));
+  ok("it keeps the existing title", /DƏYİŞMƏ/.test(edit.system));
+
+  // "add examples to the second section" is unanswerable without the outline.
+  ok("the current headings go with it", edit.prompt.includes("Faiz nədir") && edit.prompt.includes("Məsələlər"));
+  ok("and how big the document is", edit.prompt.includes("3 blok"));
+  ok("the teacher's words are carried", edit.prompt.includes("alman nümunələri"));
+  ok("a creation is not given an outline", !create.prompt.includes("HAZIRKI BÖLMƏLƏR"));
+
+  /*
+   * The two plans mean opposite things and must not reach the writer with the same
+   * sentence: on an edit those list items are OPERATIONS, and telling the writer
+   * they are the document's sections would replace a 26-block handout with four
+   * blocks named after the work.
+   */
+  const ctl = require("fs").readFileSync(require("path").join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  ok("the plan pass runs for edits too", /send\("phase", \{ phase: "plan", editing: hadBlocks \}\)/.test(ctl));
+  ok("an edit hands the writer steps, not sections", /RAZILAŞDIRILMIŞ ADDIMLAR/.test(ctl));
+  ok("a creation still hands it sections", /RAZILAŞDIRILMIŞ PLAN — bölmələr/.test(ctl));
+  ok("and the two are chosen by hadBlocks", /hadBlocks\s*\?\s*`\$\{base\.prompt\}\\n\\nRAZILAŞDIRILMIŞ ADDIMLAR/.test(ctl));
+}
+
+console.log("\n13. The transcript shows what the model was given:");
+{
+  /*
+   * Attaching a PDF and sending a message looked exactly like sending the message
+   * alone, so the only way to find out whether the book had been read was to read
+   * the answer and guess.
+   */
+  const ctl = require("fs").readFileSync(require("path").join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  ok("both turns stamp the files onto the message", (ctl.match(/const sent = \(doc\.files \|\| \[\]\)\.map/g) || []).length === 2);
+  ok("names and keys only — never the bytes", /key: f\.key, name: f\.name, mime: f\.mime/.test(ctl));
+  ok("a turn with no attachment stays clean", /\.\.\.\(sent\.length \? \{ files: sent \} : \{\}\)/.test(ctl));
+
+  const model = require("fs").readFileSync(require("path").join(__dirname, "../models/lessonDocModel.js"), "utf8");
+  ok("the message schema can carry them", /files: \{ type: \[\{ _id: false, key: String, name: String, mime: String \}\]/.test(model));
+}
+
+console.log("\n14. The figure brief is specific enough to follow:");
+{
+  // Every rule here answers a defect seen in a real generated figure.
+  ok("nothing outside the viewBox", S.BASE_RULES.includes("KƏSİLİR"));
+  ok("no negative y for a title", S.BASE_RULES.includes("MƏNFİ y qiyməti YAZMA"));
+  ok("a margin is demanded", /ən azı 16 vahid boş yer/.test(S.BASE_RULES));
+  ok("every shape names its fill", S.BASE_RULES.includes("HƏR FİQURUN RƏNGİ AÇIQ YAZILIR"));
+  ok("white on white is called out", S.BASE_RULES.includes("Ağ fonda ağ yazı"));
+  ok("the drawing must match its caption", S.BASE_RULES.includes("DƏQİQLİK"));
+  ok("href must resolve locally", S.BASE_RULES.includes("Xarici ünvana işarə edən href SİLİNİR"));
+  ok("there is a worked example to copy", S.BASE_RULES.includes("<svg viewBox=\"0 0 320 120\""));
+  ok("with a palette that matches the handout", S.BASE_RULES.includes("#2563eb"));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 assert.strictEqual(failed, 0, `${failed} lesson-doc assertions failed`);
 process.exit(failed ? 1 : 0);

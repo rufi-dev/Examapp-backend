@@ -65,13 +65,57 @@ BLOK TİPLƏRİ və nə vaxt istifadə edilir:
   Riyaziyyat, həndəsə, fizika, biologiya üçün: ədəd oxu, üçbucaq, dairə və radius,
   koordinat müstəvisi, diaqram, kəsr zolağı, hüceyrə sxemi və s.
 
-FİQUR (figure) QAYDALARI:
-- Mütləq viewBox olmalıdır, məsələn: <svg viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg">
-- YALNIZ bu elementlərdən istifadə et: line, path, rect, circle, ellipse, polygon,
-  polyline, text, g, defs, marker. Script, style, foreignObject, image QADAĞANDIR.
-- Rəngləri birbaşa fill/stroke atributunda yaz (style atributu işləmir).
-- Şəkil izahı asanlaşdırırsa əlavə et. Sadəcə bəzək üçün fiqur çəkmə.
-- Yazıları <text> ilə əlavə et ki, şəkil özü özünü izah etsin.
+FİQUR (figure) QAYDALARI — DİQQƏTLƏ OXU:
+
+1) ÇƏRÇİVƏ. Mütləq viewBox olmalıdır:
+   <svg viewBox="0 0 400 260" xmlns="http://www.w3.org/2000/svg">
+   HEÇ NƏ viewBox-dan kənarda olmamalıdır — kənarda qalan hissə KƏSİLİR.
+   Hər tərəfdən ən azı 16 vahid boş yer saxla. Başlıq yazırsansa, onu yuxarıda
+   viewBox-un İÇİNDƏ yerləşdir (məsələn y="24"), MƏNFİ y qiyməti YAZMA.
+
+2) HƏR FİQURUN RƏNGİ AÇIQ YAZILIR. Hər shape-də fill= və lazımdırsa stroke=
+   olmalıdır. Rəng verməsən fiqur qara doğulur və ya heç görünmür.
+   style= atributu İŞLƏMİR — rəngi birbaşa fill/stroke atributunda yaz.
+
+3) KONTRAST. Ağ mətn yalnız tünd dolğunun ÜSTÜNDƏ yazıla bilər. Şübhə varsa
+   fill="#1f2937" (tünd boz) istifadə et. Ağ fonda ağ yazı = görünməyən yazı.
+
+4) DƏQİQLİK — ƏN VACİBİ. Şəkil altyazıda yazdığın şeyi HƏQİQƏTƏN göstərməlidir.
+   "25 xana qırmızıdır" yazırsansa, tam olaraq 25 ədəd qırmızı xana çəkilməlidir.
+   Say, ölçü və nisbətlər düz olmalıdır. Uyğun gəlmirsə, altyazını dəyiş.
+
+5) TƏKRARLANAN FORMALAR. 100 xanalı tor kimi şeylərdə hər xananı ayrıca <rect>
+   kimi yaz — bu ən etibarlı yoldur. Alternativ olaraq <defs> + <use href="#id">
+   də işləyir, amma href MÜTLƏQ eyni şəkildəki id-yə işarə etməlidir.
+   Xarici ünvana işarə edən href SİLİNİR və fiqur boş qalır.
+
+6) İCAZƏ VERİLƏN ELEMENTLƏR: line, path, rect, circle, ellipse, polygon, polyline,
+   text, tspan, g, defs, marker, use, linearGradient, radialGradient, clipPath.
+   Script, style, foreignObject, image QADAĞANDIR.
+
+7) ÜSLUB (materialın dizaynı ilə eyni olsun):
+   - əsas xətt/kontur: stroke="#334155", stroke-width="1.5"
+   - vurğu/dolğu: #2563eb (mavi), #16a34a (yaşıl), #dc2626 (qırmızı), #f59e0b (sarı)
+   - açıq fon: #eff6ff, tor xətləri: #cbd5e1
+   - yazı: font-size="13" font-family="Arial, sans-serif" fill="#1f2937"
+   - başlıq: font-size="15" font-weight="bold"
+   - text-anchor="middle" ilə mərkəzləşdir, ədəd oxunda dominant-baseline istifadə et
+
+8) NƏ VAXT. Riyaziyyat, həndəsə, fizika, biologiya, coğrafiya: ədəd oxu, üçbucaq,
+   dairə və radius, koordinat müstəvisi, sütun diaqramı, kəsr zolağı, faiz toru,
+   hüceyrə sxemi, dövran sxemi. Sadəcə bəzək üçün fiqur ÇƏKMƏ.
+   Hər şəkildə <text> ilə yazılar olsun ki, şəkil özü özünü izah etsin.
+
+NÜMUNƏ (kəsr zolağı — 3/4). Diqqət et: başlıq içəridədir, hər rect-in fill-i var,
+say altyazı ilə üst-üstə düşür:
+<svg viewBox="0 0 320 120" xmlns="http://www.w3.org/2000/svg">
+  <text x="160" y="24" text-anchor="middle" font-size="15" font-weight="bold" fill="#1f2937">3/4</text>
+  <rect x="20" y="44" width="70" height="46" fill="#2563eb" stroke="#334155" stroke-width="1.5"/>
+  <rect x="90" y="44" width="70" height="46" fill="#2563eb" stroke="#334155" stroke-width="1.5"/>
+  <rect x="160" y="44" width="70" height="46" fill="#2563eb" stroke="#334155" stroke-width="1.5"/>
+  <rect x="230" y="44" width="70" height="46" fill="#eff6ff" stroke="#334155" stroke-width="1.5"/>
+  <text x="160" y="108" text-anchor="middle" font-size="13" fill="#1f2937">4 hissədən 3-ü boyanıb</text>
+</svg>
 
 MÜTLƏQ QAYDALAR:
 - Materialın strukturu olmalıdır: giriş izahı → anlayışlar → nümunələr → tapşırıqlar.
@@ -325,10 +369,59 @@ Müəllim konkret şeylər istəyibsə (cədvəl, neçə nümunə, neçə tapş�
 göstərmək), onları bölmələrdə əks etdir. Uydurma bölmə əlavə etmə.
 `.trim();
 
-function buildPlanPrompt({ doc = {}, instructions = "" } = {}) {
+/*
+ * The same first pass, for a change rather than a creation.
+ *
+ * An edit used to run straight to the writing pass, so the only thing the teacher
+ * saw for the length of a long call was "Dəyişirəm…". That is not progress, it is a
+ * spinner with a word on it: it never says what was understood, so a
+ * misunderstanding is only discovered once the rewrite has landed on the document.
+ *
+ * Planning the edit costs one small fast call and buys the thing that actually
+ * matters — the teacher reads "I will add three German examples from the attached
+ * book and draw a figure for the plural rule" and knows within two seconds whether
+ * to let it run.
+ */
+const EDIT_PLAN_RULES = `
+Sən Azərbaycan məktəbləri üçün dərs materialı hazırlayan metodistsən.
+Müəllimin HAZIR materialı var və onu dəyişmək istəyir. Hələ dəyişiklik ETMİRSƏN —
+yalnız nə edəcəyini planlaşdırırsan.
+
+- "title": materialın adı — DƏYİŞMƏ, olduğu kimi qaytar (müəllim adı dəyişməyi
+  xüsusi istəmirsə).
+- "audience": boş qoy.
+- "sections": edəcəyin ADDIMLAR, 2–5 ədəd. Bölmə adı deyil — ƏMƏLİYYAT.
+  "heading" = qısa əməliyyat, "why" = bir cümlə izah.
+
+Nümunə addımlar:
+  heading: "3 yeni alman nümunəsi əlavə edirəm"
+  why: "Əlavə edilmiş kitabın 24-cü səhifəsindəki cümlələr əsasında."
+  heading: "Cəm şəkilçisi üçün sxem çəkirəm"
+  why: "Qaydanı yazı ilə deyil, şəkillə göstərmək daha aydındır."
+
+Yalnız müəllimin istədiyini planlaşdır. Bütün materialı yenidən yazmağı planlaşdırma.
+Əlavə edilmiş fayl varsa, ondan nə götürəcəyini konkret yaz.
+`.trim();
+
+function buildPlanPrompt({ doc = {}, instructions = "", editing = false } = {}) {
+  // The current document's headings go in for an edit: "add examples to the second
+  // section" is unanswerable without knowing what the sections are.
+  const outline = editing
+    ? (doc.blocks || [])
+        .filter((b) => b && b.kind === "heading" && b.text)
+        .map((b, i) => `${i + 1}. ${b.text}`)
+        .join("\n")
+    : "";
+
   return {
-    system: PLAN_RULES,
-    prompt: [describe(doc), "", `MÜƏLLİMİN İSTƏYİ: ${String(instructions || "").slice(0, 4000)}`]
+    system: editing ? EDIT_PLAN_RULES : PLAN_RULES,
+    prompt: [
+      describe(doc),
+      outline ? `\nHAZIRKI BÖLMƏLƏR:\n${outline}` : "",
+      editing ? `\nMaterialda ${(doc.blocks || []).length} blok var.` : "",
+      "",
+      `MÜƏLLİMİN İSTƏYİ: ${String(instructions || "").slice(0, 4000)}`,
+    ]
       .filter(Boolean)
       .join("\n"),
   };

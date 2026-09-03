@@ -94,7 +94,14 @@ const sendMessage = asyncHandler(async (req, res) => {
   if (!text) throw httpError(400, "message_empty", "Nə yaratmaq istədiyinizi yazın.");
   if (text.length > 4000) throw httpError(422, "message_long", "Mesaj çox uzundur.");
 
-  doc.messages = [...(doc.messages || []), { role: "user", text, at: new Date() }];
+  // Stamp the references that are going up with this turn, so the transcript can
+  // show the teacher what the model was actually given rather than leaving them to
+  // wonder whether the PDF made it.
+  const sent = (doc.files || []).map((f) => ({ key: f.key, name: f.name, mime: f.mime }));
+  doc.messages = [
+    ...(doc.messages || []),
+    { role: "user", text, at: new Date(), ...(sent.length ? { files: sent } : {}) },
+  ];
   await doc.save();
 
   const { runDocument } = require("../helper/aiDocument");
@@ -195,7 +202,14 @@ const streamMessage = asyncHandler(async (req, res) => {
   if (!text) throw httpError(400, "message_empty", "Nə yaratmaq istədiyinizi yazın.");
   if (text.length > 4000) throw httpError(422, "message_long", "Mesaj çox uzundur.");
 
-  doc.messages = [...(doc.messages || []), { role: "user", text, at: new Date() }];
+  // Stamp the references that are going up with this turn, so the transcript can
+  // show the teacher what the model was actually given rather than leaving them to
+  // wonder whether the PDF made it.
+  const sent = (doc.files || []).map((f) => ({ key: f.key, name: f.name, mime: f.mime }));
+  doc.messages = [
+    ...(doc.messages || []),
+    { role: "user", text, at: new Date(), ...(sent.length ? { files: sent } : {}) },
+  ];
   await doc.save();
 
   res.writeHead(200, {
@@ -234,25 +248,31 @@ const streamMessage = asyncHandler(async (req, res) => {
   const parts = await require("../helper/lessonDocFiles").toParts(doc.files || []);
 
   try {
-    // ---- phase 1: what are we writing? -------------------------------------
+    /*
+     * ---- phase 1: what are we about to do? ---------------------------------
+     *
+     * Runs for an EDIT as well as a creation. It used to be creation-only, which
+     * left every change showing nothing but "Dəyişirəm…" for the length of a long
+     * call — a spinner with a word on it. Now both paths answer the question the
+     * teacher is actually asking while they wait: what did you understand, and
+     * what are you about to do to my document.
+     */
     let plan = null;
-    if (!hadBlocks) {
-      send("phase", { phase: "plan" });
-      try {
-        const p = await runDocument({
-          ...S.buildPlanPrompt({ doc: doc.toObject(), instructions: text }),
-          parts,
-          schema: S.PLAN_SCHEMA,
-          geminiSchema: toGeminiSchema(S.PLAN_SCHEMA),
-          maxTokens: 1200,
-        });
-        plan = S.normalizePlan(p.doc || {});
-        if (plan.sections.length) send("plan", plan);
-      } catch {
-        // A failed plan is not a failed turn — the writing pass can still run, it
-        // just runs without a preview.
-        plan = null;
-      }
+    send("phase", { phase: "plan", editing: hadBlocks });
+    try {
+      const p = await runDocument({
+        ...S.buildPlanPrompt({ doc: doc.toObject(), instructions: text, editing: hadBlocks }),
+        parts,
+        schema: S.PLAN_SCHEMA,
+        geminiSchema: toGeminiSchema(S.PLAN_SCHEMA),
+        maxTokens: 1200,
+      });
+      plan = S.normalizePlan(p.doc || {});
+      if (plan.sections.length) send("plan", { ...plan, editing: hadBlocks });
+    } catch {
+      // A failed plan is not a failed turn — the writing pass can still run, it
+      // just runs without a preview.
+      plan = null;
     }
 
     // ---- phase 2: write it, reporting each block -----------------------------
@@ -267,13 +287,24 @@ const streamMessage = asyncHandler(async (req, res) => {
 ${S.SOURCE_RULES}`;
     }
 
-    // Hold the writing pass to what it just committed to.
-    const prompt =
-      plan && plan.sections.length
-        ? `${base.prompt}\n\nRAZILAŞDIRILMIŞ PLAN — bölmələr məhz bunlar olmalıdır:\n${plan.sections
-            .map((sx, i) => `${i + 1}. ${sx.heading} — ${sx.why}`)
-            .join("\n")}`
-        : base.prompt;
+    /*
+     * Hold the writing pass to what it just committed to — but the two plans mean
+     * different things and must not be handed over with the same sentence.
+     *
+     * On a creation the plan IS the document's outline, so "the sections must be
+     * exactly these" is right. On an edit the same list is a set of OPERATIONS
+     * ("add three examples", "draw a figure"); telling the writer those are the
+     * document's sections would have it replace a 26-block handout with four
+     * blocks named after the work. Same data, opposite instruction.
+     */
+    const planLines = plan?.sections?.length
+      ? plan.sections.map((sx, i) => `${i + 1}. ${sx.heading} — ${sx.why}`).join("\n")
+      : "";
+    const prompt = !planLines
+      ? base.prompt
+      : hadBlocks
+        ? `${base.prompt}\n\nRAZILAŞDIRILMIŞ ADDIMLAR — yalnız bunları et, başqa heç nəyi dəyişmə:\n${planLines}`
+        : `${base.prompt}\n\nRAZILAŞDIRILMIŞ PLAN — bölmələr məhz bunlar olmalıdır:\n${planLines}`;
 
     const readBlocks = S.makeBlockStreamer();
     let seen = 0;
