@@ -192,6 +192,107 @@ console.log("\n7. The prompts carry the contract:");
   ok("the scratch directory is always removed", /finally[\s\S]{0,120}rm\(/.test(docx));
 }
 
+console.log("\n8. Figures — the model draws, the allow-list decides:");
+{
+  /*
+   * SVG is a full document format: it can carry <script>, event handlers,
+   * <foreignObject> with arbitrary HTML and external references. It goes into the
+   * page with dangerouslySetInnerHTML, so what this filter lets through IS the
+   * security boundary.
+   */
+  const { sanitizeSvg } = require("../helper/lessonDocSvg");
+  const good =
+    '<svg viewBox="0 0 100 50" xmlns="http://www.w3.org/2000/svg">' +
+    '<line x1="5" y1="25" x2="95" y2="25" stroke="#333" stroke-width="2"/>' +
+    '<circle cx="50" cy="25" r="4" fill="#0F4C5C"/>' +
+    '<text x="50" y="45" text-anchor="middle" font-size="10">0</text></svg>';
+
+  const clean = sanitizeSvg(good);
+  ok("a real diagram survives intact", clean.includes("<line") && clean.includes("<circle") && clean.includes("<text"));
+  ok("viewBox keeps its capital B", clean.includes("viewBox="));
+
+  ok("script is stripped", !sanitizeSvg('<svg viewBox="0 0 1 1"><script>alert(1)</script><circle r="1"/></svg>').includes("alert"));
+  ok("event handlers are stripped", !sanitizeSvg('<svg viewBox="0 0 1 1"><circle r="1" onload="alert(1)"/></svg>').includes("onload"));
+  ok("foreignObject is stripped", !sanitizeSvg('<svg viewBox="0 0 1 1"><foreignObject><img src=x onerror=alert(1)></foreignObject></svg>').includes("onerror"));
+  ok("external references are stripped", !sanitizeSvg('<svg viewBox="0 0 1 1"><image href="http://evil/x.png"/></svg>').includes("evil"));
+  ok("style attributes are stripped", !sanitizeSvg('<svg viewBox="0 0 1 1"><rect style="background:url(http://evil)"/></svg>').includes("evil"));
+  ok("animate is stripped", !sanitizeSvg('<svg viewBox="0 0 1 1"><animate attributeName="x"/></svg>').includes("animate"));
+
+  // Without a viewBox the browser falls back to 300x150 and crops the drawing.
+  ok("no viewBox is refused", sanitizeSvg('<svg><circle r="1"/></svg>') === "");
+  ok("non-svg is refused", sanitizeSvg("<div>hi</div>") === "");
+  ok("an oversized blob is refused", sanitizeSvg('<svg viewBox="0 0 1 1">' + "x".repeat(30000) + "</svg>") === "");
+
+  // A figure whose drawing does not survive is dropped whole: an empty frame in a
+  // handout helps nobody.
+  const kept = S.normalizeDoc({
+    title: "t",
+    blocks: [
+      full({ kind: "figure", svg: good, text: "Ədəd oxu" }),
+      full({ kind: "figure", svg: "<svg><script>x</script></svg>" }),
+    ],
+  }).blocks;
+  ok("a good figure is kept with its caption", kept.length === 1 && kept[0].text === "Ədəd oxu");
+  ok("an unsafe figure is dropped whole", kept.length === 1);
+
+  const pdfF = buildLessonDocHtml({ blocks: kept });
+  ok("the PDF inlines the svg", pdfF.includes("<svg viewBox") && pdfF.includes("<line"));
+  ok("Word renders nothing without a raster", !buildLessonDocHtml({ blocks: kept }, { forWord: true }).includes("<figure"));
+  ok(
+    "Word uses the raster when it has one",
+    buildLessonDocHtml({ blocks: [{ ...kept[0], pngSrc: "data:image/png;base64,AA" }] }, { forWord: true }).includes(
+      '<img src="data:image/png'
+    )
+  );
+
+  // The edit prompt must carry the drawing, or an unrelated edit loses every figure.
+  ok("the edit prompt sends svg", S.buildEditPrompt({ doc: { blocks: kept } }).prompt.includes("viewBox"));
+}
+
+console.log("\n9. Attached references travel with every turn:");
+{
+  const fs2 = require("fs");
+  const path2 = require("path");
+  const F = require("../helper/lessonDocFiles");
+
+  // Only what the providers can actually read. Anything else would be accepted and
+  // then silently ignored at the exact point it was supposed to help.
+  ok("PDF is accepted", Boolean(F.ACCEPT["application/pdf"]));
+  ok("images are accepted", Boolean(F.ACCEPT["image/png"] && F.ACCEPT["image/jpeg"]));
+  ok(
+    "Word documents are refused",
+    !F.ACCEPT["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+  );
+  ok("there is a per-file cap", F.MAX_FILE_MB > 0 && F.MAX_FILE_MB <= 50);
+  ok("and a total cap", F.MAX_TOTAL_MB >= F.MAX_FILE_MB);
+  ok("and a count cap", F.MAX_FILES > 1 && F.MAX_FILES <= 10);
+
+  ok("keys are content hashes", F.isValidKey("a".repeat(64)));
+  ok("a short key is refused", !F.isValidKey("abc"));
+  ok(
+    "traversal is refused",
+    (() => {
+      try {
+        F.pathForKey("../../etc/passwd", "pdf");
+        return false;
+      } catch {
+        return true;
+      }
+    })()
+  );
+
+  const ctl = fs2.readFileSync(path2.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  // The reference is needed on turn five as much as on turn one.
+  ok("both turns send the files", (ctl.match(/toParts\(doc\.files \|\| \[\]\)/g) || []).length === 2);
+  ok("the PLAN pass sees them too", /buildPlanPrompt[\s\S]{0,140}parts,/.test(ctl));
+  ok("a shared file is not deleted while another doc holds it", /stillUsed/.test(ctl));
+  ok("attachments are owner-scoped", /const getFile[\s\S]{0,120}mine\(req/.test(ctl));
+
+  ok("the model is told a source is present", S.SOURCE_RULES.includes("BİRİNCİ MƏNBƏDİR"));
+  ok("and how to transcribe one", S.SOURCE_RULES.includes("ÇEVİRMƏ İSTƏYİ"));
+  ok("and not to invent unreadable parts", S.SOURCE_RULES.includes("[oxunmadı]"));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 assert.strictEqual(failed, 0, `${failed} lesson-doc assertions failed`);
 process.exit(failed ? 1 : 0);

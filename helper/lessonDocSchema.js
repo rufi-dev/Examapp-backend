@@ -96,6 +96,33 @@ REDAKTƏ REJİMİ:
 - Yeni blok əlavə etmək istənilirsə, onu düzgün yerə qoy.
 `.trim();
 
+
+/*
+ * Added only when the teacher has attached something. Without it the model has a
+ * file in the request and no instruction to prefer it, and will happily write from
+ * general knowledge while ignoring the page it was given.
+ */
+const SOURCE_RULES = `
+ƏLAVƏ EDİLMİŞ FAYLLAR:
+- Müəllim fayl (PDF və ya şəkil) əlavə edib. O fayl BİRİNCİ MƏNBƏDİR.
+- Materialı həmin faylın məzmununa əsaslandır: anlayışlar, nümunələr, tapşırıqlar
+  mümkün qədər oradan götürülsün.
+- Faylda olmayan şeyi "faylda yazılıb" kimi təqdim etmə. Əlavə izah verirsənsə,
+  bunu öz sözlərinlə yaz.
+- Müəllim faylı yalnız NÜMUNƏ (üslub, format) kimi göstəribsə, məzmunu köçürmə —
+  quruluşu təkrarla.
+
+ÇEVİRMƏ İSTƏYİ (məsələn "bu şəkli materiala çevir", "bu vərəqi Word et"):
+- Şəkildəki və ya PDF-dəki BÜTÜN məzmunu oxu və blok-blok yenidən qur:
+  başlıqlar → heading, izahlar → text, anlayışlar → definition, həll olunmuş
+  misallar → example, çalışmalar → task, cədvəllər → table.
+- Mətnini dəyişdirmə, tərcümə etmə, "yaxşılaşdırma" — olduğu kimi köçür.
+  Yalnız quruluşu ver: hansı hissə hansı blokdur.
+- Əlyazma və ya keyfiyyətsiz şəkildə oxunmayan yer varsa, uydurma. Həmin yeri
+  "[oxunmadı]" kimi qeyd et ki, müəllim özü düzəltsin.
+- Şəkildə düstur, sxem və ya fiqur varsa, onu "figure" bloku kimi SVG ilə yenidən çək.
+`.trim();
+
 const describe = (d = {}) =>
   [
     d.topic ? `Mövzu: ${d.topic}` : null,
@@ -371,6 +398,7 @@ function makeBlockStreamer() {
 
 module.exports = {
   DOC_SCHEMA,
+  SOURCE_RULES,
   PLAN_SCHEMA,
   PLAN_RULES,
   buildPlanPrompt,

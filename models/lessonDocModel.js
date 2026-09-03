@@ -73,6 +73,24 @@ const messageSchema = new Schema(
   { _id: false }
 );
 
+/*
+ * A reference the teacher attached: a textbook page, a photo of a worksheet, a
+ * syllabus. Stored with the document because the model needs it on EVERY turn —
+ * "add three more like the ones on page 4" means nothing if page 4 was only visible
+ * during the first request.
+ */
+const fileSchema = new Schema(
+  {
+    key: { type: String, required: true }, // content hash — the same page twice is one file
+    ext: { type: String, default: "" },
+    mime: { type: String, default: "" },
+    name: { type: String, default: "" },
+    bytes: { type: Number, default: 0 },
+    at: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const lessonDocSchema = new Schema(
   {
     owner: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
@@ -87,6 +105,7 @@ const lessonDocSchema = new Schema(
 
     blocks: { type: [blockSchema], default: undefined },
     messages: { type: [messageSchema], default: undefined },
+    files: { type: [fileSchema], default: undefined },
 
     // The teacher's chosen export. Remembered so the button says the right thing
     // next time rather than asking again.

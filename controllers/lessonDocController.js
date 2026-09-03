@@ -101,6 +101,8 @@ const sendMessage = asyncHandler(async (req, res) => {
   const { toGeminiSchema } = require("../helper/curriculumSchema");
 
   const hadBlocks = (doc.blocks || []).length > 0;
+  // The references go with EVERY turn, not just the first.
+  const parts = await require("../helper/lessonDocFiles").toParts(doc.files || []);
   const { system, prompt } = hadBlocks
     ? S.buildEditPrompt({ doc: doc.toObject(), instructions: text })
     : S.buildCreatePrompt({ doc: doc.toObject(), instructions: text });
@@ -110,7 +112,7 @@ const sendMessage = asyncHandler(async (req, res) => {
     out = await runDocument({
       system,
       prompt,
-      parts: [],
+      parts,
       schema: S.DOC_SCHEMA,
       geminiSchema: toGeminiSchema(S.DOC_SCHEMA),
       maxTokens: 8000,
@@ -227,6 +229,9 @@ const streamMessage = asyncHandler(async (req, res) => {
   const { runDocument } = require("../helper/aiDocument");
   const { toGeminiSchema } = require("../helper/curriculumSchema");
   const hadBlocks = (doc.blocks || []).length > 0;
+  // Attached references travel with every turn, and with the PLAN too — deciding
+  // what to write from a page the model cannot see is deciding blind.
+  const parts = await require("../helper/lessonDocFiles").toParts(doc.files || []);
 
   try {
     // ---- phase 1: what are we writing? -------------------------------------
@@ -236,7 +241,7 @@ const streamMessage = asyncHandler(async (req, res) => {
       try {
         const p = await runDocument({
           ...S.buildPlanPrompt({ doc: doc.toObject(), instructions: text }),
-          parts: [],
+          parts,
           schema: S.PLAN_SCHEMA,
           geminiSchema: toGeminiSchema(S.PLAN_SCHEMA),
           maxTokens: 1200,
@@ -256,6 +261,11 @@ const streamMessage = asyncHandler(async (req, res) => {
     const base = hadBlocks
       ? S.buildEditPrompt({ doc: doc.toObject(), instructions: text })
       : S.buildCreatePrompt({ doc: doc.toObject(), instructions: text });
+    if (parts.length) {
+      base.system = `${base.system}
+
+${S.SOURCE_RULES}`;
+    }
 
     // Hold the writing pass to what it just committed to.
     const prompt =
@@ -270,7 +280,7 @@ const streamMessage = asyncHandler(async (req, res) => {
     const out = await runDocument({
       system: base.system,
       prompt,
-      parts: [],
+      parts,
       schema: S.DOC_SCHEMA,
       geminiSchema: toGeminiSchema(S.DOC_SCHEMA),
       maxTokens: 8000,
@@ -328,6 +338,84 @@ const streamMessage = asyncHandler(async (req, res) => {
     clearInterval(hb);
     res.end();
   }
+});
+
+
+/*
+ * POST /:id/files — attach a reference.
+ *
+ * Accepted types are exactly what the providers can actually read. A .docx would be
+ * silently ignored by all of them, so it is refused with a reason rather than
+ * accepted and quietly dropped at the point it was supposed to help.
+ */
+const addFile = asyncHandler(async (req, res) => {
+  const doc = await mine(req, req.params.id);
+  const F = require("../helper/lessonDocFiles");
+  const f = req.file;
+  if (!f) throw httpError(400, "no_file", "Fayl seçilmədi.");
+  if (!F.ACCEPT[f.mimetype]) {
+    throw httpError(415, "bad_type", "Yalnız PDF və şəkil (PNG, JPG, WEBP) əlavə etmək olar.");
+  }
+
+  const files = doc.files || [];
+  if (files.length >= F.MAX_FILES) {
+    throw httpError(422, "too_many_files", `Ən çox ${F.MAX_FILES} fayl əlavə edə bilərsiniz.`);
+  }
+  const total = files.reduce((n, x) => n + (x.bytes || 0), 0) + f.size;
+  if (total > F.MAX_TOTAL_MB * 1024 * 1024) {
+    throw httpError(413, "too_large", `Faylların ümumi həcmi ${F.MAX_TOTAL_MB}MB-dan çox ola bilməz.`);
+  }
+
+  const saved = await F.saveFile({ buffer: f.buffer, mime: f.mimetype, name: f.originalname });
+  // The same page attached twice is one entry, not two identical ones in the list.
+  if (!files.some((x) => x.key === saved.key)) {
+    doc.files = [...files, saved];
+    await doc.save();
+  }
+  res.status(201).json({ doc });
+});
+
+/*
+ * GET /:id/files/:key — serve an attachment back.
+ *
+ * So a thumbnail survives a reload: an object URL made at upload time dies with the
+ * page, and a teacher who reopens a material would find their references reduced to
+ * filenames. Owner-scoped and no-store — these are someone's textbook pages.
+ */
+const getFile = asyncHandler(async (req, res) => {
+  const doc = await mine(req, req.params.id);
+  const F = require("../helper/lessonDocFiles");
+  const f = (doc.files || []).find((x) => x.key === String(req.params.key || ""));
+  if (!f) throw httpError(404, "file_missing", "Fayl tapılmadı.");
+
+  const fsp = require("fs/promises");
+  let buf;
+  try {
+    buf = await fsp.readFile(F.pathForKey(f.key, f.ext));
+  } catch {
+    throw httpError(404, "file_missing", "Fayl serverdə tapılmadı.");
+  }
+  res.setHeader("Content-Type", f.mime || "application/octet-stream");
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(f.name || "fayl")}`);
+  res.send(buf);
+});
+
+// DELETE /:id/files/:key
+const removeFile = asyncHandler(async (req, res) => {
+  const doc = await mine(req, req.params.id);
+  const F = require("../helper/lessonDocFiles");
+  const key = String(req.params.key || "");
+  const gone = (doc.files || []).find((x) => x.key === key);
+  if (!gone) throw httpError(404, "file_missing", "Fayl tapılmadı.");
+
+  doc.files = (doc.files || []).filter((x) => x.key !== key);
+  await doc.save();
+
+  // Content-addressed, so another material may hold the identical file.
+  const stillUsed = await LessonDoc.exists({ _id: { $ne: doc._id }, "files.key": key });
+  await F.removeIfUnused(key, gone.ext, Boolean(stillUsed));
+  res.json({ doc });
 });
 
 /*
@@ -411,4 +499,4 @@ const exportDoc = asyncHandler(async (req, res) => {
   res.send(body);
 });
 
-module.exports = { listDocs, createDoc, getDoc, sendMessage, streamMessage, updateDoc, removeDoc, exportDoc };
+module.exports = { listDocs, createDoc, getDoc, sendMessage, streamMessage, addFile, getFile, removeFile, updateDoc, removeDoc, exportDoc };
