@@ -188,6 +188,60 @@ console.log("\n8. The renderer must hand Express a Buffer:");
   ok("and is not cached", /private, no-store/.test(ctl));
 }
 
+console.log("\n9. One variant on its own:");
+{
+  /*
+   * What a teacher hands to a row of desks. The full plan carries the objectives,
+   * the stage timing and the ANSWERS — none of which belong on a sheet a student
+   * writes on, and the last of which would hand them the paper.
+   */
+  const { buildWorksheetHtml } = require("../helper/lessonPlanPrintHtml");
+  const plan = {
+    title: "Modal fellər",
+    topic: "Modal fellər",
+    subject: "İngilis dili",
+    grade: 11,
+    ownerName: "Rufi",
+    objectives: ["Məqsəd bir", "Məqsəd iki"],
+    stages: [{ name: "Motivasiya", minutes: 5 }],
+    reflection: "Refleksiya mətni",
+  };
+  const rows = [
+    { statement: "Boşluqları can ilə doldurun.", answer: "can", solution: "can — bacarıq bildirir" },
+    { statement: "İkinci tapşırıq." },
+  ];
+  const html = buildWorksheetHtml(plan, "A", rows);
+
+  ok("it is a complete document", html.startsWith("<!DOCTYPE html>") && html.includes("</html>"));
+  ok("the variant is named", html.includes("Variant A"));
+  ok("both tasks are on the sheet", html.includes("can ilə doldurun") && html.includes("İkinci tapşırıq"));
+  ok("there is somewhere to write a name", html.includes("Ad, soyad"));
+  ok("ruled writing lines are drawn", html.includes("ruled"));
+
+  // The whole point of it being a separate document.
+  ok("the objectives are NOT on it", !html.includes("Məqsəd bir"));
+  ok("the stage timing is NOT on it", !html.includes("Motivasiya"));
+  ok("the reflection is NOT on it", !html.includes("Refleksiya mətni"));
+  ok("the ANSWER is not printed", !html.includes("bacarıq bildirir"));
+
+  ok("it shares the plan stylesheet", html.includes("worksheet"));
+  ok("only installed fonts are named", !html.includes("Inter") && !html.includes("Noto"));
+  ok("no external resource is referenced", !/https?:\/\//.test(html));
+
+  // Junk must not throw: a print request is not the place to 500.
+  ok("no rows still yields a document", buildWorksheetHtml(plan, "B", []).includes("tapşırıq yoxdur"));
+  ok("a null plan does not throw", typeof buildWorksheetHtml(null, "A", rows) === "string");
+  ok("a non-array rows value does not throw", typeof buildWorksheetHtml(plan, "A", null) === "string");
+
+  // The route contract.
+  const fs2 = require("fs");
+  const path2 = require("path");
+  const ctl = fs2.readFileSync(path2.join(__dirname, "../controllers/lessonPlanController.js"), "utf8");
+  ok("the route reads ?variant", /req\.query\.variant/.test(ctl));
+  ok("an unknown variant is refused, not served as the whole plan", /variant_missing/.test(ctl));
+  ok("the footer says which document it is", /footerLabel: wanted/.test(ctl));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 assert.strictEqual(failed, 0, `${failed} lesson-plan-print assertions failed`);
 process.exit(failed ? 1 : 0);

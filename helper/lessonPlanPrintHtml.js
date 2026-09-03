@@ -331,4 +331,21 @@ ${sheets}
 </body></html>`;
 }
 
-module.exports = { buildLessonPlanHtml, esc, CSS };
+/*
+ * One variant on its own — what a teacher hands to a row of desks.
+ *
+ * The full plan PDF carries the objectives, the stage timing and the answers, none
+ * of which belong on a sheet a student writes on. Rather than a second template
+ * this reuses worksheetSheet and the same stylesheet, so a change to the worksheet
+ * shows up in both documents and the two can never drift apart.
+ */
+function buildWorksheetHtml(rawPlan = {}, letter = "A", rows = []) {
+  const plan = rawPlan && typeof rawPlan === "object" ? rawPlan : {};
+  const list = Array.isArray(rows) ? rows : [];
+  return `<!DOCTYPE html><html lang="az"><head><meta charset="utf-8">
+<title>${esc(plan.title || "İş vərəqi")} — Variant ${esc(letter)}</title><style>${CSS}</style></head><body>
+${list.length ? worksheetSheet(letter, list, plan) : '<section class="worksheet"><p>Bu variantda tapşırıq yoxdur.</p></section>'}
+</body></html>`;
+}
+
+module.exports = { buildLessonPlanHtml, buildWorksheetHtml, worksheetSheet, esc, CSS };

@@ -39,6 +39,13 @@ const listPlans = asyncHandler(async (req, res) => {
         activeVersionNumber: 1, archivedAt: 1, updatedAt: 1, lessonMinutes: 1,
         taskCount: { $size: { $ifNull: ["$tasks", []] } },
         stageCount: { $size: { $ifNull: ["$stages", []] } },
+        // The minutes per stage — enough to draw the lesson's SHAPE on the card.
+        // A list of plans that all look alike tells a teacher nothing; the timing
+        // profile is the one thing that distinguishes one lesson from another at a
+        // glance, and it is three numbers, not a document.
+        stageMinutes: {
+          $map: { input: { $ifNull: ["$stages", []] }, as: "s", in: { $ifNull: ["$$s.minutes", 0] } },
+        },
         objectiveCount: {
           $size: {
             $filter: { input: { $ifNull: ["$objectives", []] }, as: "o", cond: { $ne: ["$$o", ""] } },
@@ -449,9 +456,16 @@ const discardProposal = asyncHandler(async (req, res) => {
  * worksheet variants are built from the SAME tasks, so the paper a teacher hands
  * out can never disagree with the plan it came from.
  */
+/*
+ * GET /:id/pdf — the whole plan, or ONE worksheet variant with `?variant=A`.
+ *
+ * A teacher handing out papers wants the sheet a student writes on, not the plan:
+ * no objectives, no stage timing, no answers. Same renderer and same stylesheet as
+ * the full document, so the two cannot drift apart.
+ */
 const planPdf = asyncHandler(async (req, res) => {
   const plan = await mine(req, req.params.id);
-  const { buildLessonPlanHtml } = require("../helper/lessonPlanPrintHtml");
+  const { buildLessonPlanHtml, buildWorksheetHtml } = require("../helper/lessonPlanPrintHtml");
   const { renderPdf } = require("../helper/lessonPlanPdf");
   const { buildWorksheet } = require("../helper/worksheetVariants");
 
@@ -465,8 +479,24 @@ const planPdf = asyncHandler(async (req, res) => {
     console.error("[PLAN PDF] worksheet skipped:", e.message);
   }
 
-  const pdf = await renderPdf(buildLessonPlanHtml(doc, variants));
-  const safe = String(doc.title || "ders-plani").replace(/[^\p{L}\p{N}\s._-]/gu, "").trim().slice(0, 80) || "ders-plani";
+  // Only a letter the worksheet actually produced — an unknown one is refused
+  // rather than silently served as the whole plan, which would look like a bug.
+  const wanted = String(req.query.variant || "").trim().toUpperCase();
+  if (wanted) {
+    if (!variants || !Array.isArray(variants[wanted]) || !variants[wanted].length) {
+      throw httpError(404, "variant_missing", `Variant ${wanted} yoxdur.`);
+    }
+  }
+
+  const html = wanted
+    ? buildWorksheetHtml(doc, wanted, variants[wanted])
+    : buildLessonPlanHtml(doc, variants);
+
+  const base = String(doc.title || "ders-plani").replace(/[^\p{L}\p{N}\s._-]/gu, "").trim().slice(0, 80) || "ders-plani";
+  const safe = wanted ? `${base} - is vereqi ${wanted}` : base;
+  const pdf = await renderPdf(html, {
+    footerLabel: wanted ? `iş vərəqi · variant ${wanted}` : "dərs planı",
+  });
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(safe)}.pdf`);
   res.setHeader("Cache-Control", "private, no-store");
