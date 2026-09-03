@@ -103,7 +103,28 @@ td{font-size:10.5pt;padding:4pt 6pt;border-bottom:0.5pt solid #ECF0F2}
 `;
 
 /* ------------------------------------------------------------ the content --- */
-function renderBlock(b) {
+
+/*
+ * WHY WORD GETS DIFFERENT MARKUP.
+ *
+ * LibreOffice's HTML import does not keep a bordered, padded <div> together. It
+ * turns each child paragraph into its OWN framed paragraph, so one worked example
+ * arrived in Word as three separate boxes — and a long solution broke mid-sentence
+ * across two of them, which is worse than having no box at all.
+ *
+ * A single-cell TABLE is how Word actually represents a callout, and LibreOffice
+ * imports tables faithfully: the cell holds its paragraphs together, keeps one
+ * border around all of them, and takes a background. So the screen and the PDF use
+ * divs, and Word uses a table carrying the same colours and the same content.
+ */
+const wordBox = (inner, { bg = "", border = "#D8DEE2", pad = "10pt 12pt" } = {}) => `
+<table cellspacing="0" cellpadding="0" style="width:100%;border-collapse:collapse;margin:0 0 10pt 0">
+  <tr><td style="border:0.75pt solid ${border};${bg ? `background-color:${bg};` : ""}padding:${pad}">
+    ${inner}
+  </td></tr>
+</table>`;
+
+function renderBlock(b, forWord) {
   switch (b.kind) {
     case "heading":
       return `<h2>${esc(b.text)}</h2>`;
@@ -112,35 +133,92 @@ function renderBlock(b) {
       return `<p>${esc(b.text)}</p>`;
 
     case "definition":
-      return `<div class="def"><span class="term">${esc(b.term)}</span><p class="body">${esc(b.text)}</p></div>`;
+      return forWord
+        ? wordBox(
+            `<p style="margin:0"><b style="color:#0F4C5C">${esc(b.term)}</b> — ${esc(b.text)}</p>`,
+            { bg: "#E8F1F3", border: "#C7DDE2" }
+          )
+        : `<div class="def"><span class="term">${esc(b.term)}</span><p class="body">${esc(b.text)}</p></div>`;
 
     case "list": {
       const tag = b.ordered ? "ol" : "ul";
       return `<${tag}>${(b.items || []).map((i) => `<li>${esc(i)}</li>`).join("")}</${tag}>`;
     }
 
-    case "example":
-      return `<div class="ex"><span class="tag">Nümunə</span><p>${esc(b.text)}</p>${
-        has(b.solution) ? `<p class="sol"><b>Həlli:</b> ${esc(b.solution)}</p>` : ""
-      }</div>`;
+    case "example": {
+      const inner = `<p style="margin:0 0 4pt 0;font-size:8.5pt;font-weight:bold;color:#0F4C5C">NÜMUNƏ</p>
+        <p style="margin:0">${esc(b.text)}</p>${
+        has(b.solution)
+          ? `<p style="margin:7pt 0 0 0;padding-top:5pt;border-top:0.5pt solid #D8DEE2;color:#4C5B68"><b>Həlli:</b> ${esc(b.solution)}</p>`
+          : ""
+      }`;
+      return forWord
+        ? wordBox(inner)
+        : `<div class="ex"><span class="tag">Nümunə</span><p>${esc(b.text)}</p>${
+            has(b.solution) ? `<p class="sol"><b>Həlli:</b> ${esc(b.solution)}</p>` : ""
+          }</div>`;
+    }
 
     /*
-     * A task's solution is NEVER printed. This is the sheet a student writes on;
-     * putting the answer under the question hands them the paper. The teacher has
-     * it on screen, which is where it belongs.
+     * A task's solution is NEVER printed, in either format. This is the sheet a
+     * student writes on; putting the answer under the question hands them the
+     * paper. The teacher has it on screen, which is where it belongs.
      */
     case "task":
-      return `<div class="task"><span class="tag">Tapşırıq</span><p>${esc(b.text)}</p></div>`;
+      return forWord
+        ? wordBox(
+            `<p style="margin:0 0 4pt 0;font-size:8.5pt;font-weight:bold;color:#8A5A00">TAPŞIRIQ</p>
+             <p style="margin:0">${esc(b.text)}</p>`,
+            { bg: "#FAFBFC", border: "#E6E9EC" }
+          )
+        : `<div class="task"><span class="tag">Tapşırıq</span><p>${esc(b.text)}</p></div>`;
 
-    case "note":
-      return `<div class="note ${esc(b.tone || "info")}"><p>${esc(b.text)}</p></div>`;
+    case "note": {
+      const tone = b.tone || "info";
+      const WORD_TONE = {
+        info: { bg: "#E8F1F3", border: "#C7DDE2", fg: "#0F4C5C" },
+        warning: { bg: "#FBF2DE", border: "#EBD9AE", fg: "#8A5A00" },
+        success: { bg: "#E7F1EB", border: "#C6DFD1", fg: "#2F6B4F" },
+      }[tone] || { bg: "#E8F1F3", border: "#C7DDE2", fg: "#0F4C5C" };
+      return forWord
+        ? wordBox(`<p style="margin:0;color:${WORD_TONE.fg}">${esc(b.text)}</p>`, {
+            bg: WORD_TONE.bg,
+            border: WORD_TONE.border,
+            pad: "9pt 12pt",
+          })
+        : `<div class="note ${esc(tone)}"><p>${esc(b.text)}</p></div>`;
+    }
 
-    case "table":
-      return `<table><thead><tr>${(b.columns || [])
-        .map((c) => `<th>${esc(c)}</th>`)
-        .join("")}</tr></thead><tbody>${(b.rows || [])
+    case "table": {
+      const head = (b.columns || []).map((c) => `<th>${esc(c)}</th>`).join("");
+      const body = (b.rows || [])
         .map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`)
-        .join("")}</tbody></table>`;
+        .join("");
+      // Word ignores the stylesheet's borders on an imported table often enough
+      // that they are declared on the element itself — a dotted grey grid was what
+      // it fell back to.
+      return forWord
+        ? `<table cellspacing="0" cellpadding="0" style="width:100%;border-collapse:collapse;margin:0 0 12pt 0">
+             <tr>${(b.columns || [])
+               .map(
+                 (c) =>
+                   `<td style="border-bottom:1pt solid #0F4C5C;padding:5pt 8pt 4pt 0;color:#0F4C5C;font-size:9pt;font-weight:bold">${esc(c)}</td>`
+               )
+               .join("")}</tr>
+             ${(b.rows || [])
+               .map(
+                 (r) =>
+                   `<tr>${r
+                     .map(
+                       (c) =>
+                         `<td style="border-bottom:0.5pt solid #E4E8EA;padding:5pt 8pt;font-size:10.5pt;vertical-align:top">${esc(c)}</td>`
+                     )
+                     .join("")}</tr>`
+               )
+               .join("")}
+           </table>`
+        : `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+    }
 
     default:
       return "";
@@ -155,7 +233,7 @@ function buildLessonDocHtml(rawDoc = {}, { forWord = false } = {}) {
     .filter((x) => has(x))
     .join(" · ");
 
-  const body = blocks.map(renderBlock).join("\n");
+  const body = blocks.map((b) => renderBlock(b, forWord)).join("\n");
 
   const head = forWord
     ? `<h1>${esc(title)}</h1>${meta ? `<p class="meta">${esc(meta)}</p>` : ""}`
