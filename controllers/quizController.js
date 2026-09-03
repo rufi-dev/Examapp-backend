@@ -5180,7 +5180,7 @@ const createVariantB = asyncHandler(async (req, res) => {
     geminiSchema: toGeminiSchema(variant.VARIANT_SCHEMA),
   });
 
-  const { B, varied } = variant.applyVariant(items, (out.doc && out.doc.questions) || []);
+  const { B, varied, skipped } = variant.applyVariant(items, (out.doc && out.doc.questions) || []);
   if (!varied) {
     throw httpError(422, "variant_not_differentiated", "B variantı hazırlana bilmədi — heç bir sual dəyişmədi.");
   }
@@ -5199,7 +5199,9 @@ const createVariantB = asyncHandler(async (req, res) => {
   res.status(201).json({
     exam: { _id: twin._id, name: twin.name },
     varied,
-    total: items.length,
+    // Per-reason, so the UI can say what actually happened instead of guessing.
+    skipped,
+    total: items.filter((q) => q.type !== "reading").length,
     provider: out.provider,
   });
 });

@@ -153,6 +153,66 @@ console.log("\n7. Labels never stack up:");
   );
 }
 
+console.log("\nB. A similar NEW question, not A with one value swapped:");
+{
+  /*
+   * The rule used to be "only the numerical data differs" — the teacher's own brief,
+   * written for a maths paper. On a German exam it produced five of fifteen questions
+   * byte-identical to A: the formal-address questions ("Polis məmuruna müraciət
+   * edərkən…") contain no digits, so nothing the rule permitted could change.
+   *
+   * Same type, same skill, same difficulty, NEW question is what the rule was for.
+   */
+  ok("it asks for a similar new question", /BƏNZƏR YENİ SUAL/.test(v.SYSTEM));
+  ok("copying a question verbatim is forbidden", /HEÇ BİR SUAL olduğu kimi qaytarılmamalıdır/.test(v.SYSTEM));
+  ok("a student must not be able to copy one from the other", /köçürə bilməməlidir/.test(v.SYSTEM));
+
+  ok("the type is held fixed", /sualın TİPİ/.test(v.SYSTEM));
+  ok("the tested skill is held fixed", /yoxlanılan BACARIQ/.test(v.SYSTEM));
+  ok("difficulty and Bloom are held fixed", /ÇƏTİNLİK səviyyəsi və Blum/.test(v.SYSTEM));
+
+  // A worked example for each shape of subject, because "similar" on its own is the
+  // kind of instruction a model satisfies by changing nothing.
+  ok("a language example is given", /Polis məmuruna müraciət/.test(v.SYSTEM));
+  ok("a maths example is given", /Kubun tərəfi 4 sm/.test(v.SYSTEM));
+  ok("the language example keeps the same rule", /Yoxlanılan qayda eynidir/.test(v.SYSTEM));
+
+  ok("the new question must stay on topic", /eyni fəsil, eyni mövzu/.test(v.SYSTEM));
+  ok("it must still be re-solved", /YENİDƏN HƏLL ET/.test(v.SYSTEM));
+}
+
+console.log("\nC. Why a question was left alone is reported per reason:");
+{
+  /*
+   * Three different things needing three different responses from the teacher, so
+   * one number covering all of them was worse than useless: it reported five
+   * unchanged language questions as an ANSWER-KEY problem, sending the teacher
+   * looking for a bug that was not there.
+   */
+  const items = [
+    { type: "Cm", text: "Bir", choices: [{ text: "a" }, { text: "b" }], correct: [0] },
+    { type: "Cm", text: "İki", choices: [{ text: "a" }, { text: "b" }], correct: [0] },
+    { type: "Cm", text: "Üç", choices: [{ text: "a" }, { text: "b" }], correct: [1] },
+    { type: "reading", text: "Mətn" },
+    { type: "Co", text: "Dörd", answer: "x" },
+  ];
+  const r = v.applyVariant(items, [
+    { index: 0, text: "Bir", choices: [], correct: [], openAnswer: "" },
+    { index: 2, text: "Üç dəyişdi", choices: ["c", "d"], correct: [], openAnswer: "" },
+    { index: 4, text: "Dörd dəyişdi", choices: [], correct: [], openAnswer: "y" },
+  ]);
+
+  ok("one question actually varied", r.varied === 1, r.varied);
+  ok("an identical answer is counted as identical", r.skipped.identical === 1, JSON.stringify(r.skipped));
+  ok("a missing index is counted as missing", r.skipped.missing === 1, JSON.stringify(r.skipped));
+  ok("new options with no key is counted separately", r.skipped.noKey === 1, JSON.stringify(r.skipped));
+  ok("the reading block is never counted as skipped", r.skipped.identical + r.skipped.missing === 2);
+  ok("the paper keeps its length", r.B.length === items.length);
+  ok("the key-less question kept A's options", r.B[2].choices[0].text === "a");
+  ok("the key-less question kept A's key", r.B[2].correct[0] === 1);
+  ok("the varied open question took the new answer", r.B[4].answer === "y");
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 assert.strictEqual(failed, 0, `${failed} exam-variant assertions failed`);
 process.exit(failed ? 1 : 0);

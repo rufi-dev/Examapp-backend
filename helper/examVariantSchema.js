@@ -1,8 +1,16 @@
 /*
  * The B variant of a finished paper.
  *
- * The brief is precise: A and B have the same structure, the same skills, the same
- * wording and difficulty, and differ ONLY in their numbers.
+ * A and B keep the same structure, the same skills, the same difficulty and the same
+ * marks. What changes is the QUESTION: B is a new, similar task, not A with one
+ * value swapped.
+ *
+ * The teacher's original brief said "differ only in the numerical data", and that
+ * was written for a maths paper. Applied literally to a language exam it produced a
+ * B variant where five of fifteen questions came back byte-identical to A — the
+ * formal-address questions contain no numbers, so there was nothing the rule
+ * permitted the model to change. Same skill, same difficulty, new question is what
+ * the rule was always FOR; "only the numbers" was one subject's way of saying it.
  *
  * Two approaches were possible. Asking for both variants inside the main generation
  * call would have meant threading a composed schema through six provider call sites
@@ -49,22 +57,40 @@ Sən Azərbaycan kurikulumu üzrə summativ qiymətləndirmə hazırlayan metodi
 Sənə HAZIR imtahanın (A variantı) sualları verilir. Sənin işin — HƏMİN imtahanın
 B VARİANTINI qaytarmaqdır.
 
-DƏYİŞMƏZ QALIR:
-- sualın tipi, süjeti, ifadə tərzi və cümlə quruluşu
-- yoxlanılan bacarıq və çətinlik səviyyəsi
-- sualların sayı və sırası
+ƏSAS PRİNSİP: hər sual üçün BƏNZƏR YENİ SUAL yaz. Sualı köçürüb bir sözü/rəqəmi
+dəyişmək kifayət deyil — eyni bacarığı yoxlayan, eyni çətinlikdə YENİ sual olmalıdır.
+Şagird A və B variantına baxıb birini digərindən köçürə bilməməlidir.
 
-YALNIZ DƏYİŞİR:
-- rəqəmlər, kəmiyyətlər, ölçülər, qiymətlər
+DƏYİŞMƏZ QALIR:
+- sualın TİPİ (qapalı/açıq, variantların sayı)
+- yoxlanılan BACARIQ və qrammatik/riyazi qayda
+- ÇƏTİNLİK səviyyəsi və Blum səviyyəsi
+- sualların sayı, sırası və balı
+
+YENİ OLUR:
+- sualın özü: konkret situasiya, nümunə, ad, kontekst, rəqəm və kəmiyyətlər
+- cavab variantları və düzgün cavab
+
+NÜMUNƏ (dil fənni):
+  A: "Polis məmuruna müraciət edərkən hansı sualı vermək düzgündür?"  (rəsmi müraciət)
+  B: "Vağzalda tanımadığın sərnişindən yol soruşarkən hansı sual düzgündür?"  (rəsmi müraciət)
+  Yoxlanılan qayda eynidir — sual isə yenidir.
+
+NÜMUNƏ (riyaziyyat):
+  A: "Kubun tərəfi 4 sm-dir. Səth sahəsini tapın."
+  B: "Kubun tərəfi 7 sm-dir. Səth sahəsini tapın."
+  Rəqəmi olan suallarda rəqəmi dəyişmək kifayətdir — süjeti saxla.
 
 MÜTLƏQ QAYDALAR:
 - Hər sual üçün "index" A variantındakı mövqe ilə eyni olmalıdır.
-- Rəqəmləri dəyişdikdən sonra sualı YENİDƏN HƏLL ET və düzgün cavabı ona görə yaz.
+- HEÇ BİR SUAL olduğu kimi qaytarılmamalıdır. Bütün suallar üçün cavab qaytar.
+- Yeni sualı YENİDƏN HƏLL ET və düzgün cavabı ona görə yaz.
   A variantının cavabını köçürmək ƏN CİDDİ SƏHVDİR — bütün açar yanlış olur.
-- Qapalı suallarda 4 variant saxlanılır, distraktorlar yeni rəqəmlərə uyğun olmalıdır.
-- Mətn blokları (oxu mətnləri) və rəqəmi olmayan suallar OLDUĞU KİMİ qaytarılır.
-- Rəqəmləri elə seç ki, cavab A variantındakından fərqli çıxsın.
-- Sualın mənasını pozma: məsələn kvadratın tərəfi mənfi ola bilməz.
+- Qapalı suallarda variantların sayı A ilə eyni qalır; distraktorlar yeni suala
+  uyğun və inandırıcı olmalıdır.
+- Mətn blokları (oxu mətnləri) OLDUĞU KİMİ qaytarılır.
+- Sual mövzudan kənara çıxmamalıdır: eyni fəsil, eyni mövzu, eyni lüğət səviyyəsi.
+- Sualın mənasını pozma: kvadratın tərəfi mənfi ola bilməz, situasiya real olmalıdır.
 `.trim();
 
 // The A paper, reduced to what the model needs to rewrite it. Answer keys are sent
@@ -106,11 +132,31 @@ function applyVariant(items, variants) {
       .map((v) => [v.index, v])
   );
   let varied = 0;
+  /*
+   * Why a question was left alone, counted separately, because the three reasons
+   * need different things from the teacher and blurring them misleads.
+   *
+   *   identical — the model returned the same text. Almost always "there was
+   *               nothing here to vary": the rule used to be "only the NUMBERS
+   *               change", and a grammar question has no numbers. Reporting that
+   *               as an answer-key problem sent the teacher looking for a bug
+   *               that was not there.
+   *   missing   — the model skipped the index entirely.
+   *   noKey     — new options with no key. The dangerous one, and rare.
+   */
+  const skipped = { identical: 0, missing: 0, noKey: 0 };
 
   const B = (items || []).map((q, i) => {
     const v = byIndex.get(i);
     const text = String(v?.text || "").trim();
-    if (!v || !text || text === String(q.text || "").trim()) return { ...q };
+    if (!v || !text) {
+      if (q.type !== "reading") skipped.missing += 1;
+      return { ...q };
+    }
+    if (text === String(q.text || "").trim()) {
+      if (q.type !== "reading") skipped.identical += 1;
+      return { ...q };
+    }
 
     const hadChoices = Array.isArray(q.choices) && q.choices.length > 0;
     const newChoices = Array.isArray(v.choices) && v.choices.length > 0;
@@ -124,7 +170,10 @@ function applyVariant(items, variants) {
      * failure: a B paper where one question matches A costs a little copying;
      * a B paper with a wrong key costs the grades.
      */
-    if (hadChoices && newChoices && !newKey) return { ...q };
+    if (hadChoices && newChoices && !newKey) {
+      skipped.noKey += 1;
+      return { ...q };
+    }
 
     const out = { ...q, text };
     if (newChoices) {
@@ -142,7 +191,7 @@ function applyVariant(items, variants) {
     return out;
   });
 
-  return { B, varied };
+  return { B, varied, skipped };
 }
 
 module.exports = { VARIANT_SCHEMA, VARIANT_ITEM, SYSTEM, buildVariantPrompt, applyVariant };
