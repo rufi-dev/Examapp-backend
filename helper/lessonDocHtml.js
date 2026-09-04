@@ -345,7 +345,20 @@ function buildLessonDocHtml(rawDoc = {}, { forWord = false } = {}) {
    * signing the output it was asked to produce is a watermark, and the preview is
    * the contract: what is on screen is what prints.
    */
-  const head = `<h1>${esc(title)}</h1>${meta ? `<p class="meta">${esc(meta)}</p>` : ""}`;
+  /*
+   * A document the model wrote is the WHOLE document.
+   *
+   * This printed our own title block above it — the stored title as an <h1> and
+   * an invented audience line under a rule. Asked for an exact duplicate of an
+   * attached timetable, the teacher got their timetable with a heading and a
+   * subtitle on top that appear nowhere in the file they attached. It is the same
+   * objection as the brandline below: chrome we add to a document that is meant
+   * to be theirs. The model writes the document's own heading now.
+   *
+   * Block documents keep the masthead: they were designed around it and carry no
+   * heading of their own unless one was authored as a block.
+   */
+  const head = has(doc.html) ? "" : `<h1>${esc(title)}</h1>${meta ? `<p class="meta">${esc(meta)}</p>` : ""}`;
 
   return `<!DOCTYPE html><html lang="az"><head><meta charset="utf-8">
 <title>${esc(title)}</title><style>${forWord ? cssDocx(a) : cssPdf(a)}</style></head><body>

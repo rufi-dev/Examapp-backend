@@ -1085,6 +1085,24 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("copy mode is scoped to a first draft", /if \(parts\.length && !hadBlocks\) \{/.test(ctl5));
   ok("and no block count is left deciding content exists", !/\(doc\.blocks \|\| \[\]\)\.length[^;]*\?|!\(doc\.blocks \|\| \[\]\)\.length/.test(ctl5));
 
+  /*
+   * "Create an exact duplicate" produced the attached timetable under a heading
+   * and an invented "Müəllimlər üçün" subtitle — neither of which is in the file.
+   * They were ours: the renderer printed the stored title and audience above
+   * every document. A document the model wrote is the whole document.
+   */
+  const dup = buildLessonDocHtml({ title: "Timetable", audience: "Müəllimlər üçün", html: "<h2>2026/2027</h2>" });
+  ok("nothing is printed above a document the model wrote", !dup.includes("<h1>Timetable</h1>") && !dup.includes("Müəllimlər üçün"));
+  ok("and the document itself is untouched", dup.includes("<h2>2026/2027</h2>"));
+  ok("a block document keeps the masthead it was designed with",
+    buildLessonDocHtml({ title: "Kəsrlər", blocks: [{ id: "1", kind: "text", text: "a" }] }).includes("<h1>Kəsrlər</h1>"));
+  ok("so the model is told the heading is its job", /SƏNƏDİN BAŞLIĞINI ÖZÜN YAZIRSAN/.test(S.BASE_RULES));
+
+  // A serif source reproduced in our sans is not a duplicate — but a font name is
+  // still a style value, and style values may never reach the network.
+  ok("a font can be named", sanitizeDocHtml('<p style="font-family:Times New Roman, serif">x</p>').includes("font-family"));
+  ok("but not fetched", !/url|evil/i.test(sanitizeDocHtml('<p style="font-family:url(http://evil)">x</p>')));
+
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));
   ok("blocks are cleared so there is one source of truth", /blocks: \[\],/.test(ctl5));

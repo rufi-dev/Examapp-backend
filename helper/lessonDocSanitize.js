@@ -66,6 +66,12 @@ const STYLES = {
     "vertical-align": [/^(top|middle|bottom|baseline)$/],
     "font-weight": [/^(normal|bold|[1-9]00)$/],
     "font-style": [/^(normal|italic)$/],
+    /*
+     * A serif source reproduced in sans is not a duplicate. Names, quotes, commas
+     * and the generic families only — no parenthesis can appear, so this cannot
+     * become a url() by any route.
+     */
+    "font-family": [/^[-\w\s'",]{1,80}$/],
     "font-size": SIZE,
     "line-height": [/^\d{0,2}(\.\d{1,3})?(px|pt|em|rem|%)?$/],
     "text-decoration": [/^(none|underline|line-through)$/],
