@@ -21,13 +21,22 @@ const docError = (status, userMessage, fallback = false) => {
   return e;
 };
 
-// The provider reports an exhausted account in prose inside a 400, with no
-// machine-readable marker, so the words are what there is to match.
-const OUT_OF_CREDIT = /credit balance is too low|purchase credits|insufficient[_ ]quota|billing hard limit|exceeded your current quota/i;
+/*
+ * The account cannot be used — as opposed to the service having a bad minute.
+ *
+ * Every provider says this in prose, in a status that is otherwise ordinary, with
+ * no machine-readable marker, so the words are what there is to match. The
+ * distinction is the whole point: "try again shortly" is right about a timeout
+ * and a false promise about a balance at zero or a deactivated key. A teacher
+ * told to wait will retry, wait, retry, and conclude the feature is broken; it is
+ * not broken, and the only person who can act is the owner.
+ */
+const OUT_OF_CREDIT =
+  /credit balance is too low|purchase credits|insufficient[_ ]quota|billing hard limit|exceeded your current quota|account_deactivated|has been deactivated|billing_not_active|API key not valid/i;
 
 const billingError = () => {
-  console.error("[AI BILLING] provider reports the account cannot be charged — Studio is down until it is topped up.");
-  return docError(402, "AI xidməti dayandırılıb — hesab balansı bitib. Administratorla əlaqə saxlayın.");
+  console.error("[AI BILLING] provider refuses this account — Studio is down on this model until it is fixed.");
+  return docError(402, "Bu AI modeli üçün hesab aktiv deyil — administratorla əlaqə saxlayın.");
 };
 
 /* ------------------------------------------------------------------ Claude -- */
@@ -75,7 +84,7 @@ function claudeAdapter({ client, model, tools, maxTokens, onText }) {
       } catch (e) {
         if (signal?.aborted) throw docError(499, "Ləğv edildi");
         console.error("AI document tools (claude) error:", e?.status, e?.message);
-        if (e?.status === 400 && OUT_OF_CREDIT.test(String(e?.message || ""))) throw billingError();
+        if (OUT_OF_CREDIT.test(String(e?.message || ""))) throw billingError();
         throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
       }
 
@@ -269,8 +278,22 @@ function geminiAdapter({ model, tools, maxTokens }) {
         throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
       }
       const data = await r.json().catch(() => null);
-      const content = data?.candidates?.[0]?.content;
+      const candidate = data?.candidates?.[0];
+      const content = candidate?.content;
       const parts = Array.isArray(content?.parts) ? content.parts : [];
+      /*
+       * A 200 with nothing in it is the shape a Gemini failure takes, and it is
+       * silent unless someone writes it down: a safety stop, a malformed call, or
+       * a thinking budget spent without producing an answer all arrive as an empty
+       * parts array with a 200. The reason is in the response and nowhere else.
+       */
+      if (!parts.length) {
+        console.error(
+          "[LESSON DOC] gemini returned no parts:",
+          candidate?.finishReason || "no finishReason",
+          JSON.stringify(data?.usageMetadata || {}).slice(0, 200)
+        );
+      }
 
       return {
         raw: content || { role: "model", parts: [] },

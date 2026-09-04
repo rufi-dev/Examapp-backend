@@ -47,6 +47,17 @@ async function runToolLoop(adapter, opts) {
   let unresolved = [];
   let calls = [];
   let said = "";
+  /*
+   * The last round that actually produced something.
+   *
+   * A round after the first is a REPLY to a finding or to a render, and "the
+   * draft is fine as it is" can be answered with silence — Gemini in particular
+   * returns a STOP with no parts, having spent its thinking budget agreeing with
+   * itself. Treating that as an empty turn threw away a document the model had
+   * already written and finished, and the teacher got "AI cavabı oxunmadı" over a
+   * material that existed. Silence after work means the work stands.
+   */
+  let lastWork = null;
 
   const history = adapter.start(opts);
 
@@ -61,6 +72,23 @@ async function runToolLoop(adapter, opts) {
     cost = adapter.addCost ? adapter.addCost(cost, turn) : cost;
     calls = turn.calls || [];
     said = turn.said || "";
+    if (calls.length) lastWork = { calls, said };
+    else if (lastWork) {
+      /*
+       * A round with no tool call, after a round that had one. The model is
+       * answering the render or the finding in words — "the design looks right,
+       * the material is ready" — rather than repeating a document it is happy
+       * with. Silence and agreement are the same thing here, and both were read
+       * as an empty turn, so a finished document was discarded and the teacher
+       * got "AI cavabı oxunmadı" over a material that existed.
+       *
+       * The last real work stands, and whatever it said last is kept as its word
+       * on the turn.
+       */
+      calls = lastWork.calls;
+      said = said || lastWork.said;
+      break;
+    }
 
     if (signal?.aborted) throw adapter.cancelled();
 

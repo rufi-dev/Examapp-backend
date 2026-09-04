@@ -1303,13 +1303,14 @@ console.log("\n25. The model writes the document; the schema stops being the cei
    * and the only person who can act on that is the owner.
    */
   ok("an exhausted account is not reported as a bad minute", /credit balance is too low/.test(ad2));
-  ok("and is not told to wait", /hesab balansı bitib/.test(ad2));
+  ok("and is not told to wait", /hesab aktiv deyil/.test(ad2));
   ok("the owner is shouted at in the log", /\[AI BILLING\]/.test(ad2));
   // A 400 that is not about credit still reads as an ordinary failure.
-  ok("the match stays narrow on Claude", /e\?\.status === 400 && OUT_OF_CREDIT\.test/.test(ad2));
+  // A deactivated key arrives as a 401, not only an exhausted balance as a 400.
+  ok("a deactivated account counts too", /account_deactivated|has been deactivated/.test(ad2));
   // And every provider says it its own way, so every provider is matched.
   ok("every provider's wording is covered",
-    ["insufficient", "quota", "billing hard limit"].every((w) => ad2.includes(w)));
+    ["insufficient", "quota", "billing hard limit", "deactivated"].every((w) => ad2.includes(w)));
   ok("all three check it", (ad2.match(/OUT_OF_CREDIT\.test|billingError\(\)/g) || []).length >= 5);
 
   /*
@@ -1380,6 +1381,24 @@ console.log("\n25. The model writes the document; the schema stops being the cei
     );
     ok("the tool schema is converted for gemini", !("additionalProperties" in gs) && gs.properties.html);
   }
+
+  /*
+   * A round after the first is a REPLY — to a finding, or to a render — and "the
+   * draft is fine as it is" can be answered with silence. Gemini in particular
+   * returns a STOP with no parts, having spent its thinking budget agreeing with
+   * itself. That was read as an empty turn, so a document the model had already
+   * written and finished was thrown away and the teacher got "AI cavabı oxunmadı"
+   * over a material that existed.
+   */
+  ok("silence after work keeps the work", /if \(calls\.length\) lastWork = \{ calls, said \};/.test(ai2));
+  ok("and only when there was work to keep", /else if \(lastWork\) \{/.test(ai2));
+  // Agreement in words is the same as silence here: the model answering the
+  // render with "it looks right" is not an empty turn either.
+  ok("agreeing in words also keeps the work", /said = said \|\| lastWork\.said;/.test(ai2));
+  // A 200 with nothing in it is how a Gemini failure arrives, and the reason is
+  // in the response and nowhere else.
+  ok("an empty gemini response is written down", /gemini returned no parts/.test(ad2));
+  ok("with the reason it gives", /finishReason/.test(ad2));
 
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));
