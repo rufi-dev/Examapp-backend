@@ -109,6 +109,17 @@ const fileSchema = new Schema(
     name: { type: String, default: "" },
     bytes: { type: Number, default: 0 },
     at: { type: Date, default: Date.now },
+    /*
+     * Set when the teacher attaches this file for a turn, cleared once that turn
+     * has it. It is what "attached" means now.
+     *
+     * The key is a content hash, so re-uploading the same page produces the same
+     * entry — and "is it already in the list?" therefore answered "yes" and the
+     * upload did nothing at all. The teacher watched their file go up and no card
+     * appear. Whether the BYTES are already on disk and whether the file is part
+     * of THIS turn are two different questions that were sharing one answer.
+     */
+    stagedAt: { type: Date, default: null },
   },
   { _id: false }
 );

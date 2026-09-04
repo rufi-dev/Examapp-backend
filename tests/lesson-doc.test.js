@@ -516,7 +516,18 @@ console.log("\n13. The transcript shows what the model was given:");
    * for it.
    */
   ok("both turns stamp the files onto the message", (ctl.match(/const sent = stagedFiles\(doc\);/g) || []).length === 2);
-  ok("and only the ones not already carried by an earlier message", /already\.has\(f\.key\)/.test(ctl));
+  /*
+   * Staging asked the transcript — "has this key been mentioned yet?" — and a key
+   * is a content hash, so re-uploading a page the document already held answered
+   * "yes, long ago" and the upload did nothing. The teacher's file went up and no
+   * card appeared, and the only way to reuse a page was to never have used it.
+   * The file carries its own staging now.
+   */
+  ok("staging is a property of the file", /\.filter\(\(f\) => f\.stagedAt\)/.test(ctl));
+  ok("not a gap in the transcript", !/already\.has\(f\.key\)/.test(ctl));
+  ok("attaching a file the document already holds stages it again", /svc\.stageFile\(doc\._id, doc\.owner, saved\.key\)/.test(ctl));
+  ok("a new attachment arrives staged", /push: \{ files: \{ \.\.\.saved, stagedAt: new Date\(\) \} \}/.test(ctl));
+  ok("and a turn takes them with it", (ctl.match(/svc\.clearStaged\(doc\._id, doc\.owner,/g) || []).length === 2);
   ok("names and keys only — never the bytes", /key: f\.key, name: f\.name, mime: f\.mime/.test(ctl));
   ok("a turn with no attachment stays clean", /\.\.\.\(sent\.length \? \{ files: sent \} : \{\}\)/.test(ctl));
 

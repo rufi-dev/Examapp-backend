@@ -198,11 +198,18 @@ function printOptions(input = {}) {
  * what is still staged, so the two can never disagree.
  */
 function stagedFiles(doc) {
-  const already = new Set(
-    (doc.messages || []).flatMap((m) => (m.files || []).map((f) => f.key))
-  );
+  /*
+   * Asked of the FILE, not of the transcript.
+   *
+   * This used to mean "not mentioned in any message yet", which quietly made
+   * attaching a one-way door: keys are content hashes, so re-uploading the same
+   * page produced the same key, the key was already stamped on an older message,
+   * and the file was treated as long since sent. The teacher watched their upload
+   * succeed and no card appear. Whether these bytes are already on disk and
+   * whether this file is part of THIS turn are different questions.
+   */
   return (doc.files || [])
-    .filter((f) => !already.has(f.key))
+    .filter((f) => f.stagedAt)
     .map((f) => ({ key: f.key, name: f.name, mime: f.mime }));
 }
 
@@ -329,6 +336,9 @@ const sendMessage = asyncHandler(async (req, res) => {
     at: new Date(),
     ...(sent.length ? { files: sent } : {}),
   });
+  // This turn is carrying them now, so they are no longer waiting to be carried.
+  // By key, so a file attached while this turn was starting stays for the next.
+  await svc.clearStaged(doc._id, doc.owner, sent.map((f) => f.key));
 
   const { runDocument } = require("../helper/aiDocument");
   const { toGeminiSchema } = require("../helper/curriculumSchema");
@@ -461,6 +471,9 @@ const streamMessage = asyncHandler(async (req, res) => {
     at: new Date(),
     ...(sent.length ? { files: sent } : {}),
   });
+  // This turn is carrying them now, so they are no longer waiting to be carried.
+  // By key, so a file attached while this turn was starting stays for the next.
+  await svc.clearStaged(doc._id, doc.owner, sent.map((f) => f.key));
   // The revision this turn answers; the commit at the end must still match it.
   const baseRevision = doc.revision || 0;
 
@@ -900,15 +913,26 @@ const addFile = asyncHandler(async (req, res) => {
   }
 
   const saved = await F.saveFile({ buffer: f.buffer, mime: f.mimetype, name: f.originalname });
-  // The same page attached twice is one entry, not two identical ones in the list.
-  if (files.some((x) => x.key === saved.key)) return res.status(201).json({ doc });
+  /*
+   * The same page attached twice is one entry, not two identical ones in the
+   * list — but it IS attached again. Re-uploading a file the document already
+   * holds used to return the document untouched, so the teacher's upload
+   * completed and nothing happened; the only way to reuse a page was to have
+   * never used it. One entry, freshly staged.
+   */
+  if (files.some((x) => x.key === saved.key)) {
+    const restaged = await svc.stageFile(doc._id, doc.owner, saved.key);
+    return res.status(201).json({ doc: restaged || doc });
+  }
   /*
    * An attachment is document content — it changes what every later turn is
    * grounded in — so it takes the same CAS as any other write. Attaching from two
    * tabs at once now conflicts loudly instead of one list silently replacing the
    * other.
    */
-  const withFile = await svc.commit(doc._id, doc.owner, {}, doc.revision || 0, { push: { files: saved } });
+  const withFile = await svc.commit(doc._id, doc.owner, {}, doc.revision || 0, {
+    push: { files: { ...saved, stagedAt: new Date() } },
+  });
   res.status(201).json({ doc: withFile });
 });
 

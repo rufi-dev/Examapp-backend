@@ -107,6 +107,36 @@ async function appendMessages(docId, ownerId, messages) {
 }
 
 /*
+ * Stage a file for the next turn, whether or not its bytes are already here.
+ *
+ * Re-attaching a page the document already holds must count as attaching it: the
+ * teacher is saying "use this one again", which is a thing they are allowed to
+ * mean. Positional update rather than a rewritten array, so two tabs attaching
+ * different files cannot overwrite each other.
+ */
+async function stageFile(docId, ownerId, key) {
+  return LessonDoc.findOneAndUpdate(
+    { _id: docId, owner: ownerId, "files.key": key },
+    { $set: { "files.$.stagedAt": new Date() } },
+    { new: true }
+  );
+}
+
+/*
+ * Hand the staged files over to the turn that is now carrying them. Keyed, so a
+ * file attached WHILE this turn was starting stays staged for the next one
+ * instead of being silently consumed by a turn that never saw it.
+ */
+async function clearStaged(docId, ownerId, keys = []) {
+  if (!keys.length) return null;
+  return LessonDoc.updateOne(
+    { _id: docId, owner: ownerId },
+    { $set: { "files.$[f].stagedAt": null } },
+    { arrayFilters: [{ "f.key": { $in: keys } }] }
+  );
+}
+
+/*
  * The document quota, counted atomically.
  *
  * `countDocuments()` then `create()` is a race with a window between the two: ten
@@ -148,4 +178,4 @@ async function releaseDocSlot(User, ownerId) {
   await User.updateOne({ _id: ownerId, lessonDocCount: { $gt: 0 } }, { $inc: { lessonDocCount: -1 } }).catch(() => {});
 }
 
-module.exports = { commit, appendMessages, requireRevision, reserveDocSlot, releaseDocSlot, CONFLICT };
+module.exports = { commit, appendMessages, stageFile, clearStaged, requireRevision, reserveDocSlot, releaseDocSlot, CONFLICT };
