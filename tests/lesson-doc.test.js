@@ -1183,6 +1183,31 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("a block document keeps the house table style",
     !/text-transform:none/.test(buildLessonDocHtml({ title: "T", blocks: [{ id: "1", kind: "text", text: "a" }] })));
 
+  /*
+   * Sending every attachment on every turn was wasteful and kept pushing "copy
+   * the file" at turns that were about the document, so it stopped. Right for
+   * edits, quietly disastrous for copies: asked on turn twelve to match the PDF
+   * exactly, the model no longer had the PDF — what it had were the teacher's
+   * screenshots OF OUR OWN PREVIEW, so it copied our rendering back to us and
+   * reported it as matching the source. The file was on the document the whole
+   * time. Now the model can ask for it.
+   */
+  const read = S.DOC_TOOLS.find((t) => t.name === "read_source");
+  ok("the model can fetch a source it was given earlier", Boolean(read));
+  ok("by name", Object.keys(read.input_schema.properties).join() === "name");
+  ok("and the prompt tells it which names exist",
+    S.sourceList({ files: [{ name: "4750.pdf" }] }).includes("4750.pdf"));
+  ok("saying plainly that they are not sent automatically",
+    /read_source ilə oxu/.test(S.sourceList({ files: [{ name: "a.pdf" }] })));
+  ok("a document with no files says nothing", S.sourceList({}) === "");
+  ok("the turn can serve one", /fetchSource: async \(name\) =>/.test(ctl5));
+  ok("from the document's own list only", /const all = doc\.files \|\| \[\];/.test(ctl5));
+  const ai = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocument.js"), "utf8");
+  // Served as the real file, not as text describing it — a description of a page
+  // is exactly what produced a copy of our preview instead of a copy of the PDF.
+  ok("and sends the file itself back", /extra\.push\(\.\.\.claudeContentParts\(\[found\.part\]\)\)/.test(ai));
+  ok("bounded, and not out of the budget for fixing a table", /reads < MAX_READS/.test(ai) && /attempt -= 1;/.test(ai));
+
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));
   ok("blocks are cleared so there is one source of truth", /blocks: \[\],/.test(ctl5));

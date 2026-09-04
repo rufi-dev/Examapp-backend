@@ -90,7 +90,7 @@ function docError(status, userMessage, fallback = false) {
  * Claude is unavailable, and a degraded turn that can still write the document is
  * better than a turn that cannot run at all.
  */
-async function documentWithTools({ prompt, parts = [], system, tools, signal, maxTokens = DOC_MAX_TOKENS, onText, validate }) {
+async function documentWithTools({ prompt, parts = [], system, tools, signal, maxTokens = DOC_MAX_TOKENS, onText, validate, fetchSource }) {
   const { claudeContentParts, computeCost } = require("../controllers/aiController");
   const client = anthropic();
   if (!client) throw docError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)", true);
@@ -113,6 +113,14 @@ async function documentWithTools({ prompt, parts = [], system, tools, signal, ma
    * will not satisfy it on the sixth, and the teacher is waiting.
    */
   const MAX_FIXES = 2;
+  /*
+   * Bounded separately from the fixes: fetching a source is legitimate work the
+   * model asked for, not a failed attempt, so it must not spend the budget for
+   * correcting a table — and it still cannot loop forever re-reading the same
+   * file.
+   */
+  const MAX_READS = 4;
+  let reads = 0;
   const history = [
     {
       role: "user",
@@ -178,6 +186,43 @@ async function documentWithTools({ prompt, parts = [], system, tools, signal, ma
             .map((b) => ({ block: b, why: validate(b.name, b.input || {}) }))
             .filter((f) => f.why)
         : [];
+
+    /*
+     * The model asking to see a source it was given earlier. Served as a real
+     * document part in the reply, not as text about the file: a copy has to be
+     * made from the page, and a description of a page is what produced a
+     * timetable copied out of our own preview instead of out of the PDF.
+     */
+    const wants =
+      typeof fetchSource === "function" && reads < MAX_READS
+        ? used.filter((b) => b.name === "read_source")
+        : [];
+
+    if (wants.length) {
+      const results = [];
+      const extra = [];
+      for (const b of wants) {
+        reads += 1;
+        // eslint-disable-next-line no-await-in-loop
+        const found = await fetchSource(String(b.input?.name || ""));
+        results.push({
+          type: "tool_result",
+          tool_use_id: b.id,
+          ...(found ? {} : { is_error: true }),
+          content: found
+            ? `"${found.name}" aşağıda göndərildi.`
+            : `"${b.input?.name}" tapılmadı. Mövcud faylların adlarını promptdakı siyahıdan götür.`,
+        });
+        if (found) extra.push(...claudeContentParts([found.part]));
+      }
+      history.push({ role: "assistant", content: message.content });
+      // The tool_result blocks lead; the file itself follows in the same turn.
+      history.push({ role: "user", content: [...results, ...extra] });
+      // A fetch is not a failed attempt, so it does not consume a fix.
+      attempt -= 1;
+      // eslint-disable-next-line no-continue
+      continue;
+    }
 
     if (!faults.length || attempt >= MAX_FIXES) {
       /*

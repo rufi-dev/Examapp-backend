@@ -129,8 +129,38 @@ const DOC_TOOLS = [
       required: ["question"],
     },
   },
-];
-const DOC_SCHEMA = {
+  {
+    /*
+     * The model can fetch a source it was given earlier.
+     *
+     * Attachments used to ride along on every single turn, which was wasteful and
+     * kept pushing "copy the file" instructions at turns that were about the
+     * document — so they stopped, and only what the teacher attaches now is sent.
+     * That was right for edits and quietly disastrous for copies: asked on turn
+     * twelve to match the PDF exactly, the model no longer had the PDF. What it
+     * did have were the teacher's screenshots of our own preview, so it copied our
+     * rendering back to us, blue headers and all, and reported the result as
+     * matching the source.
+     *
+     * The file has been on the document the whole time. This is the model asking
+     * for it — pull, not push: nothing is resent unless the work needs it, and
+     * nothing needed is out of reach.
+     */
+    name: "read_source",
+    description:
+      "Sənədə əvvəllər əlavə edilmiş faylı OXU. Faylların adları promptda sadalanıb. " +
+      "Fayl sənə hər növbədə göndərilmir — mənbəyə baxmaq lazımdırsa, bu aləti çağır. " +
+      "Xüsusilə köçürmə işində: yaddaşdan və ya ekran şəklindən deyil, FAYLIN ÖZÜNDƏN köçür.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        name: { type: "string", description: "Faylın adı — promptdakı siyahıdan olduğu kimi." },
+      },
+      required: ["name"],
+    },
+  },
+];const DOC_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
@@ -353,6 +383,7 @@ function buildCreatePrompt({ doc = {}, instructions = "" } = {}) {
     system: BASE_RULES,
     prompt: [
       describe(doc),
+      sourceList(doc),
       // A first draft can still be the second thing asked for — the teacher may
       // have described what they want across two messages.
       historyOf(doc),
@@ -409,6 +440,19 @@ function historyOf(doc = {}) {
   return `ƏVVƏLKİ SÖHBƏT (bu sənəd üzrə):\n${lines.join("\n")}`;
 }
 
+/*
+ * The sources this document holds, by name.
+ *
+ * Named rather than sent: the bytes travel only on the turn they are attached, so
+ * this is how a file the teacher added ten turns ago stays reachable — the model
+ * reads the list, and calls read_source for the one it needs.
+ */
+function sourceList(doc = {}) {
+  const files = (doc.files || []).map((f) => f.name).filter(Boolean);
+  if (!files.length) return "";
+  return `SƏNƏDƏ ƏLAVƏ EDİLMİŞ FAYLLAR: ${files.join(", ")}\n(Bunlar sənə avtomatik göndərilmir — lazım olanı read_source ilə oxu.)`;
+}
+
 function buildEditPrompt({ doc = {}, instructions = "" } = {}) {
   /*
    * The document itself, as the model wrote it.
@@ -425,6 +469,7 @@ function buildEditPrompt({ doc = {}, instructions = "" } = {}) {
       system: [BASE_RULES, EDIT_RULES].join("\n\n"),
       prompt: [
         describe(doc),
+        sourceList(doc),
         historyOf(doc),
         "",
         "HAZIRKI MATERİAL (HTML) — DƏYİŞDİRİLƏCƏK SƏNƏD BUDUR:",
@@ -895,6 +940,7 @@ module.exports = {
   buildEditPrompt,
   countParts,
   historyOf,
+  sourceList,
   normalizeDoc,
   summarize,
   newId,

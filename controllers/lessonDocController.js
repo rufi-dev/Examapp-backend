@@ -700,6 +700,28 @@ ${S.SOURCE_RULES}`;
        * the source is still in front of it.
        */
       validate: (name, input) => (name === "write_material" ? checkTables(input.html || "") : ""),
+      /*
+       * Serve a source the model asks for. Every file the document holds is
+       * reachable this way, not just the ones attached on this turn — which is the
+       * whole point: the bytes travel on request instead of on every turn, and a
+       * PDF attached ten turns ago is still the thing a copy gets made from.
+       *
+       * Matched on the name the teacher's file actually has, loosely enough to
+       * survive the model retyping it, and never on anything but this document's
+       * own list.
+       */
+      fetchSource: async (name) => {
+        const want = String(name || "").trim().toLowerCase();
+        if (!want) return null;
+        const all = doc.files || [];
+        const hit =
+          all.find((f) => String(f.name || "").toLowerCase() === want) ||
+          all.find((f) => String(f.name || "").toLowerCase().includes(want)) ||
+          all.find((f) => want.includes(String(f.name || "").toLowerCase()));
+        if (!hit) return null;
+        const { parts: got } = await require("../helper/lessonDocFiles").toParts([hit]);
+        return got.length ? { name: hit.name, part: got[0] } : null;
+      },
     });
 
     const wrote = out.calls.find((c) => c.name === "write_material");
