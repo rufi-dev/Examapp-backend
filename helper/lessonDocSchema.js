@@ -45,6 +45,40 @@ const BLOCK = {
  * signature of a function: the model picks the one that matches the request, and
  * the one that would produce nonsense simply does not exist for that job.
  */
+/*
+ * The models a turn may run on.
+ *
+ * An allow-list, not a free-text field: the id goes straight to the provider, and
+ * a document that stores whatever the client typed is a document that can be made
+ * to bill against a model nobody chose. Both entries are models this codebase
+ * already runs in production, and both support the tool use the whole studio path
+ * is built on — a model without it could not write a document here at all.
+ *
+ * Anthropic only, and deliberately so. The turn is a conversation of tool calls,
+ * tool results, images handed back for the model to look at, and a source fetched
+ * mid-turn; an OpenAI or Gemini entry could only be honoured by falling back to
+ * the old block path, which would quietly hand the teacher a worse document under
+ * the name of a better model.
+ */
+const DOC_MODELS = [
+  {
+    id: "claude-opus-4-8",
+    label: "Claude Opus 4.8",
+    note: "Ən güclü — mürəkkəb sənədlər, dəqiq köçürmə",
+  },
+  {
+    id: "claude-haiku-4-5-20251001",
+    label: "Claude Haiku 4.5",
+    note: "Sürətli və ucuz — sadə dəyişikliklər",
+  },
+];
+
+const DEFAULT_DOC_MODEL = DOC_MODELS[0].id;
+
+// Anything unrecognised becomes the default rather than an error: a stale tab
+// naming a model that has since been retired should still be able to work.
+const pickModel = (id) => (DOC_MODELS.some((m) => m.id === id) ? id : DEFAULT_DOC_MODEL);
+
 const DOC_TOOLS = [
   {
     name: "write_material",
@@ -945,6 +979,9 @@ function makeBlockStreamer() {
 module.exports = {
   DOC_SCHEMA,
   DOC_TOOLS,
+  DOC_MODELS,
+  DEFAULT_DOC_MODEL,
+  pickModel,
   SOURCE_RULES,
   PLAN_SCHEMA,
   PLAN_RULES,

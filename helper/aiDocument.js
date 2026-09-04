@@ -98,7 +98,7 @@ const isOutOfCredit = (e) =>
  * Claude is unavailable, and a degraded turn that can still write the document is
  * better than a turn that cannot run at all.
  */
-async function documentWithTools({ prompt, parts = [], system, tools, signal, maxTokens = DOC_MAX_TOKENS, onText, validate, fetchSource, look, gridOf }) {
+async function documentWithTools({ prompt, parts = [], system, tools, signal, maxTokens = DOC_MAX_TOKENS, onText, validate, fetchSource, look, gridOf, model }) {
   const { claudeContentParts, computeCost } = require("../controllers/aiController");
   const client = anthropic();
   if (!client) throw docError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)", true);
@@ -150,7 +150,9 @@ async function documentWithTools({ prompt, parts = [], system, tools, signal, ma
     try {
       const run = client.messages.stream(
         {
-          model: "claude-opus-4-8",
+          // Chosen by the teacher, already checked against the catalogue by the
+          // caller; the fallback keeps this function usable on its own.
+          model: model || "claude-opus-4-8",
           max_tokens: maxTokens,
           system: [{ type: "text", text: system }],
           output_config: { effort: "high" },

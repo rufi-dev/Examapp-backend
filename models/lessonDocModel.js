@@ -189,6 +189,14 @@ const lessonDocSchema = new Schema(
      */
     settings: {
       pageNumbers: { type: Boolean, default: true },
+      /*
+       * Which model runs this document's turns. Stored per document because the
+       * choice belongs to the work: a teacher copying a form exactly wants the
+       * strongest model, and the same teacher fixing a typo an hour later does
+       * not want to pay for it. Validated against the catalogue on the way in —
+       * this string is sent to the provider.
+       */
+      model: { type: String, default: "" },
       // The document's accent, as a NAMED choice: each one carries a matching
       // tint that keeps text on it readable, which a free-form hex does not.
       accent: {

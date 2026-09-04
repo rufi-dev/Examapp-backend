@@ -1299,6 +1299,22 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   // A 400 that is not about credit still reads as an ordinary failure.
   ok("the match stays narrow", /e\?\.status === 400 &&/.test(ai2));
 
+  /*
+   * The model id is sent straight to the provider, so it is an allow-list and not
+   * a free-text field — a document that stores whatever a client typed is a
+   * document that can be made to bill against a model nobody chose.
+   */
+  ok("the catalogue is a fixed list", S.DOC_MODELS.length >= 2 && S.DOC_MODELS.every((m) => m.id && m.label));
+  ok("junk cannot reach the provider", S.pickModel("gpt-4o; rm -rf") === S.DEFAULT_DOC_MODEL);
+  ok("an empty choice is the default", S.pickModel("") === S.DEFAULT_DOC_MODEL && S.pickModel(undefined) === S.DEFAULT_DOC_MODEL);
+  ok("a listed model passes through", S.pickModel(S.DOC_MODELS[1].id) === S.DOC_MODELS[1].id);
+  // Every entry must support the tool use the whole studio path is built on; a
+  // model without it could not write a document here at all.
+  ok("every entry is one this codebase runs", S.DOC_MODELS.every((m) => /^claude-/.test(m.id)));
+  ok("the turn validates what it was sent", /S\.pickModel\(String\(\(req\.body && req\.body\.model\)/.test(ctl5));
+  ok("and remembers it on the document", /"settings\.model": model/.test(ctl5));
+  ok("the request carries it", /model: model \|\| "claude-opus-4-8"/.test(ai2));
+
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));
   ok("blocks are cleared so there is one source of truth", /blocks: \[\],/.test(ctl5));

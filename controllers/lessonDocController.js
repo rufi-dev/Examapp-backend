@@ -477,6 +477,18 @@ const streamMessage = asyncHandler(async (req, res) => {
   // This turn is carrying them now, so they are no longer waiting to be carried.
   // By key, so a file attached while this turn was starting stays for the next.
   await svc.clearStaged(doc._id, doc.owner, sent.map((f) => f.key));
+  /*
+   * Which model this turn runs on. Sent with the turn rather than read off the
+   * document, so a teacher who changes it in the composer gets the change on the
+   * very next message instead of on the one after; validated against the
+   * catalogue, because this string is handed to the provider. Remembered so the
+   * choice sticks without being resent by every client.
+   */
+  const model = S.pickModel(String((req.body && req.body.model) || doc.settings?.model || ""));
+  if (model !== doc.settings?.model) {
+    await LessonDoc.updateOne({ _id: doc._id, owner: doc.owner }, { $set: { "settings.model": model } });
+  }
+
   // The revision this turn answers; the commit at the end must still match it.
   const baseRevision = doc.revision || 0;
 
@@ -708,6 +720,7 @@ ${S.SOURCE_RULES}`;
       prompt,
       parts,
       tools: S.DOC_TOOLS,
+      model,
       signal: ac.signal,
       onText,
       /*
