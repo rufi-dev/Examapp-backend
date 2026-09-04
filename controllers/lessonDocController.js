@@ -73,6 +73,9 @@ const PUBLIC_FAILURE = {
   operation_cancelled: "Dayandırıldı.",
   source_unreadable: "Əlavə edilmiş fayl oxunmadı.",
   generation_failed: "Material hazırlanmadı — bir az sonra yenidən cəhd edin.",
+  // Not a bad minute: waiting will not fix an unpaid account, and saying it will
+  // sends a teacher into a retry loop against something only the owner can act on.
+  service_suspended: "AI xidməti dayandırılıb — administratorla əlaqə saxlayın.",
 };
 
 /*

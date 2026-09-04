@@ -1286,6 +1286,19 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("and it is sent with the render", /gridOf: \(html\) => gridMap\(html \|\| ""\)/.test(ctl5));
   ok("warning that a wide-looking cell need not be wide", /geniş görünən xana geniş olmaya bilər/.test(ai2));
 
+  /*
+   * "Try again a bit later" is right about a provider having a bad minute and a
+   * false promise about a credit balance at zero. The teacher retries, waits,
+   * retries, and concludes the feature is broken — it is not broken, it is unpaid,
+   * and the only person who can act on that is the owner.
+   */
+  ok("an exhausted account is not reported as a bad minute",
+    /credit balance is too low\|purchase credits/.test(ai2));
+  ok("and is not told to wait", /hesab balansı bitib/.test(ai2) && !/isOutOfCredit[\s\S]{0,400}bir az sonra/.test(ai2));
+  ok("the owner is shouted at in the log", /\[AI BILLING\]/.test(ai2));
+  // A 400 that is not about credit still reads as an ordinary failure.
+  ok("the match stays narrow", /e\?\.status === 400 &&/.test(ai2));
+
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));
   ok("blocks are cleared so there is one source of truth", /blocks: \[\],/.test(ctl5));

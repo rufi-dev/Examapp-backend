@@ -62,6 +62,14 @@ function docError(status, userMessage, fallback = false) {
 }
 
 /*
+ * The provider says this in prose, in a 400, with no machine-readable marker —
+ * so matching the words is the only thing available. Kept narrow: a 400 that is
+ * not about credit still reads as a normal failure.
+ */
+const isOutOfCredit = (e) =>
+  e?.status === 400 && /credit balance is too low|purchase credits/i.test(String(e?.message || ""));
+
+/*
  * The agentic path: the model ACTS through tools instead of describing an action.
  *
  * WHY THIS EXISTS, and why the previous design kept failing the same way.
@@ -171,6 +179,20 @@ async function documentWithTools({ prompt, parts = [], system, tools, signal, ma
     } catch (e) {
       if (signal?.aborted) throw docError(499, "Ləğv edildi");
       console.error("AI document tools (claude) error:", e?.status, e?.message);
+      /*
+       * An exhausted account is not a bad minute.
+       *
+       * "Try again a bit later" is the right thing to say about a provider having
+       * a bad minute and a false promise about a credit balance at zero: waiting
+       * changes nothing, so the teacher retries, waits, retries, and concludes the
+       * feature is broken. It is not broken — it is unpaid, and the only person
+       * who can act on that is the account owner. So say so, and shout it in the
+       * log where the owner will actually find it.
+       */
+      if (isOutOfCredit(e)) {
+        console.error("[AI BILLING] Anthropic credit balance exhausted — Studio is down until it is topped up.");
+        throw docError(402, "AI xidməti dayandırılıb — hesab balansı bitib. Administratorla əlaqə saxlayın.");
+      }
       throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
     }
 
