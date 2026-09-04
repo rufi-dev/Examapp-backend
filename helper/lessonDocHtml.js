@@ -326,7 +326,16 @@ function buildLessonDocHtml(rawDoc = {}, { forWord = false } = {}) {
   // set_print_options tool. Both stylesheets and the Word markup take it, so the
   // colour a teacher asked for is the colour that prints.
   const a = accentOf(doc);
-  const body = blocks.map((b) => renderBlock(b, forWord, a)).join("\n");
+  /*
+   * The model's own document when there is one, the old block walk otherwise.
+   *
+   * Documents written before the HTML tool still hold blocks and must keep
+   * rendering — a teacher does not lose a material because the representation
+   * changed underneath it. New ones are the model's markup, sanitised on the way
+   * in, and the SAME string reaches the screen, the PDF and Word, which is what
+   * makes the preview the file rather than an approximation of it.
+   */
+  const body = has(doc.html) ? doc.html : blocks.map((b) => renderBlock(b, forWord, a)).join("\n");
 
   /*
    * No brandline. The PDF used to open with "EXAMOPIA" and "DƏRS MATERİALI"

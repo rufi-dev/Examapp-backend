@@ -177,7 +177,14 @@ console.log("\n8. The renderer must hand Express a Buffer:");
   // The renderer is shared with the MSO analytic table, so the label is a
   // parameter — but a footer of OUR making must still be what displaces the
   // browser's date/title/URL stamp.
-  ok("our own footer replaces the browser's", /footerTemplate:\s*footerFor\(footerLabel\)/.test(src));
+  /*
+   * A lesson material can now turn page numbers off, so the footer is
+   * conditional — but BOTH branches must be ours. Falling back to Chromium's
+   * default would put the date, the title and the file URL back on every sheet,
+   * which is the whole reason this renderer exists.
+   */
+  ok("our own footer replaces the browser's", /footerTemplate:\s*pageNumbers \? footerFor\(footerLabel\) : "<div><\/div>"/.test(src));
+  ok("and header/footer rendering is never handed back", !/displayHeaderFooter:\s*false/.test(src));
   ok("the lesson plan's own label is still the default", /footerLabel = "dərs planı"/.test(src));
   ok("the header template is emptied", /headerTemplate:\s*"<div><\/div>"/.test(src));
   ok("fonts are awaited before rendering", /document\.fonts\.ready/.test(src));

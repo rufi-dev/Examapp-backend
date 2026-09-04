@@ -964,6 +964,93 @@ console.log("\n24. The export is the preview, not a branded copy of it:");
   ok("a material's footer can carry no product name", /label \? `<span>Examopia · \$\{label\}<\/span>` : \"\"/.test(pdfSrc));
 }
 
+
+console.log("\n25. The model writes the document; the schema stops being the ceiling:");
+{
+  /*
+   * The document was nine block kinds, and everything a teacher asked for had to
+   * be expressible in those nine or it could not be built. A blank lesson-plan
+   * form — merged cells, a Procedure grid, empty fields to write in — is not
+   * expressible in them, so asking for one back produced a flat list of field
+   * names, and every fix was another negotiation with the schema.
+   *
+   * The model now writes the document as HTML and this sanitises it. The gain is
+   * not only fidelity: the SAME string renders on screen, into the PDF and into
+   * Word, so the preview stops being a second rendering that can disagree with
+   * the file.
+   */
+  const { sanitizeDocHtml } = require("../helper/lessonDocSanitize");
+
+  // The form that could not be built before.
+  const form =
+    '<table><tr><th colspan="3">Lesson Plan</th></tr>' +
+    '<tr><td style="width:33%;border:1pt solid #333">Teacher:</td><td></td><td></td></tr>' +
+    "<tr><td colspan=\"3\">Context:</td></tr></table>";
+  const clean = sanitizeDocHtml(form);
+  ok("a table survives", clean.includes("<table>"));
+  ok("merged cells survive", clean.includes('colspan="3"'));
+  ok("column widths survive", clean.includes("width:33%"));
+  ok("cell borders survive", clean.includes("border:1pt solid"));
+  ok("an empty field cell is kept", /<td><\/td>/.test(clean));
+
+  /*
+   * IT IS UNTRUSTED MARKUP: it reaches the page through dangerouslySetInnerHTML
+   * and Chromium through a renderer with network access, so what this allows IS
+   * the security boundary.
+   */
+  const attacks = {
+    script: "<p>ok</p><script>alert(1)</script>",
+    handler: '<p onclick="alert(1)">x</p>',
+    iframe: '<iframe src="http://evil"></iframe>',
+    link: '<a href="http://evil">x</a>',
+    image: '<img src="http://evil/track.png">',
+    styleUrl: '<p style="background-image:url(http://evil)">x</p>',
+    expression: '<p style="width:expression(alert(1))">x</p>',
+    importCss: '<style>@import url(http://evil)</style><p>x</p>',
+    object: '<object data="http://evil"></object>',
+    form: '<form action="http://evil"><input name="p"></form>',
+    svgScript: '<svg viewBox="0 0 1 1"><script>alert(1)</script><circle r="1"/></svg>',
+    svgHandler: '<svg viewBox="0 0 1 1"><circle r="1" onload="alert(1)"/></svg>',
+    svgExternal: '<svg viewBox="0 0 1 1"><use href="https://evil/x#a"/></svg>',
+  };
+  for (const [name, html] of Object.entries(attacks)) {
+    const out = sanitizeDocHtml(html);
+    ok(`${name} cannot survive`, !/evil|alert|expression|@import|<script|<iframe|<object|<form|<input|onclick|onload|href=|src=/i.test(out), out.slice(0, 60));
+  }
+
+  // A drawing must still draw: the SVG rules own SVG, and the HTML pass must not
+  // strip the shapes on its way past.
+  const fig = sanitizeDocHtml('<figure><svg viewBox="0 0 10 10"><circle r="4" fill="#445CCA"/></svg><figcaption>Şəkil</figcaption></figure>');
+  ok("a figure keeps its drawing", fig.includes("<circle") && fig.includes("viewBox"));
+  ok("and its caption", fig.includes("Şəkil"));
+
+  ok("empty input is refused", sanitizeDocHtml("") === "" && sanitizeDocHtml(null) === "");
+  // A handout, not a book: past this something upstream has gone wrong.
+  ok("an absurdly large document is refused", sanitizeDocHtml("<p>x</p>".repeat(80000)) === "");
+
+  // The renderers take the model's html, and old documents keep working.
+  const doc = { title: "T", html: "<h2>Bölmə</h2><table><tr><td>a</td></tr></table>" };
+  const pdf = buildLessonDocHtml(doc);
+  const word = buildLessonDocHtml(doc, { forWord: true });
+  ok("the PDF is built from the model's html", pdf.includes("<h2>Bölmə</h2>"));
+  ok("and so is Word — the same string", word.includes("<h2>Bölmə</h2>"));
+  ok("a document written before this still renders from blocks",
+    buildLessonDocHtml({ title: "x", blocks: [{ id: "1", kind: "heading", text: "H" }] }).includes("<h2>H</h2>"));
+
+  const ctl5 = require("fs").readFileSync(require("path").join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  // Sanitised BEFORE the write, so nothing unsafe is ever at rest and no reader
+  // has to re-check what the database holds.
+  ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
+  ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));
+  ok("blocks are cleared so there is one source of truth", /blocks: \[\],/.test(ctl5));
+
+  const tool = S.DOC_TOOLS.find((t) => t.name === "write_material");
+  ok("the write tool takes html", Boolean(tool.input_schema.properties.html));
+  ok("and no longer takes blocks", !tool.input_schema.properties.blocks);
+  ok("the brief tells the model it writes a document", S.BASE_RULES.includes("SƏNƏDİ HTML KİMİ YAZIRSAN"));
+  ok("and gives it the house styles to use", S.BASE_RULES.includes('class="def"'));
+}
+
 Promise.all(pending).then(() => {
   console.log(`\n${passed} passed, ${failed} failed`);
   assert.strictEqual(failed, 0, `${failed} lesson-doc assertions failed`);

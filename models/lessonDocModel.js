@@ -125,6 +125,20 @@ const lessonDocSchema = new Schema(
     // any other single instruction.
     audience: { type: String, default: "" },
 
+    /*
+     * The document as the model wrote it, sanitised.
+     *
+     * Blocks below are the older representation and are kept for documents made
+     * before this: nine kinds that everything had to be expressed in, which is why
+     * a lesson-plan form with merged cells and a Procedure grid came back as a flat
+     * list of field names. HTML is what a document actually is, and the same string
+     * renders on screen, into the PDF and into Word — so the preview is the file
+     * rather than an approximation of it.
+     *
+     * NEVER stored unsanitised: helper/lessonDocSanitize owns what may be in here.
+     */
+    html: { type: String, default: "" },
+
     blocks: { type: [blockSchema], default: undefined },
     messages: { type: [messageSchema], default: undefined },
     files: { type: [fileSchema], default: undefined },

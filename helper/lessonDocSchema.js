@@ -49,7 +49,7 @@ const DOC_TOOLS = [
   {
     name: "write_material",
     description:
-      "Materialın MƏZMUNUNU yaz və ya dəyiş: bölmələr, izahlar, nümunələr, tapşırıqlar, cədvəllər, şəkillər. " +
+      "Materialın MƏZMUNUNU yaz və ya dəyiş. Sənədi HTML kimi yazırsan — quruluşu sən qurursan. " +
       "Məzmun dəyişmirsə bu aləti ÇAĞIRMA.",
     input_schema: {
       type: "object",
@@ -57,9 +57,17 @@ const DOC_TOOLS = [
       properties: {
         title: { type: "string", description: "Materialın qısa adı." },
         reply: { type: "string", description: "Müəllimə 1–2 cümlə: nə etdin və niyə." },
-        blocks: { type: "array", items: BLOCK, description: "Materialın BÜTÜN blokları, sıra ilə." },
+        html: {
+          type: "string",
+          description:
+            "Sənədin TAM məzmunu HTML kimi. İcazə verilən teqlər: h1-h4, p, ul/ol/li, " +
+            "table/thead/tbody/tr/th/td (colspan və rowspan işləyir), strong, em, u, " +
+            "blockquote, figure/figcaption, section, div, span, hr, br, svg. " +
+            "style atributu ilə ölçü, rəng, kənar xətt və hizalama verə bilərsən. " +
+            "script, iframe, img, a, href, src QADAĞANDIR — sənəd internetə çıxmır.",
+        },
       },
-      required: ["title", "reply", "blocks"],
+      required: ["title", "reply", "html"],
     },
   },
   {
@@ -112,7 +120,24 @@ Sən Azərbaycan məktəbləri üçün DƏRS MATERİALI hazırlayan metodistsən
 
 DİL: hər şey Azərbaycan dilində, aydın və sadə. Şagirdin yaşına uyğun yaz.
 
-BLOK TİPLƏRİ və nə vaxt istifadə edilir:
+SƏNƏDİ HTML KİMİ YAZIRSAN. Quruluşu sən qurursan — bloklar siyahısı deyil.
+Formalar, mürəkkəb cədvəllər, birləşdirilmiş xanalar (colspan/rowspan), sütun
+enləri — hamısı mümkündür. Ekranda gördüyün, PDF-də və Word-də eyni olacaq:
+sənədin HTML-i hər üç yerdə eynidir.
+
+İSTİFADƏ EDƏ BİLDİYİN TEQLƏR: h1–h4, p, ul/ol/li, table/thead/tbody/tr/th/td
+(colspan, rowspan), strong, em, u, blockquote, figure/figcaption, section, div,
+span, hr, br, svg. style atributu ilə ölçü, rəng, kənar xətt, hizalama ver.
+QADAĞAN: script, iframe, img, a, href, src — sənəd internetə çıxmır, şəkil
+lazımdırsa svg çək.
+
+ÜSLUB SİNİFLƏRİ (hazır dizayn — istifadə et):
+- <div class="def"><span class="term">Termin</span><p>izah</p></div> — anlayış
+- <div class="ex"><span class="tag">NÜMUNƏ</span><p>şərt</p><p class="sol">həll</p></div>
+- <div class="task"><span class="tag">TAPŞIRIQ</span><p>şərt</p></div>
+- <div class="note info|warning|success"><p>qeyd</p></div>
+
+KÖHNƏ BLOK TİPLƏRİ (yalnız arayış üçün — indi HTML yazırsan):
 - heading — bölmə başlığı. Materialı 3–6 bölməyə ayır.
 - text — izah. Bir blokda BİR fikir; uzun abzas yazma.
 - definition — anlayış: "term" sahəsində termin, "text" sahəsində izahı.

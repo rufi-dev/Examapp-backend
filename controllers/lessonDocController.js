@@ -6,6 +6,7 @@ const { buildLessonDocHtml } = require("../helper/lessonDocHtml");
 // Every write to a document goes through here. No path in this file may call
 // doc.save() — see the header of services/lessonDocService.js for why.
 const svc = require("../services/lessonDocService");
+const { sanitizeDocHtml } = require("../helper/lessonDocSanitize");
 
 /*
  * Lesson materials, written through a conversation.
@@ -148,6 +149,22 @@ async function commitTurn(doc, baseRevision, { next, out, hadBlocks, sum, reply,
     // after `doc` was read, so writing the array back would delete it.
     { push: { messages: message } }
   );
+}
+
+/*
+ * The receipt for an HTML document: what it actually contains.
+ *
+ * S.summarize counted blocks, which no longer exist for a document the model
+ * wrote itself. Counting the rendered structure keeps the chips honest — a
+ * teacher reading "12 nümunə" should be able to find twelve of them.
+ */
+function summarizeHtml(html) {
+  const count = (re) => (String(html).match(re) || []).length;
+  return {
+    blocks: count(/<(h[1-4]|p|ul|ol|table|figure|blockquote)/gi),
+    examples: count(/class="[^"]*ex/gi),
+    tasks: count(/class="[^"]*task/gi),
+  };
 }
 
 /*
@@ -650,14 +667,18 @@ ${S.SOURCE_RULES}`;
       send("done", { doc: fresh, summary: S.summarize(fresh.blocks || []), provider: out.provider });
       return;
     }
-    out.doc = wrote.input;
-
-    const keepIds = (doc.blocks || []).map((b) => b.id);
-    const next = S.normalizeDoc(out.doc || {}, { keepIds });
-    if (!next.blocks.length) {
+    /*
+     * The model wrote the document; this is where it becomes safe to store.
+     *
+     * Sanitised BEFORE it touches the database, so nothing unsafe is ever at rest
+     * and every reader — the preview, the PDF, Word — can trust what it holds
+     * without re-checking. An input that sanitises to nothing was not a document.
+     */
+    const html = sanitizeDocHtml(wrote.input.html);
+    if (!html) {
       await svc.appendMessages(doc._id, doc.owner, {
         role: "assistant",
-        text: "Məzmun qaytarılmadı — istəyinizi bir az dəqiqləşdirin.",
+        text: "Material boş qayıtdı — istəyinizi bir az dəqiqləşdirin.",
         action: "failed",
         at: new Date(),
       });
@@ -665,30 +686,41 @@ ${S.SOURCE_RULES}`;
       return;
     }
 
-    const sum = S.summarize(next.blocks);
-    /*
-     * A response cut off by the token ceiling used to be a total failure — every
-     * block the teacher had already watched arrive was thrown away because the
-     * FULL response never became valid JSON. It now survives (helper/aiDocument
-     * repairs what closed cleanly and reports the rest as missing), so what is
-     * saved here is real, but it may be short. Say so, with something to do about
-     * it, rather than presenting a partial document as a finished one.
-     */
-    const saved = await commitTurn(doc, baseRevision, {
-      next,
-      out,
-      hadBlocks,
-      sum,
-      reply: next.reply || (hadBlocks ? "Dəyişdirildi." : "Material hazırdır."),
-      note: out.truncated
-        ? 'Qeyd: cavab tam gəlmədi, material yarımçıq qala bilər — "davam et" yazaraq tamamlaya bilərsiniz.'
-        : "",
-      audience: plan?.audience,
-      plan,
-    });
+    const sum = summarizeHtml(html);
+    const saved = await svc.commit(
+      doc._id,
+      doc.owner,
+      {
+        html,
+        // Blocks belonged to the old representation. Clearing them keeps one
+        // source of truth per document rather than two that can disagree.
+        blocks: [],
+        ...(wrote.input.title ? { title: wrote.input.title } : {}),
+        ...(!doc.topic && wrote.input.title ? { topic: wrote.input.title } : {}),
+        ...(plan?.audience && !doc.audience ? { audience: plan.audience } : {}),
+        status: "ready",
+        aiMeta: { provider: out.provider, at: new Date() },
+      },
+      baseRevision,
+      {
+        push: {
+          messages: {
+            role: "assistant",
+            text: wrote.input.reply || (hadBlocks ? "Dəyişdirildi." : "Material hazırdır."),
+            action: hadBlocks ? "edited" : "created",
+            stats: sum,
+            ...(plan && (plan.sources?.length || plan.sections?.length)
+              ? { work: { sources: plan.sources || [], steps: plan.sections || [] } }
+              : {}),
+            at: new Date(),
+          },
+        },
+      }
+    );
 
     await logStudioUsage(req, { doc: saved, out, hadBlocks });
-    send("done", { doc: saved, summary: sum, provider: out.provider, truncated: !!out.truncated });
+    send("done", { doc: saved, summary: sum, provider: out.provider });
+    return;
   } catch (e) {
     // A deliberate stop is not a failure — it must not read like "Alınmadı" in
     // the transcript, and there is no client left to send an SSE frame to.
