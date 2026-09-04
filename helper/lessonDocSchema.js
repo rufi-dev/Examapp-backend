@@ -63,20 +63,48 @@ const BLOCK = {
 const DOC_MODELS = [
   {
     id: "claude-opus-4-8",
+    provider: "claude",
     label: "Claude Opus 4.8",
-    note: "Ən güclü — mürəkkəb sənədlər, dəqiq köçürmə",
+    note: "Ən güclü — mürəkkəb sənəd, dəqiq köçürmə. Yazarkən canlı gedişat göstərir.",
   },
   {
     id: "claude-haiku-4-5-20251001",
+    provider: "claude",
     label: "Claude Haiku 4.5",
-    note: "Sürətli və ucuz — sadə dəyişikliklər",
+    note: "Sürətli və ucuz — sadə dəyişikliklər. Canlı gedişat göstərir.",
+  },
+  {
+    id: "gpt-5.6-sol",
+    provider: "openai",
+    label: "GPT-5.6 Sol",
+    note: "OpenAI — güclü. Canlı gedişat yoxdur, yalnız mərhələ.",
+  },
+  {
+    id: "gpt-4.1-mini",
+    provider: "openai",
+    label: "GPT-4.1 mini",
+    note: "OpenAI — ucuz və sürətli. Canlı gedişat yoxdur.",
+  },
+  {
+    id: "gemini-2.5-pro",
+    provider: "gemini",
+    label: "Gemini 2.5 Pro",
+    note: "Google — güclü, uzun sənədlər. Canlı gedişat yoxdur.",
+  },
+  {
+    id: "gemini-2.5-flash",
+    provider: "gemini",
+    label: "Gemini 2.5 Flash",
+    note: "Google — çox sürətli və ucuz. Canlı gedişat yoxdur.",
   },
 ];
 
 const DEFAULT_DOC_MODEL = DOC_MODELS[0].id;
 
-// Anything unrecognised becomes the default rather than an error: a stale tab
-// naming a model that has since been retired should still be able to work.
+// The provider that owns an id. Read from the catalogue rather than guessed from
+// the name, so a model whose id stops looking like its family still routes right.
+const providerOf = (id) => (DOC_MODELS.find((m) => m.id === id) || DOC_MODELS[0]).provider;
+
 const pickModel = (id) => (DOC_MODELS.some((m) => m.id === id) ? id : DEFAULT_DOC_MODEL);
 
 const DOC_TOOLS = [
@@ -982,6 +1010,7 @@ module.exports = {
   DOC_MODELS,
   DEFAULT_DOC_MODEL,
   pickModel,
+  providerOf,
   SOURCE_RULES,
   PLAN_SCHEMA,
   PLAN_RULES,

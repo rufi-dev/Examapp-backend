@@ -98,270 +98,57 @@ const isOutOfCredit = (e) =>
  * Claude is unavailable, and a degraded turn that can still write the document is
  * better than a turn that cannot run at all.
  */
-async function documentWithTools({ prompt, parts = [], system, tools, signal, maxTokens = DOC_MAX_TOKENS, onText, validate, fetchSource, look, gridOf, model }) {
-  const { claudeContentParts, computeCost } = require("../controllers/aiController");
-  const client = anthropic();
-  if (!client) throw docError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)", true);
+async function documentWithTools({
+  prompt,
+  parts = [],
+  system,
+  tools,
+  signal,
+  maxTokens = DOC_MAX_TOKENS,
+  onText,
+  validate,
+  fetchSource,
+  look,
+  gridOf,
+  model,
+  provider = "claude",
+}) {
+  const { runToolLoop } = require("./aiDocDrivers");
+  const { claudeAdapter, openaiAdapter, geminiAdapter } = require("./aiDocAdapters");
 
   /*
-   * The conversation, not a single request.
-   *
-   * A tool call used to be taken as final: whatever came back was sanitised and
-   * stored. So when the model dropped the empty cells out of a copied timetable —
-   * moving a lecture into a month it does not happen in — nothing in the system
-   * was in a position to notice, and the teacher found it themselves.
-   *
-   * `validate` is that position. It gets the tool input, and if it can state
-   * something WRONG about it, the finding goes back as a tool_result marked as an
-   * error and the model corrects it inside the same turn, with the source still in
-   * front of it. This is the difference between telling the model what not to do
-   * and checking whether it did.
-   *
-   * Bounded, because a model that cannot satisfy a check on the second attempt
-   * will not satisfy it on the sixth, and the teacher is waiting.
+   * Which provider, and can it actually run? A missing key is a configuration
+   * fault the owner can fix, and saying so beats a generic failure that sends
+   * everyone looking at the model instead of the environment.
    */
-  const MAX_FIXES = 2;
-  /*
-   * Bounded separately from the fixes: fetching a source is legitimate work the
-   * model asked for, not a failed attempt, so it must not spend the budget for
-   * correcting a table — and it still cannot loop forever re-reading the same
-   * file.
-   */
-  const MAX_READS = 4;
-  let reads = 0;
-  /*
-   * Once. Looking at the draft costs a browser render and an image round-trip, and
-   * the second look almost never says anything the first did not — the first is
-   * where "I merged five empty cells into the lecture block" becomes visible.
-   */
-  let looked = false;
-  const history = [
-    {
-      role: "user",
-      content: [...claudeContentParts(parts), { type: "text", text: prompt }],
-    },
-  ];
-
-  let message;
-  let usage = { input_tokens: 0, output_tokens: 0 };
-  let cost = 0;
-
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      const run = client.messages.stream(
-        {
-          // Chosen by the teacher, already checked against the catalogue by the
-          // caller; the fallback keeps this function usable on its own.
-          model: model || "claude-opus-4-8",
-          max_tokens: maxTokens,
-          system: [{ type: "text", text: system }],
-          output_config: { effort: "high" },
-          tools,
-          messages: history,
-        },
-        signal ? { signal } : undefined
-      );
-
-      /*
-       * Progress still comes from the real response. With a tool call the document
-       * arrives as the tool's INPUT rather than as text, so the block streamer reads
-       * `inputJson` instead — same partial-JSON walk, same honest count of blocks
-       * that have actually closed.
-       */
-      if (typeof onText === "function") {
-        run.on("inputJson", (_partial, snapshot) => {
-          try {
-            onText(typeof snapshot === "string" ? snapshot : JSON.stringify(snapshot || {}));
-          } catch {
-            /* progress is decoration; the document is not */
-          }
-        });
-      }
-      message = await run.finalMessage();
-    } catch (e) {
-      if (signal?.aborted) throw docError(499, "Ləğv edildi");
-      console.error("AI document tools (claude) error:", e?.status, e?.message);
-      /*
-       * An exhausted account is not a bad minute.
-       *
-       * "Try again a bit later" is the right thing to say about a provider having
-       * a bad minute and a false promise about a credit balance at zero: waiting
-       * changes nothing, so the teacher retries, waits, retries, and concludes the
-       * feature is broken. It is not broken — it is unpaid, and the only person
-       * who can act on that is the account owner. So say so, and shout it in the
-       * log where the owner will actually find it.
-       */
-      if (isOutOfCredit(e)) {
-        console.error("[AI BILLING] Anthropic credit balance exhausted — Studio is down until it is topped up.");
-        throw docError(402, "AI xidməti dayandırılıb — hesab balansı bitib. Administratorla əlaqə saxlayın.");
-      }
-      throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
-    }
-
-    if (message.stop_reason === "refusal") throw docError(422, "AI bu sorğunu emal edə bilmədi.");
-
-    // Every attempt was really spent, so every attempt is really billed.
-    usage = {
-      input_tokens: (usage.input_tokens || 0) + (message.usage?.input_tokens || 0),
-      output_tokens: (usage.output_tokens || 0) + (message.usage?.output_tokens || 0),
-    };
-    cost += computeCost(message.usage) || 0;
-
-    const used = (message.content || []).filter((b) => b.type === "tool_use");
-
-    // Findings, one per tool call that has something wrong with it.
-    const faults =
-      typeof validate === "function"
-        ? used
-            .map((b) => ({ block: b, why: validate(b.name, b.input || {}) }))
-            .filter((f) => f.why)
-        : [];
-
-    /*
-     * The model asking to see a source it was given earlier. Served as a real
-     * document part in the reply, not as text about the file: a copy has to be
-     * made from the page, and a description of a page is what produced a
-     * timetable copied out of our own preview instead of out of the PDF.
-     */
-    const wants =
-      typeof fetchSource === "function" && reads < MAX_READS
-        ? used.filter((b) => b.name === "read_source")
-        : [];
-
-    if (wants.length) {
-      const results = [];
-      const extra = [];
-      for (const b of wants) {
-        reads += 1;
-        // eslint-disable-next-line no-await-in-loop
-        const found = await fetchSource(String(b.input?.name || ""));
-        results.push({
-          type: "tool_result",
-          tool_use_id: b.id,
-          ...(found ? {} : { is_error: true }),
-          content: found
-            ? `"${found.name}" aşağıda göndərildi.`
-            : `"${b.input?.name}" tapılmadı. Mövcud faylların adlarını promptdakı siyahıdan götür.`,
-        });
-        if (found) extra.push(...claudeContentParts([found.part]));
-      }
-      history.push({ role: "assistant", content: message.content });
-      // The tool_result blocks lead; the file itself follows in the same turn.
-      history.push({ role: "user", content: [...results, ...extra] });
-      // A fetch is not a failed attempt, so it does not consume a fix.
-      attempt -= 1;
-      // eslint-disable-next-line no-continue
-      continue;
-    }
-
-    /*
-     * Show it its own work before accepting it.
-     *
-     * Every other check here is arithmetic — a short row, a deleted property —
-     * and arithmetic cannot see that the ruling is wrong. The model wrote a
-     * timetable whose colours were right to the cell and whose lines were absent,
-     * because in markup you are only reading, five empty cells merged into their
-     * neighbour look like nothing at all. It has read the source; this hands it
-     * the render and lets it compare, which is what a person would do.
-     *
-     * Only when the caller asked for it — copying work — and only with the source
-     * still in the conversation, so there is something to compare against.
-     */
-    const wrote = used.find((b) => b.name === "write_material");
-    if (!faults.length && typeof look === "function" && !looked && wrote && attempt < MAX_FIXES) {
-      const shots = await look(wrote.input?.html || "");
-      const map = typeof gridOf === "function" ? gridOf(wrote.input?.html || "") : "";
-      if (shots?.length) {
-        looked = true;
-        history.push({ role: "assistant", content: message.content });
-        history.push({
-          role: "user",
-          content: [
-            {
-              type: "tool_result",
-              tool_use_id: wrote.id,
-              /*
-               * The picture and the arithmetic together. The picture answers "does
-               * it look right"; the map answers "which columns is this cell
-               * actually on", which is the question a stretched column makes
-               * impossible to answer by eye — a one-column cell holding a long
-               * sentence looks exactly like a block spanning seven.
-               */
-              content: [
-                `Yazdığın sənədin görüntüsü aşağıdadır (${shots.length} hissə, yuxarıdan aşağıya).`,
-                "Mənbə ilə müqayisə et: xətlər, sütunların düzülüşü, boş xanalar, rənglər, hizalama.",
-                map ? `\nXANALARIN SÜTUN NÖMRƏLƏRİ (hesablanmış, təxmin deyil):\n${map}` : "",
-                "\nDiqqət: geniş görünən xana geniş olmaya bilər — mətn uzun olduğu üçün",
-                "sütun uzanır. Bloklardan hər birinin hansı sütunlarda olduğunu yuxarıdakı",
-                "siyahıdan yoxla və başlıq sətrindəki tarixlərlə tutuşdur.",
-                "\nFərq varsa write_material-ı düzəldilmiş HTML ilə yenidən çağır.",
-                "Hər şey uyğundursa eyni HTML-i yenidən göndər.",
-              ]
-                .filter(Boolean)
-                .join("\n"),
-            },
-            // Every band of the page, in order. The part being asked about is
-            // rarely the part at the top.
-            ...shots.map((b) => ({
-              type: "image",
-              source: { type: "base64", media_type: "image/png", data: b.toString("base64") },
-            })),
-          ],
-        });
-        // Not a failed attempt: it is the verification step, and it must not eat
-        // the budget kept for correcting what it finds.
-        attempt -= 1;
-        // eslint-disable-next-line no-continue
-        continue;
-      }
-    }
-
-    if (!faults.length || attempt >= MAX_FIXES) {
-      /*
-       * Out of attempts with the document still wrong. It is stored anyway — a
-       * timetable with one short row is worth more to the teacher than a failed
-       * turn — but the failure is NOT swallowed: the caller is told, and says so
-       * on the turn, so nobody is told a copy is exact when it is not.
-       */
-      if (faults.length) {
-        console.error("[LESSON DOC] validation unresolved after retries:", faults[0].why.split("\n")[0]);
-      }
-      message.unresolved = faults.map((f) => f.why);
-      break;
-    }
-
-    // The call it made, and what is wrong with it, in the shape the API expects.
-    history.push({ role: "assistant", content: message.content });
-    history.push({
-      role: "user",
-      content: faults.map((f) => ({
-        type: "tool_result",
-        tool_use_id: f.block.id,
-        is_error: true,
-        content: f.why,
-      })),
-    });
+  let adapter;
+  if (provider === "openai") {
+    if (!process.env.OPENAI_API_KEY) throw docError(503, "OpenAI konfiqurasiya olunmayıb (OPENAI_API_KEY)", true);
+    adapter = openaiAdapter({ model, tools, maxTokens });
+  } else if (provider === "gemini") {
+    if (!process.env.GEMINI_API_KEY) throw docError(503, "Gemini konfiqurasiya olunmayıb (GEMINI_API_KEY)", true);
+    adapter = geminiAdapter({ model, tools, maxTokens });
+  } else {
+    const client = anthropic();
+    if (!client) throw docError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)", true);
+    adapter = claudeAdapter({ client, model: model || "claude-opus-4-8", tools, maxTokens, onText });
   }
 
-  const calls = (message.content || [])
-    .filter((b) => b.type === "tool_use")
-    .map((b) => ({ name: b.name, input: b.input || {} }));
+  const out = await runToolLoop(adapter, {
+    prompt,
+    parts,
+    system,
+    signal,
+    validate,
+    fetchSource,
+    look,
+    gridOf,
+  });
 
-  /*
-   * The model's own words, when it wrote any. A settings-only turn produces no
-   * document, so this is the whole answer the teacher sees — "page numbers are
-   * already on" is a complete and correct response to a request, and it must not
-   * be dropped just because no blocks changed.
-   */
-  const said = (message.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join(" ")
-    .trim();
-
-  if (!calls.length && !said) throw docError(502, "AI cavabı oxunmadı. Yenidən cəhd edin.", true);
-
-  return { calls, said, cost, usage, provider: "claude", unresolved: message.unresolved || [] };
+  // Nothing said and nothing done is not an answer; it is a turn that failed
+  // quietly, and the teacher would be left looking at an unchanged document.
+  if (!out.calls.length && !out.said) throw docError(502, "AI cavabı oxunmadı. Yenidən cəhd edin.", true);
+  return out;
 }
 
 /*

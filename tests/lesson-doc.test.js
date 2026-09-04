@@ -1214,11 +1214,18 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("a document with no files says nothing", S.sourceList({}) === "");
   ok("the turn can serve one", /fetchSource: async \(name\) =>/.test(ctl5));
   ok("from the document's own list only", /const all = doc\.files \|\| \[\];/.test(ctl5));
-  const ai = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocument.js"), "utf8");
+  /*
+   * The loop moved out of aiDocument when the same conversation had to run on
+   * three providers: one driver that knows what a turn is, three adapters that
+   * know what a provider wants. These facts are about the turn, so they are read
+   * from the driver.
+   */
+  const ai = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocDrivers.js"), "utf8");
+  const adapters = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocAdapters.js"), "utf8");
   // Served as the real file, not as text describing it — a description of a page
   // is exactly what produced a copy of our preview instead of a copy of the PDF.
-  ok("and sends the file itself back", /extra\.push\(\.\.\.claudeContentParts\(\[found\.part\]\)\)/.test(ai));
-  ok("bounded, and not out of the budget for fixing a table", /reads < MAX_READS/.test(ai) && /attempt -= 1;/.test(ai));
+  ok("and sends the file itself back", /files\.push\(found\.part\)/.test(ai) && /claudeContentParts\(parts\)/.test(adapters));
+  ok("bounded, and not out of the budget for fixing a table", /reads < MAX_READS/.test(ai) && /attempt -= 1; \/\/ a fetch is not a failed attempt/.test(ai));
 
   /*
    * The most distinctive thing about the timetable is that the day names run
@@ -1243,9 +1250,11 @@ console.log("\n25. The model writes the document; the schema stops being the cei
    * here is arithmetic on the markup, and arithmetic cannot see that. The model
    * had never once looked at what it wrote.
    */
-  const ai2 = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocument.js"), "utf8");
-  ok("the model is shown its own draft", /type: "image"[\s\S]{0,200}b\.toString\("base64"\)/.test(ai2));
-  ok("once, because the second look says nothing new", /if \(shots\?\.length\) \{[\s\S]{0,80}looked = true;/.test(ai2));
+  const ai2 = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocDrivers.js"), "utf8");
+  const ad2 = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocAdapters.js"), "utf8");
+  const aiSrc = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocument.js"), "utf8");
+  ok("the model is shown its own draft", /images: shots/.test(ai2) && /type: "image"[\s\S]{0,160}b\.toString\("base64"\)/.test(ad2));
+  ok("once, because the second look says nothing new", /if \(shots\?\.length\) \{[\s\S]{0,60}looked = true;/.test(ai2));
   /*
    * The first version captured the top 1500 pixels, so a teacher asking about the
    * Wednesday table was answered by a model looking at a picture of Monday. It
@@ -1253,11 +1262,11 @@ console.log("\n25. The model writes the document; the schema stops being the cei
    * full-page strip is no better: it is downscaled to fit the vision limit, and
    * hairline table rules are the first thing to vanish.
    */
-  ok("and shown the WHOLE page, in readable bands", /shots\.map\(\(b\) => \(\{/.test(ai2));
+  ok("and shown the WHOLE page, in readable bands", /images\.map\(\(b\) => \(\{/.test(ad2) && /\$\{bands\} hissə/.test(ai2));
   const pdfSrc = require("fs").readFileSync(require("path").join(__dirname, "../helper/lessonPlanPdf.js"), "utf8");
   ok("captured band by band at full scale", /const bands = Math\.min\(maxBands/.test(pdfSrc));
   ok("with no image of empty trailing margin", /if \(i > 0 && height < 120\) break;/.test(pdfSrc));
-  ok("and looking is not counted as a failed attempt", /attempt -= 1;/.test(ai2));
+  ok("and looking is not counted as a failed attempt", /attempt -= 1; \/\/ verifying is not failing/.test(ai2));
   ok("only with a source to compare against",
     /look: sending\.length \|\| \(doc\.files \|\| \[\]\)\.length/.test(ctl5));
   ok("a failed render costs the teacher nothing", /draft render failed/.test(ctl5));
@@ -1285,6 +1294,7 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("an empty run is counted, not skipped", /2-7:boş/.test(grid));
   ok("and it is sent with the render", /gridOf: \(html\) => gridMap\(html \|\| ""\)/.test(ctl5));
   ok("warning that a wide-looking cell need not be wide", /geniş görünən xana geniş olmaya bilər/.test(ai2));
+  ok("the loop is written once, not once per provider", !/api\.openai\.com|generativelanguage/.test(ai2));
 
   /*
    * "Try again a bit later" is right about a provider having a bad minute and a
@@ -1292,12 +1302,15 @@ console.log("\n25. The model writes the document; the schema stops being the cei
    * retries, and concludes the feature is broken — it is not broken, it is unpaid,
    * and the only person who can act on that is the owner.
    */
-  ok("an exhausted account is not reported as a bad minute",
-    /credit balance is too low\|purchase credits/.test(ai2));
-  ok("and is not told to wait", /hesab balansı bitib/.test(ai2) && !/isOutOfCredit[\s\S]{0,400}bir az sonra/.test(ai2));
-  ok("the owner is shouted at in the log", /\[AI BILLING\]/.test(ai2));
+  ok("an exhausted account is not reported as a bad minute", /credit balance is too low/.test(ad2));
+  ok("and is not told to wait", /hesab balansı bitib/.test(ad2));
+  ok("the owner is shouted at in the log", /\[AI BILLING\]/.test(ad2));
   // A 400 that is not about credit still reads as an ordinary failure.
-  ok("the match stays narrow", /e\?\.status === 400 &&/.test(ai2));
+  ok("the match stays narrow on Claude", /e\?\.status === 400 && OUT_OF_CREDIT\.test/.test(ad2));
+  // And every provider says it its own way, so every provider is matched.
+  ok("every provider's wording is covered",
+    ["insufficient", "quota", "billing hard limit"].every((w) => ad2.includes(w)));
+  ok("all three check it", (ad2.match(/OUT_OF_CREDIT\.test|billingError\(\)/g) || []).length >= 5);
 
   /*
    * The model id is sent straight to the provider, so it is an allow-list and not
@@ -1308,12 +1321,65 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("junk cannot reach the provider", S.pickModel("gpt-4o; rm -rf") === S.DEFAULT_DOC_MODEL);
   ok("an empty choice is the default", S.pickModel("") === S.DEFAULT_DOC_MODEL && S.pickModel(undefined) === S.DEFAULT_DOC_MODEL);
   ok("a listed model passes through", S.pickModel(S.DOC_MODELS[1].id) === S.DOC_MODELS[1].id);
-  // Every entry must support the tool use the whole studio path is built on; a
-  // model without it could not write a document here at all.
-  ok("every entry is one this codebase runs", S.DOC_MODELS.every((m) => /^claude-/.test(m.id)));
+  /*
+   * Every entry must support the tool use the whole studio path is built on — a
+   * model without it could not write a document here at all — and must name the
+   * provider that owns it, because the wire format is the only thing that differs
+   * between them and the adapter is chosen by this field.
+   */
+  ok("every entry names its provider", S.DOC_MODELS.every((m) => ["claude", "openai", "gemini"].includes(m.provider)));
+  ok("all three providers are offered", new Set(S.DOC_MODELS.map((m) => m.provider)).size === 3);
+  ok("the provider is read from the catalogue, not the name", S.providerOf("gpt-4.1-mini") === "openai");
+  ok("an unknown id routes to the default's provider", S.providerOf("nope") === S.DOC_MODELS[0].provider);
+  /*
+   * Which of them stream. Claude reports the document as it is written, so live
+   * progress is real work finished; the other two do not, and the note says so —
+   * a teacher choosing a cheaper model should know what they give up.
+   */
+  ok("a model that cannot stream progress says so",
+    S.DOC_MODELS.filter((m) => m.provider !== "claude").every((m) => /gedişat yoxdur/.test(m.note)));
   ok("the turn validates what it was sent", /S\.pickModel\(String\(\(req\.body && req\.body\.model\)/.test(ctl5));
   ok("and remembers it on the document", /"settings\.model": model/.test(ctl5));
-  ok("the request carries it", /model: model \|\| "claude-opus-4-8"/.test(ai2));
+  ok("the request carries it", /model: model \|\| "claude-opus-4-8"/.test(aiSrc));
+
+  /*
+   * The wire format each provider wants, checked without calling anyone. A tool
+   * conversation is easy to get subtly wrong — an output with no call to attach
+   * to, an image in the wrong turn — and the failure arrives as a 400 in
+   * production rather than as a wrong document, so it is worth pinning here.
+   */
+  {
+    const { openaiAdapter, geminiAdapter } = require("../helper/aiDocAdapters");
+    const srcParts = [{ mime: "application/pdf", data: "AAA", isPdf: true }];
+
+    const oa = openaiAdapter({ model: "gpt-4.1-mini", tools: S.DOC_TOOLS, maxTokens: 100 });
+    const oh = oa.start({ parts: srcParts, prompt: "salam", system: "sys" });
+    ok("openai opens with a system turn and a user turn", oh[0].role === "system" && oh[1].role === "user");
+    ok("and the pdf rides in it", JSON.stringify(oh[1].content).includes("input_file"));
+    oa.reply(
+      oh,
+      { raw: [{ type: "function_call", call_id: "c1", name: "read_source", arguments: '{"name":"a.pdf"}' }] },
+      [{ call: { id: "c1", name: "read_source" }, isError: false, text: "ok" }],
+      { parts: srcParts, images: [Buffer.from("x")] }
+    );
+    // The call must be replayed before its output or there is nothing to attach to.
+    ok("openai replays the call, then its output", oh[2].type === "function_call" && oh[3].type === "function_call_output");
+    ok("and the picture arrives as its own user turn", JSON.stringify(oh[4]).includes("input_image"));
+
+    const ga = geminiAdapter({ model: "gemini-2.5-flash", tools: S.DOC_TOOLS, maxTokens: 100 });
+    const gh = ga.start({ parts: srcParts, prompt: "salam" });
+    ok("gemini opens with a user turn carrying the file", gh[0].role === "user" && JSON.stringify(gh[0]).includes("inline_data"));
+    ga.reply(gh, { raw: { role: "model", parts: [] } }, [{ call: { name: "read_source" }, isError: false, text: "ok" }], { images: [Buffer.from("x")] });
+    // Gemini has no call ids: a result is matched back by name.
+    ok("gemini answers by name", JSON.stringify(gh[2]).includes("functionResponse") && JSON.stringify(gh[2]).includes("read_source"));
+    ok("and takes the picture inline", JSON.stringify(gh[2]).includes("inline_data"));
+
+    // Gemini rejects the JSON-Schema keywords the other two require.
+    const gs = require("../helper/curriculumSchema").toGeminiSchema(
+      S.DOC_TOOLS.find((t) => t.name === "write_material").input_schema
+    );
+    ok("the tool schema is converted for gemini", !("additionalProperties" in gs) && gs.properties.html);
+  }
 
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));

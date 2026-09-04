@@ -721,6 +721,9 @@ ${S.SOURCE_RULES}`;
       parts,
       tools: S.DOC_TOOLS,
       model,
+      // Which API this id belongs to. The loop is the same on all three; only the
+      // wire format differs, and the adapter owns that.
+      provider: S.providerOf(model),
       signal: ac.signal,
       onText,
       /*
