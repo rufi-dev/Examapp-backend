@@ -151,6 +151,22 @@ async function commitTurn(doc, baseRevision, { next, out, hadBlocks, sum, reply,
 }
 
 /*
+ * The print options a tool call is allowed to set.
+ *
+ * Read off the call rather than spread from it: a tool input is model output, and
+ * the one place it reaches document state is the one place to be exact about what
+ * may pass. An accent outside the known palette is ignored rather than written —
+ * each name carries a tint chosen to keep text on it readable, so an unknown one
+ * has no colours to render with.
+ */
+const { ACCENTS } = require("../helper/lessonDocHtml");
+function printOptions(input = {}) {
+  const patch = { "settings.pageNumbers": input.pageNumbers !== false };
+  if (typeof input.accent === "string" && ACCENTS[input.accent]) patch["settings.accent"] = input.accent;
+  return patch;
+}
+
+/*
  * The files this turn is adding, not every file the document holds.
  *
  * Every turn sends ALL attachments to the model — that is what makes "add three
@@ -590,7 +606,7 @@ ${S.SOURCE_RULES}`;
       const saved = await svc.commit(
         doc._id,
         doc.owner,
-        { "settings.pageNumbers": printed.input.pageNumbers !== false },
+        printOptions(printed.input),
         baseRevision,
         {
           push: {
@@ -611,20 +627,27 @@ ${S.SOURCE_RULES}`;
     if (printed && wrote) {
       // Both, in one turn: apply the setting first so the content commit below is
       // the single write that moves the revision.
-      await LessonDoc.updateOne(
-        { _id: doc._id, owner: doc.owner },
-        { $set: { "settings.pageNumbers": printed.input.pageNumbers !== false } }
-      );
+      await LessonDoc.updateOne({ _id: doc._id, owner: doc.owner }, { $set: printOptions(printed.input) });
     }
 
     if (!wrote) {
-      await svc.appendMessages(doc._id, doc.owner, {
+      /*
+       * Send back what the database now holds, NOT the copy read at the top of
+       * this turn.
+       *
+       * `doc` was fetched before the teacher's own message was pushed and before
+       * this reply was, so handing it to the client — which replaces its state
+       * with whatever `done` carries — erased both from the conversation the
+       * moment the turn ended. It read as the turn vanishing.
+       */
+      const saved = await svc.appendMessages(doc._id, doc.owner, {
         role: "assistant",
-        text: out.said || "Dəyişiklik edilmədi.",
+        text: out.said || "Bu dəyişikliyi edə bilmədim.",
         action: "noop",
         at: new Date(),
       });
-      send("done", { doc, summary: S.summarize(doc.blocks || []), provider: out.provider });
+      const fresh = saved || doc;
+      send("done", { doc: fresh, summary: S.summarize(fresh.blocks || []), provider: out.provider });
       return;
     }
     out.doc = wrote.input;

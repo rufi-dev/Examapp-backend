@@ -149,6 +149,13 @@ const lessonDocSchema = new Schema(
      */
     settings: {
       pageNumbers: { type: Boolean, default: true },
+      // The document's accent, as a NAMED choice: each one carries a matching
+      // tint that keeps text on it readable, which a free-form hex does not.
+      accent: {
+        type: String,
+        enum: ["default", "red", "orange", "green", "teal", "purple", "slate"],
+        default: "default",
+      },
     },
 
     status: { type: String, enum: ["draft", "ready", "archived"], default: "draft" },

@@ -914,7 +914,10 @@ console.log("\n23. The agent acts through tools, so it cannot fake a capability:
   // A settings change must not rewrite the document: that is what makes it instant
   // and what stops a print tweak from mangling the content on the way past.
   ok("a settings-only turn commits only the setting", /if \(printed && !wrote\)/.test(ctl4));
-  ok("and writes no blocks", /\"settings\.pageNumbers\": printed\.input\.pageNumbers !== false/.test(ctl4));
+  ok("and writes no blocks", /svc\.commit\([\s\S]{0,120}printOptions\(printed\.input\)/.test(ctl4));
+  // A tool input is model output: what reaches document state is read off it
+  // deliberately, never spread, and an unknown accent is ignored rather than stored.
+  ok("only known options reach the document", /ACCENTS\[input\.accent\]/.test(ctl4));
   ok("a turn that calls nothing says so instead of inventing", /action: \"noop\"/.test(ctl4));
 
   // The renderer has to honour it, or the setting is decoration.

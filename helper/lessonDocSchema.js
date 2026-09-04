@@ -65,7 +65,8 @@ const DOC_TOOLS = [
   {
     name: "set_print_options",
     description:
-      "Materialın ÇAP parametrlərini dəyiş. Məzmuna toxunmur. " +
+      "Materialın ÇAP və DİZAYN parametrlərini dəyiş. Məzmuna toxunmur — mətn olduğu kimi qalır. " +
+      "Müəllim rəng, üslub və ya dizayn dəyişikliyi istəyirsə (məsələn \"rəngləri qırmızı et\"), bu aləti çağır. " +
       "Səhifə nömrələri PDF-in altında sistem tərəfindən çap olunur — onları blok kimi yazmaq mümkün deyil, " +
       "çünki blok hansı səhifəyə düşəcəyini bilmir. Müəllim səhifə nömrəsi istəyirsə və ya onları istəmirsə, " +
       "bu aləti çağır və cavabında vəziyyəti bildir.",
@@ -77,9 +78,16 @@ const DOC_TOOLS = [
           type: "boolean",
           description: "PDF-in hər səhifəsinin altında nömrə (1/5) çap olunsun.",
         },
+        accent: {
+          type: "string",
+          enum: ["default", "red", "orange", "green", "teal", "purple", "slate"],
+          description:
+            "Materialın əsas rəngi — başlıqlar, cədvəl başlıqları, anlayış qutuları. " +
+            "Dəyişməyəcəksə, hazırkı dəyəri qaytar.",
+        },
         reply: { type: "string", description: "Müəllimə bir cümlə: nəyi dəyişdin." },
       },
-      required: ["pageNumbers", "reply"],
+      required: ["pageNumbers", "accent", "reply"],
     },
   },
 ];
