@@ -184,6 +184,22 @@ KÖÇÜRMƏ REJİMİNDƏ:
   PİS: "Teacher: Əliyeva Aygün", "Date: 15.03.2024" (faylda yoxdur — uydurmadır).
   YAXŞI: "Teacher:" sahəsi var, dəyəri boş.
 - Faylın quruluşu cədvəldirsə, cədvəl olaraq qalsın — sadalamaya çevirmə.
+
+📋 FORMA/ŞABLON KÖÇÜRƏNDƏ — ƏN VACİB QAYDA:
+Forma xanalardan ibarətdir. Onu "heading" və "text" bloklarının siyahısı kimi
+YAZMA — belə etsən forma yox, sadəcə başlıq siyahısı alınır. Hər forma hissəsini
+"table" bloku kimi qur:
+- "columns" → həmin sətirdəki sahə adları (olduğu kimi, ingiliscədirsə ingiliscə).
+- "rows" → doldurulacaq BOŞ xanalar: [["", "", ""]]. Boş sətir SAXLANILIR —
+  müəllim məhz ora yazacaq.
+Nümunə (formada "Teacher: | Observer: | Date and Time:" sətri varsa):
+  { "kind": "table",
+    "columns": ["Teacher:", "Observer:", "Date and Time:"],
+    "rows": [["", "", ""]] }
+Böyük cədvəl (məsələn Procedure | Phase | Timing | Interaction) üçün neçə boş
+sətir lazımdırsa o qədər boş sətir yaz — müəllim onları dolduracaq.
+Tək sahə (məsələn "Context:") üçün də cədvəl işlət:
+  { "kind": "table", "columns": ["Context:"], "rows": [[""]] }
 - Əlyazma və ya keyfiyyətsiz şəkildə oxunmayan yer varsa, uydurma. Həmin yeri
   "[oxunmadı]" kimi qeyd et ki, müəllim özü düzəltsin.
 - Şəkildə düstur, sxem və ya fiqur varsa, onu "figure" bloku kimi SVG ilə yenidən çək.
@@ -257,6 +273,8 @@ function buildEditPrompt({ doc = {}, instructions = "" } = {}) {
 
 const clean = (v) => String(v == null ? "" : v).replace(/\r/g, "").trim();
 const list = (v) => (Array.isArray(v) ? v.map(clean).filter(Boolean) : []);
+// A form's Procedure grid is legitimately long; a model looping is not.
+const MAX_TABLE_ROWS = 80;
 const newId = () => crypto.randomBytes(6).toString("hex");
 
 /*
@@ -323,11 +341,30 @@ function normalizeDoc(rawDoc = {}, { keepIds = [] } = {}) {
         break;
       }
       case "table": {
-        const columns = list(b.columns);
+        /*
+         * An empty cell is CONTENT in a table, and this used to delete it.
+         *
+         * `list()` ends in `.filter(Boolean)`, which is right for a bullet list —
+         * an empty bullet is noise — and catastrophic for a grid. A blank form is
+         * almost entirely empty cells: filtering them collapsed every row onto its
+         * labels, shifted the remaining cells into the wrong columns, and dropped
+         * any row that was blank all the way across. A teacher who asked for their
+         * lesson-plan form back got a flat list of field names, because the table
+         * that would have been the form was dismantled here.
+         *
+         * So cells are cleaned but never dropped, and each row is squared off to
+         * the header width — a ragged grid renders as a broken one.
+         */
+        const columns = (Array.isArray(b.columns) ? b.columns : []).map(clean);
+        const width = columns.length;
         const rows = (Array.isArray(b.rows) ? b.rows : [])
-          .map((r) => list(r))
-          .filter((r) => r.length);
-        if (columns.length && rows.length) blocks.push({ id, kind, columns, rows });
+          .slice(0, MAX_TABLE_ROWS)
+          .map((r) => {
+            const cells = Array.isArray(r) ? r.map(clean) : [];
+            return Array.from({ length: width }, (_, i) => cells[i] || "");
+          });
+        // A table still needs at least one real header, or it is not a table.
+        if (width && columns.some(Boolean) && rows.length) blocks.push({ id, kind, columns, rows });
         break;
       }
       default:

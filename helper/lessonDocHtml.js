@@ -215,9 +215,18 @@ function renderBlock(b, forWord) {
     }
 
     case "table": {
-      const head = (b.columns || []).map((c) => `<th>${esc(c)}</th>`).join("");
+      /*
+       * An empty cell still has to be a box you can write in.
+       *
+       * A blank form is mostly empty cells, and an empty <td> collapses to a hair
+       * line in both renderers — the teacher gets the labels and nowhere to put
+       * anything. A non-breaking space gives the cell a line box, so a form prints
+       * as a form rather than as a list of headings with gaps.
+       */
+      const cell = (c) => (String(c || "").trim() ? esc(c) : "&nbsp;");
+      const head = (b.columns || []).map((c) => `<th>${cell(c)}</th>`).join("");
       const body = (b.rows || [])
-        .map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`)
+        .map((r) => `<tr>${r.map((c) => `<td>${cell(c)}</td>`).join("")}</tr>`)
         .join("");
       // Word ignores the stylesheet's borders on an imported table often enough
       // that they are declared on the element itself — a dotted grey grid was what
@@ -227,7 +236,7 @@ function renderBlock(b, forWord) {
              <tr>${(b.columns || [])
                .map(
                  (c) =>
-                   `<td style="border-bottom:1pt solid #0F4C5C;padding:5pt 8pt 4pt 0;color:#0F4C5C;font-size:9pt;font-weight:bold">${esc(c)}</td>`
+                   `<td style="border-bottom:1pt solid #0F4C5C;padding:5pt 8pt 4pt 0;color:#0F4C5C;font-size:9pt;font-weight:bold">${cell(c)}</td>`
                )
                .join("")}</tr>
              ${(b.rows || [])
@@ -236,7 +245,7 @@ function renderBlock(b, forWord) {
                    `<tr>${r
                      .map(
                        (c) =>
-                         `<td style="border-bottom:0.5pt solid #E4E8EA;padding:5pt 8pt;font-size:10.5pt;vertical-align:top">${esc(c)}</td>`
+                         `<td style="border-bottom:0.5pt solid #E4E8EA;padding:5pt 8pt;font-size:10.5pt;vertical-align:top">${cell(c)}</td>`
                      )
                      .join("")}</tr>`
                )

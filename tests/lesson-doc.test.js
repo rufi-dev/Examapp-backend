@@ -67,7 +67,13 @@ console.log("\n2. Normalisation keeps only what a kind uses:");
   ok("a list keeps items and ordered", Object.keys(by("list")).sort().join(",") === "id,items,kind,ordered");
   ok("a note keeps its tone", by("note").tone === "warning");
   ok("empty list items are dropped", by("list").items.length === 2, JSON.stringify(by("list").items));
-  ok("empty table rows are dropped", by("table").rows.length === 1);
+  /*
+   * This used to assert that an empty row was DROPPED, and that was the defect:
+   * an empty cell is content in a grid, and a blank form is made of them. The row
+   * is kept and squared to the header width — see section 22.
+   */
+  ok("an empty table row is kept, squared to the header", by("table").rows.length === 2);
+  ok("and padded rather than left ragged", by("table").rows[1].length === 2 && by("table").rows[1].every((c) => c === ""));
   ok("every block gets an id", blocks.every((b) => typeof b.id === "string" && b.id.length >= 8));
   ok("ids are unique", new Set(blocks.map((b) => b.id)).size === blocks.length);
 }
@@ -781,6 +787,82 @@ console.log("\n21. 'Copy this form exactly' must not become a tutorial about the
 
   // Fabrication was already banned in general; it now names what was fabricated.
   ok("inventing a name is banned by name", S.BASE_RULES.includes("uydurma ad"));
+}
+
+
+console.log("\n22. A blank form survives — the empty cell IS the content:");
+{
+  /*
+   * The second half of the copy-a-form failure, and this one was ours, not the
+   * model's. Table cells went through `list()`, which ends in `.filter(Boolean)`:
+   * right for a bullet list, where an empty bullet is noise, and catastrophic for
+   * a grid. A blank form is almost entirely empty cells, so every value cell was
+   * deleted, the surviving labels slid into the wrong columns, and any row that
+   * was blank across was dropped whole — taking the table with it, because a
+   * table with no rows is not stored.
+   *
+   * The teacher asked for their lesson-plan form back and got a flat list of
+   * field names. The model had almost certainly sent the tables; this discarded
+   * them.
+   */
+  const formBlock = (columns, rows) =>
+    full({ kind: "table", columns, rows });
+
+  const { blocks } = S.normalizeDoc({
+    title: "Lesson Plan",
+    blocks: [
+      formBlock(["Teacher:", "Observer:", "Date and Time:"], [["", "", ""]]),
+      formBlock(["Procedure", "Phase", "Timing", "Interaction"], [["", "", "", ""], ["", "", "", ""]]),
+      formBlock(["Context:"], [[""]]),
+    ],
+  });
+
+  ok("an all-empty form row keeps its table", blocks.length === 3, `${blocks.length} of 3 survived`);
+  ok("the empty cells are still there", blocks[0].rows[0].length === 3);
+  ok("and are empty, not dropped", blocks[0].rows[0].every((c) => c === ""));
+  ok("a multi-row grid keeps every row", blocks[1].rows.length === 2);
+  ok("a single-field table survives", blocks[2].columns[0] === "Context:");
+
+  // A ragged grid renders as a broken one, so rows are squared to the header.
+  const ragged = S.normalizeDoc({
+    blocks: [formBlock(["A", "B", "C"], [["1"], ["1", "2", "3", "4"]])],
+  }).blocks[0];
+  ok("a short row is padded to the header width", ragged.rows[0].length === 3);
+  ok("and keeps its real cell in the right column", ragged.rows[0][0] === "1" && ragged.rows[0][1] === "");
+  ok("an overlong row is trimmed", ragged.rows[1].length === 3);
+
+  // Cells still get cleaned, just not deleted.
+  const messy = S.normalizeDoc({ blocks: [formBlock(["A", "B"], [["  x  ", "  "]])] }).blocks[0];
+  ok("cell text is trimmed", messy.rows[0][0] === "x");
+  ok("a whitespace-only cell becomes empty, not missing", messy.rows[0][1] === "");
+
+  // A table with nothing to head it is still not a table.
+  ok("no columns means no table", S.normalizeDoc({ blocks: [formBlock([], [["a"]])] }).blocks.length === 0);
+  ok("blank headers mean no table", S.normalizeDoc({ blocks: [formBlock(["", ""], [["a", "b"]])] }).blocks.length === 0);
+  ok("no rows means no table", S.normalizeDoc({ blocks: [formBlock(["A"], [])] }).blocks.length === 0);
+
+  // A model that loops must not write a document nobody can open.
+  const flood = S.normalizeDoc({
+    blocks: [formBlock(["A"], Array.from({ length: 500 }, () => [""]))],
+  }).blocks[0];
+  ok("a runaway row count is capped", flood.rows.length <= 80, `${flood.rows.length} rows`);
+
+  /*
+   * And it has to PRINT as a form. An empty <td> collapses to a hair line in both
+   * renderers, so the teacher would get labels with nowhere to write.
+   */
+  const doc = { title: "F", blocks: [{ id: "1", kind: "table", columns: ["Teacher:", "Observer:"], rows: [["", ""]] }] };
+  const pdf = buildLessonDocHtml(doc);
+  const word = buildLessonDocHtml(doc, { forWord: true });
+  ok("the PDF gives an empty cell a line box", (pdf.match(/&nbsp;/g) || []).length >= 2);
+  ok("so does Word", (word.match(/&nbsp;/g) || []).length >= 2);
+  ok("a filled cell is unaffected", buildLessonDocHtml({ blocks: [{ id: "1", kind: "table", columns: ["A"], rows: [["real"]] }] }).includes("real"));
+
+  // The brief has to ask for a table, or the model writes headings and text and
+  // there is no grid to preserve in the first place.
+  ok("a form is specified as a table block", S.SOURCE_RULES.includes("FORMA/ŞABLON KÖÇÜRƏNDƏ"));
+  ok("with headings explicitly refused", S.SOURCE_RULES.includes('"heading" və "text" bloklarının siyahısı kimi'));
+  ok("and a worked example of the shape", S.SOURCE_RULES.includes('"rows": [["", "", ""]]'));
 }
 
 Promise.all(pending).then(() => {
