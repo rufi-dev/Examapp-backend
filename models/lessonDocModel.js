@@ -138,6 +138,9 @@ const lessonDocSchema = new Schema(
      * NEVER stored unsanitised: helper/lessonDocSanitize owns what may be in here.
      */
     html: { type: String, default: "" },
+    // How many parts the html holds, counted once when it is written. The library
+    // card needs a number and an aggregate cannot regex over a string cheaply.
+    partCount: { type: Number, default: 0 },
 
     blocks: { type: [blockSchema], default: undefined },
     messages: { type: [messageSchema], default: undefined },

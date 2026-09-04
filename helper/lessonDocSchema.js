@@ -672,6 +672,30 @@ const normalizePlan = (raw = {}) => {
   };
 };
 
+
+/*
+ * Progress for a document written as HTML.
+ *
+ * makeBlockStreamer walks a partial `blocks` array, which an html document does
+ * not have — so the live turn lost its count the moment the model started writing
+ * markup instead, and a two-minute rewrite reported nothing at all. This counts
+ * the block-level tags that have CLOSED in the partial tool input, which is the
+ * same honest signal: work finished, not time elapsed.
+ */
+function makeHtmlStreamer() {
+  let seen = 0;
+  const CLOSERS = /<\/(h[1-4]|p|li|tr|figure|blockquote|table)>/gi;
+  return (buf) => {
+    const total = (String(buf || "").match(CLOSERS) || []).length;
+    const fresh = [];
+    while (seen < total) {
+      seen += 1;
+      fresh.push({ kind: "hissə", text: "" });
+    }
+    return fresh;
+  };
+}
+
 /*
  * Reads blocks out of a half-finished JSON response, so progress can be reported
  * from what has actually been written rather than a timer. Same technique as the
@@ -732,6 +756,7 @@ module.exports = {
   buildPlanPrompt,
   normalizePlan,
   makeBlockStreamer,
+  makeHtmlStreamer,
   BLOCK,
   BASE_RULES,
   EDIT_RULES,

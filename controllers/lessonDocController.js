@@ -249,7 +249,8 @@ const listDocs = asyncHandler(async (req, res) => {
         title: 1, topic: 1, subject: 1, grade: 1, format: 1, status: 1, updatedAt: 1,
         // The card needs a shape, not the document: sending every block to draw
         // "12 blok" would be hundreds of kilobytes per row.
-        blockCount: { $size: { $ifNull: ["$blocks", []] } },
+        // An html document has no blocks; it carries its own part count.
+        blockCount: { $ifNull: ["$partCount", { $size: { $ifNull: ["$blocks", []] } }] },
         taskCount: {
           $size: {
             $filter: { input: { $ifNull: ["$blocks", []] }, as: "b", cond: { $eq: ["$$b.kind", "task"] } },
@@ -582,7 +583,8 @@ ${S.SOURCE_RULES}`;
         ? `${base.prompt}\n\nRAZILAŞDIRILMIŞ ADDIMLAR — yalnız bunları et, başqa heç nəyi dəyişmə:\n${planLines}`
         : `${base.prompt}\n\nRAZILAŞDIRILMIŞ PLAN — bölmələr məhz bunlar olmalıdır:\n${planLines}`;
 
-    const readBlocks = S.makeBlockStreamer();
+    // The document arrives as html now, so progress counts closed tags.
+    const readBlocks = S.makeHtmlStreamer();
     let seen = 0;
     const onText = (snapshot) => {
       lastSnapshot = snapshot;
@@ -692,6 +694,9 @@ ${S.SOURCE_RULES}`;
       doc.owner,
       {
         html,
+        // What the library card counts. Derived once here rather than by
+        // re-scanning the html on every list query.
+        partCount: sum.blocks,
         // Blocks belonged to the old representation. Clearing them keeps one
         // source of truth per document rather than two that can disagree.
         blocks: [],
