@@ -32,6 +32,58 @@ const BLOCK = {
   required: ["kind", "text", "term", "items", "ordered", "solution", "columns", "rows", "tone", "svg"],
 };
 
+/*
+ * What the agent can actually DO, as tools rather than as instructions.
+ *
+ * The distinction that matters: `write_material` changes what the document SAYS,
+ * `set_print_options` changes how it PRINTS. They were the same thing before —
+ * there was only one output shape, document content — so a request about printing
+ * had to be answered with content, and "add page numbers" became the words
+ * "Səhifə 1" typed into the middle of a lesson.
+ *
+ * A description here is not a rule the model must remember not to break. It is the
+ * signature of a function: the model picks the one that matches the request, and
+ * the one that would produce nonsense simply does not exist for that job.
+ */
+const DOC_TOOLS = [
+  {
+    name: "write_material",
+    description:
+      "Materialın MƏZMUNUNU yaz və ya dəyiş: bölmələr, izahlar, nümunələr, tapşırıqlar, cədvəllər, şəkillər. " +
+      "Məzmun dəyişmirsə bu aləti ÇAĞIRMA.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        title: { type: "string", description: "Materialın qısa adı." },
+        reply: { type: "string", description: "Müəllimə 1–2 cümlə: nə etdin və niyə." },
+        blocks: { type: "array", items: BLOCK, description: "Materialın BÜTÜN blokları, sıra ilə." },
+      },
+      required: ["title", "reply", "blocks"],
+    },
+  },
+  {
+    name: "set_print_options",
+    description:
+      "Materialın ÇAP parametrlərini dəyiş. Məzmuna toxunmur. " +
+      "Səhifə nömrələri PDF-in altında sistem tərəfindən çap olunur — onları blok kimi yazmaq mümkün deyil, " +
+      "çünki blok hansı səhifəyə düşəcəyini bilmir. Müəllim səhifə nömrəsi istəyirsə və ya onları istəmirsə, " +
+      "bu aləti çağır və cavabında vəziyyəti bildir.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        pageNumbers: {
+          type: "boolean",
+          description: "PDF-in hər səhifəsinin altında nömrə (1/5) çap olunsun.",
+        },
+        reply: { type: "string", description: "Müəllimə bir cümlə: nəyi dəyişdin." },
+      },
+      required: ["pageNumbers", "reply"],
+    },
+  },
+];
+
 const DOC_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -273,6 +325,24 @@ function buildEditPrompt({ doc = {}, instructions = "" } = {}) {
 
 const clean = (v) => String(v == null ? "" : v).replace(/\r/g, "").trim();
 const list = (v) => (Array.isArray(v) ? v.map(clean).filter(Boolean) : []);
+
+/*
+ * A page marker written as CONTENT is never real, so it never survives.
+ *
+ * Asked to "add page numbers", the model wrote "Səhifə 1", "Səhifə 2" as text
+ * blocks into the middle of the document — numbers that mean nothing, because a
+ * block does not know what page it lands on, and that go stale the moment
+ * anything above them changes. The renderer has already printed a true page
+ * number in the footer of every sheet since the beginning; there was nothing to
+ * add and no way for a block to add it.
+ *
+ * The brief now says so, but a rule the model can forget is not a fix when the
+ * failure writes rubbish into a teacher's document. This is the enforcement: a
+ * block whose entire content is a page marker is dropped, in any of the three
+ * languages this product is written in.
+ */
+const PAGE_MARKER = /^(səhifə|sehife|sayfa|page|s\.)\s*[-–—:]?\s*\d+\s*(\/\s*\d+)?[.)]?$/i;
+const isPageMarker = (t) => PAGE_MARKER.test(String(t || "").trim());
 // A form's Procedure grid is legitimately long; a model looping is not.
 const MAX_TABLE_ROWS = 80;
 const newId = () => crypto.randomBytes(6).toString("hex");
@@ -305,10 +375,11 @@ function normalizeDoc(rawDoc = {}, { keepIds = [] } = {}) {
 
     switch (kind) {
       case "heading":
-        if (text) blocks.push({ id, kind, text });
+        // A heading that is only "Səhifə 2" is a page marker, not a section.
+        if (text && !isPageMarker(text)) blocks.push({ id, kind, text });
         break;
       case "text":
-        if (text) blocks.push({ id, kind, text });
+        if (text && !isPageMarker(text)) blocks.push({ id, kind, text });
         break;
       case "note":
         if (text) {
@@ -621,6 +692,7 @@ function makeBlockStreamer() {
 
 module.exports = {
   DOC_SCHEMA,
+  DOC_TOOLS,
   SOURCE_RULES,
   PLAN_SCHEMA,
   PLAN_RULES,

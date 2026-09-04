@@ -446,7 +446,7 @@ const streamMessage = asyncHandler(async (req, res) => {
     ac.abort();
   });
 
-  const { runDocument } = require("../helper/aiDocument");
+  const { runDocument, documentWithTools: runTools } = require("../helper/aiDocument");
   const { toGeminiSchema } = require("../helper/curriculumSchema");
   const hadBlocks = (doc.blocks || []).length > 0;
   // Attached references travel with every turn, and with the PLAN too — deciding
@@ -551,24 +551,83 @@ ${S.SOURCE_RULES}`;
 
     const readBlocks = S.makeBlockStreamer();
     let seen = 0;
-    const out = await runDocument({
+    const onText = (snapshot) => {
+      lastSnapshot = snapshot;
+      for (const b of readBlocks(snapshot)) {
+        seen += 1;
+        // The block itself, so the client can name what just landed rather than
+        // counting anonymously.
+        send("block", { n: seen, kind: String(b.kind || ""), text: String(b.text || b.term || "").slice(0, 90) });
+      }
+    };
+
+    /*
+     * The agent picks a tool. A request about how the document PRINTS calls
+     * set_print_options and never touches a block; a request about what it SAYS
+     * calls write_material. That choice is the whole point — it is why "add page
+     * numbers" can no longer come back as the words "Səhifə 1" typed into a
+     * lesson, and why a print change is instant instead of a full rewrite that
+     * might mangle the document on the way past.
+     */
+    const out = await runTools({
       system: base.system,
       prompt,
       parts,
-      schema: S.DOC_SCHEMA,
-      geminiSchema: toGeminiSchema(S.DOC_SCHEMA),
-      // No override — see the sibling call in sendMessage above.
+      tools: S.DOC_TOOLS,
       signal: ac.signal,
-      onText: (snapshot) => {
-        lastSnapshot = snapshot;
-        for (const b of readBlocks(snapshot)) {
-          seen += 1;
-          // The block itself, so the client can name what just landed rather than
-          // counting anonymously.
-          send("block", { n: seen, kind: String(b.kind || ""), text: String(b.text || b.term || "").slice(0, 90) });
-        }
-      },
+      onText,
     });
+
+    const wrote = out.calls.find((c) => c.name === "write_material");
+    const printed = out.calls.find((c) => c.name === "set_print_options");
+
+    /*
+     * A settings-only turn. Nothing about the document's content changed, so
+     * nothing about it is rewritten — the setting is committed on its own and the
+     * teacher gets the model's sentence about it.
+     */
+    if (printed && !wrote) {
+      const saved = await svc.commit(
+        doc._id,
+        doc.owner,
+        { "settings.pageNumbers": printed.input.pageNumbers !== false },
+        baseRevision,
+        {
+          push: {
+            messages: {
+              role: "assistant",
+              text: printed.input.reply || out.said || "Çap parametrləri yeniləndi.",
+              action: "settings",
+              at: new Date(),
+            },
+          },
+        }
+      );
+      await logStudioUsage(req, { doc: saved, out, hadBlocks });
+      send("done", { doc: saved, summary: S.summarize(saved.blocks || []), provider: out.provider });
+      return;
+    }
+
+    if (printed && wrote) {
+      // Both, in one turn: apply the setting first so the content commit below is
+      // the single write that moves the revision.
+      await LessonDoc.updateOne(
+        { _id: doc._id, owner: doc.owner },
+        { $set: { "settings.pageNumbers": printed.input.pageNumbers !== false } }
+      );
+    }
+
+    if (!wrote) {
+      await svc.appendMessages(doc._id, doc.owner, {
+        role: "assistant",
+        text: out.said || "Dəyişiklik edilmədi.",
+        action: "noop",
+        at: new Date(),
+      });
+      send("done", { doc, summary: S.summarize(doc.blocks || []), provider: out.provider });
+      return;
+    }
+    out.doc = wrote.input;
 
     const keepIds = (doc.blocks || []).map((b) => b.id);
     const next = S.normalizeDoc(out.doc || {}, { keepIds });
@@ -836,7 +895,14 @@ const exportDoc = asyncHandler(async (req, res) => {
     mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
   } else {
     const { renderPdf } = require("./../helper/lessonPlanPdf");
-    body = await renderPdf(buildLessonDocHtml(plain), { footerLabel: "dərs materialı" });
+    // Page numbers only — no product name on a document the teacher hands out —
+    // and only when the document says it wants them. That flag is what the AI's
+    // set_print_options tool writes, which is why "add page numbers" is a real
+    // change to a real setting rather than words typed into the content.
+    body = await renderPdf(buildLessonDocHtml(plain), {
+      footerLabel: null,
+      pageNumbers: doc.settings?.pageNumbers !== false,
+    });
     mime = "application/pdf";
   }
 

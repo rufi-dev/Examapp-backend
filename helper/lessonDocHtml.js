@@ -20,19 +20,28 @@ const has = (v) => Boolean(String(v == null ? "" : v).trim());
 
 /* ------------------------------------------------------------- screen CSS --- */
 const CSS_PDF = `
-:root{--ink:#16212B;--slate:#4C5B68;--muted:#77848F;--teal:#0F4C5C;--teal-tint:#E8F1F3;
-  --ochre:#8A5A00;--ochre-tint:#FBF2DE;--green:#2F6B4F;--green-tint:#E7F1EB;
-  --rule:#D8DEE2;--rule-soft:#ECF0F2;
-  --serif:"DejaVu Serif",Georgia,serif;--sans:"Open Sans","DejaVu Sans",sans-serif}
+/*
+ * THE SAME PALETTE THE PREVIEW USES.
+ *
+ * These were a separate teal identity — a document that looked nothing like the
+ * one on screen beside it, which made the preview a decoration rather than a
+ * promise. Every value here is the app's own design token from
+ * Frontend/src/index.css, resolved to hex because a print stylesheet cannot read
+ * a CSS variable set on another document: --primary 68 92 202, --text 34 38 49,
+ * --text-muted 103 108 120, --border 221 223 229, --surface-2 235 237 242,
+ * --warning 233 180 82, --success 21 128 61.
+ *
+ * If a token moves in index.css, move it here too. The preview IS the contract.
+ */
+:root{--ink:#222631;--slate:#676C78;--muted:#676C78;--teal:#445CCA;--teal-tint:#EDF0FB;
+  --ochre:#8A5A00;--ochre-tint:#FBF2DE;--green:#15803D;--green-tint:#E7F1EB;
+  --rule:#DDDFE5;--rule-soft:#EBEDF2;
+  --serif:"Open Sans","DejaVu Sans",sans-serif;--sans:"Open Sans","DejaVu Sans",sans-serif}
 *{box-sizing:border-box}
 html,body{margin:0;background:#fff}
 body{font-family:var(--sans);font-size:10.5pt;line-height:1.55;color:var(--ink);
   -webkit-print-color-adjust:exact;print-color-adjust:exact}
 
-.masthead{border-top:2.5pt solid var(--teal);padding-top:8pt;margin-bottom:16pt}
-.brandline{display:flex;justify-content:space-between;font-size:7.5pt;letter-spacing:.1em;
-  font-weight:700;color:var(--teal);margin-bottom:9pt;text-transform:uppercase}
-.brandline .doctype{color:var(--muted);font-weight:600}
 h1{font-family:var(--serif);font-size:20pt;margin:0 0 4pt;line-height:1.15}
 .meta{margin:0;color:var(--muted);font-size:9pt}
 
@@ -82,30 +91,30 @@ td{font-size:10pt;padding:4pt 6pt 4pt 0;border-bottom:.5pt solid var(--rule-soft
 // ignores most of them. Margins, borders and tables only.
 const CSS_DOCX = `
 @page{size:A4;margin:2cm}
-body{font-family:"Calibri","Segoe UI",sans-serif;font-size:11pt;color:#16212B;line-height:1.45}
-h1{font-family:"Georgia",serif;font-size:22pt;color:#0F4C5C;margin:0 0 4pt}
-.meta{color:#77848F;font-size:9.5pt;margin:0 0 16pt}
-h2{font-family:"Georgia",serif;font-size:14pt;color:#0F4C5C;margin:18pt 0 6pt;
-  border-bottom:1pt solid #D8DEE2;padding-bottom:3pt}
+body{font-family:"Calibri","Segoe UI",sans-serif;font-size:11pt;color:#222631;line-height:1.45}
+h1{font-family:"Georgia",serif;font-size:22pt;color:#445CCA;margin:0 0 4pt}
+.meta{color:#676C78;font-size:9.5pt;margin:0 0 16pt}
+h2{font-family:"Georgia",serif;font-size:14pt;color:#445CCA;margin:18pt 0 6pt;
+  border-bottom:1pt solid #DDDFE5;padding-bottom:3pt}
 p{margin:0 0 8pt}
 ul,ol{margin:0 0 9pt}
 li{margin-bottom:3pt}
-.def{margin:0 0 9pt;padding:8pt 10pt;background:#E8F1F3}
-.def .term{font-weight:bold;color:#0F4C5C}
-.ex{margin:0 0 10pt;padding:8pt 10pt;border:1pt solid #D8DEE2}
-.ex .tag{font-size:8pt;font-weight:bold;color:#0F4C5C}
-.ex .sol{margin:6pt 0 0;color:#4C5B68}
+.def{margin:0 0 9pt;padding:8pt 10pt;background:#EDF0FB}
+.def .term{font-weight:bold;color:#445CCA}
+.ex{margin:0 0 10pt;padding:8pt 10pt;border:1pt solid #DDDFE5}
+.ex .tag{font-size:8pt;font-weight:bold;color:#445CCA}
+.ex .sol{margin:6pt 0 0;color:#676C78}
 .task{margin:0 0 9pt;padding:8pt 10pt;background:#FAFBFC}
 .task .tag{font-size:8pt;font-weight:bold;color:#8A5A00}
 .note{margin:0 0 9pt;padding:8pt 10pt}
-.note.info{background:#E8F1F3;color:#0F4C5C}
+.note.info{background:#EDF0FB;color:#445CCA}
 .note.warning{background:#FBF2DE;color:#8A5A00}
-.note.success{background:#E7F1EB;color:#2F6B4F}
+.note.success{background:#E7F1EB;color:#15803D}
 table{border-collapse:collapse;width:100%;margin:0 0 10pt}
-th{font-size:9pt;color:#0F4C5C;text-align:left;border-bottom:1pt solid #0F4C5C;padding:4pt 6pt 4pt 0}
-td{font-size:10.5pt;padding:4pt 6pt;border-bottom:0.5pt solid #ECF0F2}
+th{font-size:9pt;color:#445CCA;text-align:left;border-bottom:1pt solid #445CCA;padding:4pt 6pt 4pt 0}
+td{font-size:10.5pt;padding:4pt 6pt;border-bottom:0.5pt solid #EBEDF2}
 .fig{margin:0 0 12pt;text-align:center}
-.fig figcaption{margin-top:4pt;color:#77848F;font-size:9pt;font-style:italic}
+.fig figcaption{margin-top:4pt;color:#676C78;font-size:9pt;font-style:italic}
 `;
 
 /* ------------------------------------------------------------ the content --- */
@@ -123,7 +132,7 @@ td{font-size:10.5pt;padding:4pt 6pt;border-bottom:0.5pt solid #ECF0F2}
  * border around all of them, and takes a background. So the screen and the PDF use
  * divs, and Word uses a table carrying the same colours and the same content.
  */
-const wordBox = (inner, { bg = "", border = "#D8DEE2", pad = "10pt 12pt" } = {}) => `
+const wordBox = (inner, { bg = "", border = "#DDDFE5", pad = "10pt 12pt" } = {}) => `
 <table cellspacing="0" cellpadding="0" style="width:100%;border-collapse:collapse;margin:0 0 10pt 0">
   <tr><td style="border:0.75pt solid ${border};${bg ? `background-color:${bg};` : ""}padding:${pad}">
     ${inner}
@@ -141,8 +150,8 @@ function renderBlock(b, forWord) {
     case "definition":
       return forWord
         ? wordBox(
-            `<p style="margin:0"><b style="color:#0F4C5C">${esc(b.term)}</b> — ${esc(b.text)}</p>`,
-            { bg: "#E8F1F3", border: "#C7DDE2" }
+            `<p style="margin:0"><b style="color:#445CCA">${esc(b.term)}</b> — ${esc(b.text)}</p>`,
+            { bg: "#EDF0FB", border: "#C9D2F0" }
           )
         : `<div class="def"><span class="term">${esc(b.term)}</span><p class="body">${esc(b.text)}</p></div>`;
 
@@ -152,10 +161,10 @@ function renderBlock(b, forWord) {
     }
 
     case "example": {
-      const inner = `<p style="margin:0 0 4pt 0;font-size:8.5pt;font-weight:bold;color:#0F4C5C">NÜMUNƏ</p>
+      const inner = `<p style="margin:0 0 4pt 0;font-size:8.5pt;font-weight:bold;color:#445CCA">NÜMUNƏ</p>
         <p style="margin:0">${esc(b.text)}</p>${
         has(b.solution)
-          ? `<p style="margin:7pt 0 0 0;padding-top:5pt;border-top:0.5pt solid #D8DEE2;color:#4C5B68"><b>Həlli:</b> ${esc(b.solution)}</p>`
+          ? `<p style="margin:7pt 0 0 0;padding-top:5pt;border-top:0.5pt solid #DDDFE5;color:#676C78"><b>Həlli:</b> ${esc(b.solution)}</p>`
           : ""
       }`;
       return forWord
@@ -182,10 +191,10 @@ function renderBlock(b, forWord) {
     case "note": {
       const tone = b.tone || "info";
       const WORD_TONE = {
-        info: { bg: "#E8F1F3", border: "#C7DDE2", fg: "#0F4C5C" },
+        info: { bg: "#EDF0FB", border: "#C9D2F0", fg: "#445CCA" },
         warning: { bg: "#FBF2DE", border: "#EBD9AE", fg: "#8A5A00" },
-        success: { bg: "#E7F1EB", border: "#C6DFD1", fg: "#2F6B4F" },
-      }[tone] || { bg: "#E8F1F3", border: "#C7DDE2", fg: "#0F4C5C" };
+        success: { bg: "#E7F1EB", border: "#C6DFD1", fg: "#15803D" },
+      }[tone] || { bg: "#EDF0FB", border: "#C9D2F0", fg: "#445CCA" };
       return forWord
         ? wordBox(`<p style="margin:0;color:${WORD_TONE.fg}">${esc(b.text)}</p>`, {
             bg: WORD_TONE.bg,
@@ -236,7 +245,7 @@ function renderBlock(b, forWord) {
              <tr>${(b.columns || [])
                .map(
                  (c) =>
-                   `<td style="border-bottom:1pt solid #0F4C5C;padding:5pt 8pt 4pt 0;color:#0F4C5C;font-size:9pt;font-weight:bold">${cell(c)}</td>`
+                   `<td style="border-bottom:1pt solid #445CCA;padding:5pt 8pt 4pt 0;color:#445CCA;font-size:9pt;font-weight:bold">${cell(c)}</td>`
                )
                .join("")}</tr>
              ${(b.rows || [])
@@ -290,13 +299,14 @@ function buildLessonDocHtml(rawDoc = {}, { forWord = false } = {}) {
 
   const body = blocks.map((b) => renderBlock(b, forWord)).join("\n");
 
-  const head = forWord
-    ? `<h1>${esc(title)}</h1>${meta ? `<p class="meta">${esc(meta)}</p>` : ""}`
-    : `<header class="masthead">
-  <div class="brandline"><span>Examopia</span><span class="doctype">Dərs materialı</span></div>
-  <h1>${esc(title)}</h1>
-  ${meta ? `<p class="meta">${esc(meta)}</p>` : ""}
-</header>`;
+  /*
+   * No brandline. The PDF used to open with "EXAMOPIA" and "DƏRS MATERİALI"
+   * stamped across the top — words that appear nowhere in the preview beside it,
+   * on a document a teacher hands to a methodologist as their own work. A tool
+   * signing the output it was asked to produce is a watermark, and the preview is
+   * the contract: what is on screen is what prints.
+   */
+  const head = `<h1>${esc(title)}</h1>${meta ? `<p class="meta">${esc(meta)}</p>` : ""}`;
 
   return `<!DOCTYPE html><html lang="az"><head><meta charset="utf-8">
 <title>${esc(title)}</title><style>${forWord ? CSS_DOCX : CSS_PDF}</style></head><body>

@@ -865,6 +865,102 @@ console.log("\n22. A blank form survives — the empty cell IS the content:");
   ok("and a worked example of the shape", S.SOURCE_RULES.includes('"rows": [["", "", ""]]'));
 }
 
+
+console.log("\n23. The agent acts through tools, so it cannot fake a capability:");
+{
+  /*
+   * Asked to add page numbers, the model wrote "Səhifə 1" and "Səhifə 2" into the
+   * document as text blocks. Numbers that cannot be right — a block does not know
+   * which page it lands on — and stale after the next edit.
+   *
+   * The instinctive fix is a rule: "never write page markers". That is the wrong
+   * shape of fix and it scales the wrong way: the prompt grows by one prohibition
+   * per discovered mistake, each one is a rule the model can forget, and the real
+   * gap stays open — there was no way to express the thing being asked for. The
+   * model had exactly one output shape, document content, so every request that
+   * was not about content still had to come out as content.
+   *
+   * The fix is a capability, not a prohibition.
+   */
+  const fs4 = require("fs");
+  const path4 = require("path");
+
+  const names = S.DOC_TOOLS.map((t) => t.name);
+  ok("there is a tool for content", names.includes("write_material"));
+  ok("and a separate one for how it prints", names.includes("set_print_options"));
+
+  const print = S.DOC_TOOLS.find((t) => t.name === "set_print_options");
+  ok("the print tool cannot touch content", !JSON.stringify(print.input_schema.properties).includes("blocks"));
+  ok("it carries the page-number switch", print.input_schema.properties.pageNumbers.type === "boolean");
+  ok("and a sentence for the teacher", Boolean(print.input_schema.properties.reply));
+  // Strict mode: every property required, or the call is rejected outright.
+  assertStrict(print.input_schema);
+  ok("the print tool's schema is strict-valid", true);
+
+  const write = S.DOC_TOOLS.find((t) => t.name === "write_material");
+  assertStrict(write.input_schema);
+  ok("the write tool's schema is strict-valid", true);
+  ok("the write tool is told not to run for a non-content change", write.description.includes("ÇAĞIRMA"));
+
+  /*
+   * The prohibition is GONE from the brief. That is the point of the change: the
+   * rule is not needed once the capability exists, and leaving it would be the
+   * habit this was meant to break.
+   */
+  ok("no page-number prohibition in the brief", !S.BASE_RULES.includes("SƏHİFƏ NÖMRƏSİ YAZMA"));
+
+  const ctl4 = fs4.readFileSync(path4.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  ok("the turn runs through the tool path", /runTools\(\{/.test(ctl4));
+  // A settings change must not rewrite the document: that is what makes it instant
+  // and what stops a print tweak from mangling the content on the way past.
+  ok("a settings-only turn commits only the setting", /if \(printed && !wrote\)/.test(ctl4));
+  ok("and writes no blocks", /\"settings\.pageNumbers\": printed\.input\.pageNumbers !== false/.test(ctl4));
+  ok("a turn that calls nothing says so instead of inventing", /action: \"noop\"/.test(ctl4));
+
+  // The renderer has to honour it, or the setting is decoration.
+  ok("the export reads the setting", /pageNumbers: doc\.settings\?\.pageNumbers !== false/.test(ctl4));
+
+  const pdf = fs4.readFileSync(path4.join(__dirname, "../helper/lessonPlanPdf.js"), "utf8");
+  ok("the renderer can turn the footer off", /footerTemplate: pageNumbers \? footerFor\(footerLabel\) : \"<div><\/div>\"/.test(pdf));
+  /*
+   * displayHeaderFooter must stay true even with numbers off: switching it off
+   * hands the page back to Chromium's own header and footer — the date, the title
+   * and the file URL — which is the exact thing this renderer exists to remove.
+   */
+  ok("and never by handing the sheet back to Chromium", /displayHeaderFooter: true/.test(pdf));
+
+  const model4 = fs4.readFileSync(path4.join(__dirname, "../models/lessonDocModel.js"), "utf8");
+  ok("the setting is real state on the document", /settings: \{[\s\S]{0,120}pageNumbers/.test(model4));
+  ok("and defaults to on, as it always printed", /pageNumbers: \{ type: Boolean, default: true \}/.test(model4));
+}
+
+console.log("\n24. The export is the preview, not a branded copy of it:");
+{
+  /*
+   * The PDF opened with "EXAMOPIA" and "DƏRS MATERİALI" stamped across the top —
+   * words that appear nowhere in the preview beside it, on a document a teacher
+   * hands to a methodologist as their own work. And it was drawn in a teal palette
+   * the app does not use anywhere, so the preview was a decoration rather than a
+   * promise about what would print.
+   */
+  const doc = { title: "Dərs", blocks: [{ id: "1", kind: "heading", text: "Bölmə" }] };
+  const pdf = buildLessonDocHtml(doc);
+  const word = buildLessonDocHtml(doc, { forWord: true });
+
+  ok("no brand line in the PDF", !pdf.includes("brandline") && !pdf.includes("Examopia"));
+  ok("no document-type stamp either", !pdf.includes("Dərs materialı</span>"));
+  ok("the masthead rules went with it", !pdf.includes("masthead"));
+
+  // The app's own tokens, resolved to hex — --primary 68 92 202 is #445CCA.
+  ok("the PDF uses the app's primary", pdf.includes("#445CCA"));
+  ok("and its text colour", pdf.includes("#222631"));
+  ok("Word matches the same palette", word.includes("#445CCA"));
+  ok("the old teal identity is gone from both", !pdf.includes("0F4C5C") && !word.includes("0F4C5C"));
+
+  const pdfSrc = require("fs").readFileSync(require("path").join(__dirname, "../helper/lessonPlanPdf.js"), "utf8");
+  ok("a material's footer can carry no product name", /label \? `<span>Examopia · \$\{label\}<\/span>` : \"\"/.test(pdfSrc));
+}
+
 Promise.all(pending).then(() => {
   console.log(`\n${passed} passed, ${failed} failed`);
   assert.strictEqual(failed, 0, `${failed} lesson-doc assertions failed`);

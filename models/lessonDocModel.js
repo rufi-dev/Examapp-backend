@@ -133,6 +133,24 @@ const lessonDocSchema = new Schema(
     // next time rather than asking again.
     format: { type: String, enum: ["pdf", "docx"], default: "pdf" },
 
+    /*
+     * How the document PRINTS, as opposed to what it says.
+     *
+     * This exists because "add page numbers" is not a content request and must not
+     * be answered with content. Asked for page numbers, the model wrote "Səhifə 1"
+     * and "Səhifə 2" into the middle of the document as text — numbers that cannot
+     * be right, because a block does not know which page it lands on, and that go
+     * stale the moment anything above them changes.
+     *
+     * The renderer has always printed a real page number on every sheet. What was
+     * missing was a place for the model to ACT on that, so it faked it in the only
+     * material it had. These are settings the AI can set through a tool, and the
+     * renderer reads — no prose instruction can substitute for the capability.
+     */
+    settings: {
+      pageNumbers: { type: Boolean, default: true },
+    },
+
     status: { type: String, enum: ["draft", "ready", "archived"], default: "draft" },
     // Draft-side CAS, same contract as LessonPlan: a write with a stale revision
     // gets 409 rather than silently overwriting another tab.

@@ -62,6 +62,104 @@ function docError(status, userMessage, fallback = false) {
 }
 
 /*
+ * The agentic path: the model ACTS through tools instead of describing an action.
+ *
+ * WHY THIS EXISTS, and why the previous design kept failing the same way.
+ *
+ * Every turn used to be one structured answer — `{title, reply, blocks}` — which
+ * meant the model had exactly one thing it could produce: document content. So
+ * every request that was NOT about content still had to come out as content. Asked
+ * to add page numbers, it wrote "Səhifə 1" and "Səhifə 2" into the middle of the
+ * document as text, because writing text was the only capability it had. The
+ * numbers were wrong the moment they were written — a block cannot know which page
+ * it lands on — and stale after the next edit.
+ *
+ * The instinctive fix is a rule: "never write page markers". That is the wrong
+ * shape of fix, and it scales the wrong way: the prompt grows by one prohibition
+ * per discovered mistake, every rule is one the model may forget, and the
+ * underlying gap — no way to express the thing that was actually asked for — is
+ * still there. A prohibition tells the model what not to do INSTEAD of the job. A
+ * tool lets it do the job.
+ *
+ * So: a request that changes how the document PRINTS calls a settings tool and
+ * touches no content at all — which is also why it is instant and cannot mangle
+ * the document. A request that changes what the document SAYS calls the writing
+ * tool. The model chooses, the same way it would choose between two functions.
+ *
+ * Fallback providers stay on the structured-output path below. They run only when
+ * Claude is unavailable, and a degraded turn that can still write the document is
+ * better than a turn that cannot run at all.
+ */
+async function documentWithTools({ prompt, parts = [], system, tools, signal, maxTokens = DOC_MAX_TOKENS, onText }) {
+  const { claudeContentParts, computeCost } = require("../controllers/aiController");
+  const client = anthropic();
+  if (!client) throw docError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)", true);
+
+  let message;
+  try {
+    const run = client.messages.stream(
+      {
+        model: "claude-opus-4-8",
+        max_tokens: maxTokens,
+        system: [{ type: "text", text: system }],
+        output_config: { effort: "high" },
+        tools,
+        messages: [
+          {
+            role: "user",
+            content: [...claudeContentParts(parts), { type: "text", text: prompt }],
+          },
+        ],
+      },
+      signal ? { signal } : undefined
+    );
+
+    /*
+     * Progress still comes from the real response. With a tool call the document
+     * arrives as the tool's INPUT rather than as text, so the block streamer reads
+     * `inputJson` instead — same partial-JSON walk, same honest count of blocks
+     * that have actually closed.
+     */
+    if (typeof onText === "function") {
+      run.on("inputJson", (_partial, snapshot) => {
+        try {
+          onText(typeof snapshot === "string" ? snapshot : JSON.stringify(snapshot || {}));
+        } catch {
+          /* progress is decoration; the document is not */
+        }
+      });
+    }
+    message = await run.finalMessage();
+  } catch (e) {
+    if (signal?.aborted) throw docError(499, "Ləğv edildi");
+    console.error("AI document tools (claude) error:", e?.status, e?.message);
+    throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
+  }
+
+  if (message.stop_reason === "refusal") throw docError(422, "AI bu sorğunu emal edə bilmədi.");
+
+  const calls = (message.content || [])
+    .filter((b) => b.type === "tool_use")
+    .map((b) => ({ name: b.name, input: b.input || {} }));
+
+  /*
+   * The model's own words, when it wrote any. A settings-only turn produces no
+   * document, so this is the whole answer the teacher sees — "page numbers are
+   * already on" is a complete and correct response to a request, and it must not
+   * be dropped just because no blocks changed.
+   */
+  const said = (message.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join(" ")
+    .trim();
+
+  if (!calls.length && !said) throw docError(502, "AI cavabı oxunmadı. Yenidən cəhd edin.", true);
+
+  return { calls, said, cost: computeCost(message.usage), usage: message.usage, provider: "claude" };
+}
+
+/*
  * Recover a document from JSON that was cut off mid-write.
  *
  * A response that hits its token ceiling stops in the middle of a string, a
@@ -447,6 +545,7 @@ async function runDocument({ prompt, parts = [], system, schema, geminiSchema, m
 
 module.exports = {
   DOC_MAX_TOKENS,
+  documentWithTools,
   documentWithClaude,
   documentWithOpenAI,
   documentWithGemini,

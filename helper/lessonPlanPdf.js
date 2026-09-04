@@ -19,15 +19,27 @@ const MARGIN = { top: "14mm", right: "15mm", bottom: "15mm", left: "15mm" };
 // The label is a parameter because this renderer is shared: an exam's analytic
 // table carrying "dərs planı" in its footer is a small error a teacher would
 // notice immediately, on a document they hand to a methodologist.
+/*
+ * `label: null` prints page numbers ALONE, with no product name on the sheet.
+ *
+ * A lesson material is the teacher's own document — they hand it to a class or to
+ * a methodologist — and a tool that signs the output it was asked to produce has
+ * put a watermark on someone else's work. Lesson plans and exam tables keep their
+ * label because those name what the document IS, which is useful on a stack of
+ * printouts; a material's own title already does that job.
+ */
 const footerFor = (label) => `
   <div style="font-family:'Open Sans',sans-serif;font-size:7pt;color:#77848F;width:100%;
-              padding:0 15mm;display:flex;justify-content:space-between;">
-    <span>Examopia · ${label}</span>
+              padding:0 15mm;display:flex;justify-content:${label ? "space-between" : "flex-end"};">
+    ${label ? `<span>Examopia · ${label}</span>` : ""}
     <span><span class="pageNumber"></span>/<span class="totalPages"></span></span>
   </div>`;
 const FOOTER = footerFor("dərs planı");
 
-async function renderPdf(html, { timeoutMs = 30000, footerLabel = "dərs planı", landscape = false } = {}) {
+async function renderPdf(
+  html,
+  { timeoutMs = 30000, footerLabel = "dərs planı", landscape = false, pageNumbers = true } = {}
+) {
   let browser;
   try {
     browser = await puppeteer.launch({
@@ -60,9 +72,16 @@ async function renderPdf(html, { timeoutMs = 30000, footerLabel = "dərs planı"
     return Buffer.from(await page.pdf({
       format: "A4",
       printBackground: true, // the design is tinted blocks; without this it is blank boxes
+      /*
+       * displayHeaderFooter stays TRUE even with page numbers off: switching it
+       * off hands the sheet back to Chromium's own header and footer — the date,
+       * the page title and the file URL on every page — which is the exact thing
+       * this renderer exists to prevent. An empty template is how you get a clean
+       * sheet.
+       */
       displayHeaderFooter: true,
       headerTemplate: "<div></div>",
-      footerTemplate: footerFor(footerLabel),
+      footerTemplate: pageNumbers ? footerFor(footerLabel) : "<div></div>",
       landscape,
       margin: MARGIN,
       preferCSSPageSize: false,
