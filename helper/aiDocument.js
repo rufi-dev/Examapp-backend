@@ -90,7 +90,7 @@ function docError(status, userMessage, fallback = false) {
  * Claude is unavailable, and a degraded turn that can still write the document is
  * better than a turn that cannot run at all.
  */
-async function documentWithTools({ prompt, parts = [], system, tools, signal, maxTokens = DOC_MAX_TOKENS, onText, validate, fetchSource }) {
+async function documentWithTools({ prompt, parts = [], system, tools, signal, maxTokens = DOC_MAX_TOKENS, onText, validate, fetchSource, look }) {
   const { claudeContentParts, computeCost } = require("../controllers/aiController");
   const client = anthropic();
   if (!client) throw docError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)", true);
@@ -121,6 +121,12 @@ async function documentWithTools({ prompt, parts = [], system, tools, signal, ma
    */
   const MAX_READS = 4;
   let reads = 0;
+  /*
+   * Once. Looking at the draft costs a browser render and an image round-trip, and
+   * the second look almost never says anything the first did not — the first is
+   * where "I merged five empty cells into the lecture block" becomes visible.
+   */
+  let looked = false;
   const history = [
     {
       role: "user",
@@ -222,6 +228,51 @@ async function documentWithTools({ prompt, parts = [], system, tools, signal, ma
       attempt -= 1;
       // eslint-disable-next-line no-continue
       continue;
+    }
+
+    /*
+     * Show it its own work before accepting it.
+     *
+     * Every other check here is arithmetic — a short row, a deleted property —
+     * and arithmetic cannot see that the ruling is wrong. The model wrote a
+     * timetable whose colours were right to the cell and whose lines were absent,
+     * because in markup you are only reading, five empty cells merged into their
+     * neighbour look like nothing at all. It has read the source; this hands it
+     * the render and lets it compare, which is what a person would do.
+     *
+     * Only when the caller asked for it — copying work — and only with the source
+     * still in the conversation, so there is something to compare against.
+     */
+    const wrote = used.find((b) => b.name === "write_material");
+    if (!faults.length && typeof look === "function" && !looked && wrote && attempt < MAX_FIXES) {
+      const shot = await look(wrote.input?.html || "");
+      if (shot) {
+        looked = true;
+        history.push({ role: "assistant", content: message.content });
+        history.push({
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: wrote.id,
+              content:
+                "Yazdığın sənədin görüntüsü aşağıdadır. Mənbə ilə müqayisə et: xətlər, " +
+                "sütunların düzülüşü, boş xanalar, rənglər, hizalama. Fərq varsa " +
+                "write_material-ı düzəldilmiş HTML ilə yenidən çağır. Hər şey uyğundursa " +
+                "eyni HTML-i yenidən göndər.",
+            },
+            {
+              type: "image",
+              source: { type: "base64", media_type: "image/png", data: shot.toString("base64") },
+            },
+          ],
+        });
+        // Not a failed attempt: it is the verification step, and it must not eat
+        // the budget kept for correcting what it finds.
+        attempt -= 1;
+        // eslint-disable-next-line no-continue
+        continue;
+      }
     }
 
     if (!faults.length || attempt >= MAX_FIXES) {

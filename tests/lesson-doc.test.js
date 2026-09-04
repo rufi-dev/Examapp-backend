@@ -1237,6 +1237,21 @@ console.log("\n25. The model writes the document; the schema stops being the cei
     droppedStyles('<td style="box-shadow:0 0 2px #000;color:#c00">x</td>', sanitizeDocHtml('<table><tr><td style="box-shadow:0 0 2px #000;color:#c00">x</td></tr></table>')).join() === "box-shadow");
   ok("and is handed back to the model", /const gone = droppedStyles\(raw, sanitizeDocHtml\(raw\)\);/.test(ctl5));
 
+  /*
+   * The colours came out right to the cell and the ruling was absent: five empty
+   * September cells had been merged into the lecture block. Every other check
+   * here is arithmetic on the markup, and arithmetic cannot see that. The model
+   * had never once looked at what it wrote.
+   */
+  const ai2 = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocument.js"), "utf8");
+  ok("the model is shown its own draft", /type: "image"[\s\S]{0,200}shot\.toString\("base64"\)/.test(ai2));
+  ok("once, because the second look says nothing new", /if \(shot\) \{[\s\S]{0,80}looked = true;/.test(ai2));
+  ok("and looking is not counted as a failed attempt", /attempt -= 1;/.test(ai2));
+  ok("only with a source to compare against",
+    /look: sending\.length \|\| \(doc\.files \|\| \[\]\)\.length/.test(ctl5));
+  ok("a failed render costs the teacher nothing", /draft render failed/.test(ctl5));
+  ok("the renderer exists", typeof require("../helper/lessonPlanPdf").renderPng === "function");
+
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));
   ok("blocks are cleared so there is one source of truth", /blocks: \[\],/.test(ctl5));

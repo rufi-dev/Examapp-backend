@@ -92,4 +92,42 @@ async function renderPdf(
   }
 }
 
-module.exports = { renderPdf, footerFor, FOOTER, MARGIN };
+
+/*
+ * The same page, as a picture.
+ *
+ * The model writes HTML and has never once seen it. Asked to reproduce a
+ * timetable exactly it got the colours right and the ruling wrong — it had
+ * merged five empty September cells into the lecture block, which is invisible in
+ * markup you are only reading and obvious the moment you look at it. Every other
+ * check here is arithmetic on the source; this is the one that answers "does it
+ * LOOK like the file", and only an image can answer that.
+ *
+ * Same hardened setup as the PDF: no network, no sandbox, our own document.
+ */
+async function renderPng(html, { timeoutMs = 30000, width = 1240 } = {}) {
+  let browser;
+  try {
+    browser = await puppeteer.launch({
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    });
+    const page = await browser.newPage();
+    page.setDefaultTimeout(timeoutMs);
+    await page.setViewport({ width, height: 1600, deviceScaleFactor: 1 });
+    await page.setRequestInterception(true);
+    page.on("request", (r) => (r.url().startsWith("data:") || r.url() === "about:blank" ? r.continue() : r.abort()));
+    await page.setContent(html, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    await page.evaluateHandle("document.fonts.ready");
+    /*
+     * Capped, not full-page. A long handout would otherwise come back as a strip
+     * thousands of pixels tall that costs a fortune in image tokens and shows the
+     * model less of what matters, because everything is scaled to fit.
+     */
+    return Buffer.from(await page.screenshot({ type: "png", clip: { x: 0, y: 0, width, height: 1600 } }));
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+}
+
+module.exports = { renderPdf, renderPng, footerFor, FOOTER, MARGIN };

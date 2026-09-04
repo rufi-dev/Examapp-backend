@@ -748,6 +748,28 @@ ${S.SOURCE_RULES}`;
        * survive the model retyping it, and never on anything but this document's
        * own list.
        */
+      /*
+       * Let it look at what it wrote — but only when there is a source to compare
+       * against, which is what makes the comparison worth a browser render. A
+       * material written from a teacher's description has nothing to be checked
+       * for fidelity TO.
+       */
+      look: sending.length || (doc.files || []).length
+        ? async (html) => {
+            if (!html) return null;
+            try {
+              const { renderPng } = require("../helper/lessonPlanPdf");
+              const clean = sanitizeDocHtml(html);
+              if (!clean) return null;
+              return await renderPng(buildLessonDocHtml({ ...doc.toObject(), html: clean }), { timeoutMs: 20000 });
+            } catch (e) {
+              // A failed render must cost the teacher nothing: skip the look and
+              // let the turn finish on the checks that did run.
+              console.error("[LESSON DOC] draft render failed:", e?.message);
+              return null;
+            }
+          }
+        : null,
       fetchSource: async (name) => {
         const want = String(name || "").trim().toLowerCase();
         if (!want) return null;
