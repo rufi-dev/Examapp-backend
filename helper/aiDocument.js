@@ -90,53 +90,121 @@ function docError(status, userMessage, fallback = false) {
  * Claude is unavailable, and a degraded turn that can still write the document is
  * better than a turn that cannot run at all.
  */
-async function documentWithTools({ prompt, parts = [], system, tools, signal, maxTokens = DOC_MAX_TOKENS, onText }) {
+async function documentWithTools({ prompt, parts = [], system, tools, signal, maxTokens = DOC_MAX_TOKENS, onText, validate }) {
   const { claudeContentParts, computeCost } = require("../controllers/aiController");
   const client = anthropic();
   if (!client) throw docError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)", true);
 
+  /*
+   * The conversation, not a single request.
+   *
+   * A tool call used to be taken as final: whatever came back was sanitised and
+   * stored. So when the model dropped the empty cells out of a copied timetable —
+   * moving a lecture into a month it does not happen in — nothing in the system
+   * was in a position to notice, and the teacher found it themselves.
+   *
+   * `validate` is that position. It gets the tool input, and if it can state
+   * something WRONG about it, the finding goes back as a tool_result marked as an
+   * error and the model corrects it inside the same turn, with the source still in
+   * front of it. This is the difference between telling the model what not to do
+   * and checking whether it did.
+   *
+   * Bounded, because a model that cannot satisfy a check on the second attempt
+   * will not satisfy it on the sixth, and the teacher is waiting.
+   */
+  const MAX_FIXES = 2;
+  const history = [
+    {
+      role: "user",
+      content: [...claudeContentParts(parts), { type: "text", text: prompt }],
+    },
+  ];
+
   let message;
-  try {
-    const run = client.messages.stream(
-      {
-        model: "claude-opus-4-8",
-        max_tokens: maxTokens,
-        system: [{ type: "text", text: system }],
-        output_config: { effort: "high" },
-        tools,
-        messages: [
-          {
-            role: "user",
-            content: [...claudeContentParts(parts), { type: "text", text: prompt }],
-          },
-        ],
-      },
-      signal ? { signal } : undefined
-    );
+  let usage = { input_tokens: 0, output_tokens: 0 };
+  let cost = 0;
 
-    /*
-     * Progress still comes from the real response. With a tool call the document
-     * arrives as the tool's INPUT rather than as text, so the block streamer reads
-     * `inputJson` instead — same partial-JSON walk, same honest count of blocks
-     * that have actually closed.
-     */
-    if (typeof onText === "function") {
-      run.on("inputJson", (_partial, snapshot) => {
-        try {
-          onText(typeof snapshot === "string" ? snapshot : JSON.stringify(snapshot || {}));
-        } catch {
-          /* progress is decoration; the document is not */
-        }
-      });
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const run = client.messages.stream(
+        {
+          model: "claude-opus-4-8",
+          max_tokens: maxTokens,
+          system: [{ type: "text", text: system }],
+          output_config: { effort: "high" },
+          tools,
+          messages: history,
+        },
+        signal ? { signal } : undefined
+      );
+
+      /*
+       * Progress still comes from the real response. With a tool call the document
+       * arrives as the tool's INPUT rather than as text, so the block streamer reads
+       * `inputJson` instead — same partial-JSON walk, same honest count of blocks
+       * that have actually closed.
+       */
+      if (typeof onText === "function") {
+        run.on("inputJson", (_partial, snapshot) => {
+          try {
+            onText(typeof snapshot === "string" ? snapshot : JSON.stringify(snapshot || {}));
+          } catch {
+            /* progress is decoration; the document is not */
+          }
+        });
+      }
+      message = await run.finalMessage();
+    } catch (e) {
+      if (signal?.aborted) throw docError(499, "Ləğv edildi");
+      console.error("AI document tools (claude) error:", e?.status, e?.message);
+      throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
     }
-    message = await run.finalMessage();
-  } catch (e) {
-    if (signal?.aborted) throw docError(499, "Ləğv edildi");
-    console.error("AI document tools (claude) error:", e?.status, e?.message);
-    throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
-  }
 
-  if (message.stop_reason === "refusal") throw docError(422, "AI bu sorğunu emal edə bilmədi.");
+    if (message.stop_reason === "refusal") throw docError(422, "AI bu sorğunu emal edə bilmədi.");
+
+    // Every attempt was really spent, so every attempt is really billed.
+    usage = {
+      input_tokens: (usage.input_tokens || 0) + (message.usage?.input_tokens || 0),
+      output_tokens: (usage.output_tokens || 0) + (message.usage?.output_tokens || 0),
+    };
+    cost += computeCost(message.usage) || 0;
+
+    const used = (message.content || []).filter((b) => b.type === "tool_use");
+
+    // Findings, one per tool call that has something wrong with it.
+    const faults =
+      typeof validate === "function"
+        ? used
+            .map((b) => ({ block: b, why: validate(b.name, b.input || {}) }))
+            .filter((f) => f.why)
+        : [];
+
+    if (!faults.length || attempt >= MAX_FIXES) {
+      /*
+       * Out of attempts with the document still wrong. It is stored anyway — a
+       * timetable with one short row is worth more to the teacher than a failed
+       * turn — but the failure is NOT swallowed: the caller is told, and says so
+       * on the turn, so nobody is told a copy is exact when it is not.
+       */
+      if (faults.length) {
+        console.error("[LESSON DOC] validation unresolved after retries:", faults[0].why.split("\n")[0]);
+      }
+      message.unresolved = faults.map((f) => f.why);
+      break;
+    }
+
+    // The call it made, and what is wrong with it, in the shape the API expects.
+    history.push({ role: "assistant", content: message.content });
+    history.push({
+      role: "user",
+      content: faults.map((f) => ({
+        type: "tool_result",
+        tool_use_id: f.block.id,
+        is_error: true,
+        content: f.why,
+      })),
+    });
+  }
 
   const calls = (message.content || [])
     .filter((b) => b.type === "tool_use")
@@ -156,7 +224,7 @@ async function documentWithTools({ prompt, parts = [], system, tools, signal, ma
 
   if (!calls.length && !said) throw docError(502, "AI cavabı oxunmadı. Yenidən cəhd edin.", true);
 
-  return { calls, said, cost: computeCost(message.usage), usage: message.usage, provider: "claude" };
+  return { calls, said, cost, usage, provider: "claude", unresolved: message.unresolved || [] };
 }
 
 /*

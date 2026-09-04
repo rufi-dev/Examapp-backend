@@ -310,8 +310,16 @@ console.log("\n9. Attached references travel with every turn:");
   );
 
   const ctl = fs2.readFileSync(path2.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
-  // The reference is needed on turn five as much as on turn one.
-  ok("both turns send the files", (ctl.match(/toParts\(doc\.files \|\| \[\]\)/g) || []).length === 2);
+  /*
+   * The bytes are sent ONCE, on the turn they are attached — this asserted the
+   * opposite, that every turn resends every file the document has ever held. That
+   * cost a teacher a re-upload of their textbook page on every later message, and
+   * kept handing the model a source, with source instructions attached, on turns
+   * that were about the document. What has to survive is the knowledge that the
+   * file was sent, and that is what the transcript carries.
+   */
+  ok("both turns send this turn's attachments", (ctl.match(/toParts\(sending\)/g) || []).length === 2);
+  ok("and nothing resends the whole file list", !/toParts\(doc\.files/.test(ctl));
   ok("the PLAN pass sees them too", /buildPlanPrompt[\s\S]{0,140}parts,/.test(ctl));
   ok("a shared file is not deleted while another doc holds it", /stillUsed/.test(ctl));
   ok("attachments are owner-scoped", /const getFile[\s\S]{0,120}mine\(req/.test(ctl));
@@ -693,7 +701,16 @@ console.log("\n19. A dropped source is never silently improvised over (LS-007):"
     ok("nothing attached means nothing unreadable", r.parts.length === 0 && r.unreadable.length === 0);
 
     // Calls only — the declaration has the same signature and must not be counted.
-    ok("both turns check readability", (ctlSrc.match(/^\s+assertSourcesReadable\(doc, parts, unreadable\);$/gm) || []).length === 2);
+    ok("both turns check readability", (ctlSrc.match(/^\s+assertSourcesReadable\(sending, parts, unreadable\);$/gm) || []).length === 2);
+    /*
+     * Asked about THIS turn's attachments, not the document's whole file list.
+     * Attachments live on the document forever, so against that list a turn that
+     * attaches nothing looks exactly like a turn whose every source failed to
+     * read — and the check would refuse to run at all.
+     */
+    ok("only this turn's attachments are sent to the model",
+      /const sending = \(doc\.files \|\| \[\]\)\.filter\(/.test(ctlSrc) && /sent\.some\(\(x\) => x\.key === f\.key\)/.test(ctlSrc));
+    ok("and the readability check counts the same set", /const attached = sending\.length;/.test(ctlSrc));
     ok("a partial read warns rather than fails", /send\("source_warning", \{ unreadable \}\)/.test(ctlSrc));
     ok("nothing readable at all fails closed", /source_unreadable[\s\S]{0,200}oxunmadı/.test(ctlSrc));
     // It must be inside the try: the SSE headers are already sent by then, so a
@@ -1102,6 +1119,35 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   // still a style value, and style values may never reach the network.
   ok("a font can be named", sanitizeDocHtml('<p style="font-family:Times New Roman, serif">x</p>').includes("font-family"));
   ok("but not fetched", !/url|evil/i.test(sanitizeDocHtml('<p style="font-family:url(http://evil)">x</p>')));
+
+  /*
+   * The chat was a series of first meetings: one instruction, no transcript. So
+   * "make it shorter" had nothing to resolve "it" against, "put that back" could
+   * not be answered at all, and the model could not tell that the document in
+   * front of it was its own work from two turns ago rather than something to
+   * replace. Bounded on purpose — the last few exchanges carry the intent, the
+   * document carries the state.
+   */
+  const chatty = {
+    html: "<h2>A</h2>",
+    messages: [
+      { role: "user", text: "bu faylı köçür", files: [{ name: "4750.pdf" }] },
+      { role: "assistant", text: "Köçürdüm." },
+      { role: "user", text: "rəngi qırmızı et" },
+      { role: "assistant", text: "Etdim." },
+    ],
+  };
+  const withHistory = S.buildEditPrompt({ doc: chatty, instructions: "boşluqları saxla" });
+  ok("an edit carries what was said before", /ƏVVƏLKİ SÖHBƏT/.test(withHistory.prompt));
+  ok("in both voices", /MÜƏLLİM:/.test(withHistory.prompt) && /SƏN:/.test(withHistory.prompt));
+  /*
+   * The file itself is no longer resent, so the transcript is the only thing that
+   * can answer "the file I sent earlier" — it has to name it.
+   */
+  ok("and names an attachment the bytes of which are not resent", withHistory.prompt.includes("4750.pdf"));
+  ok("a document with nothing said yet gets no transcript",
+    !/ƏVVƏLKİ SÖHBƏT/.test(S.buildEditPrompt({ doc: { html: "<p>x</p>", messages: [{ role: "user", text: "a" }] }, instructions: "b" }).prompt));
+  ok("history is bounded", S.historyOf({ messages: Array.from({ length: 60 }, (_, i) => ({ role: "user", text: `m${i}` })) }).split("\n").length <= 13);
 
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));

@@ -2,6 +2,7 @@ const asyncHandler = require("express-async-handler");
 const LessonDoc = require("../models/lessonDocModel");
 const { httpError, isAppError } = require("../utils/appError");
 const S = require("../helper/lessonDocSchema");
+const { checkTables } = require("../helper/lessonDocTables");
 const { buildLessonDocHtml } = require("../helper/lessonDocHtml");
 // Every write to a document goes through here. No path in this file may call
 // doc.save() — see the header of services/lessonDocService.js for why.
@@ -215,8 +216,11 @@ function stagedFiles(doc) {
  * would cheerfully write from general knowledge in exactly that voice. Refusing
  * is the honest answer, and it is recoverable — re-attach and ask again.
  */
-function assertSourcesReadable(doc, parts, unreadable) {
-  const attached = (doc.files || []).length;
+function assertSourcesReadable(sending, parts, unreadable) {
+  // Counted over what this turn is actually sending. Against the document's whole
+  // file list, a turn that attaches nothing would look like a turn whose every
+  // source failed to read, and refuse to run at all.
+  const attached = sending.length;
   if (attached > 0 && parts.length === 0) {
     throw httpError(
       422,
@@ -348,8 +352,23 @@ const sendMessage = asyncHandler(async (req, res) => {
    */
   const baseRevision = doc.revision || 0;
   // The references go with EVERY turn, not just the first.
-  const { parts, unreadable } = await require("../helper/lessonDocFiles").toParts(doc.files || []);
-  assertSourcesReadable(doc, parts, unreadable);
+  /*
+   * What this turn ATTACHED, not everything the document has ever held.
+   *
+   * Files stay on the document, and every one of them was re-encoded and resent on
+   * every turn afterwards. A teacher who attached a textbook page in turn one and
+   * typed "make it shorter" in turn nine paid to upload that page nine times —
+   * and, worse than the cost, the model kept being handed a source together with
+   * instructions about sources on a turn that was about the document.
+   *
+   * The bytes are needed once. What has to persist is the KNOWLEDGE that the file
+   * was sent and what came of it, and that lives in the transcript now: the
+   * history names each attachment on the turn it arrived, so "the file I sent
+   * earlier" stays answerable without shipping it again.
+   */
+  const sending = (doc.files || []).filter((f) => sent.some((x) => x.key === f.key));
+  const { parts, unreadable } = await require("../helper/lessonDocFiles").toParts(sending);
+  assertSourcesReadable(sending, parts, unreadable);
   const { system, prompt } = hadBlocks
     ? S.buildEditPrompt({ doc: doc.toObject(), instructions: text })
     : S.buildCreatePrompt({ doc: doc.toObject(), instructions: text });
@@ -507,7 +526,22 @@ const streamMessage = asyncHandler(async (req, res) => {
   const hadBlocks = S.countParts(doc) > 0;
   // Attached references travel with every turn, and with the PLAN too — deciding
   // what to write from a page the model cannot see is deciding blind.
-  const { parts, unreadable } = await require("../helper/lessonDocFiles").toParts(doc.files || []);
+  /*
+   * What this turn ATTACHED, not everything the document has ever held.
+   *
+   * Files stay on the document, and every one of them was re-encoded and resent on
+   * every turn afterwards. A teacher who attached a textbook page in turn one and
+   * typed "make it shorter" in turn nine paid to upload that page nine times —
+   * and, worse than the cost, the model kept being handed a source together with
+   * instructions about sources on a turn that was about the document.
+   *
+   * The bytes are needed once. What has to persist is the KNOWLEDGE that the file
+   * was sent and what came of it, and that lives in the transcript now: the
+   * history names each attachment on the turn it arrived, so "the file I sent
+   * earlier" stays answerable without shipping it again.
+   */
+  const sending = (doc.files || []).filter((f) => sent.some((x) => x.key === f.key));
+  const { parts, unreadable } = await require("../helper/lessonDocFiles").toParts(sending);
 
   // Declared outside the try so a stop mid-write can still see what the plan
   // committed to and what had actually been written, and salvage it below.
@@ -522,7 +556,7 @@ const streamMessage = asyncHandler(async (req, res) => {
      * would see a stream that ended with no terminal event, which is precisely
      * the ambiguity this file is trying to remove.
      */
-    assertSourcesReadable(doc, parts, unreadable);
+    assertSourcesReadable(sending, parts, unreadable);
     if (unreadable.length) send("source_warning", { unreadable });
 
     /*
@@ -642,6 +676,17 @@ ${S.SOURCE_RULES}`;
       tools: S.DOC_TOOLS,
       signal: ac.signal,
       onText,
+      /*
+       * Checked before it is accepted, not asked for in the brief.
+       *
+       * A row that stops short of the table's width is arithmetic — no source is
+       * needed to see it — and it is the mistake that quietly changes what a
+       * timetable SAYS: drop the empty cells for the weeks with no lecture and
+       * every date after them slides left, moving a lecture into a month it does
+       * not happen in. The finding goes back to the model as a tool error while
+       * the source is still in front of it.
+       */
+      validate: (name, input) => (name === "write_material" ? checkTables(input.html || "") : ""),
     });
 
     const wrote = out.calls.find((c) => c.name === "write_material");
@@ -742,6 +787,15 @@ ${S.SOURCE_RULES}`;
         push: {
           messages: {
             role: "assistant",
+            /*
+             * The model's own words, not ours stapled onto them.
+             *
+             * A finding from the table check is handed BACK to the model — see the
+             * validate loop in helper/aiDocument — so the model is the one that
+             * knows what it could and could not resolve, and says so in the reply
+             * it writes. This file appending its own sentence would be guessing at
+             * that from the outside, in fixed wording, for one shape of problem.
+             */
             text: wrote.input.reply || (hadBlocks ? "Dəyişdirildi." : "Material hazırdır."),
             action: hadBlocks ? "edited" : "created",
             stats: sum,

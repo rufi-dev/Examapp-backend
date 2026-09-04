@@ -270,12 +270,6 @@ KÖÇÜRMƏ REJİMİNDƏ — NƏTİCƏ FAYLIN EYNİSİ OLMALIDIR:
 - GÖRÜNÜŞÜ də köçür, təkcə mətni yox: fayldakı rəng (qara mətn qara qalsın),
   şrift (serif faylda serif), sərhədlər, mərkəzləmə, sütun enləri. Bunları
   birbaşa style="..." ilə yaz — bizim standart üslubumuzu tətbiq etmə.
-- CƏDVƏLLƏRDƏ SÜTUN SAYI: hər sətirdə fayldakı qədər xana olmalıdır. Fayl
-  sətirində boş xana varsa, sənəddə də BOŞ XANA olmalıdır — xananı silmə,
-  sonrakı xanaları sola sürüşdürmə. Tarix sətri fayldakı bütün sütunları
-  əhatə edirsə, sənəddə də sona qədər getməlidir.
-- Birləşdirilmiş xanalar üçün colspan/rowspan istifadə et ki, sütunlar
-  fayldakı kimi düzülsün.
 
 KÖÇÜRMƏ REJİMİNDƏ:
 - Fayldakı BÜTÜN məzmunu oxu və blok-blok eyni ardıcıllıqla yenidən qur:
@@ -329,6 +323,9 @@ function buildCreatePrompt({ doc = {}, instructions = "" } = {}) {
     system: BASE_RULES,
     prompt: [
       describe(doc),
+      // A first draft can still be the second thing asked for — the teacher may
+      // have described what they want across two messages.
+      historyOf(doc),
       "",
       `MÜƏLLİMİN İSTƏYİ: ${String(instructions || "").slice(0, 4000)}`,
       "",
@@ -345,6 +342,43 @@ function buildCreatePrompt({ doc = {}, instructions = "" } = {}) {
  * editor, and the reason a teacher's own wording survives a request to "add two
  * more examples".
  */
+/*
+ * What has already been said in this document's chat.
+ *
+ * Every turn used to be a first meeting: one instruction, no transcript. So
+ * "make it shorter" had no idea what "it" was, "put that back" could not be
+ * answered at all, and the model had no way to know that the document in front of
+ * it was something it had written two turns ago rather than something to replace.
+ *
+ * Bounded on purpose. The last few exchanges are what an instruction refers back
+ * to; the twentieth turn ago is not, and paying to resend it every time buys
+ * nothing. The DOCUMENT is what carries the state — this only carries the intent
+ * behind it.
+ */
+const HISTORY_TURNS = 12;
+const HISTORY_CHARS = 400;
+
+function historyOf(doc = {}) {
+  const msgs = (doc.messages || []).slice(-HISTORY_TURNS);
+  if (msgs.length < 2) return "";
+
+  const lines = msgs
+    .map((m) => {
+      const who = m.role === "user" ? "MÜƏLLİM" : "SƏN";
+      const text = String(m.text || "").replace(/\s+/g, " ").trim();
+      if (!text) return "";
+      const files = (m.files || []).map((f) => f.name).filter(Boolean);
+      // Naming the attachment matters even though the bytes are not resent: it is
+      // how "the file I sent earlier" stays answerable.
+      const note = files.length ? ` [fayl əlavə etdi: ${files.join(", ")}]` : "";
+      return `${who}: ${text.slice(0, HISTORY_CHARS)}${text.length > HISTORY_CHARS ? "…" : ""}${note}`;
+    })
+    .filter(Boolean);
+
+  if (!lines.length) return "";
+  return `ƏVVƏLKİ SÖHBƏT (bu sənəd üzrə):\n${lines.join("\n")}`;
+}
+
 function buildEditPrompt({ doc = {}, instructions = "" } = {}) {
   /*
    * The document itself, as the model wrote it.
@@ -361,6 +395,7 @@ function buildEditPrompt({ doc = {}, instructions = "" } = {}) {
       system: [BASE_RULES, EDIT_RULES].join("\n\n"),
       prompt: [
         describe(doc),
+        historyOf(doc),
         "",
         "HAZIRKI MATERİAL (HTML) — DƏYİŞDİRİLƏCƏK SƏNƏD BUDUR:",
         doc.html,
@@ -394,6 +429,7 @@ function buildEditPrompt({ doc = {}, instructions = "" } = {}) {
     system: [BASE_RULES, EDIT_RULES].join("\n\n"),
     prompt: [
       describe(doc),
+      historyOf(doc),
       "",
       "HAZIRKI MATERİAL (JSON):",
       JSON.stringify(current),
@@ -828,6 +864,7 @@ module.exports = {
   buildCreatePrompt,
   buildEditPrompt,
   countParts,
+  historyOf,
   normalizeDoc,
   summarize,
   newId,
