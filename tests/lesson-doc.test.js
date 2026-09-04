@@ -295,7 +295,7 @@ console.log("\n9. Attached references travel with every turn:");
   ok("attachments are owner-scoped", /const getFile[\s\S]{0,120}mine\(req/.test(ctl));
 
   ok("the model is told a source is present", S.SOURCE_RULES.includes("BİRİNCİ MƏNBƏDİR"));
-  ok("and how to transcribe one", S.SOURCE_RULES.includes("ÇEVİRMƏ İSTƏYİ"));
+  ok("and how to transcribe one", S.SOURCE_RULES.includes("KÖÇÜRMƏ REJİMİ"));
   ok("and not to invent unreadable parts", S.SOURCE_RULES.includes("[oxunmadı]"));
 }
 
@@ -727,6 +727,60 @@ console.log("\n20. It reports what it actually read (the 'did it open my PDF?' q
 
   const ctl3 = fs3.readFileSync(path3.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
   ok("the report is streamed before the plan", /send\("sources"[\s\S]{0,200}send\("plan"/.test(ctl3));
+}
+
+
+console.log("\n21. 'Copy this form exactly' must not become a tutorial about the form:");
+{
+  /*
+   * A teacher attached a blank lesson-plan form and asked, in Azerbaijani, to
+   * reproduce it exactly: "hər şeyi eyni, nə var o formada, köçür, heç nəyi
+   * dəyişmə". What came back was a GUIDE explaining what each field means, with
+   * invented sample values — a teacher's name, a room number, a date in March —
+   * and two examples and two tasks bolted on.
+   *
+   * The model was not disobeying. The brief made the job impossible: it opened by
+   * declaring the output is "given to the student", and then listed as MANDATORY
+   * that the structure be intro → concepts → examples → tasks and that there be
+   * at least one example and one task. A blank teacher's form is none of those
+   * things, so the only way to satisfy the rules was to write something else.
+   *
+   * These assertions pin the resolution: the teaching-material shape is scoped to
+   * requests that ask for new material, and a copy request outranks it.
+   */
+
+  // The shape rules must no longer be unconditional.
+  ok("the teaching arc is scoped to new material", S.BASE_RULES.includes("YENİ MATERİAL YARADARKƏN"));
+  ok("and says so where it used to be absolute", S.BASE_RULES.includes("YALNIZ SIFIRDAN MATERİAL ÜÇÜNDÜR"));
+  ok("a copy request outranks them", S.BASE_RULES.includes("KÖÇÜRMƏ REJİMİ qaydaları bunlardan ÜSTÜNDÜR"));
+  ok("adding examples to a copy is forbidden", S.BASE_RULES.includes("nümunə və tapşırıq\nəlavə etmək QADAĞANDIR"));
+
+  // The trigger has to match how a teacher actually writes, not one phrasing.
+  const triggers = ["köçür", "olduğu kimi", "dəyişmə", "bu formanı hazırla", "bu şablonu yarat"];
+  ok("the copy triggers cover real phrasings", triggers.every((t) => S.SOURCE_RULES.includes(t)));
+  // The reported request was ambiguous-ish; ambiguity must not default to inventing.
+  ok("ambiguity defaults to copying, not inventing", S.SOURCE_RULES.includes("Şübhə varsa"));
+
+  // The specific defects in the output that was produced.
+  ok("no explanations may be added", S.SOURCE_RULES.includes("ƏLAVƏ ETMƏ"));
+  ok("no invented names or dates", S.SOURCE_RULES.includes("uydurduğun adla, tarixlə"));
+  ok("a blank form stays blank", S.SOURCE_RULES.includes("BOŞ FORMA BOŞ QALIR"));
+  ok("with the bad case spelled out", S.SOURCE_RULES.includes("Əliyeva Aygün"));
+  ok("a table stays a table", S.SOURCE_RULES.includes("sadalamaya çevirmə"));
+  ok("field labels keep their own language", S.SOURCE_RULES.includes("ingiliscə qalsın"));
+
+  /*
+   * The planning pass is the other half of the failure. It forced 3–6 sections,
+   * and the writer is then held to exactly those ("bölmələr məhz bunlar
+   * olmalıdır") — so even a writer that understood the copy request would have
+   * been constrained back into an invented structure.
+   */
+  ok("the plan pass knows about copying too", S.PLAN_RULES.includes("KÖÇÜRMƏ İSTƏYİ İSTİSNADIR"));
+  ok("and drops its section count for it", S.PLAN_RULES.includes("3–6 məhdudiyyəti burada keçərli deyil"));
+  ok("and must not invent its own sections", S.PLAN_RULES.includes("Öz bölməni"));
+
+  // Fabrication was already banned in general; it now names what was fabricated.
+  ok("inventing a name is banned by name", S.BASE_RULES.includes("uydurma ad"));
 }
 
 Promise.all(pending).then(() => {

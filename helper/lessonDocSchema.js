@@ -118,12 +118,20 @@ say altyazı ilə üst-üstə düşür:
 </svg>
 
 MÜTLƏQ QAYDALAR:
-- Materialın strukturu olmalıdır: giriş izahı → anlayışlar → nümunələr → tapşırıqlar.
-- Ən azı bir "example" və ən azı bir "task" olsun.
 - İstifadə etmədiyin sahələri BOŞ qaytar: boş sətir "" və ya boş massiv [].
   Məsələn "text" blokunda "term", "items", "columns", "rows" boş olmalıdır.
-- Uydurma fakt, uydurma tarix, uydurma sitat YAZMA. Bilmirsənsə, ümumi izah ver.
+- Uydurma fakt, uydurma tarix, uydurma ad, uydurma sitat YAZMA. Bilmirsənsə,
+  ümumi izah ver və ya sahəni boş saxla.
 - Başlıq (title) qısa və mövzunu bildirən olsun.
+
+YENİ MATERİAL YARADARKƏN (müəllim mövzu deyib, sıfırdan material istəyir):
+- Strukturu belə qur: giriş izahı → anlayışlar → nümunələr → tapşırıqlar.
+- Ən azı bir "example" və ən azı bir "task" olsun.
+
+⚠️ BU İKİ QAYDA YALNIZ SIFIRDAN MATERİAL ÜÇÜNDÜR.
+Müəllim hazır sənədi, formanı və ya şablonu OLDUĞU KİMİ köçürməyi istəyirsə,
+aşağıdakı KÖÇÜRMƏ REJİMİ qaydaları bunlardan ÜSTÜNDÜR: orada nümunə və tapşırıq
+əlavə etmək QADAĞANDIR. Boş forma boş qalmalıdır.
 
 "reply" SAHƏSİ: müəllimə 1–2 cümlə yaz — nə etdiyini və niyə. Söhbət tonunda, sadə.
 Blokları sadalama, rəqəm hesabatı vermə (onu sistem özü göstərir). Nümunə:
@@ -156,15 +164,30 @@ const SOURCE_RULES = `
 - Müəllim faylı yalnız NÜMUNƏ (üslub, format) kimi göstəribsə, məzmunu köçürmə —
   quruluşu təkrarla.
 
-ÇEVİRMƏ İSTƏYİ (məsələn "bu şəkli materiala çevir", "bu vərəqi Word et"):
-- Şəkildəki və ya PDF-dəki BÜTÜN məzmunu oxu və blok-blok yenidən qur:
+KÖÇÜRMƏ REJİMİ — NƏ VAXT İŞƏ DÜŞÜR:
+Müəllim faylı OLDUĞU KİMİ istəyirsə. Tanı: "köçür", "kopyala", "olduğu kimi",
+"eyni", "hər şeyi eyni", "dəyişmə", "heç nəyi dəyişmə", "elə o formada",
+"bu formanı hazırla", "bu şablonu yarat", "bu vərəqi Word et", "PDF-ə çevir".
+Şübhə varsa və müəllim yeni məzmun istədiyini AÇIQ deməyibsə — köçürmə rejimi seç.
+
+KÖÇÜRMƏ REJİMİNDƏ:
+- Fayldakı BÜTÜN məzmunu oxu və blok-blok eyni ardıcıllıqla yenidən qur:
   başlıqlar → heading, izahlar → text, anlayışlar → definition, həll olunmuş
   misallar → example, çalışmalar → task, cədvəllər → table.
 - Mətnini dəyişdirmə, tərcümə etmə, "yaxşılaşdırma" — olduğu kimi köçür.
-  Yalnız quruluşu ver: hansı hissə hansı blokdur.
+  Sahə adları ingiliscədirsə, ingiliscə qalsın. Sıranı dəyişmə.
+- ⛔ ƏLAVƏ ETMƏ: izah, şərh, nümunə, tapşırıq, "necə doldurulur" bölməsi,
+  müəllim üçün məsləhət — faylda YOXDURSA, sənəddə də OLMAMALIDIR.
+- ⛔ BOŞ FORMA BOŞ QALIR. Doldurulmamış xanaları öz uydurduğun adla, tarixlə və
+  ya nümunə cavabla DOLDURMA. Boş forma köçürüləndə nəticə də boş formadır:
+  cədvəl sahə adlarını saxla, dəyər xanalarını boş burax.
+  PİS: "Teacher: Əliyeva Aygün", "Date: 15.03.2024" (faylda yoxdur — uydurmadır).
+  YAXŞI: "Teacher:" sahəsi var, dəyəri boş.
+- Faylın quruluşu cədvəldirsə, cədvəl olaraq qalsın — sadalamaya çevirmə.
 - Əlyazma və ya keyfiyyətsiz şəkildə oxunmayan yer varsa, uydurma. Həmin yeri
   "[oxunmadı]" kimi qeyd et ki, müəllim özü düzəltsin.
 - Şəkildə düstur, sxem və ya fiqur varsa, onu "figure" bloku kimi SVG ilə yenidən çək.
+- "reply" sahəsində nə köçürdüyünü yaz — nə əlavə etdiyini yox.
 `.trim();
 
 const describe = (d = {}) =>
@@ -388,6 +411,12 @@ Müəllimin istəyini oxu və qərar ver:
 - "title": materialın qısa adı.
 - "audience": kimin üçündür (sinif və səviyyə). Müəllim deməyibsə, mövzuya görə özün müəyyən et.
 - "sections": 3–6 bölmə. Hər birinin "heading" adı və "why" — bir cümlə: bu bölmə nə üçün lazımdır.
+
+⚠️ KÖÇÜRMƏ İSTƏYİ İSTİSNADIR. Müəllim əlavə edilmiş faylı OLDUĞU KİMİ köçürməyi
+istəyirsə ("köçür", "olduğu kimi", "eyni", "dəyişmə", "bu formanı hazırla"),
+"sections" fayldakı ÖZ bölmələri olmalıdır — nə az, nə çox, eyni adlarla və eyni
+sırada. 3–6 məhdudiyyəti burada keçərli deyil: faylda 9 bölmə varsa, 9 yaz.
+Öz bölməni ("Giriş", "Nümunələr", "Tapşırıqlar") ƏLAVƏ ETMƏ.
 
 "sources" SAHƏSİ — ƏLAVƏ EDİLMİŞ FAYLLAR HAQQINDA:
 - Sənə fayl verilibsə, hər fayl üçün bir sətir yaz. Fayl yoxdursa, boş massiv qaytar.
