@@ -183,8 +183,24 @@ console.log("\n7. The prompts carry the contract:");
     instructions: "bir nümunə əlavə et",
   });
   ok("the edit prompt sends the current document", edit.prompt.includes("qalmalıdır"));
-  ok("and says to leave the rest alone", /OLDUĞU KİMİ, eyni sözlərlə/.test(edit.system));
-  ok("and forbids a rewrite", /Onu yenidən yazma/.test(edit.system));
+  ok("and says to leave everything else identical", /hərfi-hərfinə eyni qayıtmalıdır/.test(edit.system));
+  ok("and forbids a rewrite", /YENİDƏN YAZMA/.test(edit.system));
+  /*
+   * The attachment stays on the document for its whole life, so on turn ten it is
+   * still there — and being told the file is what to reproduce is what made an
+   * edit rebuild the document from the PDF and throw the last two turns away.
+   */
+  ok("and says the document is the subject, not the attached file",
+    /DƏYİŞDİRİLƏCƏK ŞEY bu sənəddir, fayl deyil/.test(edit.system));
+
+  // The real failure: an html document sent NOTHING, because only blocks were
+  // serialised. The model cannot preserve what it was never shown.
+  const htmlEdit = S.buildEditPrompt({
+    doc: { topic: "Kəsrlər", html: "<h2>Bölmə</h2><p>qalmalıdır</p>" },
+    instructions: "boş sətirləri sil",
+  });
+  ok("an html document is sent whole", htmlEdit.prompt.includes("<p>qalmalıdır</p>"));
+  ok("and named as the thing being changed", /DƏYİŞDİRİLƏCƏK SƏNƏD BUDUR/.test(htmlEdit.prompt));
 
   const fs = require("fs");
   const path = require("path");
@@ -456,7 +472,11 @@ console.log("\n12. An edit says what it is about to do:");
 
   // "add examples to the second section" is unanswerable without the outline.
   ok("the current headings go with it", edit.prompt.includes("Faiz nədir") && edit.prompt.includes("Məsələlər"));
-  ok("and how big the document is", edit.prompt.includes("3 blok"));
+  ok("and how big the document is", edit.prompt.includes("3 hissə"));
+  // Counted from whichever shape the document has, or an html document reports
+  // itself as empty to the pass that is meant to be planning changes to it.
+  ok("an html document reports its real size",
+    S.buildPlanPrompt({ doc: { html: "<h2>A</h2><p>b</p><table><tr><td>c</td></tr></table>" }, instructions: "x", editing: true }).prompt.includes("3 hissə"));
   ok("the teacher's words are carried", edit.prompt.includes("alman nümunələri"));
   ok("a creation is not given an outline", !create.prompt.includes("HAZIRKI BÖLMƏLƏR"));
 
@@ -1053,6 +1073,18 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   const ctl5 = require("fs").readFileSync(require("path").join(__dirname, "../controllers/lessonDocController.js"), "utf8");
   // Sanitised BEFORE the write, so nothing unsafe is ever at rest and no reader
   // has to re-check what the database holds.
+  /*
+   * Every "does this document have anything in it" test in the controller asked
+   * about blocks, so an html document answered "no" to all of them at once: the
+   * turn was planned as a first draft, the copy rules fired again on an
+   * attachment from ten turns ago, the transcript said "created", and the export
+   * refused a finished document as empty.
+   */
+  ok("the turn asks the document, not its blocks", /const hadBlocks = S\.countParts\(doc\) > 0/.test(ctl5));
+  ok("export asks the same question", /if \(!S\.countParts\(doc\)\) \{/.test(ctl5));
+  ok("copy mode is scoped to a first draft", /if \(parts\.length && !hadBlocks\) \{/.test(ctl5));
+  ok("and no block count is left deciding content exists", !/\(doc\.blocks \|\| \[\]\)\.length[^;]*\?|!\(doc\.blocks \|\| \[\]\)\.length/.test(ctl5));
+
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));
   ok("blocks are cleared so there is one source of truth", /blocks: \[\],/.test(ctl5));

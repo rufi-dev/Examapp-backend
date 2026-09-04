@@ -225,12 +225,16 @@ Blokları sadalama, rəqəm hesabatı vermə (onu sistem özü göstərir). Nüm
 `.trim();
 
 const EDIT_RULES = `
-REDAKTƏ REJİMİ:
-- Aşağıda müəllimin HAZIRKI materialı var. Onu yenidən yazma.
-- YALNIZ müəllimin istədiyi dəyişikliyi et. Qalan bloklar OLDUĞU KİMİ, eyni sözlərlə
-  qaytarılmalıdır.
-- Blokların sırası dəyişməməlidir, əgər müəllim məhz sıranı dəyişməyi istəmirsə.
-- Yeni blok əlavə etmək istənilirsə, onu düzgün yerə qoy.
+REDAKTƏ REJİMİ — SƏNƏD ARTIQ MÖVCUDDUR:
+- Aşağıdakı HTML müəllimin hazırkı sənədidir. Onu YENİDƏN YAZMA, sıfırdan qurma.
+- write_material-a sənədin TAM HTML-ini qaytar — amma YALNIZ istənilən dəyişiklik
+  edilmiş halda. Toxunulmayan hər sətir hərfi-hərfinə eyni qayıtmalıdır.
+- Quruluşu, cədvəlləri, sütun sayını, sıranı, dili və üslubu DƏYİŞMƏ — müəllim
+  məhz onu dəyişməyi istəməyibsə.
+- Əvvəlki növbələrdə edilmiş dəyişikliklər (tərcümə, rəng, əlavə bölmə) sənədin
+  bir hissəsidir. Onları geri qaytarma.
+- Fayl əlavə olunubsa belə, DƏYİŞDİRİLƏCƏK ŞEY bu sənəddir, fayl deyil. Faylı
+  yalnız müəllim məhz ondan nəsə istəyəndə açıq şəkildə istifadə et.
 `.trim();
 
 
@@ -324,6 +328,33 @@ function buildCreatePrompt({ doc = {}, instructions = "" } = {}) {
  * more examples".
  */
 function buildEditPrompt({ doc = {}, instructions = "" } = {}) {
+  /*
+   * The document itself, as the model wrote it.
+   *
+   * This serialised `blocks`, which an html document does not have — so every
+   * edit handed the model an EMPTY document. Asked to remove the blank rows from
+   * a form, it had no form to remove them from, went back to the attached PDF and
+   * copied it out again from scratch, discarding a translation and a colour
+   * change made in the two turns before. The teacher saw their layout replaced
+   * and read it, correctly, as the assistant ignoring what they asked.
+   */
+  if (has(doc.html)) {
+    return {
+      system: [BASE_RULES, EDIT_RULES].join("\n\n"),
+      prompt: [
+        describe(doc),
+        "",
+        "HAZIRKI MATERİAL (HTML) — DƏYİŞDİRİLƏCƏK SƏNƏD BUDUR:",
+        doc.html,
+        "",
+        `MÜƏLLİMİN İSTƏDİYİ DƏYİŞİKLİK: ${String(instructions || "").slice(0, 4000)}`,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    };
+  }
+
+  // Documents written before the model authored its own html.
   const current = {
     title: doc.title || "",
     blocks: (doc.blocks || []).map((b) => ({
@@ -624,22 +655,38 @@ Yalnız müəllimin istədiyini planlaşdır. Bütün materialı yenidən yazma�
 
 `.trim();
 
+// Written, and not just present: an empty string is not a document.
+const has = (v) => Boolean(String(v == null ? "" : v).trim());
+
+/*
+ * How much a document holds, whichever way it is stored. Both shapes exist —
+ * html for anything the model wrote itself, blocks for everything written before
+ * that — and every "is there anything here" test must accept both, or a complete
+ * document reads as an empty one.
+ */
+function countParts(doc = {}) {
+  if (has(doc.html)) {
+    return (String(doc.html).match(/<(h[1-4]|p|ul|ol|table|figure|blockquote)/gi) || []).length;
+  }
+  return (doc.blocks || []).length;
+}
+
 function buildPlanPrompt({ doc = {}, instructions = "", editing = false } = {}) {
   // The current document's headings go in for an edit: "add examples to the second
   // section" is unanswerable without knowing what the sections are.
-  const outline = editing
-    ? (doc.blocks || [])
-        .filter((b) => b && b.kind === "heading" && b.text)
-        .map((b, i) => `${i + 1}. ${b.text}`)
-        .join("\n")
-    : "";
+  const headings = has(doc.html)
+    ? (String(doc.html).match(/<h[1-4][^>]*>([\s\S]*?)<\/h[1-4]>/gi) || [])
+        .map((h) => h.replace(/<[^>]+>/g, "").trim())
+        .filter(Boolean)
+    : (doc.blocks || []).filter((b) => b && b.kind === "heading" && b.text).map((b) => b.text);
+  const outline = editing ? headings.map((t, i) => `${i + 1}. ${t}`).join("\n") : "";
 
   return {
     system: editing ? EDIT_PLAN_RULES : PLAN_RULES,
     prompt: [
       describe(doc),
       outline ? `\nHAZIRKI BÖLMƏLƏR:\n${outline}` : "",
-      editing ? `\nMaterialda ${(doc.blocks || []).length} blok var.` : "",
+      editing ? `\nMaterialda ${countParts(doc)} hissə var.` : "",
       "",
       `MÜƏLLİMİN İSTƏYİ: ${String(instructions || "").slice(0, 4000)}`,
     ]
@@ -762,6 +809,7 @@ module.exports = {
   EDIT_RULES,
   buildCreatePrompt,
   buildEditPrompt,
+  countParts,
   normalizeDoc,
   summarize,
   newId,

@@ -99,7 +99,7 @@ const logStudioUsage = async (req, { doc, out, hadBlocks }) => {
       cacheReadTokens: c.cacheReadTokens || 0,
       totalTokens: c.totalTokens || 0,
       usd: c.usd || 0,
-      blocks: (doc.blocks || []).length,
+      blocks: S.countParts(doc),
     });
   } catch (e) {
     console.error("[LESSON DOC] usage log failed:", e?.message);
@@ -329,7 +329,18 @@ const sendMessage = asyncHandler(async (req, res) => {
   const { runDocument } = require("../helper/aiDocument");
   const { toGeminiSchema } = require("../helper/curriculumSchema");
 
-  const hadBlocks = (doc.blocks || []).length > 0;
+  /*
+   * Is there already a document, or is this the first turn?
+   *
+   * This asked whether there were BLOCKS, which an html document never has — so
+   * every turn on one looked like a first turn. The model was handed the create
+   * prompt, never saw the material it was meant to be changing, and rebuilt it
+   * from the attached file: a teacher asking to remove blank rows got their
+   * translation and their colour thrown away and the English original back.
+   * Everything downstream rode on the same flag, so the turn was also logged as a
+   * generation and recorded in the transcript as "created".
+   */
+  const hadBlocks = S.countParts(doc) > 0;
   /*
    * The revision this turn is answering. The commit at the end must still match
    * it: a generation takes tens of seconds, and if the teacher edited a block in
@@ -482,7 +493,18 @@ const streamMessage = asyncHandler(async (req, res) => {
 
   const { runDocument, documentWithTools: runTools } = require("../helper/aiDocument");
   const { toGeminiSchema } = require("../helper/curriculumSchema");
-  const hadBlocks = (doc.blocks || []).length > 0;
+  /*
+   * Is there already a document, or is this the first turn?
+   *
+   * This asked whether there were BLOCKS, which an html document never has — so
+   * every turn on one looked like a first turn. The model was handed the create
+   * prompt, never saw the material it was meant to be changing, and rebuilt it
+   * from the attached file: a teacher asking to remove blank rows got their
+   * translation and their colour thrown away and the English original back.
+   * Everything downstream rode on the same flag, so the turn was also logged as a
+   * generation and recorded in the transcript as "created".
+   */
+  const hadBlocks = S.countParts(doc) > 0;
   // Attached references travel with every turn, and with the PLAN too — deciding
   // what to write from a page the model cannot see is deciding blind.
   const { parts, unreadable } = await require("../helper/lessonDocFiles").toParts(doc.files || []);
@@ -558,7 +580,16 @@ const streamMessage = asyncHandler(async (req, res) => {
     const base = hadBlocks
       ? S.buildEditPrompt({ doc: doc.toObject(), instructions: text })
       : S.buildCreatePrompt({ doc: doc.toObject(), instructions: text });
-    if (parts.length) {
+    /*
+     * The source rules turn an attachment into the thing to reproduce — copy mode
+     * and all. That is exactly right on the first turn and exactly wrong on the
+     * tenth: the files stay attached for the life of the document, so every later
+     * edit was still being told "the file is the primary source, copy it as it
+     * is", and the model dutifully rebuilt the document from the PDF instead of
+     * changing it. On an edit the document is the subject and the file is only
+     * reference, which is what EDIT_RULES already says.
+     */
+    if (parts.length && !hadBlocks) {
       base.system = `${base.system}
 
 ${S.SOURCE_RULES}`;
@@ -936,7 +967,9 @@ const removeDoc = asyncHandler(async (req, res) => {
  */
 const exportDoc = asyncHandler(async (req, res) => {
   const doc = await mine(req, req.params.id);
-  if (!(doc.blocks || []).length) {
+  // Same blindness, worse consequence: a finished html document could not be
+  // exported at all, because the emptiness test only knew how to see blocks.
+  if (!S.countParts(doc)) {
     throw httpError(422, "doc_empty", "Materialda məzmun yoxdur.");
   }
 
