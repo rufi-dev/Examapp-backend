@@ -146,6 +146,28 @@ async function commitTurn(doc, baseRevision, { next, out, hadBlocks, sum, reply,
 }
 
 /*
+ * The files this turn is adding, not every file the document holds.
+ *
+ * Every turn sends ALL attachments to the model — that is what makes "add three
+ * more like the ones on page 4" work five turns later — and the transcript used
+ * to stamp each message with that same full list. So a teacher who attached one
+ * PDF saw two cards on their message, then three, and reasonably read it as the
+ * interface losing track of their files.
+ *
+ * A message shows what was attached FOR it. A file is "already sent" once some
+ * earlier message carries it, which is the same rule the composer uses to decide
+ * what is still staged, so the two can never disagree.
+ */
+function stagedFiles(doc) {
+  const already = new Set(
+    (doc.messages || []).flatMap((m) => (m.files || []).map((f) => f.key))
+  );
+  return (doc.files || [])
+    .filter((f) => !already.has(f.key))
+    .map((f) => ({ key: f.key, name: f.name, mime: f.mime }));
+}
+
+/*
  * Fail closed when the sources are gone.
  *
  * Some readable and some not is a warning — the teacher gets the material and is
@@ -256,10 +278,8 @@ const sendMessage = asyncHandler(async (req, res) => {
   if (!text) throw httpError(400, "message_empty", "Nə yaratmaq istədiyinizi yazın.");
   if (text.length > 4000) throw httpError(422, "message_long", "Mesaj çox uzundur.");
 
-  // Stamp the references that are going up with this turn, so the transcript can
-  // show the teacher what the model was actually given rather than leaving them to
-  // wonder whether the PDF made it.
-  const sent = (doc.files || []).map((f) => ({ key: f.key, name: f.name, mime: f.mime }));
+  // What this turn is ADDING, not everything the document holds — see stagedFiles.
+  const sent = stagedFiles(doc);
   await svc.appendMessages(doc._id, doc.owner, {
     role: "user",
     text,
@@ -364,10 +384,8 @@ const streamMessage = asyncHandler(async (req, res) => {
   if (!text) throw httpError(400, "message_empty", "Nə yaratmaq istədiyinizi yazın.");
   if (text.length > 4000) throw httpError(422, "message_long", "Mesaj çox uzundur.");
 
-  // Stamp the references that are going up with this turn, so the transcript can
-  // show the teacher what the model was actually given rather than leaving them to
-  // wonder whether the PDF made it.
-  const sent = (doc.files || []).map((f) => ({ key: f.key, name: f.name, mime: f.mime }));
+  // What this turn is ADDING, not everything the document holds — see stagedFiles.
+  const sent = stagedFiles(doc);
   await svc.appendMessages(doc._id, doc.owner, {
     role: "user",
     text,
@@ -466,6 +484,17 @@ const streamMessage = asyncHandler(async (req, res) => {
         signal: ac.signal,
       });
       plan = S.normalizePlan(p.doc || {});
+      /*
+       * What it read, before what it intends to write.
+       *
+       * Sent as its own event and shown first, because it answers a different and
+       * more basic question than the plan does: not "what will you do" but "did
+       * you actually open my file". A model that can name the topics and count the
+       * exercises on the page has demonstrably read it; one that reports
+       * `readable: false` has told the teacher something they could not otherwise
+       * have discovered until the material came back subtly invented.
+       */
+      if (plan.sources.length) send("sources", { sources: plan.sources });
       if (plan.sections.length) send("plan", { ...plan, editing: hadBlocks });
     } catch (e) {
       // A stop must stop the TURN, not just this one call — swallowing it here

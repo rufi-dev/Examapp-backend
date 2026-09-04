@@ -475,7 +475,14 @@ console.log("\n13. The transcript shows what the model was given:");
    * the answer and guess.
    */
   const ctl = require("fs").readFileSync(require("path").join(__dirname, "../controllers/lessonDocController.js"), "utf8");
-  ok("both turns stamp the files onto the message", (ctl.match(/const sent = \(doc\.files \|\| \[\]\)\.map/g) || []).length === 2);
+  /*
+   * Only the NEWLY attached files, not every file the document holds. Stamping
+   * the full list made one upload appear as two cards on the message, then three
+   * — the model still receives them all, but the message shows what was attached
+   * for it.
+   */
+  ok("both turns stamp the files onto the message", (ctl.match(/const sent = stagedFiles\(doc\);/g) || []).length === 2);
+  ok("and only the ones not already carried by an earlier message", /already\.has\(f\.key\)/.test(ctl));
   ok("names and keys only — never the bytes", /key: f\.key, name: f\.name, mime: f\.mime/.test(ctl));
   ok("a turn with no attachment stays clean", /\.\.\.\(sent\.length \? \{ files: sent \} : \{\}\)/.test(ctl));
 
@@ -667,6 +674,59 @@ console.log("\n19. A dropped source is never silently improvised over (LS-007):"
     // throw past that point kills the socket with no terminal event.
     ok("the check runs inside the streamed try block", /try \{[\s\S]{0,600}assertSourcesReadable/.test(ctlSrc));
   }));
+}
+
+
+
+console.log("\n20. It reports what it actually read (the 'did it open my PDF?' question):");
+{
+  /*
+   * A teacher asked directly whether the attached PDF was being read at all, and
+   * the interface could not answer: the progress said "writing" whether the file
+   * had been opened or invented around. The plan pass now reports, per file, what
+   * it can see — a page count and a topic it could only know by looking.
+   */
+  const fs3 = require("fs");
+  const path3 = require("path");
+
+  ok("the plan schema carries a source report", Boolean(S.PLAN_SCHEMA.properties.sources));
+  const req = S.PLAN_SCHEMA.properties.sources.items.required;
+  ok("every source names the file", req.includes("name"));
+  ok("says what was found in it", req.includes("found"));
+  ok("and whether it could be read at all", req.includes("readable"));
+  // Strict mode needs every property required, or the default OpenAI model 400s.
+  assertStrict(S.PLAN_SCHEMA);
+  ok("the plan schema is still strict-valid", true);
+
+  // Vague reports are the failure mode: "PDF oxundu" proves nothing.
+  ok("the brief refuses a vague report", S.PLAN_RULES.includes("Ümumi söz yazma"));
+  ok("and shows what specific looks like", S.PLAN_RULES.includes("12 səhifə"));
+  ok("an unreadable file must say so", S.PLAN_RULES.includes("readable=false"));
+  ok("and gives the reason rather than inventing", S.PLAN_RULES.includes("SƏBƏBİ yaz"));
+  ok("an off-topic file is called out", S.PLAN_RULES.includes("mövzuya AİD DEYİLSƏ"));
+
+  // An edit reports on its sources too, or attaching a file mid-conversation
+  // tells the teacher nothing.
+  const editBrief = S.buildPlanPrompt({ doc: { blocks: [] }, instructions: "x", editing: true }).system;
+  ok("the edit brief asks for the same report", editBrief.includes('"sources" SAHƏSİ'));
+
+  const norm = S.normalizePlan({
+    title: "t",
+    sources: [
+      { name: "a.pdf", found: "12 səhifə, faiz mövzusu", readable: true },
+      { name: "b.pdf", found: "skan oxunmur", readable: false },
+      { name: "", found: "" },
+    ],
+    sections: [{ heading: "h", why: "w" }],
+  });
+  ok("a readable source survives normalisation", norm.sources[0].readable === true);
+  // The most useful line on the whole report is the one that says it failed.
+  ok("an UNREADABLE one is kept, not dropped", norm.sources.some((x) => x.readable === false));
+  ok("empty rows are dropped", norm.sources.length === 2);
+  ok("a plan with no sources is fine", S.normalizePlan({ title: "t", sections: [] }).sources.length === 0);
+
+  const ctl3 = fs3.readFileSync(path3.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  ok("the report is streamed before the plan", /send\("sources"[\s\S]{0,200}send\("plan"/.test(ctl3));
 }
 
 Promise.all(pending).then(() => {

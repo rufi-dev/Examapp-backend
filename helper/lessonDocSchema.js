@@ -343,6 +343,30 @@ const PLAN_SCHEMA = {
   properties: {
     title: { type: "string" },
     audience: { type: "string" },
+    /*
+     * What the model can actually SEE in each attached file.
+     *
+     * This is the only honest answer to "did it really read my PDF?" — a question
+     * a teacher asked directly, and one the interface could not answer, because
+     * the progress report was a plan written before the work rather than an
+     * account of it. A model that names the topics and counts the exercises on
+     * the page has demonstrably read the page; one that cannot say what is in the
+     * file says so here, in front of the teacher, instead of quietly writing from
+     * general knowledge in the same confident voice.
+     */
+    sources: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          name: { type: "string" },
+          found: { type: "string" },
+          readable: { type: "boolean" },
+        },
+        required: ["name", "found", "readable"],
+      },
+    },
     sections: {
       type: "array",
       items: {
@@ -353,7 +377,7 @@ const PLAN_SCHEMA = {
       },
     },
   },
-  required: ["title", "audience", "sections"],
+  required: ["title", "audience", "sources", "sections"],
 };
 
 const PLAN_RULES = `
@@ -364,6 +388,19 @@ Müəllimin istəyini oxu və qərar ver:
 - "title": materialın qısa adı.
 - "audience": kimin üçündür (sinif və səviyyə). Müəllim deməyibsə, mövzuya görə özün müəyyən et.
 - "sections": 3–6 bölmə. Hər birinin "heading" adı və "why" — bir cümlə: bu bölmə nə üçün lazımdır.
+
+"sources" SAHƏSİ — ƏLAVƏ EDİLMİŞ FAYLLAR HAQQINDA:
+- Sənə fayl verilibsə, hər fayl üçün bir sətir yaz. Fayl yoxdursa, boş massiv qaytar.
+- "name": faylın adı (verilmiş adı yaz).
+- "readable": faylı HƏQİQƏTƏN oxuya bildinsə true, oxuya bilmədinsə false.
+- "found": faylda NƏ GÖRDÜYÜNÜ konkret yaz. Ümumi söz yazma.
+  PİS: "PDF oxundu", "material var", "faydalı məlumat var".
+  YAXŞI: "12 səhifə, 5-ci sinif riyaziyyat; faiz mövzusunda 8 çalışma, səh. 34-38",
+         "ingilis dili qrammatika vərəqi, modal fellər, 15 boşluq doldurma sualı",
+         "cədvəl şəklində dərs cədvəli — mövzu ilə əlaqəsi yoxdur".
+- Faylı oxuya bilmirsənsə (skan keyfiyyətsizdir, şifrələnib, boşdur), readable=false
+  yaz və "found" sahəsində SƏBƏBİ yaz. Uydurma.
+- Fayl mövzuya AİD DEYİLSƏ, bunu açıq yaz — müəllim səhv fayl əlavə etmiş ola bilər.
 
 Müəllim konkret şeylər istəyibsə (cədvəl, neçə nümunə, neçə tapşırıq, hansı səhvi
 göstərmək), onları bölmələrdə əks etdir. Uydurma bölmə əlavə etmə.
@@ -401,6 +438,20 @@ Nümunə addımlar:
 
 Yalnız müəllimin istədiyini planlaşdır. Bütün materialı yenidən yazmağı planlaşdırma.
 Əlavə edilmiş fayl varsa, ondan nə götürəcəyini konkret yaz.
+
+"sources" SAHƏSİ — ƏLAVƏ EDİLMİŞ FAYLLAR HAQQINDA:
+- Sənə fayl verilibsə, hər fayl üçün bir sətir yaz. Fayl yoxdursa, boş massiv qaytar.
+- "name": faylın adı (verilmiş adı yaz).
+- "readable": faylı HƏQİQƏTƏN oxuya bildinsə true, oxuya bilmədinsə false.
+- "found": faylda NƏ GÖRDÜYÜNÜ konkret yaz. Ümumi söz yazma.
+  PİS: "PDF oxundu", "material var", "faydalı məlumat var".
+  YAXŞI: "12 səhifə, 5-ci sinif riyaziyyat; faiz mövzusunda 8 çalışma, səh. 34-38",
+         "ingilis dili qrammatika vərəqi, modal fellər, 15 boşluq doldurma sualı",
+         "cədvəl şəklində dərs cədvəli — mövzu ilə əlaqəsi yoxdur".
+- Faylı oxuya bilmirsənsə (skan keyfiyyətsizdir, şifrələnib, boşdur), readable=false
+  yaz və "found" sahəsində SƏBƏBİ yaz. Uydurma.
+- Fayl mövzuya AİD DEYİLSƏ, bunu açıq yaz — müəllim səhv fayl əlavə etmiş ola bilər.
+
 `.trim();
 
 function buildPlanPrompt({ doc = {}, instructions = "", editing = false } = {}) {
@@ -432,6 +483,19 @@ const normalizePlan = (raw = {}) => {
   return {
     title: clean(r.title),
     audience: clean(r.audience),
+    /*
+     * What the model says it found in each attached file. Kept even when
+     * `readable` is false — "I could not read this one" is the most useful line
+     * on the whole report, and dropping it would leave the teacher with the same
+     * silence that made them doubt the file was being read at all.
+     */
+    sources: (Array.isArray(r.sources) ? r.sources : [])
+      .map((x) => ({
+        name: clean(x && x.name),
+        found: clean(x && x.found),
+        readable: (x && x.readable) !== false,
+      }))
+      .filter((x) => x.name || x.found),
     sections: (Array.isArray(r.sections) ? r.sections : [])
       .map((x) => ({ heading: clean(x && x.heading), why: clean(x && x.why) }))
       .filter((x) => x.heading),
