@@ -1244,8 +1244,19 @@ console.log("\n25. The model writes the document; the schema stops being the cei
    * had never once looked at what it wrote.
    */
   const ai2 = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocument.js"), "utf8");
-  ok("the model is shown its own draft", /type: "image"[\s\S]{0,200}shot\.toString\("base64"\)/.test(ai2));
-  ok("once, because the second look says nothing new", /if \(shot\) \{[\s\S]{0,80}looked = true;/.test(ai2));
+  ok("the model is shown its own draft", /type: "image"[\s\S]{0,200}b\.toString\("base64"\)/.test(ai2));
+  ok("once, because the second look says nothing new", /if \(shots\?\.length\) \{[\s\S]{0,80}looked = true;/.test(ai2));
+  /*
+   * The first version captured the top 1500 pixels, so a teacher asking about the
+   * Wednesday table was answered by a model looking at a picture of Monday. It
+   * reported the lines as correct, and in what it could see they were. One tall
+   * full-page strip is no better: it is downscaled to fit the vision limit, and
+   * hairline table rules are the first thing to vanish.
+   */
+  ok("and shown the WHOLE page, in readable bands", /shots\.map\(\(b\) => \(\{/.test(ai2));
+  const pdfSrc = require("fs").readFileSync(require("path").join(__dirname, "../helper/lessonPlanPdf.js"), "utf8");
+  ok("captured band by band at full scale", /const bands = Math\.min\(maxBands/.test(pdfSrc));
+  ok("with no image of empty trailing margin", /if \(i > 0 && height < 120\) break;/.test(pdfSrc));
   ok("and looking is not counted as a failed attempt", /attempt -= 1;/.test(ai2));
   ok("only with a source to compare against",
     /look: sending\.length \|\| \(doc\.files \|\| \[\]\)\.length/.test(ctl5));

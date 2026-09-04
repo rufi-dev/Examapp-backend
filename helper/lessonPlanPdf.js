@@ -105,7 +105,7 @@ async function renderPdf(
  *
  * Same hardened setup as the PDF: no network, no sandbox, our own document.
  */
-async function renderPng(html, { timeoutMs = 30000, width = 1240 } = {}) {
+async function renderPng(html, { timeoutMs = 30000, width = 1240, band = 1500, maxBands = 5 } = {}) {
   let browser;
   try {
     browser = await puppeteer.launch({
@@ -120,11 +120,31 @@ async function renderPng(html, { timeoutMs = 30000, width = 1240 } = {}) {
     await page.setContent(html, { waitUntil: "domcontentloaded", timeout: timeoutMs });
     await page.evaluateHandle("document.fonts.ready");
     /*
-     * Capped, not full-page. A long handout would otherwise come back as a strip
-     * thousands of pixels tall that costs a fortune in image tokens and shows the
-     * model less of what matters, because everything is scaled to fit.
+     * Sliced, not cropped, and not one tall strip either.
+     *
+     * The first version of this captured the top 1600 pixels — so a teacher asking
+     * about the Wednesday table was answered by a model looking at a picture of
+     * Monday. It reported the lines as correct because in what it could see, they
+     * were. The obvious alternative is as bad: one full-page strip six thousand
+     * pixels tall is downscaled to fit the vision limit, and hairline table rules
+     * are exactly what disappears first.
+     *
+     * So the page is walked in readable bands, each captured at full scale. A few
+     * more images, every one of them legible, and the part being asked about is
+     * actually in one of them.
      */
-    return Buffer.from(await page.screenshot({ type: "png", clip: { x: 0, y: 0, width, height: 1600 } }));
+    const full = await page.evaluate(() => document.documentElement.scrollHeight);
+    const bands = Math.min(maxBands, Math.max(1, Math.ceil(full / band)));
+    const shots = [];
+    for (let i = 0; i < bands; i += 1) {
+      const y = i * band;
+      const height = Math.min(band, Math.max(1, full - y));
+      // A sliver of trailing margin is not a band; it is an image of nothing.
+      if (i > 0 && height < 120) break;
+      // eslint-disable-next-line no-await-in-loop
+      shots.push(Buffer.from(await page.screenshot({ type: "png", clip: { x: 0, y, width, height } })));
+    }
+    return shots;
   } finally {
     if (browser) await browser.close().catch(() => {});
   }

@@ -245,8 +245,8 @@ async function documentWithTools({ prompt, parts = [], system, tools, signal, ma
      */
     const wrote = used.find((b) => b.name === "write_material");
     if (!faults.length && typeof look === "function" && !looked && wrote && attempt < MAX_FIXES) {
-      const shot = await look(wrote.input?.html || "");
-      if (shot) {
+      const shots = await look(wrote.input?.html || "");
+      if (shots?.length) {
         looked = true;
         history.push({ role: "assistant", content: message.content });
         history.push({
@@ -256,15 +256,18 @@ async function documentWithTools({ prompt, parts = [], system, tools, signal, ma
               type: "tool_result",
               tool_use_id: wrote.id,
               content:
-                "Yazdığın sənədin görüntüsü aşağıdadır. Mənbə ilə müqayisə et: xətlər, " +
+                `Yazdığın sənədin görüntüsü aşağıdadır (${shots.length} hissə, yuxarıdan aşağıya). ` +
+                "Mənbə ilə müqayisə et: xətlər, " +
                 "sütunların düzülüşü, boş xanalar, rənglər, hizalama. Fərq varsa " +
                 "write_material-ı düzəldilmiş HTML ilə yenidən çağır. Hər şey uyğundursa " +
                 "eyni HTML-i yenidən göndər.",
             },
-            {
+            // Every band of the page, in order. The part being asked about is
+            // rarely the part at the top.
+            ...shots.map((b) => ({
               type: "image",
-              source: { type: "base64", media_type: "image/png", data: shot.toString("base64") },
-            },
+              source: { type: "base64", media_type: "image/png", data: b.toString("base64") },
+            })),
           ],
         });
         // Not a failed attempt: it is the verification step, and it must not eat
