@@ -780,7 +780,19 @@ console.log("\n20. It reports what it actually read (the 'did it open my PDF?' q
   ok("a plan with no sources is fine", S.normalizePlan({ title: "t", sections: [] }).sources.length === 0);
 
   const ctl3 = fs3.readFileSync(path3.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
-  ok("the report is streamed before the plan", /send\("sources"[\s\S]{0,200}send\("plan"/.test(ctl3));
+  ok("the report is streamed before the plan", /send\("sources"[\s\S]{0,1200}send\("plan"/.test(ctl3));
+  /*
+   * And written down. The file itself travels only when the model asks for it,
+   * so without this its knowledge of the source lasted exactly one turn: the
+   * design it studied on turn one was gone by turn three, and "make it like the
+   * PDF" was being asked of something that had never seen a PDF.
+   */
+  ok("what it read is kept the first time", /!\(doc\.sourceNotes \|\| \[\]\)\.length/.test(ctl3));
+  ok("and committed with the turn, not on its own",
+    /\.\.\.\(notesToKeep\?\.length \? \{ sourceNotes: notesToKeep \} : \{\}\)/.test(ctl3));
+  ok("then carried on every later prompt",
+    S.sourceList({ files: [{ name: "a.pdf" }], sourceNotes: [{ name: "page 1", found: "şaquli gün adları" }] })
+      .includes("şaquli gün adları"));
 }
 
 
@@ -1027,7 +1039,7 @@ console.log("\n25. The model writes the document; the schema stops being the cei
    * Word, so the preview stops being a second rendering that can disagree with
    * the file.
    */
-  const { sanitizeDocHtml } = require("../helper/lessonDocSanitize");
+  const { sanitizeDocHtml, droppedStyles } = require("../helper/lessonDocSanitize");
 
   // The form that could not be built before.
   const form =
@@ -1207,6 +1219,23 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   // is exactly what produced a copy of our preview instead of a copy of the PDF.
   ok("and sends the file itself back", /extra\.push\(\.\.\.claudeContentParts\(\[found\.part\]\)\)/.test(ai));
   ok("bounded, and not out of the budget for fixing a table", /reads < MAX_READS/.test(ai) && /attempt -= 1;/.test(ai));
+
+  /*
+   * The most distinctive thing about the timetable is that the day names run
+   * vertically up the left-hand column. The model may well have written that;
+   * the allow-list deleted it and said nothing, so from where the model stood the
+   * instruction had simply been carried out. It would write the same thing again
+   * next turn and the copy would come back flat a second time, with both sides
+   * sure they had done the work.
+   */
+  const rot = sanitizeDocHtml('<table><tr><td style="writing-mode:vertical-rl;transform:rotate(180deg)">Wednesday</td></tr></table>');
+  ok("a vertical label survives", /writing-mode:vertical-rl/.test(rot) && /rotate\(180deg\)/.test(rot));
+  ok("so do fixed column widths", /table-layout:fixed/.test(sanitizeDocHtml('<table style="table-layout:fixed"><tr><td>a</td></tr></table>')));
+  ok("rotation still cannot carry a url", !/url/i.test(sanitizeDocHtml('<p style="transform:rotate(1deg) url(x)">y</p>')));
+  // Silence is right for an attack and wrong for a design.
+  ok("what was deleted is reportable",
+    droppedStyles('<td style="box-shadow:0 0 2px #000;color:#c00">x</td>', sanitizeDocHtml('<table><tr><td style="box-shadow:0 0 2px #000;color:#c00">x</td></tr></table>')).join() === "box-shadow");
+  ok("and is handed back to the model", /const gone = droppedStyles\(raw, sanitizeDocHtml\(raw\)\);/.test(ctl5));
 
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));

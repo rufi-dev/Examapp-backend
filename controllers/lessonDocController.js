@@ -7,7 +7,7 @@ const { buildLessonDocHtml } = require("../helper/lessonDocHtml");
 // Every write to a document goes through here. No path in this file may call
 // doc.save() — see the header of services/lessonDocService.js for why.
 const svc = require("../services/lessonDocService");
-const { sanitizeDocHtml } = require("../helper/lessonDocSanitize");
+const { sanitizeDocHtml, droppedStyles } = require("../helper/lessonDocSanitize");
 
 /*
  * Lesson materials, written through a conversation.
@@ -560,6 +560,9 @@ const streamMessage = asyncHandler(async (req, res) => {
   // committed to and what had actually been written, and salvage it below.
   let plan = null;
   let lastSnapshot = "";
+  // Committed with the turn rather than on their own, so a document never gains
+  // notes about a turn that failed before it wrote anything.
+  let notesToKeep = null;
 
   try {
     /*
@@ -603,6 +606,21 @@ const streamMessage = asyncHandler(async (req, res) => {
        * have discovered until the material came back subtly invented.
        */
       if (plan.sources.length) send("sources", { sources: plan.sources });
+      /*
+       * Written down the first time they are read, and kept.
+       *
+       * The file itself travels only on request, so without this the model's
+       * knowledge of the source lasted exactly one turn — the design it studied
+       * on turn one was gone by turn three, and "make it like the PDF" was being
+       * asked of something that had never seen a PDF. A few hundred characters of
+       * what it saw ride along on every turn from here; the page itself is still
+       * a read_source away when the work needs the page.
+       */
+      if (plan.sources.length && !(doc.sourceNotes || []).length) {
+        notesToKeep = plan.sources
+          .filter((x) => x && x.readable && x.found)
+          .map((x) => ({ name: String(x.name || "").slice(0, 80), found: String(x.found).slice(0, 400) }));
+      }
       if (plan.sections.length) send("plan", { ...plan, editing: hadBlocks });
     } catch (e) {
       // A stop must stop the TURN, not just this one call — swallowing it here
@@ -699,7 +717,27 @@ ${S.SOURCE_RULES}`;
        * not happen in. The finding goes back to the model as a tool error while
        * the source is still in front of it.
        */
-      validate: (name, input) => (name === "write_material" ? checkTables(input.html || "") : ""),
+      validate: (name, input) => {
+        if (name !== "write_material") return "";
+        const raw = input.html || "";
+        const findings = [checkTables(raw)];
+        /*
+         * Tell it what we deleted. The allow-list is silent by design, so a
+         * design instruction it wrote and we refused looked, from where it stood,
+         * exactly like an instruction that had been carried out — it would write
+         * the same thing again on the next turn and the copy would come back flat
+         * a second time, with both sides sure they had done the work.
+         */
+        const gone = droppedStyles(raw, sanitizeDocHtml(raw));
+        if (gone.length) {
+          findings.push(
+            `Bu style xüsusiyyətləri sənəddə saxlanmır və silindi: ${gone.join(", ")}. ` +
+              "İcazə verilənlərlə eyni görünüşü ver (rəng, kənar xətt, en, hizalama, " +
+              "writing-mode, transform:rotate, table-layout) və ya o detaldan imtina et."
+          );
+        }
+        return findings.filter(Boolean).join("\n\n");
+      },
       /*
        * Serve a source the model asks for. Every file the document holds is
        * reachable this way, not just the ones attached on this turn — which is the
@@ -835,6 +873,7 @@ ${S.SOURCE_RULES}`;
         ...(!doc.topic && wrote.input.title ? { topic: wrote.input.title } : {}),
         ...(plan?.audience && !doc.audience ? { audience: plan.audience } : {}),
         status: "ready",
+        ...(notesToKeep?.length ? { sourceNotes: notesToKeep } : {}),
         aiMeta: { provider: out.provider, at: new Date() },
       },
       baseRevision,

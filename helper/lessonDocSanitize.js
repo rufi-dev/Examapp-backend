@@ -103,6 +103,26 @@ const STYLES = {
     "page-break-inside": [/^(auto|avoid)$/],
     "break-inside": [/^(auto|avoid)$/],
     "white-space": [/^(normal|nowrap|pre-line|pre-wrap)$/],
+    /*
+     * The properties a faithful reproduction needs, which were not here.
+     *
+     * A timetable's day names run vertically up the left-hand column; a form's
+     * columns hold their widths. The model may well have written both — we
+     * deleted them on the way in and said nothing, so the copy came back flat and
+     * the model had no way to learn why.
+     *
+     * Each is still pattern-checked, and none can express a url() or a scheme:
+     * rotation is limited to whole turns, which is what a rotated label is.
+     */
+    "writing-mode": [/^(horizontal-tb|vertical-rl|vertical-lr)$/],
+    "text-orientation": [/^(mixed|upright|sideways)$/],
+    transform: [/^rotate\(-?\d{1,3}deg\)$/],
+    "transform-origin": [/^(center|top|bottom|left|right)(\s+(center|top|bottom|left|right))?$/],
+    "table-layout": [/^(auto|fixed)$/],
+    "border-spacing": SIZE,
+    "text-indent": SIZE,
+    "max-width": SIZE,
+    "max-height": SIZE,
   },
 };
 
@@ -137,6 +157,40 @@ function extractSvg(html) {
     return `${token}${kept.length - 1}${token}`;
   });
   return { stripped, kept, token };
+}
+
+
+/*
+ * What the allow-list threw away.
+ *
+ * Sanitising is silent by design: a disallowed declaration simply is not there
+ * afterwards. That is right for an attack and wrong for a design — the model
+ * wrote `writing-mode` for a timetable's vertical day labels, we deleted it, and
+ * from where the model stood the instruction had simply been ignored. It tried
+ * again, we deleted it again, and the teacher watched a copy come back flat with
+ * both sides insisting they had done the work.
+ *
+ * So the drop is reportable. Compared property-name by property-name, before and
+ * after, and handed back through the same tool_result path as any other finding,
+ * so the model can express the design a way that survives instead of guessing.
+ */
+const props = (html) => {
+  const names = new Set();
+  const styles = String(html || "").match(/style\s*=\s*"([^"]*)"/gi) || [];
+  for (const s of styles) {
+    const body = (s.match(/"([^"]*)"/) || [])[1] || "";
+    for (const decl of body.split(";")) {
+      const name = decl.split(":")[0].trim().toLowerCase();
+      if (name) names.add(name);
+    }
+  }
+  return names;
+};
+
+function droppedStyles(raw, clean) {
+  const before = props(raw);
+  const after = props(clean);
+  return [...before].filter((n) => !after.has(n));
 }
 
 function sanitizeDocHtml(raw) {
@@ -183,4 +237,4 @@ function sanitizeDocHtml(raw) {
     .replace(/[​‌﻿­]/g, "");
 }
 
-module.exports = { sanitizeDocHtml, TAGS, STYLES, MAX_HTML };
+module.exports = { sanitizeDocHtml, droppedStyles, TAGS, STYLES, MAX_HTML };

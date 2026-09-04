@@ -450,7 +450,26 @@ function historyOf(doc = {}) {
 function sourceList(doc = {}) {
   const files = (doc.files || []).map((f) => f.name).filter(Boolean);
   if (!files.length) return "";
-  return `SƏNƏDƏ ƏLAVƏ EDİLMİŞ FAYLLAR: ${files.join(", ")}\n(Bunlar sənə avtomatik göndərilmir — lazım olanı read_source ilə oxu.)`;
+
+  /*
+   * What was read from them, when it has been read before. This is the standing
+   * knowledge of the source: it costs a few hundred characters and it means the
+   * model is not starting from nothing on turn nine. It is a summary, not the
+   * page — read_source is still how you look at the thing itself, and for exact
+   * work you should.
+   */
+  const notes = (doc.sourceNotes || [])
+    .filter((n) => n && n.found)
+    .map((n) => `- ${n.name}: ${String(n.found).slice(0, 300)}`)
+    .join("\n");
+
+  return [
+    `SƏNƏDƏ ƏLAVƏ EDİLMİŞ FAYLLAR: ${files.join(", ")}`,
+    "(Bunlar sənə avtomatik göndərilmir — lazım olanı read_source ilə oxu.)",
+    notes ? `ƏVVƏL BU MƏNBƏLƏRDƏ GÖRDÜKLƏRİN:\n${notes}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function buildEditPrompt({ doc = {}, instructions = "" } = {}) {

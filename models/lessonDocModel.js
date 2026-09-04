@@ -156,6 +156,18 @@ const lessonDocSchema = new Schema(
     blocks: { type: [blockSchema], default: undefined },
     messages: { type: [messageSchema], default: undefined },
     files: { type: [fileSchema], default: undefined },
+    /*
+     * What the model saw in the attached sources, in its own words, kept.
+     *
+     * The bytes travel only when asked for — resending every attachment on every
+     * turn was the cost and latency problem — but "do not resend the file" was
+     * never "forget what was in it". Without this the model had no standing
+     * knowledge of the source at all, and a design it had studied on turn one was
+     * gone by turn three. The plan pass already reports what it read; this is that
+     * report, written down once and carried as text, which is a few hundred
+     * characters instead of a few megabytes.
+     */
+    sourceNotes: { type: [{ _id: false, name: String, found: String }], default: undefined },
 
     // The teacher's chosen export. Remembered so the button says the right thing
     // next time rather than asking again.
