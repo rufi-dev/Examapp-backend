@@ -3,6 +3,9 @@ const LessonDoc = require("../models/lessonDocModel");
 const { httpError, isAppError } = require("../utils/appError");
 const S = require("../helper/lessonDocSchema");
 const { buildLessonDocHtml } = require("../helper/lessonDocHtml");
+// Every write to a document goes through here. No path in this file may call
+// doc.save() — see the header of services/lessonDocService.js for why.
+const svc = require("../services/lessonDocService");
 
 /*
  * Lesson materials, written through a conversation.
@@ -103,6 +106,46 @@ const logStudioUsage = async (req, { doc, out, hadBlocks }) => {
 };
 
 /*
+ * One place where an AI turn becomes the document.
+ *
+ * Both turn paths — the plain POST and the streamed one — used to hand-assemble
+ * the same seven field writes and then call `doc.save()`, which is how they drifted
+ * apart in the first place. They now agree by construction, and both commit
+ * against the revision the turn STARTED from, so a generation that finishes after
+ * a manual edit loses instead of erasing it.
+ *
+ * The assistant's message rides along in the same write. It is part of the turn,
+ * not a separate event: a document that gained twelve blocks with no message
+ * saying why would be exactly the kind of half-applied state this is here to
+ * prevent.
+ */
+async function commitTurn(doc, baseRevision, { next, out, hadBlocks, sum, reply, note = "", action, audience }) {
+  const message = {
+    role: "assistant",
+    text: note ? `${reply} ${note}` : reply,
+    action: action || (hadBlocks ? "edited" : "created"),
+    stats: sum,
+    at: new Date(),
+  };
+  return svc.commit(
+    doc._id,
+    doc.owner,
+    {
+      blocks: next.blocks,
+      ...(next.title ? { title: next.title } : {}),
+      ...(!doc.topic && next.title ? { topic: next.title } : {}),
+      ...(audience && !doc.audience ? { audience } : {}),
+      status: "ready",
+      aiMeta: { provider: (out && out.provider) || "unknown", at: new Date() },
+    },
+    baseRevision,
+    // Pushed, not set: the teacher's own message was appended to this document
+    // after `doc` was read, so writing the array back would delete it.
+    { push: { messages: message } }
+  );
+}
+
+/*
  * Fail closed when the sources are gone.
  *
  * Some readable and some not is a warning — the teacher gets the material and is
@@ -166,21 +209,29 @@ const listDocs = asyncHandler(async (req, res) => {
 
 // POST /
 const createDoc = asyncHandler(async (req, res) => {
-  const owned = await LessonDoc.countDocuments({ owner: req.user._id, archivedAt: null });
-  if (owned >= MAX_DOCS) {
-    throw httpError(422, "too_many_docs", `Ən çox ${MAX_DOCS} material saxlaya bilərsiniz.`);
-  }
+  const User = require("../models/userModel");
+  // Claim the slot BEFORE creating: count-then-create let ten concurrent requests
+  // all read the same number and all decide there was room.
+  await svc.reserveDocSlot(User, req.user._id, MAX_DOCS);
+
   const b = req.body || {};
-  const doc = await LessonDoc.create({
-    owner: req.user._id,
-    topic: String(b.topic || "").trim(),
-    title: String(b.title || b.topic || "").trim(),
-    subject: String(b.subject || "").trim(),
-    grade: String(b.grade || "").trim(),
-    audience: String(b.audience || "").trim(),
-    format: b.format === "docx" ? "docx" : "pdf",
-  });
-  res.status(201).json({ doc });
+  try {
+    const doc = await LessonDoc.create({
+      owner: req.user._id,
+      topic: String(b.topic || "").trim(),
+      title: String(b.title || b.topic || "").trim(),
+      subject: String(b.subject || "").trim(),
+      grade: String(b.grade || "").trim(),
+      audience: String(b.audience || "").trim(),
+      format: b.format === "docx" ? "docx" : "pdf",
+    });
+    res.status(201).json({ doc });
+  } catch (e) {
+    // The slot was claimed and nothing was made with it — hand it back, or the
+    // teacher loses an allowance to an error they did not cause.
+    await svc.releaseDocSlot(User, req.user._id);
+    throw e;
+  }
 });
 
 // GET /:id
@@ -209,16 +260,23 @@ const sendMessage = asyncHandler(async (req, res) => {
   // show the teacher what the model was actually given rather than leaving them to
   // wonder whether the PDF made it.
   const sent = (doc.files || []).map((f) => ({ key: f.key, name: f.name, mime: f.mime }));
-  doc.messages = [
-    ...(doc.messages || []),
-    { role: "user", text, at: new Date(), ...(sent.length ? { files: sent } : {}) },
-  ];
-  await doc.save();
+  await svc.appendMessages(doc._id, doc.owner, {
+    role: "user",
+    text,
+    at: new Date(),
+    ...(sent.length ? { files: sent } : {}),
+  });
 
   const { runDocument } = require("../helper/aiDocument");
   const { toGeminiSchema } = require("../helper/curriculumSchema");
 
   const hadBlocks = (doc.blocks || []).length > 0;
+  /*
+   * The revision this turn is answering. The commit at the end must still match
+   * it: a generation takes tens of seconds, and if the teacher edited a block in
+   * the meantime this turn is writing a document that no longer exists.
+   */
+  const baseRevision = doc.revision || 0;
   // The references go with EVERY turn, not just the first.
   const { parts, unreadable } = await require("../helper/lessonDocFiles").toParts(doc.files || []);
   assertSourcesReadable(doc, parts, unreadable);
@@ -238,57 +296,47 @@ const sendMessage = asyncHandler(async (req, res) => {
       // grows with the document; the fixed 8000 here used to truncate long edits.
     });
   } catch (e) {
-    doc.messages = [
-      ...(doc.messages || []),
-      { role: "assistant", text: e?.userMessage || "Alınmadı — bir az sonra yenidən cəhd edin.", action: "failed", at: new Date() },
-    ];
-    await doc.save();
-    res.status(e?.aiStatus || 502);
-    throw new Error(e?.userMessage || "Material hazırlanmadı.");
+    const pub = publicFailure(e);
+    await svc.appendMessages(doc._id, doc.owner, {
+      role: "assistant",
+      text: pub.message,
+      action: "failed",
+      at: new Date(),
+    });
+    // An AppError so the curated message survives errorMiddleware, which replaces
+    // the text of any non-AppError at 5xx with "Internal server error".
+    throw httpError(e?.aiStatus === 422 ? 422 : 502, pub.code, pub.message);
   }
 
   const keepIds = (doc.blocks || []).map((b) => b.id);
   const next = S.normalizeDoc(out.doc || {}, { keepIds });
 
   if (!next.blocks.length) {
-    doc.messages = [
-      ...(doc.messages || []),
-      { role: "assistant", text: "Məzmun qaytarılmadı — istəyinizi bir az dəqiqləşdirin.", action: "failed", at: new Date() },
-    ];
-    await doc.save();
+    await svc.appendMessages(doc._id, doc.owner, {
+      role: "assistant",
+      text: "Məzmun qaytarılmadı — istəyinizi bir az dəqiqləşdirin.",
+      action: "failed",
+      at: new Date(),
+    });
     throw httpError(502, "empty_doc", "Material boş qayıtdı — istəyinizi dəqiqləşdirin.");
   }
 
   const sum = S.summarize(next.blocks);
-  doc.blocks = next.blocks;
-  if (next.title) doc.title = next.title;
-  if (!doc.topic) doc.topic = next.title;
-  doc.status = "ready";
-  doc.revision = (doc.revision || 0) + 1;
-  doc.aiMeta = { provider: out.provider, at: new Date() };
   /*
-   * The model's own words, with the counts kept separately as a receipt beside
-   * them. A teacher who asks for something subtle — "simpler for weaker students" —
-   * cannot tell from "12 blok" whether it was understood.
+   * The commit, against the revision this turn started from. If the teacher edited
+   * a block while the model was writing, this loses with a 409 rather than
+   * overwriting them — the whole point of taking `baseRevision` at the top.
    */
-  doc.messages = [
-    ...(doc.messages || []),
-    {
-      role: "assistant",
-      text:
-        next.reply ||
-        (hadBlocks
-          ? "Dəyişdirildi."
-          : "Material hazırdır."),
-      action: hadBlocks ? "edited" : "created",
-      stats: sum,
-      at: new Date(),
-    },
-  ];
-  await doc.save();
+  const saved = await commitTurn(doc, baseRevision, {
+    next,
+    out,
+    hadBlocks,
+    sum,
+    reply: next.reply || (hadBlocks ? "Dəyişdirildi." : "Material hazırdır."),
+  });
 
-  await logStudioUsage(req, { doc, out, hadBlocks });
-  res.json({ doc, summary: sum, provider: out.provider });
+  await logStudioUsage(req, { doc: saved, out, hadBlocks });
+  res.json({ doc: saved, summary: sum, provider: out.provider });
 });
 
 /*
@@ -320,11 +368,14 @@ const streamMessage = asyncHandler(async (req, res) => {
   // show the teacher what the model was actually given rather than leaving them to
   // wonder whether the PDF made it.
   const sent = (doc.files || []).map((f) => ({ key: f.key, name: f.name, mime: f.mime }));
-  doc.messages = [
-    ...(doc.messages || []),
-    { role: "user", text, at: new Date(), ...(sent.length ? { files: sent } : {}) },
-  ];
-  await doc.save();
+  await svc.appendMessages(doc._id, doc.owner, {
+    role: "user",
+    text,
+    at: new Date(),
+    ...(sent.length ? { files: sent } : {}),
+  });
+  // The revision this turn answers; the commit at the end must still match it.
+  const baseRevision = doc.revision || 0;
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -488,23 +539,17 @@ ${S.SOURCE_RULES}`;
     const keepIds = (doc.blocks || []).map((b) => b.id);
     const next = S.normalizeDoc(out.doc || {}, { keepIds });
     if (!next.blocks.length) {
-      doc.messages = [
-        ...(doc.messages || []),
-        { role: "assistant", text: "Məzmun qaytarılmadı — istəyinizi bir az dəqiqləşdirin.", action: "failed", at: new Date() },
-      ];
-      await doc.save();
-      send("failed", { message: "Material boş qayıtdı — istəyinizi dəqiqləşdirin." });
+      await svc.appendMessages(doc._id, doc.owner, {
+        role: "assistant",
+        text: "Məzmun qaytarılmadı — istəyinizi bir az dəqiqləşdirin.",
+        action: "failed",
+        at: new Date(),
+      });
+      send("failed", { code: "validation_failed", message: "Material boş qayıtdı — istəyinizi dəqiqləşdirin." });
       return;
     }
 
     const sum = S.summarize(next.blocks);
-    doc.blocks = next.blocks;
-    if (next.title) doc.title = next.title;
-    if (!doc.topic) doc.topic = next.title;
-    if (plan?.audience && !doc.audience) doc.audience = plan.audience;
-    doc.status = "ready";
-    doc.revision = (doc.revision || 0) + 1;
-    doc.aiMeta = { provider: out.provider, at: new Date() };
     /*
      * A response cut off by the token ceiling used to be a total failure — every
      * block the teacher had already watched arrive was thrown away because the
@@ -513,23 +558,20 @@ ${S.SOURCE_RULES}`;
      * saved here is real, but it may be short. Say so, with something to do about
      * it, rather than presenting a partial document as a finished one.
      */
-    const reply = next.reply || (hadBlocks ? "Dəyişdirildi." : "Material hazırdır.");
-    doc.messages = [
-      ...(doc.messages || []),
-      {
-        role: "assistant",
-        text: out.truncated
-          ? `${reply} Qeyd: cavab tam gəlmədi, material yarımçıq qala bilər — "davam et" yazaraq tamamlaya bilərsiniz.`
-          : reply,
-        action: hadBlocks ? "edited" : "created",
-        stats: sum,
-        at: new Date(),
-      },
-    ];
-    await doc.save();
+    const saved = await commitTurn(doc, baseRevision, {
+      next,
+      out,
+      hadBlocks,
+      sum,
+      reply: next.reply || (hadBlocks ? "Dəyişdirildi." : "Material hazırdır."),
+      note: out.truncated
+        ? 'Qeyd: cavab tam gəlmədi, material yarımçıq qala bilər — "davam et" yazaraq tamamlaya bilərsiniz.'
+        : "",
+      audience: plan?.audience,
+    });
 
-    await logStudioUsage(req, { doc, out, hadBlocks });
-    send("done", { doc, summary: sum, provider: out.provider, truncated: !!out.truncated });
+    await logStudioUsage(req, { doc: saved, out, hadBlocks });
+    send("done", { doc: saved, summary: sum, provider: out.provider, truncated: !!out.truncated });
   } catch (e) {
     // A deliberate stop is not a failure — it must not read like "Alınmadı" in
     // the transcript, and there is no client left to send an SSE frame to.
@@ -550,44 +592,39 @@ ${S.SOURCE_RULES}`;
           const keepIds = (doc.blocks || []).map((b) => b.id);
           const next = repaired ? S.normalizeDoc(repaired, { keepIds }) : null;
           if (next?.blocks?.length) {
-            const sum = S.summarize(next.blocks);
-            doc.blocks = next.blocks;
-            if (next.title) doc.title = next.title;
-            if (!doc.topic) doc.topic = next.title;
-            if (plan?.audience && !doc.audience) doc.audience = plan.audience;
-            doc.status = "ready";
-            doc.revision = (doc.revision || 0) + 1;
-            // The provider that was actually running when the stop landed, named
-            // by runDocument — never a guessed brand, and "unknown" when the
-            // failure happened before any provider was chosen.
-            doc.aiMeta = { provider: e?.provider || "unknown", at: new Date(), stopped: true };
-            doc.messages = [
-              ...(doc.messages || []),
-              {
-                role: "assistant",
-                text: "Dayandırıldı — buraya qədər olan hissə saxlanıldı.",
-                action: hadBlocks ? "edited" : "created",
-                stats: sum,
-                at: new Date(),
-              },
-            ];
+            /*
+             * Salvage still goes through the CAS. A stop is not a licence to
+             * overwrite: if the teacher edited a block while this turn was
+             * running, the half-written version they cancelled must not win over
+             * the edit they made deliberately. Losing here is the right outcome
+             * and leaves the plain "Dayandırıldı." note below.
+             */
+            await commitTurn(doc, baseRevision, {
+              next,
+              // The provider that was actually running when the stop landed,
+              // named by runDocument — never a guessed brand.
+              out: { provider: e?.provider || "unknown" },
+              hadBlocks,
+              sum: S.summarize(next.blocks),
+              reply: "Dayandırıldı — buraya qədər olan hissə saxlanıldı.",
+              audience: plan?.audience,
+            });
             salvaged = true;
           }
         } catch {
-          /* nothing usable in the partial snapshot — fall through to the plain stop message */
+          /* nothing usable, or a newer revision won — fall through to the note */
         }
       }
       if (!salvaged) {
-        doc.messages = [...(doc.messages || []), { role: "assistant", text: "Dayandırıldı.", action: "stopped", at: new Date() }];
+        await svc
+          .appendMessages(doc._id, doc.owner, { role: "assistant", text: "Dayandırıldı.", action: "stopped", at: new Date() })
+          .catch(() => {});
       }
-      await doc.save().catch(() => {});
     } else {
       const pub = publicFailure(e);
-      doc.messages = [
-        ...(doc.messages || []),
-        { role: "assistant", text: pub.message, action: "failed", at: new Date() },
-      ];
-      await doc.save().catch(() => {});
+      await svc
+        .appendMessages(doc._id, doc.owner, { role: "assistant", text: pub.message, action: "failed", at: new Date() })
+        .catch(() => {});
       send("failed", pub);
     }
   } finally {
@@ -624,11 +661,15 @@ const addFile = asyncHandler(async (req, res) => {
 
   const saved = await F.saveFile({ buffer: f.buffer, mime: f.mimetype, name: f.originalname });
   // The same page attached twice is one entry, not two identical ones in the list.
-  if (!files.some((x) => x.key === saved.key)) {
-    doc.files = [...files, saved];
-    await doc.save();
-  }
-  res.status(201).json({ doc });
+  if (files.some((x) => x.key === saved.key)) return res.status(201).json({ doc });
+  /*
+   * An attachment is document content — it changes what every later turn is
+   * grounded in — so it takes the same CAS as any other write. Attaching from two
+   * tabs at once now conflicts loudly instead of one list silently replacing the
+   * other.
+   */
+  const withFile = await svc.commit(doc._id, doc.owner, {}, doc.revision || 0, { push: { files: saved } });
+  res.status(201).json({ doc: withFile });
 });
 
 /*
@@ -665,13 +706,19 @@ const removeFile = asyncHandler(async (req, res) => {
   const gone = (doc.files || []).find((x) => x.key === key);
   if (!gone) throw httpError(404, "file_missing", "Fayl tapılmadı.");
 
-  doc.files = (doc.files || []).filter((x) => x.key !== key);
-  await doc.save();
+  const without = await svc.commit(
+    doc._id,
+    doc.owner,
+    { files: (doc.files || []).filter((x) => x.key !== key) },
+    doc.revision || 0
+  );
 
-  // Content-addressed, so another material may hold the identical file.
+  // Content-addressed, so another material may hold the identical file. The
+  // reference check runs AFTER the row is committed: unlinking bytes that a
+  // failed commit left referenced is the one ordering that loses data.
   const stillUsed = await LessonDoc.exists({ _id: { $ne: doc._id }, "files.key": key });
   await F.removeIfUnused(key, gone.ext, Boolean(stillUsed));
-  res.json({ doc });
+  res.json({ doc: without });
 });
 
 /*
@@ -681,35 +728,48 @@ const removeFile = asyncHandler(async (req, res) => {
  * credit or risk the rest of the document being rewritten. Guarded by the same
  * revision CAS as lesson plans so two tabs cannot silently overwrite each other.
  */
+/*
+ * PATCH /:id — the teacher's own edit.
+ *
+ * `revision` is now REQUIRED. It used to be checked only when the client happened
+ * to send it (`if (b.revision !== undefined)`), which made a blind write a
+ * supported call: two tabs both read revision 4, both write, and the second one
+ * silently discards the first. And even when sent, the comparison happened in
+ * JavaScript between a findById and a save() — a window wide enough to lose an
+ * edit through, which is exactly what a compare-and-set exists to close.
+ */
 const updateDoc = asyncHandler(async (req, res) => {
   const doc = await mine(req, req.params.id);
   const b = req.body || {};
 
-  if (b.revision !== undefined && Number(b.revision) !== doc.revision) {
-    throw httpError(409, "doc_conflict", "Material başqa yerdə dəyişdirilib — səhifəni yeniləyin.");
-  }
-
+  const patch = {};
   for (const f of ["title", "topic", "subject", "grade", "audience"]) {
-    if (b[f] !== undefined) doc[f] = String(b[f] || "").trim();
+    if (b[f] !== undefined) patch[f] = String(b[f] || "").trim();
   }
-  if (b.format !== undefined) doc.format = b.format === "docx" ? "docx" : "pdf";
+  if (b.format !== undefined) patch.format = b.format === "docx" ? "docx" : "pdf";
 
   if (Array.isArray(b.blocks)) {
     // Run the teacher's blocks through the SAME normaliser as the model's, so a
     // hand-edited document cannot end up in a shape the renderer has never seen.
-    const kept = S.normalizeDoc({ title: doc.title, blocks: b.blocks }, { keepIds: b.blocks.map((x) => x && x.id) });
-    doc.blocks = kept.blocks;
+    const kept = S.normalizeDoc(
+      { title: patch.title || doc.title, blocks: b.blocks },
+      { keepIds: b.blocks.map((x) => x && x.id) }
+    );
+    patch.blocks = kept.blocks;
   }
 
-  doc.revision = (doc.revision || 0) + 1;
-  await doc.save();
-  res.json({ doc });
+  res.json({ doc: await svc.commit(doc._id, doc.owner, patch, b.revision) });
 });
 
 // DELETE /:id
 const removeDoc = asyncHandler(async (req, res) => {
   const doc = await mine(req, req.params.id);
-  await LessonDoc.deleteOne({ _id: doc._id });
+  const gone = await LessonDoc.deleteOne({ _id: doc._id });
+  // Only give the slot back if this request is the one that actually removed the
+  // row — a double-click would otherwise refund twice for one deletion.
+  if (gone.deletedCount === 1) {
+    await svc.releaseDocSlot(require("../models/userModel"), doc.owner);
+  }
   res.json({ ok: true });
 });
 

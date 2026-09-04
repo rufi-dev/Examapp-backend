@@ -183,9 +183,12 @@ console.log("\n7. The prompts carry the contract:");
   const fs = require("fs");
   const path = require("path");
   const ctl = fs.readFileSync(path.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
-  ok("the teacher's message is stored before the model runs", /doc\.save\(\)[\s\S]{0,400}runDocument/.test(ctl));
+  const svcSrc = fs.readFileSync(path.join(__dirname, "../services/lessonDocService.js"), "utf8");
+  // A provider timeout must not lose what the teacher typed: they should reopen
+  // the page and find their own words with a failure beside them.
+  ok("the teacher's message is stored before the model runs", /appendMessages\([\s\S]{0,300}role: "user"[\s\S]{0,600}runDocument/.test(ctl));
   ok("a hand edit never calls the model", /const updateDoc[\s\S]{0,1200}/.test(ctl) && !/const updateDoc[\s\S]{0,1200}runDocument/.test(ctl));
-  ok("edits are guarded by the revision CAS", /doc_conflict/.test(ctl));
+  ok("edits are guarded by the revision CAS", /svc\.commit\(/.test(ctl) && /doc_conflict/.test(svcSrc));
   ok("Word is sent as an attachment", /attachment/.test(ctl));
 
   const docx = fs.readFileSync(path.join(__dirname, "../helper/lessonDocDocx.js"), "utf8");

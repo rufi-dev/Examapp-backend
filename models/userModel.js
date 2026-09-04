@@ -278,6 +278,19 @@ const userSchema = Schema(
         // is enabled. Simple integer balance, never negative.
         aiCredits: { type: Number, default: 0, min: 0 },
 
+        /*
+         * How many lesson materials this teacher holds, as an atomically claimed
+         * counter rather than a count taken at request time. `countDocuments()`
+         * then `create()` is a race — ten requests at the limit all read the same
+         * number and all decide there is room — so the check and the claim have to
+         * be one conditional write. Seeded from the real count on first use and
+         * released on delete; see services/lessonDocService.js.
+         *
+         * Absent on accounts that have never opened Studio, which is why every
+         * read of it tolerates `undefined`.
+         */
+        lessonDocCount: { type: Number, default: undefined, min: 0 },
+
         // "Trust this device" tokens for one-tap re-login from the account chooser
         // (Login page). Each entry is a HASHED device token (never the raw value)
         // the browser holds in an httpOnly cookie; POST /device/login exchanges a
