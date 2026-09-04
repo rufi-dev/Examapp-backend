@@ -704,6 +704,26 @@ ${S.SOURCE_RULES}`;
 
     const wrote = out.calls.find((c) => c.name === "write_material");
     const printed = out.calls.find((c) => c.name === "set_print_options");
+    const asked = out.calls.find((c) => c.name === "ask_teacher");
+
+    /*
+     * A question, and the document untouched.
+     *
+     * Answered FIRST, and only when nothing was written, because a model that has
+     * decided it does not understand must not also be changing the material — the
+     * whole point of the tool is that guessing is no longer the only move.
+     */
+    if (asked && !wrote && !printed) {
+      const withQuestion = await svc.appendMessages(doc._id, doc.owner, {
+        role: "assistant",
+        text: String(asked.input.question || "").trim() || out.said || "Nə etməyimi istəyirsiniz?",
+        action: "asked",
+        at: new Date(),
+      });
+      await logStudioUsage(req, { doc: withQuestion || doc, out, hadBlocks });
+      send("done", { doc: withQuestion || doc, summary: null, provider: out.provider });
+      return;
+    }
 
     /*
      * A settings-only turn. Nothing about the document's content changed, so

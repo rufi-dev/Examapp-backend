@@ -98,8 +98,38 @@ const DOC_TOOLS = [
       required: ["pageNumbers", "accent", "reply"],
     },
   },
+  {
+    /*
+     * The model could not say "I do not know what you mean".
+     *
+     * write_material and set_print_options were the whole vocabulary, so every
+     * turn — however vague — had to come out as a change to the document. Sent
+     * "continue" with nothing left to continue, the model did the only thing it
+     * could express and invented two blank tables the teacher had not asked for,
+     * appended to a document that was supposed to be an exact copy of a file.
+     *
+     * That is not the model being careless. Guessing was the only move on the
+     * board. This adds the other one.
+     */
+    name: "ask_teacher",
+    description:
+      "Müəllimin nə istədiyi aydın deyilsə, SƏNƏDƏ TOXUNMADAN sual ver. " +
+      "Sənəd olduğu kimi qalır — heç nə əlavə olunmur, heç nə silinmir. " +
+      "Təxmin edib nəsə yazmaqdansa soruş: müəllimin istəmədiyi bir bölmə əlavə etmək, " +
+      "sualı bir növbə gecikdirməkdən pisdir.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        question: {
+          type: "string",
+          description: "Müəllimə bir-iki cümləlik konkret sual. Nəyin aydın olmadığını de.",
+        },
+      },
+      required: ["question"],
+    },
+  },
 ];
-
 const DOC_SCHEMA = {
   type: "object",
   additionalProperties: false,

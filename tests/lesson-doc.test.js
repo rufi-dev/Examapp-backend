@@ -1160,6 +1160,29 @@ console.log("\n25. The model writes the document; the schema stops being the cei
     !/ƏVVƏLKİ SÖHBƏT/.test(S.buildEditPrompt({ doc: { html: "<p>x</p>", messages: [{ role: "user", text: "a" }] }, instructions: "b" }).prompt));
   ok("history is bounded", S.historyOf({ messages: Array.from({ length: 60 }, (_, i) => ({ role: "user", text: `m${i}` })) }).split("\n").length <= 13);
 
+  /*
+   * Sent "continue" with nothing left to continue, the model appended two blank
+   * tables nobody had asked for to a document that was meant to be an exact copy
+   * of a file. It was not being careless: write_material and set_print_options
+   * were the entire vocabulary, so guessing was the only move it could express.
+   */
+  const ask = S.DOC_TOOLS.find((t) => t.name === "ask_teacher");
+  ok("the model can ask instead of guessing", Boolean(ask));
+  ok("and asking takes nothing but a question", Object.keys(ask.input_schema.properties).join() === "question");
+  ok("a question leaves the document alone", /if \(asked && !wrote && !printed\) \{/.test(ctl5));
+  ok("and is not committed as a document change", /action: "asked"/.test(ctl5));
+
+  /*
+   * A timetable copied out of a black-and-white PDF came back with blue,
+   * uppercased month names — our table house style, applied to a document the
+   * model wrote. In that teacher's source a coloured date marks a holiday, so the
+   * colour did not merely look wrong: it said something the file does not say.
+   */
+  const copied = buildLessonDocHtml({ title: "T", html: "<table><tr><th>September</th></tr></table>" });
+  ok("a copied table is not recoloured or capitalised", /text-transform:none/.test(copied) && /color:inherit/.test(copied));
+  ok("a block document keeps the house table style",
+    !/text-transform:none/.test(buildLessonDocHtml({ title: "T", blocks: [{ id: "1", kind: "text", text: "a" }] })));
+
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));
   ok("blocks are cleared so there is one source of truth", /blocks: \[\],/.test(ctl5));

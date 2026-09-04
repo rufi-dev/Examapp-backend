@@ -315,6 +315,22 @@ async function withRasterFigures(doc = {}) {
   return { ...doc, blocks: out };
 }
 
+/*
+ * House styling stops at the edge of a document the model wrote.
+ *
+ * The table rules were designed for block documents: header cells in the accent
+ * colour, uppercased, letter-spaced. Applied to a timetable copied out of a
+ * black-and-white PDF they turned "September" into a blue "SEPTEMBER" — and in
+ * that teacher's source a coloured date means a holiday, so the colour did not
+ * merely look wrong, it said something. Choosing what is coloured or capitalised
+ * in someone's copied document is not ours to do; the model writes the styles it
+ * means, and anything it sets inline still overrides this.
+ */
+const PLAIN_CSS = `
+th{color:inherit;text-transform:none;letter-spacing:normal;font-weight:700;
+  border-bottom:.5pt solid var(--rule-soft,#EBEDF2)}
+`;
+
 function buildLessonDocHtml(rawDoc = {}, { forWord = false } = {}) {
   const doc = rawDoc && typeof rawDoc === "object" ? rawDoc : {};
   const blocks = Array.isArray(doc.blocks) ? doc.blocks : [];
@@ -361,7 +377,7 @@ function buildLessonDocHtml(rawDoc = {}, { forWord = false } = {}) {
   const head = has(doc.html) ? "" : `<h1>${esc(title)}</h1>${meta ? `<p class="meta">${esc(meta)}</p>` : ""}`;
 
   return `<!DOCTYPE html><html lang="az"><head><meta charset="utf-8">
-<title>${esc(title)}</title><style>${forWord ? cssDocx(a) : cssPdf(a)}</style></head><body>
+<title>${esc(title)}</title><style>${forWord ? cssDocx(a) : cssPdf(a)}${has(doc.html) ? PLAIN_CSS : ""}</style></head><body>
 ${head}
 ${body || '<p class="meta">Bu materialda hələ məzmun yoxdur.</p>'}
 </body></html>`;
