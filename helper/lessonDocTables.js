@@ -126,4 +126,72 @@ function checkTables(html) {
     .join("\n");
 }
 
-module.exports = { checkTables, rowWidths, dominant };
+
+/*
+ * Which columns each cell actually occupies.
+ *
+ * The teacher said the class runs October 14 to November 2. The model agreed,
+ * said it had done it, and shipped a cell sitting on ONE column — the browser
+ * then stretched that column wide enough to hold the text, which is why the
+ * result looked like a wide block in roughly the right place and was nothing of
+ * the sort. Both sides were describing the same picture and meaning different
+ * markup.
+ *
+ * colspan arithmetic across a merged grid is exactly the kind of counting that is
+ * easy to get wrong in your head and trivial to compute. So compute it: every
+ * cell, with the column range it lands on, against the header row's labels. The
+ * model can then check "Big Data sits on columns 8-8" against "column 8 is
+ * October 14" instead of believing it got the sum right.
+ */
+function gridMap(html, { maxTables = 6, maxRows = 14 } = {}) {
+  const tables = String(html || "").match(/<table\b[\s\S]*?<\/table>/gi) || [];
+  const out = [];
+
+  tables.slice(0, maxTables).forEach((table, ti) => {
+    const rows = table.match(/<tr\b[\s\S]*?<\/tr>/gi) || [];
+    const carried = [];
+    const lines = [];
+
+    rows.slice(0, maxRows).forEach((row, ri) => {
+      const cells = row.match(/<t[hd]\b[^>]*>[\s\S]*?<\/t[hd]>/gi) || [];
+      let col = 0;
+      const placed = [];
+
+      const skip = () => {
+        while (carried[col] > 0) {
+          carried[col] -= 1;
+          col += 1;
+        }
+      };
+
+      for (const cell of cells) {
+        skip();
+        const open = (cell.match(/<t[hd]\b[^>]*>/i) || [""])[0];
+        const num = (attr) => {
+          const m = open.match(new RegExp(`${attr}\\s*=\\s*["']?(\\d{1,3})`, "i"));
+          const n = m ? parseInt(m[1], 10) : 1;
+          return Number.isFinite(n) && n > 0 ? Math.min(n, 100) : 1;
+        };
+        const span = num("colspan");
+        const down = num("rowspan") - 1;
+        const text = cell
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        const from = col + 1;
+        const to = col + span;
+        placed.push(`${from}${to > from ? `-${to}` : ""}:${text ? `"${text.slice(0, 34)}"` : "boş"}`);
+        for (let i = 0; i < span; i += 1) if (down > 0) carried[col + i] = down;
+        col += span;
+      }
+
+      lines.push(`  s${ri + 1}: ${placed.join(" | ")}`);
+    });
+
+    out.push(`Cədvəl ${ti + 1} (sütun nömrələri):\n${lines.join("\n")}`);
+  });
+
+  return out.join("\n\n").slice(0, 6000);
+}
+
+module.exports = { checkTables, gridMap, rowWidths, dominant };

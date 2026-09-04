@@ -90,7 +90,7 @@ function docError(status, userMessage, fallback = false) {
  * Claude is unavailable, and a degraded turn that can still write the document is
  * better than a turn that cannot run at all.
  */
-async function documentWithTools({ prompt, parts = [], system, tools, signal, maxTokens = DOC_MAX_TOKENS, onText, validate, fetchSource, look }) {
+async function documentWithTools({ prompt, parts = [], system, tools, signal, maxTokens = DOC_MAX_TOKENS, onText, validate, fetchSource, look, gridOf }) {
   const { claudeContentParts, computeCost } = require("../controllers/aiController");
   const client = anthropic();
   if (!client) throw docError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)", true);
@@ -246,6 +246,7 @@ async function documentWithTools({ prompt, parts = [], system, tools, signal, ma
     const wrote = used.find((b) => b.name === "write_material");
     if (!faults.length && typeof look === "function" && !looked && wrote && attempt < MAX_FIXES) {
       const shots = await look(wrote.input?.html || "");
+      const map = typeof gridOf === "function" ? gridOf(wrote.input?.html || "") : "";
       if (shots?.length) {
         looked = true;
         history.push({ role: "assistant", content: message.content });
@@ -255,12 +256,25 @@ async function documentWithTools({ prompt, parts = [], system, tools, signal, ma
             {
               type: "tool_result",
               tool_use_id: wrote.id,
-              content:
-                `Yazdığın sənədin görüntüsü aşağıdadır (${shots.length} hissə, yuxarıdan aşağıya). ` +
-                "Mənbə ilə müqayisə et: xətlər, " +
-                "sütunların düzülüşü, boş xanalar, rənglər, hizalama. Fərq varsa " +
-                "write_material-ı düzəldilmiş HTML ilə yenidən çağır. Hər şey uyğundursa " +
-                "eyni HTML-i yenidən göndər.",
+              /*
+               * The picture and the arithmetic together. The picture answers "does
+               * it look right"; the map answers "which columns is this cell
+               * actually on", which is the question a stretched column makes
+               * impossible to answer by eye — a one-column cell holding a long
+               * sentence looks exactly like a block spanning seven.
+               */
+              content: [
+                `Yazdığın sənədin görüntüsü aşağıdadır (${shots.length} hissə, yuxarıdan aşağıya).`,
+                "Mənbə ilə müqayisə et: xətlər, sütunların düzülüşü, boş xanalar, rənglər, hizalama.",
+                map ? `\nXANALARIN SÜTUN NÖMRƏLƏRİ (hesablanmış, təxmin deyil):\n${map}` : "",
+                "\nDiqqət: geniş görünən xana geniş olmaya bilər — mətn uzun olduğu üçün",
+                "sütun uzanır. Bloklardan hər birinin hansı sütunlarda olduğunu yuxarıdakı",
+                "siyahıdan yoxla və başlıq sətrindəki tarixlərlə tutuşdur.",
+                "\nFərq varsa write_material-ı düzəldilmiş HTML ilə yenidən çağır.",
+                "Hər şey uyğundursa eyni HTML-i yenidən göndər.",
+              ]
+                .filter(Boolean)
+                .join("\n"),
             },
             // Every band of the page, in order. The part being asked about is
             // rarely the part at the top.

@@ -1263,6 +1263,29 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("a failed render costs the teacher nothing", /draft render failed/.test(ctl5));
   ok("the renderer exists", typeof require("../helper/lessonPlanPdf").renderPng === "function");
 
+  /*
+   * The teacher said the class runs three weeks. The model agreed, said it had
+   * done it, and shipped a cell sitting on ONE column — the browser then
+   * stretched that column wide enough to hold the sentence, so the picture showed
+   * a wide block roughly where a wide block belonged. Both sides were describing
+   * the same image and meaning different markup, and no amount of looking settles
+   * that. Column arithmetic does.
+   */
+  const { gridMap } = require("../helper/lessonDocTables");
+  const grid = gridMap(
+    "<table>" +
+      '<tr><td></td><td colspan="5">September</td><td colspan="4">October</td></tr>' +
+      "<tr><td></td><td>2</td><td>9</td><td>16</td><td>23</td><td>30</td><td>7</td><td>14</td><td>21</td><td>28</td></tr>" +
+      '<tr><td>18:00</td><td colspan="6"></td><td colspan="3">Big Data</td></tr>' +
+      "</table>"
+  );
+  ok("a merged header reports its real span", /2-6:"September"/.test(grid));
+  ok("a lesson block reports the columns it lands on", /8-10:"Big Data"/.test(grid));
+  ok("so it can be checked against the dates on those columns", /8:"14"/.test(grid) && /10:"28"/.test(grid));
+  ok("an empty run is counted, not skipped", /2-7:boş/.test(grid));
+  ok("and it is sent with the render", /gridOf: \(html\) => gridMap\(html \|\| ""\)/.test(ctl5));
+  ok("warning that a wide-looking cell need not be wide", /geniş görünən xana geniş olmaya bilər/.test(ai2));
+
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));
   ok("blocks are cleared so there is one source of truth", /blocks: \[\],/.test(ctl5));

@@ -2,7 +2,7 @@ const asyncHandler = require("express-async-handler");
 const LessonDoc = require("../models/lessonDocModel");
 const { httpError, isAppError } = require("../utils/appError");
 const S = require("../helper/lessonDocSchema");
-const { checkTables } = require("../helper/lessonDocTables");
+const { checkTables, gridMap } = require("../helper/lessonDocTables");
 const { buildLessonDocHtml } = require("../helper/lessonDocHtml");
 // Every write to a document goes through here. No path in this file may call
 // doc.save() — see the header of services/lessonDocService.js for why.
@@ -770,6 +770,15 @@ ${S.SOURCE_RULES}`;
             }
           }
         : null,
+      /*
+       * The arithmetic that goes with the picture: which columns each cell lands
+       * on. A cell holding a long sentence stretches its column, so a block
+       * sitting on ONE column can look exactly like a block spanning seven —
+       * which is how a class that runs three weeks came back looking like it runs
+       * eleven, with both sides describing the same image and meaning different
+       * markup.
+       */
+      gridOf: (html) => gridMap(html || ""),
       fetchSource: async (name) => {
         const want = String(name || "").trim().toLowerCase();
         if (!want) return null;
