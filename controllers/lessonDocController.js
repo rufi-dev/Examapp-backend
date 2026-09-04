@@ -119,12 +119,17 @@ const logStudioUsage = async (req, { doc, out, hadBlocks }) => {
  * saying why would be exactly the kind of half-applied state this is here to
  * prevent.
  */
-async function commitTurn(doc, baseRevision, { next, out, hadBlocks, sum, reply, note = "", action, audience }) {
+async function commitTurn(doc, baseRevision, { next, out, hadBlocks, sum, reply, note = "", action, audience, plan }) {
   const message = {
     role: "assistant",
     text: note ? `${reply} ${note}` : reply,
     action: action || (hadBlocks ? "edited" : "created"),
     stats: sum,
+    // The work log, kept with the message it produced, so a teacher can reopen
+    // "what did it read, what did it decide" long after the turn scrolled away.
+    ...(plan && (plan.sources?.length || plan.sections?.length)
+      ? { work: { sources: plan.sources || [], steps: plan.sections || [] } }
+      : {}),
     at: new Date(),
   };
   return svc.commit(
@@ -597,6 +602,7 @@ ${S.SOURCE_RULES}`;
         ? 'Qeyd: cavab tam gəlmədi, material yarımçıq qala bilər — "davam et" yazaraq tamamlaya bilərsiniz.'
         : "",
       audience: plan?.audience,
+      plan,
     });
 
     await logStudioUsage(req, { doc: saved, out, hadBlocks });
@@ -637,6 +643,7 @@ ${S.SOURCE_RULES}`;
               sum: S.summarize(next.blocks),
               reply: "Dayandırıldı — buraya qədər olan hissə saxlanıldı.",
               audience: plan?.audience,
+              plan,
             });
             salvaged = true;
           }

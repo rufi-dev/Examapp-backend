@@ -69,6 +69,16 @@ const messageSchema = new Schema(
     // Counts beside the words, so the UI can show a receipt without re-deriving it.
     stats: { type: Schema.Types.Mixed, default: undefined },
     /*
+     * What the turn actually did, kept so it can be reopened later.
+     *
+     * The live report used to exist only for the length of the request: the
+     * sources it read and the steps it committed to were on screen while it
+     * worked and gone the moment it finished, so "what did it use to write this?"
+     * was unanswerable an hour afterwards. Stored with the message it produced —
+     * `{ sources: [{name, found, readable}], steps: [{heading, why}] }`.
+     */
+    work: { type: Schema.Types.Mixed, default: undefined },
+    /*
      * Which references were in front of the model on THIS turn.
      *
      * Not derivable from `files`, which is the document's current attachment list:
