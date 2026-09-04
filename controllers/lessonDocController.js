@@ -1,6 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const LessonDoc = require("../models/lessonDocModel");
-const { httpError } = require("../utils/appError");
+const { httpError, isAppError } = require("../utils/appError");
 const S = require("../helper/lessonDocSchema");
 const { buildLessonDocHtml } = require("../helper/lessonDocHtml");
 
@@ -15,15 +15,126 @@ const { buildLessonDocHtml } = require("../helper/lessonDocHtml");
 
 const MAX_DOCS = 200;
 
+/*
+ * One opaque answer for "not yours" and "not there".
+ *
+ * A 403 on someone else's document and a 404 on a missing one are different
+ * answers to the same probe, and the difference IS the leak: it confirms that a
+ * given id exists and belongs to somebody. A teacher can only ever act on their
+ * own materials, so the distinction buys them nothing and costs privacy.
+ *
+ * An admin still gets the truthful answer — they are allowed to know.
+ * A malformed id takes the same path rather than throwing a CastError, which
+ * used to surface as a 500 on a mistyped URL.
+ */
+const missing = () => httpError(404, "doc_missing", "Material tapılmadı.");
+
 const mine = async (req, id) => {
-  const doc = await LessonDoc.findById(id);
-  if (!doc) throw httpError(404, "doc_missing", "Material tapılmadı.");
   const admin = req.user?.role === "admin";
+  let doc = null;
+  try {
+    doc = await LessonDoc.findById(id);
+  } catch {
+    throw missing();
+  }
+  if (!doc) throw missing();
   if (!admin && String(doc.owner) !== String(req.user._id)) {
-    throw httpError(403, "not_owner", "Bu material sizə aid deyil.");
+    throw admin ? httpError(403, "not_owner", "Bu material sizə aid deyil.") : missing();
   }
   return doc;
 };
+
+/*
+ * The only error text allowed onto the wire from a streamed turn.
+ *
+ * The SSE failure path used to send `e?.userMessage || e?.message`. That second
+ * fallback is a raw-egress channel with nothing in front of it: a Mongo error, a
+ * TypeError, a provider body — whatever the exception happened to carry went
+ * straight into the teacher's toast. It cannot be caught by errorMiddleware
+ * either, because by then the 200 and the headers are long gone.
+ *
+ * So: a curated message, chosen from a fixed vocabulary, or a generic one. An
+ * AppError and a docError both carry text written FOR a teacher, so those pass
+ * through; anything else is reported generically and logged in full server-side,
+ * where it belongs.
+ */
+const PUBLIC_FAILURE = {
+  provider_unavailable: "AI xidməti cavab vermir — bir az sonra yenidən cəhd edin.",
+  generation_timeout: "Cavab çox uzun çəkdi — yenidən cəhd edin.",
+  validation_failed: "Material gözlənilən formatda qayıtmadı — istəyinizi dəqiqləşdirin.",
+  document_conflict: "Material başqa yerdə dəyişdirilib — səhifəni yeniləyin.",
+  storage_unavailable: "Fayl saxlanmadı — bir az sonra yenidən cəhd edin.",
+  export_failed: "Fayl hazırlanmadı — bir az sonra yenidən cəhd edin.",
+  operation_cancelled: "Dayandırıldı.",
+  source_unreadable: "Əlavə edilmiş fayl oxunmadı.",
+  generation_failed: "Material hazırlanmadı — bir az sonra yenidən cəhd edin.",
+};
+
+/*
+ * What a turn cost, recorded where the admin AI-cost page already looks.
+ *
+ * Studio has no rate limit, no daily budget guard and no credit charge — by
+ * decision. That makes this row the ONLY way anyone can see what the feature
+ * spends: without it, the one AI surface with no ceiling is also the one with no
+ * meter, and the first sign of a runaway would be the invoice.
+ *
+ * Never throws. A usage row failing to write must not cost the teacher the
+ * material they just waited for.
+ */
+const logStudioUsage = async (req, { doc, out, hadBlocks }) => {
+  try {
+    const AiUsage = require("../models/aiUsageModel");
+    const c = (out && out.cost) || {};
+    await AiUsage.create({
+      user: req.user._id,
+      operation: hadBlocks ? "ai.edit.material" : "ai.generate.material",
+      model: c.model || (out && out.provider) || "unknown",
+      inputTokens: c.inputTokens || 0,
+      outputTokens: c.outputTokens || 0,
+      cacheWriteTokens: c.cacheWriteTokens || 0,
+      cacheReadTokens: c.cacheReadTokens || 0,
+      totalTokens: c.totalTokens || 0,
+      usd: c.usd || 0,
+      blocks: (doc.blocks || []).length,
+    });
+  } catch (e) {
+    console.error("[LESSON DOC] usage log failed:", e?.message);
+  }
+};
+
+/*
+ * Fail closed when the sources are gone.
+ *
+ * Some readable and some not is a warning — the teacher gets the material and is
+ * told what was missing. But a teacher who attached files and got NONE of them
+ * read is in the one situation where continuing is worse than stopping: every
+ * instruction in the prompt says "base this on the attached page", and the model
+ * would cheerfully write from general knowledge in exactly that voice. Refusing
+ * is the honest answer, and it is recoverable — re-attach and ask again.
+ */
+function assertSourcesReadable(doc, parts, unreadable) {
+  const attached = (doc.files || []).length;
+  if (attached > 0 && parts.length === 0) {
+    throw httpError(
+      422,
+      "source_unreadable",
+      unreadable.length === 1
+        ? `"${unreadable[0]}" oxunmadı — faylı yenidən əlavə edin.`
+        : "Əlavə edilmiş fayllar oxunmadı — onları yenidən əlavə edin."
+    );
+  }
+}
+
+function publicFailure(e) {
+  // Log the real thing exactly once, where only we can read it.
+  console.error("[LESSON DOC] turn failed:", e?.code || e?.aiStatus || "", e?.message);
+  const code = typeof e?.code === "string" && PUBLIC_FAILURE[e.code] ? e.code : null;
+  if (code) return { code, message: e.userMessage || e.message || PUBLIC_FAILURE[code] };
+  // A docError/AppError carries a message written for a teacher; anything else
+  // is an internal detail and gets the generic line.
+  const curated = e?.userMessage || (isAppError(e) ? e.message : "");
+  return { code: e?.code || "generation_failed", message: curated || PUBLIC_FAILURE.generation_failed };
+}
 
 // GET /
 const listDocs = asyncHandler(async (req, res) => {
@@ -109,7 +220,8 @@ const sendMessage = asyncHandler(async (req, res) => {
 
   const hadBlocks = (doc.blocks || []).length > 0;
   // The references go with EVERY turn, not just the first.
-  const parts = await require("../helper/lessonDocFiles").toParts(doc.files || []);
+  const { parts, unreadable } = await require("../helper/lessonDocFiles").toParts(doc.files || []);
+  assertSourcesReadable(doc, parts, unreadable);
   const { system, prompt } = hadBlocks
     ? S.buildEditPrompt({ doc: doc.toObject(), instructions: text })
     : S.buildCreatePrompt({ doc: doc.toObject(), instructions: text });
@@ -175,6 +287,7 @@ const sendMessage = asyncHandler(async (req, res) => {
   ];
   await doc.save();
 
+  await logStudioUsage(req, { doc, out, hadBlocks });
   res.json({ doc, summary: sum, provider: out.provider });
 });
 
@@ -264,7 +377,7 @@ const streamMessage = asyncHandler(async (req, res) => {
   const hadBlocks = (doc.blocks || []).length > 0;
   // Attached references travel with every turn, and with the PLAN too — deciding
   // what to write from a page the model cannot see is deciding blind.
-  const parts = await require("../helper/lessonDocFiles").toParts(doc.files || []);
+  const { parts, unreadable } = await require("../helper/lessonDocFiles").toParts(doc.files || []);
 
   // Declared outside the try so a stop mid-write can still see what the plan
   // committed to and what had actually been written, and salvage it below.
@@ -272,6 +385,16 @@ const streamMessage = asyncHandler(async (req, res) => {
   let lastSnapshot = "";
 
   try {
+    /*
+     * The source check belongs INSIDE the try. The 200 and the SSE headers went
+     * out several lines ago, so throwing past this point would leave Express with
+     * nothing to write the error onto and the socket would just die — the client
+     * would see a stream that ended with no terminal event, which is precisely
+     * the ambiguity this file is trying to remove.
+     */
+    assertSourcesReadable(doc, parts, unreadable);
+    if (unreadable.length) send("source_warning", { unreadable });
+
     /*
      * ---- phase 1: what are we about to do? ---------------------------------
      *
@@ -298,9 +421,16 @@ const streamMessage = asyncHandler(async (req, res) => {
       // would run the far more expensive write pass anyway, right after the
       // teacher asked to cancel.
       if (ac.signal.aborted) throw e;
-      // Any other failed plan is not a failed turn — the writing pass can still
-      // run, it just runs without a preview.
+      /*
+       * Any other failed plan is not a failed turn — the writing pass can still
+       * run, it just runs without a preview. But it must SAY so: swallowing this
+       * silently left the UI implying a planned workflow that never happened, and
+       * the teacher reading "I am writing it" had no way to know the model never
+       * committed to a shape first.
+       */
       plan = null;
+      console.error("[LESSON DOC] plan pass failed:", e?.message);
+      send("planning_degraded", { message: "Plan hazırlanmadı — birbaşa yazıram." });
     }
 
     // ---- phase 2: write it, reporting each block -----------------------------
@@ -398,6 +528,7 @@ ${S.SOURCE_RULES}`;
     ];
     await doc.save();
 
+    await logStudioUsage(req, { doc, out, hadBlocks });
     send("done", { doc, summary: sum, provider: out.provider, truncated: !!out.truncated });
   } catch (e) {
     // A deliberate stop is not a failure — it must not read like "Alınmadı" in
@@ -426,7 +557,10 @@ ${S.SOURCE_RULES}`;
             if (plan?.audience && !doc.audience) doc.audience = plan.audience;
             doc.status = "ready";
             doc.revision = (doc.revision || 0) + 1;
-            doc.aiMeta = { provider: "claude", at: new Date() };
+            // The provider that was actually running when the stop landed, named
+            // by runDocument — never a guessed brand, and "unknown" when the
+            // failure happened before any provider was chosen.
+            doc.aiMeta = { provider: e?.provider || "unknown", at: new Date(), stopped: true };
             doc.messages = [
               ...(doc.messages || []),
               {
@@ -448,12 +582,13 @@ ${S.SOURCE_RULES}`;
       }
       await doc.save().catch(() => {});
     } else {
+      const pub = publicFailure(e);
       doc.messages = [
         ...(doc.messages || []),
-        { role: "assistant", text: e?.userMessage || "Alınmadı — bir az sonra yenidən cəhd edin.", action: "failed", at: new Date() },
+        { role: "assistant", text: pub.message, action: "failed", at: new Date() },
       ];
       await doc.save().catch(() => {});
-      send("failed", { message: e?.userMessage || e?.message || "Material hazırlanmadı." });
+      send("failed", pub);
     }
   } finally {
     clearInterval(hb);
@@ -621,3 +756,7 @@ const exportDoc = asyncHandler(async (req, res) => {
 });
 
 module.exports = { listDocs, createDoc, getDoc, sendMessage, streamMessage, addFile, getFile, removeFile, updateDoc, removeDoc, exportDoc };
+// Exported for the redaction test: the funnel that decides what a teacher is
+// allowed to see is worth asserting on directly, not only through a live stream.
+module.exports.publicFailure = publicFailure;
+module.exports.assertSourcesReadable = assertSourcesReadable;

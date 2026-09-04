@@ -93,21 +93,34 @@ async function saveFile({ buffer, mime, name }) {
   };
 }
 
-// Read the attachments back in the shape the AI document path already speaks.
+/*
+ * Read the attachments back in the shape the AI document path already speaks —
+ * and REPORT the ones that could not be read.
+ *
+ * This used to swallow an unreadable file with a console line. That is the worst
+ * possible outcome for a grounded material: the teacher attached a textbook page,
+ * the model never received it, and the answer came back written from general
+ * knowledge in exactly the same confident tone. Nothing anywhere said the source
+ * had been dropped, so "based on the page I gave you" was unfalsifiable.
+ *
+ * The turn still runs on what WAS readable — a teacher would rather have the
+ * material than an error — but the caller now knows what is missing and can say
+ * so, and can refuse outright when nothing at all could be read.
+ */
 async function toParts(files = []) {
   const parts = [];
+  const unreadable = [];
   for (const f of files) {
     try {
       // eslint-disable-next-line no-await-in-loop
       const buf = await fsp.readFile(pathForKey(f.key, f.ext));
       parts.push({ mime: f.mime, data: buf.toString("base64"), isPdf: f.mime === "application/pdf" });
     } catch {
-      // A missing reference must not take down the turn: the teacher would rather
-      // have the material written without it than get an error and nothing.
       console.error("[LESSON DOC] attachment unreadable:", f.key);
+      unreadable.push(f.name || "fayl");
     }
   }
-  return parts;
+  return { parts, unreadable };
 }
 
 /*

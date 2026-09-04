@@ -33,7 +33,15 @@ const eq = (name, a, b) => ok(name, JSON.stringify(a) === JSON.stringify(b), `${
 
 // ---------------- 1. price neutrality (the numbers must not have moved) -------
 console.log("\n1. The consolidation moved no number:");
-eq("OP_COST projection (existing operations unchanged)", reg.costTable(), {
+
+/*
+ * These two started as whole-table deep-equals, which made ADDING an operation
+ * indistinguishable from CHANGING a price — the thing they exist to catch. The
+ * guarantee is unchanged and still exact: every baseline entry must still map to
+ * the same number, and the full operation set is asserted separately below, so a
+ * new operation still cannot appear without a deliberate edit here.
+ */
+const COST_BASELINE = {
   "ai.extract.questions": 10,
   "ai.generate.questions": 10,
   "ai.regenerate.question": 2,
@@ -42,8 +50,8 @@ eq("OP_COST projection (existing operations unchanged)", reg.costTable(), {
   "ai.realtime.session": 0,
   "ai.models.list": 0,
   "ai.generate.lessonplan": 6,
-});
-eq("WEIGHTS projection (existing operations unchanged)", WEIGHTS, {
+};
+const WEIGHT_BASELINE = {
   "ai.extract.questions": 5,
   "ai.generate.questions": 5,
   "ai.regenerate.question": 1,
@@ -52,7 +60,30 @@ eq("WEIGHTS projection (existing operations unchanged)", WEIGHTS, {
   "ai.realtime.session": 5,
   "ai.models.list": 0,
   "ai.generate.lessonplan": 3,
-});
+};
+const unchanged = (table, baseline) =>
+  Object.entries(baseline)
+    .filter(([op, n]) => table[op] !== n)
+    .map(([op, n]) => `${op}: ${n} -> ${table[op]}`);
+
+eq("OP_COST projection (existing operations unchanged)", unchanged(reg.costTable(), COST_BASELINE), []);
+eq("WEIGHTS projection (existing operations unchanged)", unchanged(WEIGHTS, WEIGHT_BASELINE), []);
+
+// The full set, so an operation cannot be added invisibly. Lesson Studio's two
+// are cost 0 by owner decision — see the comment in config/aiOperations.js.
+eq("the operation set is exactly what is declared here", Object.keys(reg.costTable()).sort(), [
+  "ai.chat.message",
+  "ai.edit.material",
+  "ai.extract.questions",
+  "ai.generate.lessonplan",
+  "ai.generate.material",
+  "ai.generate.questions",
+  "ai.models.list",
+  "ai.realtime.session",
+  "ai.regenerate.question",
+  "ai.transcribe.audio",
+]);
+ok("Lesson Studio's operations charge nothing", reg.costFor("ai.generate.material") === 0 && reg.costFor("ai.edit.material") === 0);
 eq("AI_ACTION_COSTS projection", AI_ACTION_COSTS, { generateExam: 10, rewriteQuestion: 2, supportChat: 0, generateLessonPlan: 6 });
 eq("CONFIRM_BEFORE projection", [...CONFIRM_BEFORE].sort(), [
   "ai.extract.questions",

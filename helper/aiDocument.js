@@ -429,7 +429,15 @@ async function runDocument({ prompt, parts = [], system, schema, geminiSchema, m
       return { ...out, provider: name, fellBack: name !== order[0] };
     } catch (e) {
       lastErr = e;
-      if (signal?.aborted) throw docError(499, "Ləğv edildi");
+      // Which provider was actually running when this failed. The caller needs it
+      // to record honest provenance on a salvaged partial document — before this,
+      // one path recorded a hard-coded brand and could name the wrong one.
+      e.provider = name;
+      if (signal?.aborted) {
+        const abort = docError(499, "Ləğv edildi");
+        abort.provider = name;
+        throw abort;
+      }
       console.error(`document via ${name} failed:`, e?.message);
       if (!e.aiFallback) break;
     }

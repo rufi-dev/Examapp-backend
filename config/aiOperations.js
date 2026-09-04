@@ -46,6 +46,24 @@ const AI_OPERATIONS = {
   // a rewrite (2) and a full exam (10). The ledger weights keep the same 2:1 ratio
   // to cost that every existing operation uses.
   "ai.generate.lessonplan": { cost: 6, ledgerWeight: 3, confirmBefore: true, active: true, display: "generateLessonPlan" },
+
+  /*
+   * Lesson Studio — DELIBERATELY cost 0, by owner decision.
+   *
+   * These are named here so Studio stops being the one AI surface outside the
+   * app's own conventions: the route can be gated by `requireActiveOperation`,
+   * every turn can be attributed in the usage table, and pricing later is a
+   * one-number change rather than a new integration. `cost: 0` charges nothing
+   * and enforces nothing — it is not an oversight and must not be "fixed" to a
+   * positive number without the owner asking for it.
+   *
+   * The ledger weights record the RELATIVE work for the day a price is chosen:
+   * writing a handout from nothing is a lesson plan's worth of generation (3);
+   * changing one that exists is less (2). `display: null` keeps both off the
+   * public pricing list, which is correct while they are free.
+   */
+  "ai.generate.material": { cost: 0, ledgerWeight: 3, confirmBefore: false, active: true, display: null },
+  "ai.edit.material": { cost: 0, ledgerWeight: 2, confirmBefore: false, active: true, display: null },
 };
 
 const OPERATION_NAMES = Object.keys(AI_OPERATIONS);

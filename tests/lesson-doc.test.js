@@ -17,6 +17,9 @@ const { assertStrict, toGeminiSchema } = require("../helper/curriculumSchema");
 
 let passed = 0;
 let failed = 0;
+// A few checks need to await real I/O. They register here and the summary at the
+// bottom waits for them, so the rest of the file stays plainly synchronous.
+const pending = [];
 const ok = (name, cond, extra) => {
   if (cond) { passed += 1; console.log("  ✓", name); }
   else { failed += 1; console.log("  ✗ FAIL:", name, extra === undefined ? "" : extra); }
@@ -581,6 +584,90 @@ console.log("\n16. Stop actually stops the bill, and salvages what streamed:");
   ok("an abort during the Claude call surfaces as a stop, not a generic failure", /if \(signal\?\.aborted\) throw docError\(499/.test(aiDoc));
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-assert.strictEqual(failed, 0, `${failed} lesson-doc assertions failed`);
-process.exit(failed ? 1 : 0);
+
+console.log("\n17. Nothing internal reaches the teacher (LS-010):");
+{
+  /*
+   * The streamed failure path used to send `e?.userMessage || e?.message`. That
+   * second fallback is a raw-egress channel with nothing in front of it, and it
+   * cannot be caught by errorMiddleware because the 200 and the headers are long
+   * gone by then. Whatever the exception happened to carry — a Mongo URI, a
+   * provider body, a filesystem path — went into the teacher's toast.
+   *
+   * Canary-shaped, after tests/http/mail-redaction.test.js.
+   */
+  const path3 = require("path");
+  const ctlPath = path3.join(__dirname, "../controllers/lessonDocController.js");
+  delete require.cache[require.resolve(ctlPath)];
+  const ctlSrc = require("fs").readFileSync(ctlPath, "utf8");
+
+  ok("the raw-message fallback is gone from the SSE path", !/send\("failed",\s*\{\s*message:\s*e\?\.userMessage \|\| e\?\.message/.test(ctlSrc));
+  ok("failures go through one curated funnel", /send\("failed", pub\)/.test(ctlSrc));
+
+  // The funnel itself, exercised directly.
+  const CANARY = "mongodb://secret-host/internal/path.js";
+  const { publicFailure } = require("../controllers/lessonDocController");
+  if (typeof publicFailure === "function") {
+    const raw = publicFailure(new Error(CANARY));
+    ok("an unknown error is reported generically", !JSON.stringify(raw).includes(CANARY));
+    ok("and still carries a stable code", typeof raw.code === "string" && raw.code.length > 0);
+
+    const { httpError } = require("../utils/appError");
+    const curated = publicFailure(httpError(422, "source_unreadable", "Fayl oxunmadı."));
+    ok("a curated AppError message survives", curated.message === "Fayl oxunmadı.");
+    ok("with its own code", curated.code === "source_unreadable");
+
+    // A docError from helper/aiDocument carries userMessage, not code.
+    const docErr = new Error("anthropic 500: <html>internal</html>");
+    docErr.userMessage = "AI xidməti cavab vermir.";
+    docErr.aiStatus = 502;
+    const fromDoc = publicFailure(docErr);
+    ok("a provider error shows its curated line", fromDoc.message === "AI xidməti cavab vermir.");
+    ok("and never the provider's own body", !JSON.stringify(fromDoc).includes("<html>"));
+  } else {
+    ok("publicFailure is exported for testing", false);
+  }
+}
+
+console.log("\n18. A foreign material is indistinguishable from a missing one (LS-019):");
+{
+  const path3 = require("path");
+  const ctlSrc = require("fs").readFileSync(path3.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+
+  // 403-on-foreign vs 404-on-missing answers "does this id exist and belong to
+  // someone" for anyone who can type a URL.
+  ok("both answers come from one helper", /const missing = \(\) => httpError\(404, "doc_missing"/.test(ctlSrc));
+  ok("a non-admin gets the missing answer for a foreign doc", /throw admin \? httpError\(403, "not_owner"[\s\S]{0,40}: missing\(\);/.test(ctlSrc));
+  // A mistyped id used to throw a CastError and surface as a 500.
+  ok("a malformed id is a 404, not a 500", /catch \{\s*throw missing\(\);/.test(ctlSrc));
+}
+
+console.log("\n19. A dropped source is never silently improvised over (LS-007):");
+{
+  const F = require("../helper/lessonDocFiles");
+  const path3 = require("path");
+  const ctlSrc = require("fs").readFileSync(path3.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+
+  // toParts used to swallow an unreadable attachment with a console line, so the
+  // model wrote from general knowledge in the same grounded-sounding voice.
+  const shape = F.toParts([]);
+  ok("toParts reports what it could not read", shape instanceof Promise);
+  pending.push(shape.then((r) => {
+    ok("it returns parts and the unreadable list", Array.isArray(r.parts) && Array.isArray(r.unreadable));
+    ok("nothing attached means nothing unreadable", r.parts.length === 0 && r.unreadable.length === 0);
+
+    // Calls only — the declaration has the same signature and must not be counted.
+    ok("both turns check readability", (ctlSrc.match(/^\s+assertSourcesReadable\(doc, parts, unreadable\);$/gm) || []).length === 2);
+    ok("a partial read warns rather than fails", /send\("source_warning", \{ unreadable \}\)/.test(ctlSrc));
+    ok("nothing readable at all fails closed", /source_unreadable[\s\S]{0,200}oxunmadı/.test(ctlSrc));
+    // It must be inside the try: the SSE headers are already sent by then, so a
+    // throw past that point kills the socket with no terminal event.
+    ok("the check runs inside the streamed try block", /try \{[\s\S]{0,600}assertSourcesReadable/.test(ctlSrc));
+  }));
+}
+
+Promise.all(pending).then(() => {
+  console.log(`\n${passed} passed, ${failed} failed`);
+  assert.strictEqual(failed, 0, `${failed} lesson-doc assertions failed`);
+  process.exit(failed ? 1 : 0);
+});
