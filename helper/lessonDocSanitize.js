@@ -158,7 +158,23 @@ function sanitizeDocHtml(raw) {
   });
 
   // Put the drawings back, now that the HTML pass cannot mangle them.
-  return kept.reduce((html, svg, i) => html.split(`${token}${i}${token}`).join(svg), clean);
+  const whole = kept.reduce((html, svg, i) => html.split(`${token}${i}${token}`).join(svg), clean);
+
+  /*
+   * Invisible characters are not invisible when a font has no glyph for them.
+   *
+   * A blank form arrived with a non-breaking space in each empty cell — a spacer,
+   * so the cells would not collapse to nothing — and every one of them drew on
+   * screen as a hex box reading "A0". The document was correct; it just could not
+   * be rendered by a font that has never needed U+00A0. Empty cells get their
+   * height from CSS instead, in all three renderers, so this text carries no
+   * spacers and nothing here depends on a font shipping a glyph for a space.
+   */
+  return whole
+    .replace(/ /g, " ")
+    // Zero-width space, BOM and soft hyphen: same failure, and they also break
+    // search and copy-paste out of the document.
+    .replace(/[​‌﻿­]/g, "");
 }
 
 module.exports = { sanitizeDocHtml, TAGS, STYLES, MAX_HTML };

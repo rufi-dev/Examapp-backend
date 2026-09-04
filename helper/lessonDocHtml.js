@@ -102,7 +102,8 @@ li{margin-bottom:3pt}
 table{width:100%;border-collapse:collapse;margin:0 0 10pt;break-inside:avoid}
 th{font-size:8.5pt;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
   color:var(--accent);text-align:left;border-bottom:1pt solid var(--accent);padding:0 6pt 3pt 0}
-td{font-size:10pt;padding:4pt 6pt 4pt 0;border-bottom:.5pt solid var(--rule-soft);vertical-align:top}
+td{font-size:10pt;padding:4pt 6pt 4pt 0;border-bottom:.5pt solid var(--rule-soft);vertical-align:top;
+  height:16pt}
 
 .fig{margin:0 0 12pt;padding:8pt 0;text-align:center;break-inside:avoid}
 .fig svg{max-width:100%;height:auto}
@@ -137,7 +138,7 @@ li{margin-bottom:3pt}
 .note.success{background:#E7F1EB;color:#15803D}
 table{border-collapse:collapse;width:100%;margin:0 0 10pt}
 th{font-size:9pt;color:${a.ink};text-align:left;border-bottom:1pt solid ${a.ink};padding:4pt 6pt 4pt 0}
-td{font-size:10.5pt;padding:4pt 6pt;border-bottom:0.5pt solid #EBEDF2}
+td{font-size:10.5pt;padding:4pt 6pt;border-bottom:0.5pt solid #EBEDF2;height:16pt}
 .fig{margin:0 0 12pt;text-align:center}
 .fig figcaption{margin-top:4pt;color:#676C78;font-size:9pt;font-style:italic}
 `;

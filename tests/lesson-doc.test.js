@@ -1024,6 +1024,19 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("a figure keeps its drawing", fig.includes("<circle") && fig.includes("viewBox"));
   ok("and its caption", fig.includes("Şəkil"));
 
+  /*
+   * A blank form came back with a non-breaking space in every empty cell — the
+   * model's way of stopping the cells collapsing — and every one of them DREW, as
+   * a hex box reading "A0", in a font with no glyph for it. The document was
+   * right; it was unrenderable. Spacers are not the document's job, so the cells
+   * take their height from CSS in all three renderers instead.
+   */
+  const spaced = sanitizeDocHtml("<table><tr><td> </td><td>Mət​n</td></tr></table>");
+  ok("a non-breaking space cannot reach the document", !/ /.test(spaced));
+  ok("neither can a zero-width space, which also breaks copy-paste", !/[​﻿­]/.test(spaced));
+  ok("and the word it was hiding inside survives whole", spaced.includes("Mətn"));
+  ok("an empty cell is still a cell", /<td>\s*<\/td>/.test(spaced));
+
   ok("empty input is refused", sanitizeDocHtml("") === "" && sanitizeDocHtml(null) === "");
   // A handout, not a book: past this something upstream has gone wrong.
   ok("an absurdly large document is refused", sanitizeDocHtml("<p>x</p>".repeat(80000)) === "");
