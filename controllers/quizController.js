@@ -5163,6 +5163,12 @@ const COPY_STRIP = [
   "reportSentAt", "reportDeliveredKeys", "reportLeaseOwner", "reportLeaseUntil",
   "reportNextAttemptAt", "reportAttempts", "reportDeadLetterAt", "reportLastFailure",
   "studentsNotifiedAt", "purging", "purgedAt", "deletedAt", "deletedBy",
+  /*
+   * A twin is born with its questions in the same breath, so it is never
+   * provisional — and inheriting the flag from a source that somehow was would
+   * hide a finished variant from every list. Stripped rather than trusted.
+   */
+  "provisional", "provisionalSince",
 ];
 
 /*

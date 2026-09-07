@@ -78,5 +78,21 @@ ok("and promotes what turns out to be real instead", /kept and promoted/.test(ct
 ok("the delete is fenced on the same predicate",
   /deleteOne\(\{ _id: exam\._id, provisional: true, provisionalSince: \{ \$lt: cutoff \} \}\)/.test(ctl));
 
+console.log("\n6. Only one path can make an empty exam, and it makes a provisional one:");
+/*
+ * There are exactly two places an exam is born. addExam is the teacher's form —
+ * provisional, checked above. spawnTwin makes a variant, and it creates the twin
+ * and its questions in one breath with a rollback if the second half fails, so it
+ * is never empty; the remaining risk is that it INHERITS the flag from its
+ * source, which would hide a finished variant from every list.
+ *
+ * The count is the point: a third path added later without the flag is how empty
+ * exams come back, and this fails the moment one appears.
+ */
+const births = (ctl.match(/Exam\.create\(/g) || []).length;
+ok("there are two creation paths and no more", births === 2, `found ${births}`);
+ok("the twin strips the flag rather than trusting it", /"provisional", "provisionalSince",/.test(ctl));
+ok("and it is removed if its questions fail", /await Exam\.deleteOne\(\{ _id: twin\._id \}\);/.test(ctl));
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
