@@ -777,22 +777,33 @@ ${S.SOURCE_RULES}`;
        * material written from a teacher's description has nothing to be checked
        * for fidelity TO.
        */
-      look: sending.length || (doc.files || []).length
-        ? async (html) => {
-            if (!html) return null;
-            try {
-              const { renderPng } = require("../helper/lessonPlanPdf");
-              const clean = sanitizeDocHtml(html);
-              if (!clean) return null;
-              return await renderPng(buildLessonDocHtml({ ...doc.toObject(), html: clean }), { timeoutMs: 20000 });
-            } catch (e) {
-              // A failed render must cost the teacher nothing: skip the look and
-              // let the turn finish on the checks that did run.
-              console.error("[LESSON DOC] draft render failed:", e?.message);
-              return null;
-            }
-          }
-        : null,
+      /*
+       * Every turn gets the page count; only source work gets the pictures.
+       *
+       * "I asked for two pages and got five" is a fault on every kind of turn,
+       * and the count comes from the same browser session that would take the
+       * screenshots — so measuring it always is one render, while sending four
+       * images always would be four images of tokens on a turn with nothing to
+       * compare them against.
+       */
+      look: async (html) => {
+        if (!html) return null;
+        try {
+          const { renderPng } = require("../helper/lessonPlanPdf");
+          const clean = sanitizeDocHtml(html);
+          if (!clean) return null;
+          const hasSource = sending.length > 0 || (doc.files || []).length > 0;
+          return await renderPng(buildLessonDocHtml({ ...doc.toObject(), html: clean }), {
+            timeoutMs: 20000,
+            bands: hasSource,
+          });
+        } catch (e) {
+          // A failed render must cost the teacher nothing: skip the look and let
+          // the turn finish on the checks that did run.
+          console.error("[LESSON DOC] draft render failed:", e?.message);
+          return null;
+        }
+      },
       /*
        * The arithmetic that goes with the picture: which columns each cell lands
        * on. A cell holding a long sentence stretches its column, so a block

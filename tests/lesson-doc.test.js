@@ -1254,7 +1254,7 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   const ad2 = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocAdapters.js"), "utf8");
   const aiSrc = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocument.js"), "utf8");
   ok("the model is shown its own draft", /images: shots/.test(ai2) && /type: "image"[\s\S]{0,160}b\.toString\("base64"\)/.test(ad2));
-  ok("once, because the second look says nothing new", /if \(shots\?\.length\) \{[\s\S]{0,60}looked = true;/.test(ai2));
+  ok("once, because the second look says nothing new", /if \(shots\.length \|\| pages\) \{[\s\S]{0,60}looked = true;/.test(ai2));
   /*
    * The first version captured the top 1500 pixels, so a teacher asking about the
    * Wednesday table was answered by a model looking at a picture of Monday. It
@@ -1264,11 +1264,21 @@ console.log("\n25. The model writes the document; the schema stops being the cei
    */
   ok("and shown the WHOLE page, in readable bands", /images\.map\(\(b\) => \(\{/.test(ad2) && /\$\{bands\} hissə/.test(ai2));
   const pdfSrc = require("fs").readFileSync(require("path").join(__dirname, "../helper/lessonPlanPdf.js"), "utf8");
-  ok("captured band by band at full scale", /const bands = Math\.min\(maxBands/.test(pdfSrc));
+  ok("captured band by band at full scale", /const bands = wantBands \? Math\.min\(maxBands/.test(pdfSrc));
   ok("with no image of empty trailing margin", /if \(i > 0 && height < 120\) break;/.test(pdfSrc));
   ok("and looking is not counted as a failed attempt", /attempt -= 1; \/\/ verifying is not failing/.test(ai2));
-  ok("only with a source to compare against",
-    /look: sending\.length \|\| \(doc\.files \|\| \[\]\)\.length/.test(ctl5));
+  /*
+   * The pictures need a source to be compared against; the PAGE COUNT does not.
+   * "I asked for two pages and got five" is a fault on every kind of turn, and
+   * the count comes out of the same browser session that would take the
+   * screenshots — so it is measured always, and the images are sent only when
+   * there is something to hold them against.
+   */
+  ok("pictures only when there is a source", /const hasSource = sending\.length > 0/.test(ctl5) && /bands: hasSource/.test(ctl5));
+  ok("but the page count on every turn", /look: async \(html\) => \{/.test(ctl5));
+  ok("measured by paginating the real stylesheet, not guessed",
+    pdfSrc.includes("await page.pdf({ format: \"A4\"") && pdfSrc.includes("Type"));
+  ok("and the model is told what to do with it", /PDF-də \$\{pages\} səhifə çıxır/.test(ai2));
   ok("a failed render costs the teacher nothing", /draft render failed/.test(ctl5));
   ok("the renderer exists", typeof require("../helper/lessonPlanPdf").renderPng === "function");
 

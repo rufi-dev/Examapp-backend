@@ -138,14 +138,23 @@ async function runToolLoop(adapter, opts) {
      */
     if (!faults.length && typeof look === "function" && !looked && wrote && attempt < MAX_FIXES) {
       // eslint-disable-next-line no-await-in-loop
-      const shots = await look(wrote.input?.html || "");
+      const seen = await look(wrote.input?.html || "");
+      const shots = seen?.shots || [];
+      const pages = seen?.pages || 0;
       const map = typeof gridOf === "function" ? gridOf(wrote.input?.html || "") : "";
-      if (shots?.length) {
+      /*
+       * A page count alone is worth a round even with no pictures. Asked for two
+       * pages a model writes what feels like two and produces five, because it
+       * has never been told how long a page is; this is the only place that can
+       * tell it, and the answer comes from Chromium paginating the real
+       * stylesheet rather than from a guess about words per page.
+       */
+      if (shots.length || pages) {
         looked = true;
         adapter.reply(
           history,
           turn,
-          [{ call: wrote, isError: false, text: lookNote(shots.length, map) }],
+          [{ call: wrote, isError: false, text: lookNote(shots.length, map, pages) }],
           { images: shots }
         );
         attempt -= 1; // verifying is not failing
@@ -172,10 +181,15 @@ async function runToolLoop(adapter, opts) {
   return { calls, said, cost, usage, unresolved, provider: adapter.name };
 }
 
-const lookNote = (bands, map) =>
+const lookNote = (bands, map, pages) =>
   [
-    `Yazdığın sənədin görüntüsü aşağıdadır (${bands} hissə, yuxarıdan aşağıya).`,
-    "Mənbə ilə müqayisə et: xətlər, sütunların düzülüşü, boş xanalar, rənglər, hizalama.",
+    pages
+      ? `Bu sənəd PDF-də ${pages} səhifə çıxır (Chromium ilə real ölçülüb, təxmin deyil). ` +
+        "Müəllim müəyyən sayda səhifə istəyibsə və bu uyğun gəlmirsə, mətni ona görə " +
+        "qısalt və ya uzat, sonra write_material-ı yenidən çağır."
+      : "",
+    bands ? `Yazdığın sənədin görüntüsü aşağıdadır (${bands} hissə, yuxarıdan aşağıya).` : "",
+    bands ? "Mənbə ilə müqayisə et: xətlər, sütunların düzülüşü, boş xanalar, rənglər, hizalama." : "",
     map ? `\nXANALARIN SÜTUN NÖMRƏLƏRİ (hesablanmış, təxmin deyil):\n${map}` : "",
     "\nDiqqət: geniş görünən xana geniş olmaya bilər — mətn uzun olduğu üçün sütun uzanır.",
     "Blokların hansı sütunlarda olduğunu yuxarıdakı siyahıdan yoxla və başlıq sətrindəki",

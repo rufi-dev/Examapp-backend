@@ -105,7 +105,7 @@ async function renderPdf(
  *
  * Same hardened setup as the PDF: no network, no sandbox, our own document.
  */
-async function renderPng(html, { timeoutMs = 30000, width = 1240, band = 1500, maxBands = 5 } = {}) {
+async function renderPng(html, { timeoutMs = 30000, width = 1240, band = 1500, maxBands = 5, bands: wantBands = true, countPages = true } = {}) {
   let browser;
   try {
     browser = await puppeteer.launch({
@@ -134,7 +134,7 @@ async function renderPng(html, { timeoutMs = 30000, width = 1240, band = 1500, m
      * actually in one of them.
      */
     const full = await page.evaluate(() => document.documentElement.scrollHeight);
-    const bands = Math.min(maxBands, Math.max(1, Math.ceil(full / band)));
+    const bands = wantBands ? Math.min(maxBands, Math.max(1, Math.ceil(full / band))) : 0;
     const shots = [];
     for (let i = 0; i < bands; i += 1) {
       const y = i * band;
@@ -144,7 +144,27 @@ async function renderPng(html, { timeoutMs = 30000, width = 1240, band = 1500, m
       // eslint-disable-next-line no-await-in-loop
       shots.push(Buffer.from(await page.screenshot({ type: "png", clip: { x: 0, y, width, height } })));
     }
-    return shots;
+
+    /*
+     * How many pages this actually prints to, from the same browser session.
+     *
+     * A model asked for "two pages" has no way to know how long a page is — it
+     * writes what feels like two and produces five, and nothing in the system
+     * ever tells it otherwise. Chromium paginating the real stylesheet is the
+     * only honest answer, and it is nearly free here because the page is already
+     * loaded; a second launch just to count would not be.
+     */
+    let pages = 0;
+    if (countPages) {
+      const pdf = Buffer.from(
+        await page.pdf({ format: "A4", printBackground: true, margin: MARGIN, timeout: timeoutMs })
+      );
+      // Chromium writes one /Type /Page object per page (and /Pages for the tree,
+      // which the negative lookahead excludes).
+      pages = (pdf.toString("latin1").match(/\/Type\s*\/Page(?!s)/g) || []).length;
+    }
+
+    return { shots, pages };
   } finally {
     if (browser) await browser.close().catch(() => {});
   }

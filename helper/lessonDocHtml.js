@@ -99,7 +99,21 @@ li{margin-bottom:3pt}
 .note.success{background:var(--green-tint);color:var(--green)}
 .note p{margin:0;max-width:none}
 
-table{width:100%;border-collapse:collapse;margin:0 0 10pt;break-inside:avoid}
+/*
+ * A table may break across pages; a ROW may not.
+ *
+ * break-inside:avoid on the whole table means a table that does not fit in what
+ * is left of a page moves to the next one entire — so a four-row grid two thirds
+ * down a page pushes itself over and leaves a third of that page blank. On a
+ * five-page handout that reads as the document skipping a page for no reason,
+ * which is exactly what it looked like. Rows keep the rule, because a row split
+ * down the middle is unreadable in a way a split table is not.
+ */
+table{width:100%;border-collapse:collapse;margin:0 0 10pt}
+tr{break-inside:avoid}
+/* A header row repeats at the top of each page the table continues onto — the
+   whole point of letting it break. */
+thead{display:table-header-group}
 th{font-size:8.5pt;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
   color:var(--accent);text-align:left;border-bottom:1pt solid var(--accent);padding:0 6pt 3pt 0}
 td{font-size:10pt;padding:4pt 6pt 4pt 0;border-bottom:.5pt solid var(--rule-soft);vertical-align:top;
@@ -137,6 +151,8 @@ li{margin-bottom:3pt}
 .note.warning{background:#FBF2DE;color:#8A5A00}
 .note.success{background:#E7F1EB;color:#15803D}
 table{border-collapse:collapse;width:100%;margin:0 0 10pt}
+tr{break-inside:avoid}
+thead{display:table-header-group}
 th{font-size:9pt;color:${a.ink};text-align:left;border-bottom:1pt solid ${a.ink};padding:4pt 6pt 4pt 0}
 td{font-size:10.5pt;padding:4pt 6pt;border-bottom:0.5pt solid #EBEDF2;height:16pt}
 .fig{margin:0 0 12pt;text-align:center}
