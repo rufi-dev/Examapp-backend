@@ -28,16 +28,25 @@ ok("uniqueness drift rejected", shapeReason(createSpec, {
 }) === "unique");
 
 const timeouts = [], intervals = [], clearedTimeouts = [], clearedIntervals = [];
+/*
+ * Every job the scheduler owns. This list had fallen two behind the code — it
+ * still named five when plan-lapse-sweep had made it six — so the four
+ * assertions below had been failing for as long as that: a contract test that
+ * fails constantly stops being read, and stops protecting anything.
+ */
 const jobs = Object.fromEntries([
-  "runDueExamReports", "finalizeExpiredAttempts", "purgeExpiredArchived",
-  "purgeOrphanPdfs", "purgeStagedUploads",
+  "sweepExpiredPlans", "runDueExamReports", "finalizeExpiredAttempts", "purgeExpiredArchived",
+  "purgeOrphanPdfs", "purgeStagedUploads", "purgeAbandonedExams",
 ].map((name) => [name, async () => name]));
+const JOB_COUNT = 7;
 const stop = startBackgroundJobs({
   env: {
     REPORT_INTERVAL_MS: "101", REPORT_FIRST_MS: "0",
     FINALIZE_INTERVAL_MS: "102", FINALIZE_FIRST_MS: "0",
     TRASH_INTERVAL_MS: "103", TRASH_FIRST_MS: "0",
     PDF_SWEEP_INTERVAL_MS: "104", PDF_SWEEP_FIRST_MS: "0",
+    PLAN_SWEEP_INTERVAL_MS: "100", PLAN_SWEEP_FIRST_MS: "0",
+    ABANDONED_EXAM_INTERVAL_MS: "105", ABANDONED_EXAM_FIRST_MS: "0",
   },
   jobs,
   wrap: (_name, _ms, fn) => fn,
@@ -46,12 +55,12 @@ const stop = startBackgroundJobs({
   clearTimeoutFn: (h) => clearedTimeouts.push(h),
   clearIntervalFn: (h) => clearedIntervals.push(h),
 });
-ok("scheduler owns exactly five jobs", timeouts.length === 5 && intervals.length === 5);
+ok(`scheduler owns exactly ${JOB_COUNT} jobs`, timeouts.length === JOB_COUNT && intervals.length === JOB_COUNT);
 ok("zero first-run delays are honored", timeouts.every((x) => x.ms === 0));
 ok("configured intervals are honored",
-  JSON.stringify(intervals.map((x) => x.ms)) === JSON.stringify([101, 102, 103, 104, 104]));
+  JSON.stringify(intervals.map((x) => x.ms)) === JSON.stringify([100, 101, 102, 103, 104, 104, 105]));
 stop(); stop();
-ok("stop is idempotent", clearedTimeouts.length === 5 && clearedIntervals.length === 5);
+ok("stop is idempotent", clearedTimeouts.length === JOB_COUNT && clearedIntervals.length === JOB_COUNT);
 ok("invalid durations fall back", positiveMs("NaN", 77) === 77 && positiveMs("-1", 77) === 77);
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

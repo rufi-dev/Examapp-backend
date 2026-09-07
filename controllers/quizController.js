@@ -15,7 +15,7 @@ const { notifyStudentsNewExam } = require("../helper/whatsapp");
 const { PRESETS } = require("../helper/examPresets");
 const { publishExam, resolveActiveVersionForStart, verifyIntegrity, VersionIntegrityError } = require("../helper/examVersion");
 const { computePointsPlan } = require("../helper/scoring");
-const { assertUnderClassCap, consumeExamCreate } = require("../helper/planLimits");
+const { assertUnderClassCap, assertExamCreate, consumeExamCreate } = require("../helper/planLimits");
 const mongoose = require("mongoose");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
@@ -401,6 +401,10 @@ const addExam = asyncHandler(async (req, res) => {
       endDate,
       class: classId,
       owner: req.user._id,
+      // Described, not written. It becomes a real exam when a question is saved
+      // into it, and until then it is listed nowhere — see the field's comment.
+      provisional: true,
+      provisionalSince: new Date(),
       // Only PDF exams carry a pdf reference.
       ...(savedPdf ? { pdf: savedPdf._id } : {}),
     };
@@ -408,10 +412,16 @@ const addExam = asyncHandler(async (req, res) => {
     try {
       newExam = await withMongoTransaction(async (session) => {
         const opts = session ? { session } : {};
-        // Plan gate: decrement the free tier's lifetime exam-creation allowance
-        // (unlimited tiers/admins are a no-op). Inside the transaction so a
-        // failed create rolls the decrement back; throws 402 when exhausted.
-        await consumeExamCreate(req.user, session);
+        /*
+         * Plan gate: CHECKED here, spent when the exam becomes real.
+         *
+         * Nearly two thirds of created exams never got a question, and every one
+         * of them cost a free teacher one of their lifetime creations. The
+         * allowance is spent by the first saved question instead; this still
+         * refuses upfront when there is none left, so nobody builds a paper they
+         * will not be allowed to save.
+         */
+        await assertExamCreate(req.user);
         const created = await Exam.create([examData], opts);
         const linked = await Class.updateOne(
           { _id: classId },
@@ -782,6 +792,55 @@ async function replaceExamPdf(examId, uploadId, ownerId, opts = {}) {
 // after classification can never be deleted. (3) Orphan private files with no row
 // are swept (counted only after confirmed deletion). `opts.__afterClassify` is a
 // TEST seam to inject the exact attach-vs-janitor interleaving.
+/*
+ * Clear away exams that were described and never written.
+ *
+ * A provisional exam is invisible, so an abandoned one costs nobody anything to
+ * look at — but it is still a row, and a teacher who starts the same paper three
+ * times leaves three. After a week it is not "in progress", it is abandoned.
+ *
+ * Only ones created SINCE this became the behaviour are touched: `provisionalSince`
+ * is set at creation and the historical 312 do not have it, so this can never
+ * reach an exam that predates the rule. It also refuses to touch anything that
+ * has a question, an attempt or a purchase against it, because those are the ways
+ * a row could matter even if the flag says otherwise.
+ */
+async function purgeAbandonedExams(now = Date.now(), opts = {}) {
+  const olderThanMs = opts.olderThanMs || 7 * 24 * 60 * 60 * 1000;
+  const cutoff = new Date(now - olderThanMs);
+  const candidates = await Exam.find({
+    provisional: true,
+    provisionalSince: { $lt: cutoff },
+    deletedAt: null,
+  })
+    .select("_id name questions provisionalSince")
+    .lean();
+
+  let removed = 0;
+  for (const exam of candidates) {
+    // Belt and braces: the flag says nothing was ever saved, so verify it before
+    // deleting anything. A row with real work on it stays, and loses the flag.
+    // eslint-disable-next-line no-await-in-loop
+    const [qCount, attempts] = await Promise.all([
+      exam.questions
+        ? Question.countDocuments({ _id: exam.questions, "correctAnswers.0": { $exists: true } })
+        : 0,
+      Attempt.countDocuments({ exam: exam._id }),
+    ]);
+    if (qCount || attempts) {
+      // eslint-disable-next-line no-await-in-loop
+      await Exam.updateOne({ _id: exam._id }, { $set: { provisional: false }, $unset: { provisionalSince: "" } });
+      console.warn("[EXAM] provisional exam had real work; kept and promoted:", String(exam._id));
+      continue;
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await Exam.deleteOne({ _id: exam._id, provisional: true, provisionalSince: { $lt: cutoff } });
+    removed += 1;
+  }
+  if (removed) console.log(`[EXAM] removed ${removed} abandoned exam(s) that never had a question`);
+  return removed;
+}
+
 async function purgeStagedUploads(now = Date.now(), opts = {}) {
   const nowD = new Date(now);
   const claimCutoff = new Date(now - CLAIM_RECOVERY_MS);
@@ -1278,7 +1337,9 @@ const getExamsByClass = asyncHandler(async (req, res) => {
   // A plan-blocked exam stays fully visible to the teacher who owns it (with a
   // badge saying why), and does not exist as far as students are concerned.
   const canSeeBlocked = isAdminUser(req.user) || String(exists.owner) === String(req.user._id);
-  const examFilter = { class: exists._id, deletedAt: null };
+  // A provisional exam is a name and a date with nothing in it: not listed, for
+  // anyone, until a question makes it real.
+  const examFilter = { class: exists._id, deletedAt: null, provisional: { $ne: true } };
   if (!canSeeBlocked) examFilter.blockedByPlan = { $ne: true };
   const exams = await Exam.find(examFilter).populate("class", "name level");
 
@@ -1467,7 +1528,7 @@ const getAllClasses = asyncHandler(async (req, res) => {
   const allIds = classes.map((c) => c._id);
   if (allIds.length) {
     const examCounts = await Exam.aggregate([
-      { $match: { class: { $in: allIds }, deletedAt: null } },
+      { $match: { class: { $in: allIds }, deletedAt: null, provisional: { $ne: true } } },
       {
         $lookup: {
           from: "questions",
@@ -1515,7 +1576,13 @@ const getAllClasses = asyncHandler(async (req, res) => {
 // Used by the teacher "İmtahan nəticələri" list — scoped so a teacher sees only
 // their OWN exams (admins see all).
 const getExams = asyncHandler(async (req, res) => {
-  const filter = { deletedAt: null, ...(isAdminUser(req.user) ? {} : { owner: req.user._id }) };
+  // A provisional exam is a name and a date with nothing in it: not listed, for
+  // anyone, until a question makes it real.
+  const filter = {
+    deletedAt: null,
+    provisional: { $ne: true },
+    ...(isAdminUser(req.user) ? {} : { owner: req.user._id }),
+  };
   const query = req.query || {};
   const limit = pageLimit(query.limit);
   const rows = await Exam.find(withCursor(filter, query.cursor))
@@ -1731,8 +1798,17 @@ const addQuestion = asyncHandler(async (req, res) => {
       question = created[0];
     }
 
-    const update = { $set: { ...draftSet, questions: question._id } };
-    if (Object.keys(draftUnset).length) update.$unset = draftUnset;
+    /*
+     * This is the moment the exam becomes real. A provisional one has been
+     * sitting invisible since the details were typed; a question in it is what
+     * the teacher actually came to do, and what everyone else can see.
+     */
+    const becomesReal = exam.provisional === true && correctAnswers.length > 0;
+    const update = {
+      $set: { ...draftSet, questions: question._id, ...(becomesReal ? { provisional: false } : {}) },
+    };
+    const unset = { ...draftUnset, ...(becomesReal ? { provisionalSince: "" } : {}) };
+    if (Object.keys(unset).length) update.$unset = unset;
     const linked = await Exam.updateOne(
       { _id: exam._id, deletedAt: null },
       update,
@@ -1740,6 +1816,22 @@ const addQuestion = asyncHandler(async (req, res) => {
     );
     if (linked.matchedCount !== 1) {
       throw httpError(409, "exam_changed", "Exam changed while saving questions");
+    }
+    /*
+     * The allowance is spent here rather than at create, because THIS is the
+     * creation as far as the teacher and the plan are concerned. It cannot throw
+     * the work away: an exhausted allowance marks the exam blocked-by-plan —
+     * visible to its owner with a badge, invisible to students, exactly as an
+     * over-limit exam already behaves — instead of refusing a paper that is
+     * already written.
+     */
+    if (becomesReal) {
+      try {
+        await consumeExamCreate(req.user, session);
+      } catch (e) {
+        console.error("[EXAM] allowance exhausted at first save:", exam._id, e?.message);
+        await Exam.updateOne({ _id: exam._id }, { $set: { blockedByPlan: true } }, writeOpts);
+      }
     }
     return question;
   });
@@ -5262,6 +5354,7 @@ module.exports = {
   purgeExpiredArchived,
   purgeOrphanPdfs,
   purgeStagedUploads,
+  purgeAbandonedExams,
   claimStagedPdf,
   beginAttach,
   attachPdf,

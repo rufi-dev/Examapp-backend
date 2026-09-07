@@ -6,6 +6,7 @@ const {
   purgeExpiredArchived,
   purgeOrphanPdfs,
   purgeStagedUploads,
+  purgeAbandonedExams,
 } = require("../controllers/quizController");
 
 function positiveMs(raw, fallback, { allowZero = false } = {}) {
@@ -57,6 +58,12 @@ function startBackgroundJobs({
     positiveMs(env.PDF_SWEEP_INTERVAL_MS, 6 * 60 * 60 * 1000),
     positiveMs(env.PDF_SWEEP_FIRST_MS, 5 * 60 * 1000, { allowZero: true }),
     jobs.purgeStagedUploads || purgeStagedUploads);
+  // Exams that were described and never written. Daily is often enough for a
+  // week-old cutoff, and the first run waits out the boot rush.
+  schedule("abandoned-exam-purge",
+    positiveMs(env.ABANDONED_EXAM_INTERVAL_MS, 24 * 60 * 60 * 1000),
+    positiveMs(env.ABANDONED_EXAM_FIRST_MS, 10 * 60 * 1000, { allowZero: true }),
+    jobs.purgeAbandonedExams || purgeAbandonedExams);
 
   return function stopBackgroundJobs() {
     if (stopped) return;

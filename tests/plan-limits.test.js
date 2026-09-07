@@ -75,6 +75,16 @@ async function throws402(fn, resource) {
   // ── exam allowance (decrementing, CAS) ──────────────────────────────────────
   const origUpdate = User.updateOne;
   ok("pro skips exam decrement (unlimited)", (await planLimits.consumeExamCreate({ _id: "u", role: "teacher", plan: "pro" })) === undefined);
+  /*
+   * Checking and spending are separate now. 62% of created exams never got a
+   * question, and every one of them spent a free teacher's lifetime allowance on
+   * a paper that does not exist — so the allowance is spent when the first
+   * question is saved. The check still runs at the start, or a teacher would
+   * build a paper only to be refused at the save.
+   */
+  ok("asserting does not spend", typeof planLimits.assertExamCreate === "function");
+  ok("an unlimited tier asserts clean", (await planLimits.assertExamCreate({ _id: "u", role: "teacher", plan: "pro" })) === undefined);
+  ok("an admin asserts clean", (await planLimits.assertExamCreate({ _id: "a", role: "admin" })) === undefined);
   ok("admin skips exam decrement", (await planLimits.consumeExamCreate({ _id: "u", role: "admin", plan: "free" })) === undefined);
   // free with allowance → init no-op, decrement succeeds
   User.updateOne = async (filter) => (filter.examCreatesLeft && filter.examCreatesLeft.$gt !== undefined ? { modifiedCount: 1 } : { modifiedCount: 0 });

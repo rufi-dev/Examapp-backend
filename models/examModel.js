@@ -140,6 +140,24 @@ const examSchema = Schema({
      * Mongo — silently, which is how the question flags were lost.
      */
     blockedByPlan: { type: Boolean, default: undefined, index: true },
+    /*
+     * An exam that has been described but not written yet.
+     *
+     * 312 of the 500 exams in this database have no questions in them — 62%,
+     * across 230 different teachers, and 297 of them more than a week old. That
+     * is not teachers being careless: the details form creates the exam and THEN
+     * sends them to the builder, so every abandoned build leaves a permanent
+     * exam behind. The teacher's list fills with papers that were never written,
+     * and the one that IS real gets harder to find in it.
+     *
+     * So a name, a date and a duration no longer make an exam. They make a
+     * provisional one, which is invisible everywhere an exam is listed and
+     * becomes real the moment a question is saved into it. `provisionalSince` is
+     * set only on ones created after this change, so the janitor that clears
+     * abandoned drafts can never reach the historical ones.
+     */
+    provisional: { type: Boolean, default: undefined, index: true },
+    provisionalSince: { type: Date, default: undefined },
     // Who archived it (audit trail for accidental/disputed deletions).
     deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     // A permanent purge removes live resources and private bytes but retains

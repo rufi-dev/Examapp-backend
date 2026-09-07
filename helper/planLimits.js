@@ -354,6 +354,28 @@ async function promoteWaitlisted(ownerId) {
 // Exam creation. Expired paid plans are hard-blocked (renew to continue). A
 // genuine free tier consumes its decrementing lifetime allowance. Unlimited
 // tiers/admins are a no-op. Runs inside the exam-create transaction.
+/*
+ * The same gate, spending nothing.
+ *
+ * A provisional exam must not cost a free teacher one of their lifetime exam
+ * creations — 62% of creations never became an exam, so 62% of that allowance
+ * was being burned on papers that do not exist. The allowance is spent when the
+ * exam becomes real. But the teacher still has to be told at the START that they
+ * have none left, rather than after building a paper they cannot save, so the
+ * check happens twice and the decrement once.
+ */
+async function assertExamCreate(user) {
+  if (isAdmin(user)) return;
+  if (isExpired(user)) throw planLimitError("exams", 0, 0, storedPlan(user), true);
+  const cap = limitsFor(effectivePlan(user)).examCreations;
+  if (!Number.isFinite(cap)) return; // unlimited tier
+  const fresh = await User.findById(user._id).select("examCreatesLeft").lean();
+  const left = fresh?.examCreatesLeft;
+  // Never seeded means never used: the full allowance is still there.
+  if (left === null || left === undefined) return;
+  if (left <= 0) throw planLimitError("exams", cap, 0, storedPlan(user), false);
+}
+
 async function consumeExamCreate(user, session) {
   if (isAdmin(user)) return;
   if (isExpired(user)) {
@@ -437,6 +459,7 @@ module.exports = {
   releaseExamCap,
   reconcileStudentCap,
   frozenStudentCount,
+  assertExamCreate,
   consumeExamCreate,
   usageFor,
 };
