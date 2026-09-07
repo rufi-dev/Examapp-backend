@@ -1444,6 +1444,23 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("an empty gemini response is written down", /gemini returned no parts/.test(ad2));
   ok("with the reason it gives", /finishReason/.test(ad2));
 
+  /*
+   * The whole turn runs where the teacher chose.
+   *
+   * The plan pass routed itself: it inferred a provider from a model id via the
+   * exam price table, and the studio's ids are mostly not in that table — both
+   * Gemini entries and both Claude entries fell through to the default, which is
+   * an OpenAI model. So choosing "Gemini 2.5 Pro" planned on OpenAI and billed
+   * there, and a turn could be planned by one company and written by another
+   * with nothing saying so.
+   */
+  const aiFull = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocument.js"), "utf8");
+  ok("an explicit provider is accepted", /async function runDocument\(\{[^}]*provider/.test(aiFull));
+  ok("and beats one guessed from a model id", /const order = \[provider, picked\?\.provider/.test(aiFull));
+  ok("the plan pass passes the choice through", /provider: S\.providerOf\(model\),/.test(ctl5));
+  // The fallback chain behind it is the point of runDocument and must survive.
+  ok("the fallback chain is still there", /"openai", "gemini", "claude"/.test(aiFull));
+
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));
   ok("blocks are cleared so there is one source of truth", /blocks: \[\],/.test(ctl5));

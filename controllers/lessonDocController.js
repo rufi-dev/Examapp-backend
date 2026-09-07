@@ -607,6 +607,10 @@ const streamMessage = asyncHandler(async (req, res) => {
         schema: S.PLAN_SCHEMA,
         geminiSchema: toGeminiSchema(S.PLAN_SCHEMA),
         maxTokens: 1200,
+        // The whole turn runs where the teacher chose. This pass used to route
+        // itself, so choosing Gemini still planned on OpenAI and billed there.
+        model,
+        provider: S.providerOf(model),
         signal: ac.signal,
       });
       plan = S.normalizePlan(p.doc || {});

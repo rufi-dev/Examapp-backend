@@ -493,7 +493,7 @@ async function documentWithGemini({ prompt, parts = [], system, schema, signal, 
  * for three times); and on an aborted signal throw 499 immediately rather than
  * billing two more providers for output nobody is waiting for.
  */
-async function runDocument({ prompt, parts = [], system, schema, geminiSchema, model, signal, maxTokens, onText }) {
+async function runDocument({ prompt, parts = [], system, schema, geminiSchema, model, provider, signal, maxTokens, onText }) {
   const { findAiModel, DEFAULT_AI_MODEL } = require("../controllers/aiController");
   const picked = findAiModel(String(model || "")) || findAiModel(DEFAULT_AI_MODEL);
   const runners = {
@@ -509,7 +509,20 @@ async function runDocument({ prompt, parts = [], system, schema, geminiSchema, m
     gemini: process.env.GEMINI_API_KEY,
     claude: process.env.ANTHROPIC_API_KEY,
   };
-  const order = [picked?.provider, "openai", "gemini", "claude"].filter((p, i, a) => p && a.indexOf(p) === i);
+  /*
+   * An explicit provider wins over one inferred from a model id.
+   *
+   * findAiModel only knows the ids in the exam-generation price table, and the
+   * studio picker's ids are mostly not in it — "gemini-2.5-pro" and
+   * "claude-opus-4-8" both fell through to the default, which is an OpenAI
+   * model. So a teacher who chose Gemini had this pass run on OpenAI and pay for
+   * it, and a turn could be planned by one company and written by another with
+   * nothing saying so. The fallback chain behind it is unchanged: if the chosen
+   * provider is down, the work still gets done somewhere.
+   */
+  const order = [provider, picked?.provider, "openai", "gemini", "claude"].filter(
+    (p, i, a) => p && a.indexOf(p) === i
+  );
   const chain = order.filter((p) => !!keyFor[p]);
 
   let lastErr = null;
