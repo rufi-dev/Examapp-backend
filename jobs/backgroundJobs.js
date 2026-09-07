@@ -1,6 +1,7 @@
 const { beat } = require("../utils/heartbeat");
 const { runDueExamReports } = require("./examReports");
 const { sweepExpiredPlans } = require("./planExpiry");
+const { rollUpAndPruneVisitors } = require("./visitorRollup");
 const {
   finalizeExpiredAttempts,
   purgeExpiredArchived,
@@ -58,6 +59,18 @@ function startBackgroundJobs({
     positiveMs(env.PDF_SWEEP_INTERVAL_MS, 6 * 60 * 60 * 1000),
     positiveMs(env.PDF_SWEEP_FIRST_MS, 5 * 60 * 1000, { allowZero: true }),
     jobs.purgeStagedUploads || purgeStagedUploads);
+  /*
+   * Visits older than a week become numbers. visitorsessions was the only
+   * collection here with no retention at all — 93% of it was over a week old —
+   * and a visit row carries an IP, a user agent and a journey of up to sixty
+   * paths. The summary keeps none of those, so this is a privacy improvement as
+   * much as a storage one.
+   */
+  schedule("visitor-rollup",
+    positiveMs(env.VISITOR_ROLLUP_INTERVAL_MS, 24 * 60 * 60 * 1000),
+    positiveMs(env.VISITOR_ROLLUP_FIRST_MS, 15 * 60 * 1000, { allowZero: true }),
+    jobs.rollUpAndPruneVisitors || rollUpAndPruneVisitors);
+
   // Exams that were described and never written. Daily is often enough for a
   // week-old cutoff, and the first run waits out the boot rush.
   schedule("abandoned-exam-purge",

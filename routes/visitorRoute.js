@@ -1,5 +1,5 @@
 const express = require("express");
-const { track, listVisitors, growth, hourly } = require("../controllers/visitorController");
+const { track, listVisitors, growth, hourly, visitorDays } = require("../controllers/visitorController");
 const { protect, adminOnly } = require("../middleware/authMiddleware");
 const router = express.Router();
 
@@ -20,5 +20,10 @@ router.get("/growth", protect, adminOnly, growth);
 
 // GET /api/track/hourly — ADMIN only: visitors by hour of day (0–23), unique-IP option.
 router.get("/hourly", protect, adminOnly, hourly);
+
+// GET /api/track/days — ADMIN only: the daily numbers kept after a day's
+// individual visits are deleted. Same shape whatever the age of the range, so
+// the page has something true to show for days the rows no longer cover.
+router.get("/days", protect, adminOnly, visitorDays);
 
 module.exports = router;

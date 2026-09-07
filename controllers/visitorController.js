@@ -1,5 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const VisitorSession = require("../models/visitorSessionModel");
+const VisitorDay = require("../models/visitorDayModel");
 const User = require("../models/userModel");
 const Class = require("../models/classModel");
 const Exam = require("../models/examModel");
@@ -430,9 +431,86 @@ const hourly = asyncHandler(async (req, res) => {
 
   const map = new Map(agg.map((r) => [r._id, r.count]));
   const hours = Array.from({ length: 24 }, (_, h) => ({ hour: h, count: map.get(h) || 0 }));
+
+  /*
+   * The days whose rows are gone, added back from their summaries.
+   *
+   * Visits older than a week are deleted and kept as numbers. Reading only the
+   * rows would draw a chart that falls to zero a week back — which does not say
+   * "this data was summarised", it says "nobody visited", and that is a lie the
+   * chart tells confidently. The histogram is the one thing the summary keeps at
+   * full resolution precisely so this keeps working.
+   *
+   * Skipped when a source filter is on: the summary keeps top-N sources as
+   * counts, not per-hour breakdowns, so an hour chart filtered by source can
+   * only honestly cover the days that still have rows.
+   */
+  if (!srcF) {
+    const fromKey = from && !isNaN(from) ? dayKey(req.query.from) : null;
+    const toKey = to && !isNaN(to) ? dayKey(req.query.to) : null;
+    const q = {};
+    if (fromKey) q.$gte = fromKey;
+    if (toKey) q.$lte = toKey;
+    const summaries = await VisitorDay.find(Object.keys(q).length ? { day: q } : {})
+      .select("day hours hoursUnique")
+      .lean();
+    // A day that has BOTH a summary and rows would be counted twice: the summary
+    // is written the moment a day is over, the rows survive another week.
+    const live = new Set(
+      (await VisitorSession.distinct("lastActivity", filter)).map((d) =>
+        new Date(new Date(d).getTime() + 4 * 3600 * 1000).toISOString().slice(0, 10)
+      )
+    );
+    summaries.forEach((d) => {
+      if (live.has(d.day)) return;
+      const src = (unique ? d.hoursUnique : d.hours) || [];
+      for (let h = 0; h < 24; h += 1) hours[h].count += Number(src[h]) || 0;
+    });
+  }
+
   const totalHits = hours.reduce((s, x) => s + x.count, 0);
   const peak = hours.reduce((best, x) => (x.count > best.count ? x : best), { hour: 0, count: 0 });
   res.json({ hours, total: totalHits, peakHour: peak.hour, unique });
 });
 
-module.exports = { track, listVisitors, growth, hourly, isDatacenterIp, looksLikeAdCrawler };
+/*
+ * The daily numbers, for ranges the rows no longer cover.
+ *
+ * The visitor LIST is a list of visits, and a summarised day has none — so
+ * rather than let that page render an empty table and imply nobody came, this
+ * serves what was kept. It also reports the retention cutoff, so the UI can say
+ * "individual visits are kept for 7 days" instead of leaving the reader to work
+ * out why older days look different.
+ */
+const visitorDays = asyncHandler(async (req, res) => {
+  const fromKey = req.query.from ? dayKey(req.query.from) : null;
+  const toKey = req.query.to ? dayKey(req.query.to) : null;
+  const q = {};
+  if (fromKey) q.$gte = fromKey;
+  if (toKey) q.$lte = toKey;
+
+  const days = await VisitorDay.find(Object.keys(q).length ? { day: q } : {})
+    .sort({ day: -1 })
+    .limit(400)
+    .lean();
+
+  const totals = days.reduce(
+    (acc, d) => ({
+      visits: acc.visits + (d.visits || 0),
+      uniqueIps: acc.uniqueIps + (d.uniqueIps || 0),
+      pageViews: acc.pageViews + (d.pageViews || 0),
+      signedIn: acc.signedIn + (d.signedIn || 0),
+      durationSeconds: acc.durationSeconds + (d.durationSeconds || 0),
+    }),
+    { visits: 0, uniqueIps: 0, pageViews: 0, signedIn: 0, durationSeconds: 0 }
+  );
+
+  res.json({
+    days,
+    totals,
+    // Days before this have numbers only — no individual visits, no IPs.
+    keepDays: 7,
+  });
+});
+
+module.exports = { track, listVisitors, growth, hourly, visitorDays, isDatacenterIp, looksLikeAdCrawler };
