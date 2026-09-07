@@ -64,7 +64,7 @@ const cssPdf = (a) => `
   --serif:"Open Sans","DejaVu Sans",sans-serif;--sans:"Open Sans","DejaVu Sans",sans-serif}
 *{box-sizing:border-box}
 html,body{margin:0;background:#fff}
-body{font-family:var(--sans);font-size:10.5pt;line-height:1.55;color:var(--ink);
+body{orphans:2;widows:2;font-family:var(--sans);font-size:10.5pt;line-height:1.55;color:var(--ink);
   -webkit-print-color-adjust:exact;print-color-adjust:exact}
 
 h1{font-family:var(--serif);font-size:20pt;margin:0 0 4pt;line-height:1.15}
@@ -82,14 +82,32 @@ li{margin-bottom:3pt}
 .def .term{font-weight:700;color:var(--accent);white-space:nowrap}
 .def .body{margin:0;max-width:none}
 
-.ex{margin:0 0 10pt;padding:8pt 10pt;border:.75pt solid var(--rule);border-radius:3pt;break-inside:avoid}
+/*
+ * WHAT MAY BE SPLIT ACROSS A PAGE, AND WHAT MAY NOT.
+ *
+ * A heading is glued to whatever follows it (break-after:avoid), which is right
+ * — a heading alone at the foot of a page is a broken page. But when the block
+ * underneath was ALSO unbreakable, the pair became one lump: a section heading
+ * plus a tall worked-example box could not fit in what was left, so both jumped
+ * to the next page and left a third of the previous one blank. The document
+ * looked like it was skipping pages on purpose, and the preview — which
+ * paginates nothing — showed no such thing.
+ *
+ * So the tall containers may break and the short ones may not. An example set or
+ * an exercise runs to many lines and reads perfectly well continued overleaf; a
+ * definition, a callout, a figure and a table row are two or three lines each,
+ * and splitting one of those is how you get a heading on one page and its
+ * meaning on the next. Orphan and widow control does the rest, so a break inside
+ * a block still lands somewhere deliberate.
+ */
+.ex{margin:0 0 10pt;padding:8pt 10pt;border:.75pt solid var(--rule);border-radius:3pt}
 .ex .tag{display:block;font-size:7.5pt;font-weight:700;letter-spacing:.08em;
   text-transform:uppercase;color:var(--accent);margin-bottom:3pt}
 .ex .sol{margin:6pt 0 0;padding-top:5pt;border-top:.5pt dashed var(--rule);
   color:var(--slate);white-space:pre-line}
 .ex .sol b{color:var(--ink)}
 
-.task{margin:0 0 9pt;padding:8pt 10pt 8pt 12pt;background:#FAFBFC;border-radius:3pt;break-inside:avoid}
+.task{margin:0 0 9pt;padding:8pt 10pt 8pt 12pt;background:#FAFBFC;border-radius:3pt}
 .task .tag{display:block;font-size:7.5pt;font-weight:700;letter-spacing:.08em;
   text-transform:uppercase;color:var(--ochre);margin-bottom:3pt}
 

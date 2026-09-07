@@ -1471,6 +1471,30 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   // The fallback chain behind it is the point of runDocument and must survive.
   ok("the fallback chain is still there", /"openai", "gemini", "claude"/.test(aiFull));
 
+  /*
+   * What may be split across a page, and what may not.
+   *
+   * A heading is glued to what follows it, which is right. But when the block
+   * underneath was ALSO unbreakable, the pair became one lump: a section heading
+   * plus a tall example box could not fit in what was left of the page, so both
+   * jumped to the next one and left a third of the previous page blank. Measured
+   * on the same document: 3 pages with the old rule, 2 with this one.
+   *
+   * Tall containers may break; short ones may not. Splitting a definition, a
+   * callout, a figure or a table row is how you get a heading on one page and its
+   * meaning on the next.
+   */
+  const sheet = buildLessonDocHtml({ title: "T", html: "<p>x</p>" });
+  ok("a worked example may continue overleaf", !/\.ex\{[^}]*break-inside:avoid/.test(sheet));
+  ok("so may an exercise set", !/\.task\{[^}]*break-inside:avoid/.test(sheet));
+  ok("a definition may not be split", /\.def\{[^}]*break-inside:avoid/.test(sheet));
+  ok("nor a callout", /\.note\{[^}]*break-inside:avoid/.test(sheet));
+  ok("nor a figure", /\.fig\{[^}]*break-inside:avoid/.test(sheet));
+  ok("nor a table row", /tr\{break-inside:avoid\}/.test(sheet));
+  ok("a heading is still kept with what follows", /break-after:avoid/.test(sheet));
+  // So a permitted break is never an ugly one.
+  ok("and no paragraph leaves a single line behind", /orphans:2;widows:2/.test(sheet));
+
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));
   ok("blocks are cleared so there is one source of truth", /blocks: \[\],/.test(ctl5));
