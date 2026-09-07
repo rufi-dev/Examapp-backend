@@ -94,7 +94,17 @@ h1{font-family:var(--serif);font-size:20pt;margin:0 0 4pt;line-height:1.15}
 h3,h4{font-family:var(--serif);font-size:11.5pt;margin:12pt 0 4pt;color:var(--ink)}
 h2{font-family:var(--serif);font-size:13.5pt;margin:18pt 0 6pt;color:var(--accent);
   border-bottom:.75pt solid var(--rule);padding-bottom:3pt;break-after:avoid}
-p{margin:0 0 8pt;max-width:34em}
+/*
+ * Full width, like everything else on the page.
+ *
+ * Paragraphs were capped at 34em — a readable measure in isolation, and wrong
+ * here, because the tables beside them run the full column. The result was text
+ * stopping at roughly half the page with a band of white down the right and a
+ * grid underneath it reaching the margin: not a considered measure, a document
+ * that looks like it failed to fill itself. The preview never had the cap, so
+ * the two disagreed on where a line ends.
+ */
+p{margin:0 0 8pt}
 
 ul,ol{margin:0 0 9pt;padding-left:16pt}
 li{margin-bottom:3pt}
@@ -102,7 +112,7 @@ li{margin-bottom:3pt}
 .def{display:flex;gap:9pt;margin:0 0 9pt;padding:7pt 9pt;background:var(--accent-tint);
   border-radius:3pt;break-inside:avoid}
 .def .term{font-weight:700;color:var(--accent);white-space:nowrap}
-.def .body{margin:0;max-width:none}
+.def .body{margin:0}
 
 /*
  * WHAT MAY BE SPLIT ACROSS A PAGE, AND WHAT MAY NOT.
@@ -137,7 +147,7 @@ li{margin-bottom:3pt}
 .note.info{background:var(--accent-tint);color:var(--accent)}
 .note.warning{background:var(--ochre-tint);color:var(--ochre)}
 .note.success{background:var(--green-tint);color:var(--green)}
-.note p{margin:0;max-width:none}
+.note p{margin:0}
 
 /*
  * A table may break across pages; a ROW may not.
@@ -159,6 +169,12 @@ th{font-size:9pt;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
 td{font-size:10.5pt;padding:4pt 6pt 4pt 0;border-bottom:.5pt solid var(--rule-soft);vertical-align:top;
   height:16pt}
 
+/* The preview styled a quotation and print had no rule for one at all, so it
+   fell through to the browser default — an indent where the preview showed a
+   tinted box. Caught by the parity test, not by looking. */
+blockquote{margin:0 0 9pt;padding:7pt 10pt;border-radius:3pt;background:#F4F5F8;
+  break-inside:avoid}
+blockquote p{margin:0}
 .fig{margin:0 0 12pt;padding:8pt 0;text-align:center;break-inside:avoid}
 .fig svg{max-width:100%;height:auto}
 .fig figcaption{margin-top:5pt;color:var(--muted);font-size:9pt;font-style:italic}
@@ -221,6 +237,8 @@ th{font-size:9.5pt;font-weight:bold;letter-spacing:.04em;text-transform:uppercas
   color:${a.ink};text-align:left;border-bottom:1pt solid ${a.ink};padding:4pt 6pt 4pt 0}
 td{font-size:11pt;padding:4pt 6pt;border-bottom:0.5pt solid #EBEDF2;height:16pt;
   vertical-align:top}
+blockquote{margin:0 0 9pt;padding:8pt 10pt;background:#F4F5F8}
+blockquote p{margin:0}
 .fig{margin:0 0 12pt;text-align:center}
 .fig figcaption{margin-top:4pt;color:#676C78;font-size:9.5pt;font-style:italic}
 `;
