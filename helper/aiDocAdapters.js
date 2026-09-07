@@ -227,9 +227,18 @@ function openaiAdapter({ model, tools, maxTokens }) {
       )?.usd || 0),
 
     reply(history, turn, results, { parts = [], images = [] }) {
-      // The calls it made must be replayed into the input before their outputs,
-      // or the API has nothing to attach the outputs to.
-      history.push(...turn.raw.filter((o) => o.type === "function_call"));
+      /*
+       * The WHOLE output goes back, not just the calls.
+       *
+       * The calls have to be replayed before their outputs or the API has
+       * nothing to attach the outputs to — but filtering to function_call items
+       * breaks a reasoning model outright: gpt-5.6-sol emits a `reasoning` item
+       * that its call belongs to, and replaying the call without it is refused
+       * with "provided without its required 'reasoning' item". The model's turn
+       * is a unit; the adapter has no business deciding which parts of its own
+       * output it may keep.
+       */
+      history.push(...turn.raw);
       results.forEach((r) => {
         history.push({ type: "function_call_output", call_id: r.call.id, output: r.text });
       });

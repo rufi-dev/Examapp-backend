@@ -1391,6 +1391,24 @@ console.log("\n25. The model writes the document; the schema stops being the cei
     );
     // The call must be replayed before its output or there is nothing to attach to.
     ok("openai replays the call, then its output", oh[2].type === "function_call" && oh[3].type === "function_call_output");
+    /*
+     * And the WHOLE turn, not a filtered version of it. Filtering to
+     * function_call items works on gpt-4.1-mini and breaks a reasoning model
+     * outright: gpt-5.6-sol emits a `reasoning` item that its call belongs to,
+     * and replaying the call without it is refused — "provided without its
+     * required 'reasoning' item". Found by running the loop on the model the
+     * picker offers first, not by reading the code.
+     */
+    const reasoningTurn = {
+      raw: [
+        { type: "reasoning", id: "rs_1" },
+        { type: "function_call", call_id: "c2", name: "write_material", arguments: "{}" },
+      ],
+    };
+    const rh = oa.start({ parts: [], prompt: "p", system: "s" });
+    oa.reply(rh, reasoningTurn, [{ call: { id: "c2", name: "write_material" }, isError: false, text: "ok" }], {});
+    ok("and keeps the reasoning item the call belongs to",
+      rh.some((x) => x.type === "reasoning") && rh.some((x) => x.type === "function_call"));
     ok("and the picture arrives as its own user turn", JSON.stringify(oh[4]).includes("input_image"));
 
     const ga = geminiAdapter({ model: "gemini-2.5-flash", tools: S.DOC_TOOLS, maxTokens: 100 });
