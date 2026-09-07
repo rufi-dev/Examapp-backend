@@ -1303,15 +1303,41 @@ console.log("\n25. The model writes the document; the schema stops being the cei
    * and the only person who can act on that is the owner.
    */
   ok("an exhausted account is not reported as a bad minute", /credit balance is too low/.test(ad2));
-  ok("and is not told to wait", /hesab aktiv deyil/.test(ad2));
+  ok("and is not told to wait", /kredit bitib və ya hesab aktiv deyil/.test(ad2));
+  /*
+   * The old text said "contact the administrator" — which the administrator also
+   * read, on their own platform, unable to tell whether it meant their Examopia
+   * account, their role, or something else. It meant an outside API account.
+   * Naming the provider is what makes it diagnosable.
+   */
+  ok("the provider is named", /PROVIDER_LABEL/.test(ad2) && /Claude \(Anthropic\)/.test(ad2));
+  ok("and each call site says which one it is",
+    ["billingError(\"claude\")", "billingError(\"openai\")", "billingError(\"gemini\")"].every((c) => ad2.includes(c)));
+  /*
+   * With three providers on the picker, the useful advice is one the teacher can
+   * act on alone: switch model and carry on. "Contact the administrator" never
+   * was, least of all for the administrator.
+   */
+  ok("and the reader is told what they can do", /başqa model seçib davam edə/.test(ad2));
+
+  // The wordings that actually arrive, each verified against the real body.
+  const { OUT_OF_CREDIT } = require("../helper/aiDocAdapters");
+  ok("OpenAI: no credits remaining", OUT_OF_CREDIT.test('{"code":"credit_balance_exhausted","message":"You have no credits remaining. Add credits to continue"}'));
+  ok("OpenAI: account deactivated", OUT_OF_CREDIT.test('{"code":"account_deactivated","message":"has been deactivated"}'));
+  ok("Anthropic: balance too low", OUT_OF_CREDIT.test("Your credit balance is too low to access the Anthropic API."));
+  ok("Gemini: resource exhausted", OUT_OF_CREDIT.test('{"error":{"status":"RESOURCE_EXHAUSTED"}}'));
+  // And an ordinary failure is still an ordinary failure.
+  ok("a plain error is not a billing error", !OUT_OF_CREDIT.test('{"error":{"message":"internal server error"}}'));
   ok("the owner is shouted at in the log", /\[AI BILLING\]/.test(ad2));
   // A 400 that is not about credit still reads as an ordinary failure.
-  // A deactivated key arrives as a 401, not only an exhausted balance as a 400.
-  ok("a deactivated account counts too", /account_deactivated|has been deactivated/.test(ad2));
+
   // And every provider says it its own way, so every provider is matched.
   ok("every provider's wording is covered",
     ["insufficient", "quota", "billing hard limit", "deactivated"].every((w) => ad2.includes(w)));
-  ok("all three check it", (ad2.match(/OUT_OF_CREDIT\.test|billingError\(\)/g) || []).length >= 5);
+  // Every adapter runs the check, and every one of them says which provider it
+  // was — a message that does not name the provider is not diagnosable.
+  ok("all three check it", (ad2.match(/OUT_OF_CREDIT\.test/g) || []).length === 3);
+  ok("and all three name themselves", (ad2.match(/billingError\("(claude|openai|gemini)"\)/g) || []).length === 3);
 
   /*
    * The model id is sent straight to the provider, so it is an allow-list and not

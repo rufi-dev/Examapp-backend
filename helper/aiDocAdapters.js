@@ -32,11 +32,30 @@ const docError = (status, userMessage, fallback = false) => {
  * not broken, and the only person who can act is the owner.
  */
 const OUT_OF_CREDIT =
-  /credit balance is too low|purchase credits|insufficient[_ ]quota|billing hard limit|exceeded your current quota|account_deactivated|has been deactivated|billing_not_active|API key not valid/i;
+  /credit balance is too low|credit_balance_exhausted|no credits remaining|purchase credits|add credits|insufficient[_ ]quota|billing hard limit|exceeded your current quota|RESOURCE_EXHAUSTED|account_deactivated|has been deactivated|billing_not_active|API key not valid/i;
 
-const billingError = () => {
-  console.error("[AI BILLING] provider refuses this account — Studio is down on this model until it is fixed.");
-  return docError(402, "Bu AI modeli üçün hesab aktiv deyil — administratorla əlaqə saxlayın.");
+/*
+ * Which provider, and what the person reading this can do about it.
+ *
+ * The old text said "contact the administrator", which the administrator also
+ * read — the owner hit it on their own platform and could not tell whether it
+ * meant their Examopia account, their role, or something else entirely. It meant
+ * none of those: it meant an outside API account.
+ *
+ * Naming the provider is what makes it diagnosable, and the second sentence is
+ * the part that was missing: three providers are on the picker, so a teacher
+ * blocked on one can switch to another and carry on. That is advice they can act
+ * on without anybody's help, which "contact the administrator" never was.
+ */
+const PROVIDER_LABEL = { claude: "Claude (Anthropic)", openai: "OpenAI", gemini: "Gemini (Google)" };
+
+const billingError = (provider) => {
+  const label = PROVIDER_LABEL[provider] || "AI";
+  console.error(`[AI BILLING] ${label} refuses this account (credit or key) — Studio is down on this provider's models until it is fixed.`);
+  return docError(
+    402,
+    `${label} hesabında kredit bitib və ya hesab aktiv deyil. Söhbətdəki model siyahısından başqa model seçib davam edə bilərsiniz.`
+  );
 };
 
 /* ------------------------------------------------------------------ Claude -- */
@@ -84,7 +103,7 @@ function claudeAdapter({ client, model, tools, maxTokens, onText }) {
       } catch (e) {
         if (signal?.aborted) throw docError(499, "Ləğv edildi");
         console.error("AI document tools (claude) error:", e?.status, e?.message);
-        if (OUT_OF_CREDIT.test(String(e?.message || ""))) throw billingError();
+        if (OUT_OF_CREDIT.test(String(e?.message || ""))) throw billingError("claude");
         throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
       }
 
@@ -164,7 +183,7 @@ function openaiAdapter({ model, tools, maxTokens }) {
       if (!r.ok) {
         const body = await r.text().catch(() => "");
         console.error("AI document tools (openai) error:", r.status, body.slice(0, 400));
-        if (OUT_OF_CREDIT.test(body)) throw billingError();
+        if (OUT_OF_CREDIT.test(body)) throw billingError("openai");
         throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
       }
       const data = await r.json().catch(() => null);
@@ -274,7 +293,7 @@ function geminiAdapter({ model, tools, maxTokens }) {
       if (!r.ok) {
         const body = await r.text().catch(() => "");
         console.error("AI document tools (gemini) error:", r.status, body.slice(0, 400));
-        if (OUT_OF_CREDIT.test(body)) throw billingError();
+        if (OUT_OF_CREDIT.test(body)) throw billingError("gemini");
         throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
       }
       const data = await r.json().catch(() => null);
