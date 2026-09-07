@@ -44,6 +44,27 @@ const ACCENT_NAMES = Object.keys(ACCENTS);
 const accentOf = (doc) => ACCENTS[doc?.settings?.accent] || ACCENTS.default;
 
 /* ------------------------------------------------------------- screen CSS --- */
+/*
+ * ONE TYPE SCALE, in all three renderers.
+ *
+ * There were three, and none of them was a scale. Body text printed at 10.5pt
+ * while table cells printed at 10 and callouts at 10 — so the same sentence got
+ * smaller for being in a table, for no reason a reader could infer. Tags were
+ * 7.5pt, captions 8.5, headers 8.5, meta 9: four "small" sizes doing one job.
+ * Word ran on its own numbers again, a size bigger throughout, so the two files
+ * a teacher exports from one document did not even agree on how big the words
+ * were.
+ *
+ * A size difference should mean something. These are the four that do:
+ *
+ *   eyebrow   0.78x  the uppercase label on a box, on a column
+ *   caption   0.85x  a figure's caption, the subtitle under the title
+ *   BODY      1.00x  everything a person actually reads — paragraphs, list
+ *                    items, table cells, definitions, examples, callouts
+ *   heading   1.1x / 1.3x / 1.9x
+ *
+ * Anything reading as prose is body size. A table cell is prose in a grid.
+ */
 const cssPdf = (a) => `
 /*
  * THE SAME PALETTE THE PREVIEW USES.
@@ -70,6 +91,7 @@ body{orphans:2;widows:2;font-family:var(--sans);font-size:10.5pt;line-height:1.5
 h1{font-family:var(--serif);font-size:20pt;margin:0 0 4pt;line-height:1.15}
 .meta{margin:0;color:var(--muted);font-size:9pt}
 
+h3,h4{font-family:var(--serif);font-size:11.5pt;margin:12pt 0 4pt;color:var(--ink)}
 h2{font-family:var(--serif);font-size:13.5pt;margin:18pt 0 6pt;color:var(--accent);
   border-bottom:.75pt solid var(--rule);padding-bottom:3pt;break-after:avoid}
 p{margin:0 0 8pt;max-width:34em}
@@ -101,17 +123,17 @@ li{margin-bottom:3pt}
  * a block still lands somewhere deliberate.
  */
 .ex{margin:0 0 10pt;padding:8pt 10pt;border:.75pt solid var(--rule);border-radius:3pt}
-.ex .tag{display:block;font-size:7.5pt;font-weight:700;letter-spacing:.08em;
+.ex .tag{display:block;font-size:8pt;font-weight:700;letter-spacing:.08em;
   text-transform:uppercase;color:var(--accent);margin-bottom:3pt}
 .ex .sol{margin:6pt 0 0;padding-top:5pt;border-top:.5pt dashed var(--rule);
   color:var(--slate);white-space:pre-line}
 .ex .sol b{color:var(--ink)}
 
 .task{margin:0 0 9pt;padding:8pt 10pt 8pt 12pt;background:#FAFBFC;border-radius:3pt}
-.task .tag{display:block;font-size:7.5pt;font-weight:700;letter-spacing:.08em;
+.task .tag{display:block;font-size:8pt;font-weight:700;letter-spacing:.08em;
   text-transform:uppercase;color:var(--ochre);margin-bottom:3pt}
 
-.note{margin:0 0 9pt;padding:7pt 10pt;border-radius:3pt;break-inside:avoid;font-size:10pt}
+.note{margin:0 0 9pt;padding:7pt 10pt;border-radius:3pt;break-inside:avoid;font-size:10.5pt}
 .note.info{background:var(--accent-tint);color:var(--accent)}
 .note.warning{background:var(--ochre-tint);color:var(--ochre)}
 .note.success{background:var(--green-tint);color:var(--green)}
@@ -132,14 +154,14 @@ tr{break-inside:avoid}
 /* A header row repeats at the top of each page the table continues onto — the
    whole point of letting it break. */
 thead{display:table-header-group}
-th{font-size:8.5pt;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+th{font-size:9pt;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
   color:var(--accent);text-align:left;border-bottom:1pt solid var(--accent);padding:0 6pt 3pt 0}
-td{font-size:10pt;padding:4pt 6pt 4pt 0;border-bottom:.5pt solid var(--rule-soft);vertical-align:top;
+td{font-size:10.5pt;padding:4pt 6pt 4pt 0;border-bottom:.5pt solid var(--rule-soft);vertical-align:top;
   height:16pt}
 
 .fig{margin:0 0 12pt;padding:8pt 0;text-align:center;break-inside:avoid}
 .fig svg{max-width:100%;height:auto}
-.fig figcaption{margin-top:5pt;color:var(--muted);font-size:8.5pt;font-style:italic}
+.fig figcaption{margin-top:5pt;color:var(--muted);font-size:9pt;font-style:italic}
 
 @page{size:A4;margin:16mm 16mm 18mm}
 `;
@@ -147,34 +169,60 @@ td{font-size:10pt;padding:4pt 6pt 4pt 0;border-bottom:.5pt solid var(--rule-soft
 /* --------------------------------------------------------------- Word CSS --- */
 // No grid, no flex, no custom properties: LibreOffice ignores all three and Word
 // ignores most of them. Margins, borders and tables only.
+/*
+ * Word, brought up to the PDF rather than left as a lesser cousin.
+ *
+ * "Convert the PDF to Word" is the instinctive answer and the wrong one: a
+ * PDF-to-DOCX conversion lays every line into its own positioned frame, so the
+ * file looks similar and is almost uneditable — and editing is the entire reason
+ * to want Word rather than the PDF you already have. So Word is built from the
+ * same document with a stylesheet of its own, and the gap is closed by teaching
+ * this one what the PDF's does.
+ *
+ * What it cannot have: LibreOffice's HTML import ignores flex, border-radius and
+ * most shadows, so boxes here are square-cornered. That is a real difference and
+ * it is the only one left.
+ */
 const cssDocx = (a) => `
 @page{size:A4;margin:2cm}
-body{font-family:"Calibri","Segoe UI",sans-serif;font-size:11pt;color:#222631;line-height:1.45}
-h1{font-family:"Georgia",serif;font-size:22pt;color:${a.ink};margin:0 0 4pt}
+body{font-family:"Calibri","Segoe UI",sans-serif;font-size:11pt;color:#222631;line-height:1.45;
+  orphans:2;widows:2}
+h1{font-family:"Georgia",serif;font-size:21pt;color:${a.ink};margin:0 0 4pt}
 .meta{color:#676C78;font-size:9.5pt;margin:0 0 16pt}
 h2{font-family:"Georgia",serif;font-size:14pt;color:${a.ink};margin:18pt 0 6pt;
-  border-bottom:1pt solid #DDDFE5;padding-bottom:3pt}
+  border-bottom:1pt solid #DDDFE5;padding-bottom:3pt;page-break-after:avoid}
+h3,h4{font-family:"Georgia",serif;font-size:12pt;color:#222631;margin:12pt 0 4pt;
+  page-break-after:avoid}
 p{margin:0 0 8pt}
 ul,ol{margin:0 0 9pt}
 li{margin-bottom:3pt}
 .def{margin:0 0 9pt;padding:8pt 10pt;background:${a.tint}}
 .def .term{font-weight:bold;color:${a.ink}}
+.def .body{margin:0}
 .ex{margin:0 0 10pt;padding:8pt 10pt;border:1pt solid #DDDFE5}
-.ex .tag{font-size:8pt;font-weight:bold;color:${a.ink}}
-.ex .sol{margin:6pt 0 0;color:#676C78}
-.task{margin:0 0 9pt;padding:8pt 10pt;background:#FAFBFC}
-.task .tag{font-size:8pt;font-weight:bold;color:#8A5A00}
-.note{margin:0 0 9pt;padding:8pt 10pt}
+/* Block and uppercase, as in the PDF. Inline, the label ran into the first
+   sentence and stopped reading as a label at all. */
+.ex .tag{display:block;font-size:8.5pt;font-weight:bold;letter-spacing:.08em;
+  text-transform:uppercase;color:${a.ink};margin-bottom:3pt}
+.ex .sol{margin:6pt 0 0;padding-top:5pt;border-top:1pt dashed #DDDFE5;color:#676C78}
+.ex .sol b{color:#222631}
+.task{margin:0 0 9pt;padding:8pt 10pt;background:#FAFBFC;border-left:3pt solid #E4C88A}
+.task .tag{display:block;font-size:8.5pt;font-weight:bold;letter-spacing:.08em;
+  text-transform:uppercase;color:#8A5A00;margin-bottom:3pt}
+.note{margin:0 0 9pt;padding:8pt 10pt;font-size:11pt}
+.note p{margin:0}
 .note.info{background:${a.tint};color:${a.ink}}
 .note.warning{background:#FBF2DE;color:#8A5A00}
 .note.success{background:#E7F1EB;color:#15803D}
 table{border-collapse:collapse;width:100%;margin:0 0 10pt}
 tr{break-inside:avoid}
 thead{display:table-header-group}
-th{font-size:9pt;color:${a.ink};text-align:left;border-bottom:1pt solid ${a.ink};padding:4pt 6pt 4pt 0}
-td{font-size:10.5pt;padding:4pt 6pt;border-bottom:0.5pt solid #EBEDF2;height:16pt}
+th{font-size:9.5pt;font-weight:bold;letter-spacing:.04em;text-transform:uppercase;
+  color:${a.ink};text-align:left;border-bottom:1pt solid ${a.ink};padding:4pt 6pt 4pt 0}
+td{font-size:11pt;padding:4pt 6pt;border-bottom:0.5pt solid #EBEDF2;height:16pt;
+  vertical-align:top}
 .fig{margin:0 0 12pt;text-align:center}
-.fig figcaption{margin-top:4pt;color:#676C78;font-size:9pt;font-style:italic}
+.fig figcaption{margin-top:4pt;color:#676C78;font-size:9.5pt;font-style:italic}
 `;
 
 /* ------------------------------------------------------------ the content --- */
