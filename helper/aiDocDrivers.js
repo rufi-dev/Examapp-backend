@@ -93,6 +93,32 @@ async function runToolLoop(adapter, opts) {
     if (signal?.aborted) throw adapter.cancelled();
 
     /*
+     * It described the work instead of doing it.
+     *
+     * Asked to copy a PDF, the model replied "Faylı originala uyğun olaraq,
+     * bütün mətn, düstur və həndəsi fiqurlarla birlikdə köçürdüm" — I have copied
+     * the file with all its text, formulas and figures — and called no tool. The
+     * turn ended `done`, the teacher was told it was finished, and the document
+     * had nothing in it. That is the complaint that started this whole thread, in
+     * its purest form: it acts like it did the work.
+     *
+     * Nothing here judges the prose. The document is empty, a document was asked
+     * for, and no tool was called — three facts — so it is told to use the tool.
+     * Only when there is no earlier work to fall back on: prose AFTER a write is
+     * agreement, and that is handled above.
+     */
+    if (needsDocument && !calls.length && said && !lastWork && attempt < MAX_FIXES) {
+      adapter.nudge(
+        history,
+        turn,
+        "Sən sənədi yazdığını dedin, amma heç bir alət çağırmadın — material hələ boşdur. " +
+          "Mətni write_material aləti ilə göndər: cavab yazmaq sənədi yaratmır."
+      );
+      // eslint-disable-next-line no-continue
+      continue;
+    }
+
+    /*
      * A source the model asked for, handed over as the real file. A description
      * of a page is what produced a copy of our own preview instead of a copy of
      * the teacher's PDF.

@@ -520,9 +520,25 @@ async function runDocument({ prompt, parts = [], system, schema, geminiSchema, m
    * nothing saying so. The fallback chain behind it is unchanged: if the chosen
    * provider is down, the work still gets done somewhere.
    */
-  const order = [provider, picked?.provider, "openai", "gemini", "claude"].filter(
-    (p, i, a) => p && a.indexOf(p) === i
-  );
+  /*
+   * A chosen provider is a choice, not a preference.
+   *
+   * The chain existed so a turn could still be done when one provider was down —
+   * sensible when nobody had asked for a particular one. But the studio picker
+   * makes it an instruction: a teacher who selects Claude and receives OpenAI's
+   * work has been given a different company's answer under the name of the one
+   * they chose, and would have no way to know. It is also the difference between
+   * two bills.
+   *
+   * So an explicit provider is exclusive. Falling back is still right where
+   * nothing was chosen — the exam paths that call this without a provider keep
+   * the full chain — and where the choice fails, the caller says so rather than
+   * substituting: the plan pass degrades and reports it, the write pass fails
+   * with the provider named.
+   */
+  const order = provider
+    ? [provider]
+    : [picked?.provider, "openai", "gemini", "claude"].filter((p, i, a) => p && a.indexOf(p) === i);
   const chain = order.filter((p) => !!keyFor[p]);
 
   let lastErr = null;

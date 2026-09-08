@@ -121,6 +121,20 @@ function claudeAdapter({ client, model, tools, maxTokens, onText }) {
 
     addCost: (cost, turn) => cost + (computeCost(turn.usage) || 0),
 
+    /*
+     * Say something when there is no call to answer.
+     *
+     * `reply` attaches a tool_result to a call. When the model made NO call —
+     * when it described the work in prose instead of doing it — there is nothing
+     * to attach to, and the turn would otherwise end with a description and an
+     * unchanged document.
+     */
+    nudge(history, turn, text) {
+      history.push({ role: "assistant", content: turn.raw.content });
+      history.push({ role: "user", content: [{ type: "text", text }] });
+    },
+
+
     reply(history, turn, results, { parts = [], images = [] }) {
       history.push({ role: "assistant", content: turn.raw.content });
       history.push({
@@ -225,6 +239,13 @@ function openaiAdapter({ model, tools, maxTokens }) {
         turn.model,
         model
       )?.usd || 0),
+
+    // Nothing to attach a result to: the model answered in prose rather than
+    // acting. Same shape as any other user turn on this API.
+    nudge(history, turn, text) {
+      history.push(...turn.raw);
+      history.push({ role: "user", content: [{ type: "input_text", text }] });
+    },
 
     reply(history, turn, results, { parts = [], images = [] }) {
       /*
@@ -364,6 +385,11 @@ function geminiAdapter({ model, tools, maxTokens }) {
       (computeGeminiCost
         ? computeGeminiCost({ promptTokenCount: turn.usage.input_tokens, candidatesTokenCount: turn.usage.output_tokens }, model)?.usd || 0
         : 0),
+
+    nudge(history, turn, text) {
+      history.push(turn.raw);
+      history.push({ role: "user", parts: [{ text }] });
+    },
 
     reply(history, turn, results, { parts = [], images = [] }) {
       history.push(turn.raw);

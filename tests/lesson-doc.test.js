@@ -1493,7 +1493,19 @@ console.log("\n25. The model writes the document; the schema stops being the cei
    */
   const aiFull = require("fs").readFileSync(require("path").join(__dirname, "../helper/aiDocument.js"), "utf8");
   ok("an explicit provider is accepted", /async function runDocument\(\{[^}]*provider/.test(aiFull));
-  ok("and beats one guessed from a model id", /const order = \[provider, picked\?\.provider/.test(aiFull));
+  /*
+   * And is EXCLUSIVE, not merely first.
+   *
+   * The chain existed so a turn could still be done when one provider was down —
+   * sensible when nobody had asked for a particular one. The picker makes it an
+   * instruction: a teacher who selects Claude and receives OpenAI's work has been
+   * handed another company's answer under the name of the one they chose, with
+   * no way to know, and a different bill. Where nothing was chosen, the exam
+   * paths keep the full chain.
+   */
+  ok("a chosen provider is used alone", /const order = provider[\s\S]{0,8}\? \[provider\]/.test(aiFull));
+  ok("and an unchosen one still falls back",
+    /\[picked\?\.provider, "openai", "gemini", "claude"\]/.test(aiFull));
   ok("the plan pass passes the choice through", /provider: S\.providerOf\(model\),/.test(ctl5));
   // The fallback chain behind it is the point of runDocument and must survive.
   ok("the fallback chain is still there", /"openai", "gemini", "claude"/.test(aiFull));
