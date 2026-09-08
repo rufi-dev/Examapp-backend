@@ -403,8 +403,19 @@ const sendMessage = asyncHandler(async (req, res) => {
   const { parts, unreadable } = await require("../helper/lessonDocFiles").toParts(sending);
   assertSourcesReadable(sending, parts, unreadable);
   const { system, prompt } = hadBlocks
-    ? S.buildEditPrompt({ doc: doc.toObject(), instructions: text })
+    ? S.buildEditPrompt({ doc: doc.toObject(), instructions: text, freshFiles: sent.length > 0 })
     : S.buildCreatePrompt({ doc: doc.toObject(), instructions: text });
+
+  /*
+   * The teacher's choice applies here too.
+   *
+   * This is the non-streaming turn — the same job, a different endpoint — and it
+   * called the model with no provider at all, so it took whatever the fallback
+   * chain offered and ignored the picker completely. Two ways into one feature
+   * that disagree about which company does the work is exactly the kind of split
+   * nobody finds until a bill arrives from a provider nobody selected.
+   */
+  const model = S.pickModel(String(doc.settings?.model || ""));
 
   let out;
   try {
@@ -412,6 +423,8 @@ const sendMessage = asyncHandler(async (req, res) => {
       system,
       prompt,
       parts,
+      model,
+      provider: S.providerOf(model),
       schema: S.DOC_SCHEMA,
       geminiSchema: toGeminiSchema(S.DOC_SCHEMA),
       // No override — inherit aiDocument's own ceiling. A full-document rewrite
