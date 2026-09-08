@@ -236,6 +236,26 @@ const DOC_TOOLS = [
   required: ["title", "reply", "blocks"],
 };
 
+/*
+ * WHY THE DOCUMENTS STOPPED HAVING DRAWINGS.
+ *
+ * Figures were explained in exactly one place: inside the list headed "KÖHNƏ
+ * BLOK TİPLƏRİ (yalnız arayış üçün — indi HTML yazırsan)" — old block types, for
+ * reference only, you write HTML now. And the explanation there said to put the
+ * drawing in an `svg` FIELD and the caption in a `text` FIELD, neither of which
+ * exists any more.
+ *
+ * So the only description of how to draw sat under a heading telling the model
+ * it did not apply, in a shape it could not use. A geometry PDF came back as
+ * text with every diagram missing, and it looked like a limit of the product.
+ * It was not: the sanitiser keeps circles, paths, labels and viewBox intact, the
+ * preview renders them, the PDF prints them and Word gets them rasterised.
+ *
+ * The figure now sits with the live style classes, written the way html writes
+ * it. The SVG rules below were always right — viewBox, explicit fill and stroke,
+ * contrast, and a caption that matches what is actually drawn — so they stay,
+ * as live guidance rather than legacy reference.
+ */
 const BASE_RULES = `
 Sən Azərbaycan məktəbləri üçün DƏRS MATERİALI hazırlayan metodistsən. Bu material
 şagirdə verilir: mövzunu izah edir, nümunə göstərir və məşq etdirir.
@@ -263,6 +283,13 @@ lazımdırsa svg çək.
 - <div class="ex"><span class="tag">NÜMUNƏ</span><p>şərt</p><p class="sol">həll</p></div>
 - <div class="task"><span class="tag">TAPŞIRIQ</span><p>şərt</p></div>
 - <div class="note info|warning|success"><p>qeyd</p></div>
+- <figure><svg viewBox="0 0 400 260" xmlns="http://www.w3.org/2000/svg">…</svg>
+  <figcaption>altyazı</figcaption></figure> — ŞƏKİL/SXEM, aşağıdakı qaydalarla.
+
+ŞƏKİL ÇƏK. Həndəsə, riyaziyyat, fizika, biologiya materialında şəkil mətnin
+yarısıdır: çevrə və radius, üçbucaq, bucaq işarəsi, ədəd oxu, koordinat
+müstəvisi, diaqram, kəsr zolağı, hüceyrə sxemi. Mənbədə çertyoj varsa, onu SVG
+ilə yenidən çək — mətni köçürüb şəkli buraxmaq sənədin yarısını köçürməkdir.
 
 KÖHNƏ BLOK TİPLƏRİ (yalnız arayış üçün — indi HTML yazırsan):
 - heading — bölmə başlığı. Materialı 3–6 bölməyə ayır.
@@ -273,11 +300,8 @@ KÖHNƏ BLOK TİPLƏRİ (yalnız arayış üçün — indi HTML yazırsan):
 - task — şagirdin özünün edəcəyi tapşırıq. Cavabı bilirsənsə "solution"-a yaz.
 - note — qeyd: "tone" = info (məsləhət), warning (tez-tez edilən səhv), success (yadda saxla).
 - table — müqayisə və ya cədvəl. "columns" başlıqlar, "rows" sətirlər.
-- figure — ŞƏKİL/SXEM. "svg" sahəsinə SVG kodu yaz, "text" sahəsinə şəklin altyazısı.
-  Riyaziyyat, həndəsə, fizika, biologiya üçün: ədəd oxu, üçbucaq, dairə və radius,
-  koordinat müstəvisi, diaqram, kəsr zolağı, hüceyrə sxemi və s.
 
-FİQUR (figure) QAYDALARI — DİQQƏTLƏ OXU:
+FİQUR QAYDALARI — DİQQƏTLƏ OXU:
 
 1) ÇƏRÇİVƏ. Mütləq viewBox olmalıdır:
    <svg viewBox="0 0 400 260" xmlns="http://www.w3.org/2000/svg">

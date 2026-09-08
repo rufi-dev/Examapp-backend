@@ -1546,6 +1546,37 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("and copy mode follows the attachment, not just a first draft",
     /if \(parts\.length && \(freshFiles \|\| !hadBlocks\)\) \{/.test(ctl5));
 
+  /*
+   * Why the documents stopped having drawings.
+   *
+   * Figures were explained in exactly one place: inside the list headed "old
+   * block types, for reference only, you write HTML now" — and the explanation
+   * there said to put the drawing in an `svg` FIELD and the caption in a `text`
+   * FIELD, neither of which exists any more. The only description of how to draw
+   * sat under a heading saying it did not apply, in a shape that could not be
+   * used. A geometry PDF came back as text with every diagram missing, and it
+   * looked like a limit of the product rather than a stale paragraph.
+   */
+  const rules = S.BASE_RULES;
+  const liveAt = rules.indexOf("ÜSLUB SİNİFLƏRİ");
+  const legacyAt = rules.indexOf("KÖHNƏ BLOK TİPLƏRİ");
+  const figAt = rules.indexOf("<figure><svg viewBox");
+  ok("drawing is documented", figAt > 0);
+  ok("in the live section, not the legacy one", figAt > liveAt && figAt < legacyAt);
+  ok("and not as a block field that no longer exists", !/sahəsinə SVG kodu yaz/.test(rules));
+  // A copied page loses half its meaning if the diagrams are dropped.
+  ok("a source diagram must be redrawn, not skipped", /çertyoj varsa, onu SVG/.test(rules));
+  // The pipeline was never the limit: this is what a drawing has to survive.
+  const drawn = sanitizeDocHtml(
+    '<figure><svg viewBox="0 0 200 160"><circle cx="100" cy="80" r="60" fill="none" stroke="#222"/>' +
+      '<path d="M40 80 L100 20" stroke="#222" fill="none"/><text x="30" y="78">A</text></svg>' +
+      "<figcaption>Çevrə</figcaption></figure>"
+  );
+  ok("a drawing survives sanitising whole", /<circle/.test(drawn) && /<path/.test(drawn) && /<text/.test(drawn));
+  ok("with its frame and its caption", /viewBox/.test(drawn) && /Çevrə/.test(drawn));
+  ok("and reaches both files", /<circle/.test(buildLessonDocHtml({ title: "T", html: drawn })) &&
+    /<circle/.test(buildLessonDocHtml({ title: "T", html: drawn }, { forWord: true })));
+
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));
   ok("blocks are cleared so there is one source of truth", /blocks: \[\],/.test(ctl5));
