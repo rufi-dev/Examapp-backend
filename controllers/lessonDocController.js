@@ -718,8 +718,15 @@ const streamMessage = asyncHandler(async (req, res) => {
     // ---- phase 2: write it, reporting each block -----------------------------
     send("phase", { phase: "write", sections: plan?.sections?.length || 0 });
 
+    /*
+     * Did a file arrive WITH this message? That is the teacher pointing at it,
+     * and it changes what their words mean: "keep everything the same" said over
+     * an attachment is about the attachment, not about the document they are
+     * asking to replace.
+     */
+    const freshFiles = sent.length > 0;
     const base = hadBlocks
-      ? S.buildEditPrompt({ doc: doc.toObject(), instructions: text })
+      ? S.buildEditPrompt({ doc: doc.toObject(), instructions: text, freshFiles })
       : S.buildCreatePrompt({ doc: doc.toObject(), instructions: text });
     /*
      * The source rules turn an attachment into the thing to reproduce — copy mode
@@ -730,7 +737,7 @@ const streamMessage = asyncHandler(async (req, res) => {
      * changing it. On an edit the document is the subject and the file is only
      * reference, which is what EDIT_RULES already says.
      */
-    if (parts.length && !hadBlocks) {
+    if (parts.length && (freshFiles || !hadBlocks)) {
       base.system = `${base.system}
 
 ${S.SOURCE_RULES}`;

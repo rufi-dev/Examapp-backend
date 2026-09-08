@@ -190,8 +190,14 @@ console.log("\n7. The prompts carry the contract:");
    * still there — and being told the file is what to reproduce is what made an
    * edit rebuild the document from the PDF and throw the last two turns away.
    */
-  ok("and says the document is the subject, not the attached file",
-    /DƏYİŞDİRİLƏCƏK ŞEY bu sənəddir, fayl deyil/.test(edit.system));
+  /*
+   * Replaced, deliberately. That line stopped an OLD attachment causing a
+   * rebuild and then stopped a NEW one being used at all — see the fresh-file
+   * rules below. What survives is the true half: files already on the document
+   * are background unless the model goes and reads one.
+   */
+  ok("an attachment from an earlier turn stays in the background",
+    /read_source ilə oxu/.test(edit.system));
 
   // The real failure: an html document sent NOTHING, because only blocks were
   // serialised. The model cannot preserve what it was never shown.
@@ -1140,7 +1146,10 @@ console.log("\n25. The model writes the document; the schema stops being the cei
    */
   ok("the turn asks the document, not its blocks", /const hadBlocks = S\.countParts\(doc\) > 0/.test(ctl5));
   ok("export asks the same question", /if \(!S\.countParts\(doc\)\) \{/.test(ctl5));
-  ok("copy mode is scoped to a first draft", /if \(parts\.length && !hadBlocks\) \{/.test(ctl5));
+  // Scoped to a first draft OR a turn the teacher attached something to — the
+  // case that made "copy this exactly" do nothing at all.
+  ok("copy mode is scoped to a first draft or a fresh attachment",
+    /if \(parts\.length && \(freshFiles \|\| !hadBlocks\)\) \{/.test(ctl5));
   ok("and no block count is left deciding content exists", !/\(doc\.blocks \|\| \[\]\)\.length[^;]*\?|!\(doc\.blocks \|\| \[\]\)\.length/.test(ctl5));
 
   /*
@@ -1512,6 +1521,30 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("a heading is still kept with what follows", /break-after:avoid/.test(sheet));
   // So a permitted break is never an ugly one.
   ok("and no paragraph leaves a single line behind", /orphans:2;widows:2/.test(sheet));
+
+  /*
+   * A file arriving WITH the message changes what the message means.
+   *
+   * A teacher attached ÇEVRƏ.pdf to a document about inequalities and wrote
+   * "copy exactly as is keep everything the same". The edit rules said "even if a
+   * file is attached, the thing to change is this document, not the file" — a
+   * line written to stop a ten-turn-old attachment causing a rebuild — so the
+   * model read the instruction as "leave the document alone", replied "heç bir
+   * dəyişiklik edilmədi", and was obeying precisely.
+   *
+   * Attaching is an ACTION, not a phrasing to be guessed at, so it is what the
+   * rules turn on.
+   */
+  const stale = S.buildEditPrompt({ doc: { html: "<p>x</p>" }, instructions: "copy exactly as is" }).system;
+  const fresh = S.buildEditPrompt({ doc: { html: "<p>x</p>" }, instructions: "copy exactly as is", freshFiles: true }).system;
+  ok("without an attachment the document is protected", /YENİ fayl əlavə edilməyib/.test(stale));
+  ok("with one, the words are read as being about the file", /BU HALDA FAYLA aiddir/.test(fresh));
+  ok("and the two are not the same instruction", stale !== fresh);
+  // The line that caused it is gone from both.
+  ok("nothing tells the model to ignore an attachment", !/DƏYİŞDİRİLƏCƏK ŞEY bu sənəddir/.test(stale + fresh));
+  ok("the turn decides by what the teacher did", /const freshFiles = sent\.length > 0;/.test(ctl5));
+  ok("and copy mode follows the attachment, not just a first draft",
+    /if \(parts\.length && \(freshFiles \|\| !hadBlocks\)\) \{/.test(ctl5));
 
   ok("html is sanitised before it is stored", /const html = sanitizeDocHtml\(wrote\.input\.html\)/.test(ctl5));
   ok("an input that sanitises to nothing is refused", /if \(!html\) \{/.test(ctl5));

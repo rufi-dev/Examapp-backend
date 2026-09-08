@@ -360,8 +360,35 @@ REDAKTƏ REJİMİ — SƏNƏD ARTIQ MÖVCUDDUR:
   məhz onu dəyişməyi istəməyibsə.
 - Əvvəlki növbələrdə edilmiş dəyişikliklər (tərcümə, rəng, əlavə bölmə) sənədin
   bir hissəsidir. Onları geri qaytarma.
-- Fayl əlavə olunubsa belə, DƏYİŞDİRİLƏCƏK ŞEY bu sənəddir, fayl deyil. Faylı
-  yalnız müəllim məhz ondan nəsə istəyəndə açıq şəkildə istifadə et.
+- Bu növbədə YENİ fayl əlavə edilməyib. Sənədə qoşulmuş köhnə fayllar arxa
+  plandır — müəllim məhz onlardan nəsə istəyirsə, read_source ilə oxu.
+`.trim();
+
+/*
+ * The same rules for a turn that arrived WITH a file.
+ *
+ * The line this replaces — "even if a file is attached, the thing to change is
+ * this document" — was written to stop a ten-turn-old attachment causing a
+ * rebuild, and it produced the exact opposite failure. A teacher attached
+ * ÇEVRƏ.pdf to a document about inequalities and wrote "copy exactly as is keep
+ * everything the same"; the model read that as "leave the document alone",
+ * answered "heç bir dəyişiklik edilmədi", and was following its instructions
+ * precisely.
+ *
+ * Attaching a file to a message is not a guess about wording — it is something
+ * the teacher DID, on this turn, and it means they are pointing at that file.
+ * "Keep everything the same" said over a file means the file.
+ */
+const EDIT_RULES_WITH_FILE = `
+REDAKTƏ REJİMİ — BU NÖVBƏDƏ MÜƏLLİM FAYL ƏLAVƏ EDİB:
+- Aşağıdakı HTML hazırkı sənəddir, amma müəllim İNDİ fayl göndərdi. Bu istəyin
+  mövzusu həmin fayldır.
+- "Olduğu kimi köçür", "eyni saxla", "dəyişmə" kimi sözlər BU HALDA FAYLA aiddir,
+  hazırkı sənədə yox: müəllim faylın eynisini istəyir və hazırkı məzmun onunla
+  əvəz olunur.
+- Müəllim faylı yalnız əlavə material kimi göstəribsə, mövcud sənədi saxla və
+  fayldan istənilən hissəni ora əlavə et.
+- Şübhə varsa ask_teacher ilə soruş — faylı gözardı etmə.
 `.trim();
 
 
@@ -534,7 +561,7 @@ function sourceList(doc = {}) {
     .join("\n");
 }
 
-function buildEditPrompt({ doc = {}, instructions = "" } = {}) {
+function buildEditPrompt({ doc = {}, instructions = "", freshFiles = false } = {}) {
   /*
    * The document itself, as the model wrote it.
    *
@@ -547,7 +574,7 @@ function buildEditPrompt({ doc = {}, instructions = "" } = {}) {
    */
   if (has(doc.html)) {
     return {
-      system: [BASE_RULES, EDIT_RULES].join("\n\n"),
+      system: [BASE_RULES, freshFiles ? EDIT_RULES_WITH_FILE : EDIT_RULES].join("\n\n"),
       prompt: [
         describe(doc),
         sourceList(doc),
@@ -582,7 +609,7 @@ function buildEditPrompt({ doc = {}, instructions = "" } = {}) {
     })),
   };
   return {
-    system: [BASE_RULES, EDIT_RULES].join("\n\n"),
+    system: [BASE_RULES, freshFiles ? EDIT_RULES_WITH_FILE : EDIT_RULES].join("\n\n"),
     prompt: [
       describe(doc),
       historyOf(doc),
