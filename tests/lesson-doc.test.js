@@ -780,7 +780,7 @@ console.log("\n20. It reports what it actually read (the 'did it open my PDF?' q
   ok("a plan with no sources is fine", S.normalizePlan({ title: "t", sections: [] }).sources.length === 0);
 
   const ctl3 = fs3.readFileSync(path3.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
-  ok("the report is streamed before the plan", /send\("sources"[\s\S]{0,1200}send\("plan"/.test(ctl3));
+  ok("the report is streamed before the plan", /send\("sources"[\s\S]{0,2400}send\("plan"/.test(ctl3));
   /*
    * And written down. The file itself travels only when the model asks for it,
    * so without this its knowledge of the source lasted exactly one turn: the
@@ -788,8 +788,26 @@ console.log("\n20. It reports what it actually read (the 'did it open my PDF?' q
    * PDF" was being asked of something that had never seen a PDF.
    */
   ok("what it read is kept the first time", /!\(doc\.sourceNotes \|\| \[\]\)\.length/.test(ctl3));
-  ok("and committed with the turn, not on its own",
-    /\.\.\.\(notesToKeep\?\.length \? \{ sourceNotes: notesToKeep \} : \{\}\)/.test(ctl3));
+  /*
+   * Saved the moment they are read, not with the document.
+   *
+   * They used to be written only on the path where a document got written — so
+   * the turn that read ÇEVRƏ.pdf and answered by changing a print setting threw
+   * away everything it had learned, and the next turn had neither the file nor a
+   * note about it. Reading is what happened; what the model did next does not
+   * change that.
+   */
+  ok("what was read is saved as soon as it is read",
+    /\$set: \{ sourceNotes: notesToKeep \}/.test(ctl3));
+  ok("and not only when a document is written",
+    !/\.\.\.\(notesToKeep\?\.length \? \{ sourceNotes/.test(ctl3));
+  /*
+   * And the files keep travelling until something HAS read them: a first draft
+   * that answers with a settings change must not cost the teacher their source.
+   */
+  ok("an unread source is sent again", /const neverRead = !\(doc\.sourceNotes \|\| \[\]\)\.length;/.test(ctl3));
+  ok("and stops being sent once it has been read",
+    /\(f\) => neverRead \|\| sent\.some\(\(x\) => x\.key === f\.key\)/.test(ctl3));
   ok("then carried on every later prompt",
     S.sourceList({ files: [{ name: "a.pdf" }], sourceNotes: [{ name: "page 1", found: "şaquli gün adları" }] })
       .includes("şaquli gün adları"));

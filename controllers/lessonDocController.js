@@ -379,7 +379,27 @@ const sendMessage = asyncHandler(async (req, res) => {
    * history names each attachment on the turn it arrived, so "the file I sent
    * earlier" stays answerable without shipping it again.
    */
-  const sending = (doc.files || []).filter((f) => sent.some((x) => x.key === f.key));
+  /*
+   * Until a source has actually BEEN read, it keeps being sent.
+   *
+   * "Only this turn's attachments" was right about cost and wrong about a first
+   * draft. A teacher attached ÇEVRƏ.pdf with "copy exactly as is"; the model
+   * answered that turn by calling set_print_options, so nothing was written and
+   * nothing was read — and from the next turn on the file was no longer sent,
+   * because it was no longer newly attached. The model then wrote about the
+   * document's TITLE, which was the only subject it had, and the teacher watched
+   * their circles PDF turn into a lesson on inequalities.
+   *
+   * `sourceNotes` is the record of having read something. While it is empty, no
+   * turn has ever seen inside these files, so no turn can be expected to know
+   * them: they travel. Once one has, the notes carry the knowledge and
+   * read_source fetches the page itself when the work needs the page. Bounded by
+   * a fact about the document rather than by a guess about the request.
+   */
+  const neverRead = !(doc.sourceNotes || []).length;
+  const sending = (doc.files || []).filter(
+    (f) => neverRead || sent.some((x) => x.key === f.key)
+  );
   const { parts, unreadable } = await require("../helper/lessonDocFiles").toParts(sending);
   assertSourcesReadable(sending, parts, unreadable);
   const { system, prompt } = hadBlocks
@@ -568,7 +588,27 @@ const streamMessage = asyncHandler(async (req, res) => {
    * history names each attachment on the turn it arrived, so "the file I sent
    * earlier" stays answerable without shipping it again.
    */
-  const sending = (doc.files || []).filter((f) => sent.some((x) => x.key === f.key));
+  /*
+   * Until a source has actually BEEN read, it keeps being sent.
+   *
+   * "Only this turn's attachments" was right about cost and wrong about a first
+   * draft. A teacher attached ÇEVRƏ.pdf with "copy exactly as is"; the model
+   * answered that turn by calling set_print_options, so nothing was written and
+   * nothing was read — and from the next turn on the file was no longer sent,
+   * because it was no longer newly attached. The model then wrote about the
+   * document's TITLE, which was the only subject it had, and the teacher watched
+   * their circles PDF turn into a lesson on inequalities.
+   *
+   * `sourceNotes` is the record of having read something. While it is empty, no
+   * turn has ever seen inside these files, so no turn can be expected to know
+   * them: they travel. Once one has, the notes carry the knowledge and
+   * read_source fetches the page itself when the work needs the page. Bounded by
+   * a fact about the document rather than by a guess about the request.
+   */
+  const neverRead = !(doc.sourceNotes || []).length;
+  const sending = (doc.files || []).filter(
+    (f) => neverRead || sent.some((x) => x.key === f.key)
+  );
   const { parts, unreadable } = await require("../helper/lessonDocFiles").toParts(sending);
 
   // Declared outside the try so a stop mid-write can still see what the plan
@@ -639,6 +679,23 @@ const streamMessage = asyncHandler(async (req, res) => {
         notesToKeep = plan.sources
           .filter((x) => x && x.readable && x.found)
           .map((x) => ({ name: String(x.name || "").slice(0, 80), found: String(x.found).slice(0, 400) }));
+        /*
+         * Written HERE, not with the document.
+         *
+         * These were only saved on the path where a document got written — so
+         * the turn that read the PDF and answered by changing a print setting
+         * threw away everything it had learned from it, and the next turn had
+         * neither the file nor any note about it. Reading is what happened;
+         * whether the model then wrote, adjusted a setting or asked a question
+         * does not change that. Not a content write, so it does not take the
+         * revision or contend with one.
+         */
+        if (notesToKeep.length) {
+          await LessonDoc.updateOne(
+            { _id: doc._id, owner: doc.owner },
+            { $set: { sourceNotes: notesToKeep } }
+          ).catch((e) => console.error("[LESSON DOC] source notes not saved:", e?.message));
+        }
       }
       if (plan.sections.length) send("plan", { ...plan, editing: hadBlocks });
     } catch (e) {
@@ -938,7 +995,6 @@ ${S.SOURCE_RULES}`;
         ...(!doc.topic && wrote.input.title ? { topic: wrote.input.title } : {}),
         ...(plan?.audience && !doc.audience ? { audience: plan.audience } : {}),
         status: "ready",
-        ...(notesToKeep?.length ? { sourceNotes: notesToKeep } : {}),
         aiMeta: { provider: out.provider, at: new Date() },
       },
       baseRevision,
