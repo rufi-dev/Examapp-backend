@@ -36,7 +36,7 @@ const DEFAULT_MAX_READS = 4;
  * is where a merged row becomes obvious and the second says nothing new.
  */
 async function runToolLoop(adapter, opts) {
-  const { validate, fetchSource, look, gridOf, signal } = opts;
+  const { validate, fetchSource, look, gridOf, signal, needsDocument } = opts;
   const MAX_FIXES = opts.maxFixes || DEFAULT_MAX_FIXES;
   const MAX_READS = opts.maxReads || DEFAULT_MAX_READS;
 
@@ -97,9 +97,33 @@ async function runToolLoop(adapter, opts) {
      * of a page is what produced a copy of our own preview instead of a copy of
      * the teacher's PDF.
      */
-    const wants = typeof fetchSource === "function" && reads < MAX_READS
-      ? calls.filter((c) => c.name === "read_source")
-      : [];
+    const asked = calls.filter((c) => c.name === "read_source");
+    const wants = typeof fetchSource === "function" && reads < MAX_READS ? asked : [];
+
+    /*
+     * It asked for a file and cannot be given one — the read budget is spent, or
+     * this caller serves no sources at all. Saying so is the difference between
+     * a turn it can finish and a turn that ends holding a request nobody
+     * answered: read_source is not a document, so the turn would return no
+     * document and the teacher would be told the answer could not be read, over
+     * a request that was perfectly reasonable.
+     */
+    if (!wants.length && asked.length && !calls.some((c) => c.name === "write_material")) {
+      adapter.reply(
+        history,
+        turn,
+        asked.map((c) => ({
+          call: c,
+          isError: true,
+          text: "Fayl indi göndərilə bilmir. Sənədi əlindəki məlumatla yaz və nəyin çatmadığını cavabında bildir.",
+        })),
+        {}
+      );
+      // Not a failed attempt on its part: it asked a fair question and we said no.
+      attempt -= 1;
+      // eslint-disable-next-line no-continue
+      continue;
+    }
 
     if (wants.length) {
       const results = [];
@@ -119,6 +143,44 @@ async function runToolLoop(adapter, opts) {
       }
       adapter.reply(history, turn, results, { parts: files });
       attempt -= 1; // a fetch is not a failed attempt
+      // eslint-disable-next-line no-continue
+      continue;
+    }
+
+    /*
+     * The teacher asked for a material and got a colour.
+     *
+     * Given a PDF to copy, the model looked at its orange border, called
+     * set_print_options, and replied that it had kept the accent colour and the
+     * page numbers. It had answered the DESIGN half of "copy this exactly" and
+     * never written a word of the document — and because a settings call is a
+     * legitimate answer to some turns, nothing objected. The teacher was left
+     * with an empty material and a note about colours.
+     *
+     * This is not a judgement about what they meant: the document is empty and
+     * the turn produced no document. Both halves are facts, so the model is told
+     * and gets to finish the job.
+     */
+    if (
+      needsDocument &&
+      !calls.some((c) => c.name === "write_material") &&
+      calls.some((c) => c.name === "set_print_options") &&
+      attempt < MAX_FIXES
+    ) {
+      adapter.reply(
+        history,
+        turn,
+        calls
+          .filter((c) => c.name === "set_print_options")
+          .map((c) => ({
+            call: c,
+            isError: true,
+            text:
+              "Çap parametrləri saxlanıldı, amma sənədin MƏZMUNU hələ yazılmayıb — " +
+              "material boşdur. write_material ilə mətni yaz.",
+          })),
+        {}
+      );
       // eslint-disable-next-line no-continue
       continue;
     }

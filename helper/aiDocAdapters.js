@@ -239,9 +239,30 @@ function openaiAdapter({ model, tools, maxTokens }) {
        * output it may keep.
        */
       history.push(...turn.raw);
+
+      /*
+       * EVERY replayed call needs an output, not just the ones we had something
+       * to say about.
+       *
+       * The loop answers the calls it has a finding for — a short table row, a
+       * source to hand over, "you changed a setting but wrote no document" — and
+       * leaves the rest alone. Claude and Gemini accept that; OpenAI refuses the
+       * whole request: "No tool output found for function call call_…". So a turn
+       * where the model did two things and we replied about one died with a 400
+       * and the teacher got "AI sənədi hazırlaya bilmədi".
+       *
+       * The ones we answered get the answer; the rest get an acknowledgement,
+       * which is true — they were accepted, there was simply nothing to say.
+       */
+      const answered = new Set(results.map((r) => r.call.id));
       results.forEach((r) => {
         history.push({ type: "function_call_output", call_id: r.call.id, output: r.text });
       });
+      turn.raw
+        .filter((o) => o.type === "function_call" && !answered.has(o.call_id))
+        .forEach((o) => {
+          history.push({ type: "function_call_output", call_id: o.call_id, output: "Qəbul edildi." });
+        });
       const extra = [
         ...openaiContentParts(parts, "source"),
         ...images.map((b) => ({ type: "input_image", image_url: `data:image/png;base64,${b.toString("base64")}` })),

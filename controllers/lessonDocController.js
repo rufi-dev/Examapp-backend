@@ -877,6 +877,9 @@ ${S.SOURCE_RULES}`;
        * markup.
        */
       gridOf: (html) => gridMap(html || ""),
+      // An empty document that comes back with only a print setting changed is a
+      // turn that did not do what was asked — see the loop for what happened.
+      needsDocument: !hadBlocks,
       fetchSource: async (name) => {
         const want = String(name || "").trim().toLowerCase();
         if (!want) return null;
