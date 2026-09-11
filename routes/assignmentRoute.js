@@ -49,9 +49,22 @@ const ALLOWED_EXT = new Set([
   ".xls", ".xlsx", ".ods",
 ]);
 
+/*
+ * The per-file ceiling, in one place because three things have to agree: the
+ * limit multer enforces, the message a student reads when they hit it, and the
+ * hint shown in the picker BEFORE they pick. When those drifted, the worst case
+ * was a student told "maksimum 50MB" by a server that had already accepted the
+ * file — or refused one the hint had promised would fit.
+ *
+ * Raised from 50 to 100 on request. A phone photo of handwritten work is a few
+ * MB; this headroom is for the scanned multi-page PDFs and the occasional
+ * recorded presentation that were bouncing off the old cap.
+ */
+const MAX_UPLOAD_MB = 100;
+
 const upload = multer({
   storage,
-  limits: { fileSize: 50 * 1024 * 1024, files: STUDENT_SUBMISSION_MAX_FILES },
+  limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024, files: STUDENT_SUBMISSION_MAX_FILES },
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname || "").toLowerCase();
     if (!ALLOWED_EXT.has(ext)) {
@@ -92,7 +105,7 @@ const runUpload = (field, max) => (req, res, next) =>
     if (!err) return next();
     const message =
       err.code === "LIMIT_FILE_SIZE"
-        ? "Fayl çox böyükdür (maksimum 50MB)"
+        ? `Fayl çox böyükdür (maksimum ${MAX_UPLOAD_MB}MB)`
         : err.code === "LIMIT_FILE_COUNT"
         ? `Çox fayl seçildi (maksimum ${max})`
         : err.message || "Fayl yüklənmədi";
