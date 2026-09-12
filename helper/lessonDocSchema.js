@@ -1005,9 +1005,18 @@ const has = (v) => Boolean(String(v == null ? "" : v).trim());
  * that — and every "is there anything here" test must accept both, or a complete
  * document reads as an empty one.
  */
+/*
+ * What counts as a PART of a document — the single definition.
+ *
+ * The word boundary matters: without it `<p` also matches `<polygon` and
+ * `<path`, so a document with hand-drawn SVG figures reported dozens of parts
+ * it does not have. A second copy of this rule used to live in the controller
+ * and rotted into a pattern that matched nothing (see summarizeHtml there);
+ * there is one copy now and both callers use it.
+ */
 function countParts(doc = {}) {
   if (has(doc.html)) {
-    return (String(doc.html).match(/<(h[1-4]|p|ul|ol|table|figure|blockquote)/gi) || []).length;
+    return (String(doc.html).match(/<(h[1-4]|p|ul|ol|table|figure|blockquote)\b/gi) || []).length;
   }
   return (doc.blocks || []).length;
 }
@@ -1103,15 +1112,47 @@ function makeProgressStreamer() {
       else return [];
     }
     const kind = mode === "edits" ? "dəyişiklik" : "hissə";
-    const total = (s.match(mode === "edits" ? DONE_EDIT : CLOSERS) || []).length;
+    const closers = mode === "edits" ? null : [...s.matchAll(CLOSERS)];
+    const total = closers ? closers.length : (s.match(DONE_EDIT) || []).length;
+    // Where the document's own text begins in the JSON, so the title and the
+    // reply that precede it are never read as the first part's words.
+    const head = closers ? s.match(/"html"\s*:\s*"/) : null;
+    const base = head ? head.index + head[0].length : 0;
     const fresh = [];
     while (seen < total) {
       seen += 1;
-      fresh.push({ kind, text: "" });
+      if (!closers) {
+        fresh.push({ kind, text: "" });
+        // eslint-disable-next-line no-continue
+        continue;
+      }
+      /*
+       * Which part, and what it says. The closer's tag names the part; its text
+       * is what sits between the previous closer and this one, with the markup
+       * and the JSON escaping stripped — enough for "başlıq yazıldı: Çevrə
+       * (əsas anlayışlar)" where there used to be a number going up.
+       */
+      const m = closers[seen - 1];
+      const prev = seen > 1 ? closers[seen - 2] : null;
+      const from = Math.max(base, prev ? prev.index + prev[0].length : 0);
+      const text = unescapeJsonText(s.slice(from, m.index))
+        .replace(/<[^>]*>/g, " ")
+        .replace(/&nbsp;/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      fresh.push({ kind, tag: String(m[1]).toLowerCase(), text: text.slice(0, 90) });
     }
     return fresh;
   };
 }
+
+// The inside of a JSON string, read as text: escapes undone, nothing parsed.
+const unescapeJsonText = (t) =>
+  String(t || "")
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\n|\\t/g, " ")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
 
 function makeHtmlStreamer() {
   let seen = 0;

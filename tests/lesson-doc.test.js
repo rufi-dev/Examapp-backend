@@ -1409,8 +1409,13 @@ console.log("\n25. The model writes the document; the schema stops being the cei
     ["insufficient", "quota", "billing hard limit", "deactivated"].every((w) => ad2.includes(w)));
   // Every adapter runs the check, and every one of them says which provider it
   // was — a message that does not name the provider is not diagnosable.
-  ok("all three check it", (ad2.match(/OUT_OF_CREDIT\.test/g) || []).length === 3);
-  ok("and all three name themselves", (ad2.match(/billingError\("(claude|openai|gemini)"\)/g) || []).length === 3);
+  // By the SET of providers, not by a count: OpenAI has two failure paths now
+  // (a streamed turn and a plain one) and both must run the check.
+  ok("every adapter checks it", (ad2.match(/OUT_OF_CREDIT\.test/g) || []).length >= 3);
+  ok(
+    "and every one names itself",
+    new Set([...ad2.matchAll(/billingError\("(claude|openai|gemini)"\)/g)].map((m) => m[1])).size === 3
+  );
 
   /*
    * The model id is sent straight to the provider, so it is an allow-list and not
@@ -1815,9 +1820,9 @@ console.log("\nWhat a turn costs, and the three things that decide it:");
    * conversation, attachments included. One measured turn: 267,264 input tokens,
    * cache_read 0, $1.34 of input on a $2.94 bill. The breakpoints are the fix.
    */
-  ok("the system block is cached", /system: \[\{ type: "text", text: system, cache_control: EPHEMERAL \}\]/.test(ad8));
+  ok("the system block is cached", /system: \[\{ type: "text", text: system, cache_control: LONG_LIVED \}\]/.test(ad8));
   ok("breakpoints are re-placed before every call", /markCachePoints\(history\);/.test(ad8));
-  ok("the file-bearing first user turn is cached", /setCache\(history\[users\[0\]\]\)/.test(ad8));
+  ok("the file-bearing first user turn is cached", /setCache\(history\[users\[0\]\], LONG_LIVED\)/.test(ad8));
   ok("and the growing tail too", /setCache\(history\[users\[users\.length - 1\]\]\)/.test(ad8));
 
   // Three live breakpoints, not one per loop step: the cap is four, and a stale
@@ -1867,7 +1872,7 @@ console.log("\nEffort, ceiling and attachment size:");
    */
   ok("effort is a parameter, not a constant", /output_config: \{ effort \}/.test(ad8b));
   ok("it defaults to full", /effort = "high"/.test(ad8b));
-  ok("creation gets high and an edit less", /effort: hadBlocks \? "medium" : "high"/.test(ctl8b));
+  ok("creation and an edit both read the effort dial", /effort: hadBlocks \? EFFORT_EDIT : EFFORT_CREATE/.test(ctl8b));
   ok("and it reaches the adapter", /effort,/.test(doc8b));
 
   /*
@@ -2217,6 +2222,216 @@ console.log("\nA known error code does not make its message safe (LS-R3-014):");
   docErr.code = "provider_unavailable";
   docErr.userMessage = "AI xidməti cavab vermir.";
   ok("a docError's userMessage still passes", c.publicFailure(docErr).message === "AI xidməti cavab vermir.");
+}
+
+console.log("\nA turn says what it is doing while it does it:");
+{
+  const path7 = require("path");
+  const fs7 = require("fs");
+  const drvSrc = fs7.readFileSync(path7.join(__dirname, "../helper/aiDocDrivers.js"), "utf8");
+  const ctlSrc = fs7.readFileSync(path7.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  const adSrc = fs7.readFileSync(path7.join(__dirname, "../helper/aiDocAdapters.js"), "utf8");
+  const docSrc = fs7.readFileSync(path7.join(__dirname, "../helper/aiDocument.js"), "utf8");
+  const S7 = require("../helper/lessonDocSchema");
+  const { runToolLoop } = require("../helper/aiDocDrivers");
+
+  const fake = (script) => {
+    let i = 0;
+    return {
+      name: "fake",
+      cancelled: () => new Error("cancelled"),
+      start: () => [],
+      send: async () => script[Math.min(i++, script.length - 1)],
+      addCost: (c) => c,
+      nudge: () => {},
+      reply: () => {},
+    };
+  };
+  const DOC = "<h1>A</h1><p>one</p>";
+
+  /*
+   * THE COMPLAINT: a turn showed its plan once and then nothing moved for
+   * sixteen minutes. Every event below is one of the things it was doing in
+   * that silence.
+   */
+  pending.push(
+    (async () => {
+      const seen = [];
+      const out = await runToolLoop(
+        fake([
+          { raw: {}, usage: {}, calls: [{ id: "1", name: "read_source", input: { name: "x.pdf", pages: "1-3" } }], said: "" },
+          { raw: {}, usage: {}, calls: [{ id: "2", name: "write_material", input: { html: DOC } }], said: "" },
+          { raw: {}, usage: {}, calls: [], said: "uygundur" },
+        ]),
+        {
+          onEvent: (k, d) => seen.push([k, d]),
+          fetchSource: async () => ({ name: "x.pdf", part: { mime: "application/pdf", data: "" }, served: { from: 1, to: 3 }, total: 12 }),
+          look: async () => ({ shots: [], pages: 2 }),
+          gridOf: () => "",
+        }
+      );
+      const kinds = seen.map((s) => s[0]);
+      ok("it reports asking for a source", kinds.includes("read"));
+      ok("and what was actually served", kinds.includes("served") && seen.find((s) => s[0] === "served")[1].total === 12);
+      ok("it reports rendering the draft", kinds.includes("look") && kinds.includes("looked"));
+      ok("it reports the document it wrote", kinds.includes("wrote"));
+      ok("it reports agreement rather than ending in silence", kinds.includes("agree"));
+      ok("and the turn counts its own rounds", out.stats && out.stats.rounds === 3 && out.stats.reads === 1 && out.stats.looked === true);
+    })()
+  );
+
+  /*
+   * THE COST: a fix used to mean re-emitting the whole document, because a
+   * patch could only apply to what was on disk — which during a creation is
+   * nothing. The loop carries the draft now, so a later round patches the
+   * page the model just wrote instead of typing it again.
+   */
+  pending.push(
+    (async () => {
+      const out = await runToolLoop(
+        fake([
+          { raw: {}, usage: {}, calls: [{ id: "1", name: "write_material", input: { html: DOC } }], said: "" },
+          { raw: {}, usage: {}, calls: [{ id: "2", name: "edit_material", input: { edits: [{ find: "one", replace: "two" }] } }], said: "" },
+          { raw: {}, usage: {}, calls: [], said: "hazirdir" },
+        ]),
+        {
+          onEvent: () => {},
+          // A finding on the first document is what makes a second round
+          // happen at all — and the fix for it must land on that document.
+          validate: (name) => (name === "write_material" ? "cədvəl sətri qısadır" : ""),
+          htmlOf: (c, draft) => {
+            if (c.name === "write_material") return c.input.html;
+            if (c.name === "edit_material") return String(draft || "").replace("one", "two");
+            return "";
+          },
+          look: async () => null,
+        }
+      );
+      ok("a patch in a later round applies to the draft, not to an empty document", out.document?.html === "<h1>A</h1><p>two</p>");
+      ok("and the turn commits what it ended on", out.document.call.name === "edit_material");
+    })()
+  );
+
+  ok("the loop offers the draft to the caller's resolver", /htmlOf\(c, draft\)/.test(drvSrc));
+  ok("and to its validator", /validate\(c\.name, c\.input \|\| \{\}, draft\)/.test(drvSrc));
+  ok("the controller patches against the draft", /applyEdits\(draft \|\| doc\.html \|\| ""/.test(ctlSrc));
+  ok("and commits the document the loop ended on", /if \(out\.document && out\.document\.html\)/.test(ctlSrc));
+  ok("a finding tells the model to patch rather than retype", /PATCH_HINT/.test(drvSrc));
+  ok("the render check no longer asks for the whole document back", !/eyni HTML-i yenidən göndər\./.test(drvSrc));
+  ok("it asks for a sentence instead", /HEÇ BİR alət çağırma/.test(drvSrc));
+
+  // The narration: codes in, sentences out, never model text.
+  const { activityText } = require("../controllers/lessonDocController");
+  ok("a read names the file", /x\.pdf/.test(activityText("read", { name: "x.pdf", pages: "1-3" })));
+  ok("a render says what it measured", /səhifə/.test(activityText("looked", { pages: 2, bands: 0 })));
+  ok("a finding says how many", /2 problem/.test(activityText("finding", { n: 2 })));
+  ok("an unknown code says nothing at all", activityText("whatever", {}) === "");
+  ok("the controller sends them as they happen", /send\("activity", entry\)/.test(ctlSrc));
+  ok("and keeps them on the saved turn", /steps: plan\?\.sections \|\| \[\], activity \}/.test(ctlSrc));
+  ok("the list is bounded", /activity\.length < 80/.test(ctlSrc));
+
+  /*
+   * THE OTHER MODELS: only Claude streamed, so a GPT turn was minutes of
+   * nothing at all. The Responses API streams the tool call's arguments,
+   * which IS the document being written.
+   */
+  const { readResponseStream } = require("../helper/aiDocAdapters");
+  ok("the OpenAI adapter accepts a progress callback", /function openaiAdapter\(\{ model, tools, maxTokens, onText \}\)/.test(adSrc));
+  ok("and asks for a stream when one is listening", /\.\.\.\(live \? \{ stream: true \} : \{\}\)/.test(adSrc));
+  ok("the document path hands it one", /openaiAdapter\(\{ model, tools, maxTokens, onText \}\)/.test(docSrc));
+
+  pending.push(
+    (async () => {
+      const frames = [
+        'event: response.function_call_arguments.delta\ndata: {"item_id":"a","delta":"{\\"html\\":\\"<h1>A<"}\n\n',
+        'event: response.function_call_arguments.delta\ndata: {"item_id":"a","delta":"/h1>\\"}"}\n\n',
+        'event: response.completed\ndata: {"response":{"output":[{"type":"function_call","call_id":"c1","name":"write_material","arguments":"{}"}],"usage":{"input_tokens":5,"output_tokens":6}}}\n\n',
+      ];
+      const all = frames.join("");
+      const body = (async function* gen() {
+        // Cut at 37 bytes: a chunk boundary is not a frame boundary.
+        for (let i = 0; i < all.length; i += 37) yield Buffer.from(all.slice(i, i + 37));
+      })();
+      const snaps = [];
+      const res = await readResponseStream(body, (t) => snaps.push(t), null);
+      ok("a streamed OpenAI turn reports progress as it writes", snaps.length === 2 && snaps[1].includes("</h1>"));
+      ok("and still returns the whole response at the end", res.output[0].call_id === "c1" && res.usage.output_tokens === 6);
+    })()
+  );
+
+  // Progress names the part rather than counting anonymously.
+  const named = S7.makeProgressStreamer()('{"title":"T","reply":"salam","html":"<h1>Çevrə</h1><p>Radius nədir</p>');
+  ok("a finished part carries its tag", named[0].tag === "h1" && named[1].tag === "p");
+  ok("and its own words", named[0].text === "Çevrə" && named[1].text === "Radius nədir");
+  ok("the title and the reply are not read as the document", !named.some((b) => /salam/.test(b.text)));
+}
+
+console.log("\nWhat a turn costs, and why it took sixteen minutes:");
+{
+  const path8 = require("path");
+  const fs8 = require("fs");
+  const ctl = fs8.readFileSync(path8.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  const ad = fs8.readFileSync(path8.join(__dirname, "../helper/aiDocAdapters.js"), "utf8");
+  const doc = fs8.readFileSync(path8.join(__dirname, "../helper/aiDocument.js"), "utf8");
+  const S8 = require("../helper/lessonDocSchema");
+  const { summarizeHtml } = require("../controllers/lessonDocController");
+
+  /*
+   * THE BUG, and it is the reason every material read "0 hissə".
+   *
+   * A `\b` word boundary was written into this regex as a literal BACKSPACE
+   * byte, so it demanded a control character in the middle of HTML and
+   * matched nothing at all. It parsed, it linted, and it printed correctly in
+   * a terminal — a backspace shows as nothing. Only the bytes gave it away.
+   */
+  const real =
+    '<div style="font-family:Georgia"><h1>ÇEVRƏ</h1><p>Mətn</p>' +
+    '<svg><polygon points="0,0"/><circle r="4"/></svg><table><tr><td>a</td></tr></table></div>';
+  ok("a document with parts does not report zero", summarizeHtml(real).blocks > 0);
+  // <h1>, <p>, <table>. Not <tr>, not <td>, and — the point of the boundary —
+  // not <polygon> or <path>, which both begin "<p".
+  ok("it counts the real parts", summarizeHtml(real).blocks === 3, summarizeHtml(real).blocks);
+  ok("and <polygon> is not a paragraph", summarizeHtml("<polygon/><path/>").blocks === 0);
+  ok("one rule, shared with the create-or-edit decision", summarizeHtml(real).blocks === S8.countParts({ html: real }));
+  ok("the controller no longer keeps its own copy of the rule", /blocks: S\.countParts\(\{ html \}\)/.test(ctl));
+
+  // The canary that would have caught it, on every shipping file.
+  const check = fs8.readFileSync(path8.join(__dirname, "../scripts/staticCheck.cjs"), "utf8");
+  ok("the static check refuses a control character in source", /control character \$\{code\} in source/.test(check));
+  {
+    // Prove the canary actually fires, rather than trusting that it is present.
+    const rule = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+    ok("it catches a backspace written into a regex", rule.test("count(/<p\x08/gi)"));
+    ok("it leaves tabs and newlines alone", !rule.test("a\tb\r\nc"));
+  }
+
+  /*
+   * WHERE THE MONEY WENT. The measured turn: 16 minutes, $3.18, 92,721 output
+   * tokens for a document of ~11,800 — the document twice plus ~69,000 tokens
+   * of thinking, all billed at the output rate.
+   */
+  ok("effort is a dial, not a constant", /STUDIO_EFFORT_CREATE/.test(ctl) && /STUDIO_EFFORT_EDIT/.test(ctl));
+  ok("creation no longer thinks at full effort by default", /effortFrom\(process\.env\.STUDIO_EFFORT_CREATE, "medium"\)/.test(ctl));
+  ok("the write pass reads the dial", /effort: hadBlocks \? EFFORT_EDIT : EFFORT_CREATE/.test(ctl));
+  ok("a junk value falls back rather than reaching the provider", /EFFORT\.has\(String\(value \|\| ""\)\)/.test(ctl));
+  ok("the plan pass thinks less than the writing pass", /effort: hadBlocks \? "low" : "medium"/.test(ctl));
+
+  /*
+   * THE CACHE. Rounds are minutes apart, and the default cache lives five
+   * minutes — so the prefix expired between rounds and was re-WRITTEN at
+   * 1.25x instead of read at 0.1x (124,559 cache-write tokens on one turn).
+   */
+  ok("the stable prefix is cached for an hour", /ttl: "1h"/.test(ad));
+  ok("the system block uses it", /cache_control: LONG_LIVED/.test(ad));
+  ok("so do the attached files", /setCache\(history\[users\[0\]\], LONG_LIVED\)/.test(ad));
+  ok("the moving tail keeps the cheap five-minute write", /setCache\(history\[users\[users\.length - 1\]\]\);/.test(ad));
+
+  // The plan pass: the teacher's model, and counted in the bill.
+  ok("the first pass runs on the model the teacher chose", /const usedModel = /.test(doc));
+  ok("it is no longer hard-coded", !/model: "claude-opus-4-8",\n        max_tokens/.test(doc));
+  ok("it is priced at the model it ran on", /computeCost\(message\.usage, usedModel\)/.test(doc));
+  ok("and its cost joins the turn's bill", /sumCost\(out\.cost, planCost\)/.test(ctl));
+  ok("where the minutes went is logged", /turn_done/.test(ctl) && /planMs: t\.planMs/.test(ctl));
 }
 
 console.log("\nA turn is metered (LS-R3-001, owner decision 2026-09-13):");

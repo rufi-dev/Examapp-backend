@@ -137,7 +137,7 @@ async function documentWithTools({
   let adapter;
   if (provider === "openai") {
     if (!process.env.OPENAI_API_KEY) throw docError(503, "OpenAI konfiqurasiya olunmayıb (OPENAI_API_KEY)", true);
-    adapter = openaiAdapter({ model, tools, maxTokens });
+    adapter = openaiAdapter({ model, tools, maxTokens, onText });
   } else if (provider === "gemini") {
     if (!process.env.GEMINI_API_KEY) throw docError(503, "Gemini konfiqurasiya olunmayıb (GEMINI_API_KEY)", true);
     adapter = geminiAdapter({ model, tools, maxTokens });
@@ -342,10 +342,30 @@ function parseDoc(text) {
   return { value: parsed, truncated };
 }
 
-async function documentWithClaude({ prompt, parts = [], system, schema, signal, maxTokens = DOC_MAX_TOKENS, onText }) {
+async function documentWithClaude({
+  prompt,
+  parts = [],
+  system,
+  schema,
+  signal,
+  maxTokens = DOC_MAX_TOKENS,
+  onText,
+  model,
+  effort = "high",
+}) {
   const { claudeContentParts, computeCost } = require("../controllers/aiController");
   const client = anthropic();
   if (!client) throw docError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)", true);
+  /*
+   * The model the caller chose, when it is one of ours to choose.
+   *
+   * This was a constant. The Studio picker offered Opus 5, Fable 5.1 and
+   * Sonnet 5, the write pass ran on the pick, and the plan pass — the "what
+   * did you read, what will you do" call that runs first on every turn — ran
+   * on Opus 4.8 regardless, and was priced as it. The exam paths still call
+   * this with no model or with an OpenAI id, and keep the old default.
+   */
+  const usedModel = /^claude-/.test(String(model || "")) ? model : "claude-opus-4-8";
   let message;
   try {
     /*
@@ -357,10 +377,12 @@ async function documentWithClaude({ prompt, parts = [], system, schema, signal, 
      */
     const run = client.messages.stream(
       {
-        model: "claude-opus-4-8",
+        model: usedModel,
         max_tokens: maxTokens,
         system: [{ type: "text", text: system }],
-        output_config: { effort: "high", format: { type: "json_schema", schema } },
+        // Effort is the caller's: a plan is a short structured answer and does
+        // not need the thinking a document does.
+        output_config: { effort, format: { type: "json_schema", schema } },
         messages: [
           {
             role: "user",
@@ -401,7 +423,7 @@ async function documentWithClaude({ prompt, parts = [], system, schema, signal, 
    * parse that actually needed repair counts.
    */
   const parsed = parseDoc(textBlock?.text);
-  return { doc: parsed.value, truncated: parsed.truncated, cost: computeCost(message.usage), usage: message.usage };
+  return { doc: parsed.value, truncated: parsed.truncated, cost: computeCost(message.usage, usedModel), usage: message.usage };
 }
 
 async function documentWithOpenAI({
@@ -517,7 +539,7 @@ async function documentWithGemini({ prompt, parts = [], system, schema, signal, 
  * for three times); and on an aborted signal throw 499 immediately rather than
  * billing two more providers for output nobody is waiting for.
  */
-async function runDocument({ prompt, parts = [], system, schema, geminiSchema, model, provider, signal, maxTokens, onText }) {
+async function runDocument({ prompt, parts = [], system, schema, geminiSchema, model, provider, signal, maxTokens, onText, effort }) {
   const { findAiModel, DEFAULT_AI_MODEL } = require("../controllers/aiController");
   const picked = findAiModel(String(model || "")) || findAiModel(DEFAULT_AI_MODEL);
   const runners = {
@@ -526,7 +548,8 @@ async function runDocument({ prompt, parts = [], system, schema, geminiSchema, m
     // Only Claude streams today. The others simply do not call back, so a caller
     // sees no per-block progress on a fallback — which is the truth, and better
     // than inventing motion for a request that is not reporting any.
-    claude: () => documentWithClaude({ prompt, parts, system, schema, signal, maxTokens, onText }),
+    claude: () =>
+      documentWithClaude({ prompt, parts, system, schema, signal, maxTokens, onText, model, ...(effort ? { effort } : {}) }),
   };
   const keyFor = {
     openai: process.env.OPENAI_API_KEY,

@@ -104,6 +104,24 @@ const billingError = (provider) => {
 /* ------------------------------------------------------------------ Claude -- */
 
 const EPHEMERAL = { type: "ephemeral" };
+/*
+ * An hour, for the part of the prompt that does not move.
+ *
+ * The default cache lives five minutes. A studio round routinely takes longer
+ * than that — the measured creation spent sixteen minutes over its rounds —
+ * so by the time round three asked for the prefix cached in round two, it had
+ * expired and was written again at 1.25x instead of read at 0.1x. That is
+ * visible in the usage: 124,559 cache-WRITE tokens on a turn that should have
+ * written once and read thereafter.
+ *
+ * A 1h write costs 2x rather than 1.25x and pays for itself on the second
+ * read. It goes on the two breakpoints that never move — the system block and
+ * the attached files — while the growing tail keeps the cheap five-minute
+ * write, because the tail is superseded every round anyway. The API requires
+ * longer-lived breakpoints to come FIRST in the prompt, which is the order
+ * they are in: system, then files, then the tail.
+ */
+const LONG_LIVED = { type: "ephemeral", ttl: "1h" };
 
 /*
  * Cache breakpoints, and why a studio turn cannot afford to skip them.
@@ -133,11 +151,11 @@ const EPHEMERAL = { type: "ephemeral" };
  * cache. That was written when generation was a single call, where a cache write
  * pays for itself never. It predates the tool loop.)
  */
-const setCache = (msg) => {
+const setCache = (msg, control = EPHEMERAL) => {
   const blocks = msg && Array.isArray(msg.content) ? msg.content : null;
   if (!blocks || !blocks.length) return;
   const last = blocks[blocks.length - 1];
-  if (last && typeof last === "object") last.cache_control = EPHEMERAL;
+  if (last && typeof last === "object") last.cache_control = control;
 };
 
 const clearCache = (msg) => {
@@ -156,9 +174,9 @@ const markCachePoints = (history) => {
   const users = [];
   for (let i = 0; i < history.length; i += 1) if (history[i] && history[i].role === "user") users.push(i);
   if (!users.length) return;
-  setCache(history[users[0]]); // the files
+  setCache(history[users[0]], LONG_LIVED); // the files: an hour, they never change
   for (let i = 1; i < users.length - 1; i += 1) clearCache(history[users[i]]);
-  if (users.length > 1) setCache(history[users[users.length - 1]]); // the growing tail
+  if (users.length > 1) setCache(history[users[users.length - 1]]); // the growing tail: 5m
 };
 
 function claudeAdapter({ client, model, tools, maxTokens, onText, effort = "high" }) {
@@ -182,7 +200,7 @@ function claudeAdapter({ client, model, tools, maxTokens, onText, effort = "high
           {
             model,
             max_tokens: maxTokens,
-            system: [{ type: "text", text: system, cache_control: EPHEMERAL }],
+            system: [{ type: "text", text: system, cache_control: LONG_LIVED }],
             /*
              * Creation gets the full effort; an edit does not need to re-reason
              * its way to a document that already exists. Thinking is billed as
@@ -291,7 +309,81 @@ function claudeAdapter({ client, model, tools, maxTokens, onText, effort = "high
 
 /* ------------------------------------------------------------------ OpenAI -- */
 
-function openaiAdapter({ model, tools, maxTokens }) {
+/*
+ * The Responses API, streamed.
+ *
+ * A GPT turn used to be one request that answered when it was finished — for a
+ * long document, minutes of nothing on screen while a Claude turn on the same
+ * task reported every finished part. The stream carries the tool call's
+ * arguments as deltas, which is the document being written; accumulating them
+ * gives the same partial JSON the Claude adapter reads, so the same progress
+ * counter works. The final `response.completed` event carries the full response
+ * object in the non-streamed shape, so nothing downstream changes.
+ *
+ * Exported for its test. Frames are `event:` + `data:` lines ending in a blank
+ * line; a frame may straddle two chunks, so the buffer is cut at blank lines
+ * and never at chunk edges.
+ */
+async function readResponseStream(body, onText, signal) {
+  const args = new Map(); // item_id -> the function-call arguments so far
+  let done = null;
+  let failure = null;
+  const handle = (type, data) => {
+    if (type === "response.function_call_arguments.delta") {
+      const id = String(data.item_id || "");
+      const next = (args.get(id) || "") + String(data.delta || "");
+      args.set(id, next);
+      try {
+        onText(next);
+      } catch {
+        /* progress is decoration; the document is not */
+      }
+    } else if (type === "response.completed" || type === "response.incomplete") {
+      done = data.response || null;
+    } else if (type === "response.failed") {
+      failure = (data.response && data.response.error) || { message: "failed" };
+    } else if (type === "error") {
+      failure = data.error || data;
+    }
+  };
+  const decoder = new TextDecoder();
+  let buf = "";
+  for await (const chunk of body) {
+    if (signal?.aborted) throw docError(499, "Ləğv edildi");
+    buf += decoder.decode(chunk, { stream: true });
+    let cut;
+    while ((cut = buf.indexOf("\n\n")) !== -1) {
+      const frame = buf.slice(0, cut);
+      buf = buf.slice(cut + 2);
+      let type = "";
+      const lines = [];
+      for (const raw of frame.split("\n")) {
+        const line = raw.replace(/\r$/, "");
+        if (line.startsWith("event:")) type = line.slice(6).trim();
+        else if (line.startsWith("data:")) lines.push(line.slice(5).trimStart());
+      }
+      if (!lines.length) continue;
+      const text = lines.join("\n");
+      if (text === "[DONE]") continue;
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        continue;
+      }
+      handle(type || data.type || "", data);
+    }
+  }
+  if (failure) {
+    const e = new Error(String(failure.message || failure.code || "stream failed"));
+    e.code = failure.code;
+    throw e;
+  }
+  if (!done) throw new Error("stream ended without a response");
+  return done;
+}
+
+function openaiAdapter({ model, tools, maxTokens, onText }) {
   const { openaiContentParts, computeOpenAIGenCost } = require("../controllers/aiController");
 
   // The Responses API is the only OpenAI endpoint that takes a PDF, and it is
@@ -313,12 +405,20 @@ function openaiAdapter({ model, tools, maxTokens }) {
     ],
 
     async send(history, { signal }) {
+      // Streamed whenever someone is listening; the plain answer otherwise.
+      const live = typeof onText === "function";
       let r;
       try {
         r = await fetch("https://api.openai.com/v1/responses", {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-          body: JSON.stringify({ model, input: history, tools: declared, max_output_tokens: maxTokens }),
+          body: JSON.stringify({
+            model,
+            input: history,
+            tools: declared,
+            max_output_tokens: maxTokens,
+            ...(live ? { stream: true } : {}),
+          }),
           signal,
         });
       } catch (e) {
@@ -331,7 +431,20 @@ function openaiAdapter({ model, tools, maxTokens }) {
         if (OUT_OF_CREDIT.test(body)) throw billingError("openai");
         throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
       }
-      const data = await r.json().catch(() => null);
+      let data = null;
+      if (live) {
+        try {
+          data = await readResponseStream(r.body, onText, signal);
+        } catch (e) {
+          if (signal?.aborted) throw docError(499, "Ləğv edildi");
+          // By code only: a provider's error text is not ours to log.
+          console.error("AI document tools (openai) stream error:", e?.status || e?.code || "unknown");
+          if (OUT_OF_CREDIT.test(String(e?.message || ""))) throw billingError("openai");
+          throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
+        }
+      } else {
+        data = await r.json().catch(() => null);
+      }
       const output = Array.isArray(data?.output) ? data.output : [];
 
       return {
@@ -554,4 +667,13 @@ const safeJson = (text) => {
   }
 };
 
-module.exports = { claudeAdapter, openaiAdapter, geminiAdapter, docError, OUT_OF_CREDIT, billingError };
+module.exports = {
+  claudeAdapter,
+  openaiAdapter,
+  geminiAdapter,
+  docError,
+  OUT_OF_CREDIT,
+  billingError,
+  sumCost,
+  readResponseStream,
+};

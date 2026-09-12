@@ -104,6 +104,105 @@ const logStudioEvent = (event, e, extra) => {
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /*
+ * The turn, narrated.
+ *
+ * Every line the teacher sees while a turn runs comes from here, from a code
+ * and a few numbers the loop reported — never from model text, and never
+ * from a timer. It is the difference between "Yazıram…" for eleven minutes
+ * and knowing that the model is on its second read of the PDF, that the draft
+ * is being rendered to count its pages, that one table row went back to be
+ * fixed. Returns "" for anything not worth a line.
+ */
+/*
+ * How hard the model thinks, and why this is the cost dial.
+ *
+ * Thinking bills at the OUTPUT rate. Measured on a real creation — copy a
+ * 0.4 MB PDF, 16 minutes, $3.18 — the finished document was ~11,800 tokens
+ * and the turn produced 92,721 output tokens: the document twice over, and
+ * roughly 69,000 tokens of thinking at `high`. On a transcription task that
+ * reasoning buys very little, and the teacher pays $25 per million for it.
+ *
+ * `medium` is the default for both now. It is a dial rather than a constant
+ * because the right setting is a judgement about the work, and the owner can
+ * move it without a deploy: STUDIO_EFFORT_CREATE / STUDIO_EFFORT_EDIT accept
+ * low | medium | high.
+ */
+const EFFORT = new Set(["low", "medium", "high"]);
+const effortFrom = (value, fallback) =>
+  EFFORT.has(String(value || "")) ? String(value) : fallback;
+const EFFORT_CREATE = effortFrom(process.env.STUDIO_EFFORT_CREATE, "medium");
+const EFFORT_EDIT = effortFrom(process.env.STUDIO_EFFORT_EDIT, "medium");
+
+function activityText(kind, d) {
+  const n = Number(d.n) || 0;
+  switch (kind) {
+    case "files":
+      return `Fayllar hazırlanır: ${(d.names || []).join(", ")}`;
+    case "plan":
+      return d.editing
+        ? `${d.model} istəyi oxuyur və addımları planlaşdırır`
+        : `${d.model} mənbələri oxuyur və planı hazırlayır`;
+    case "planned":
+      return (
+        `Plan hazırdır — ${d.steps || 0} addım` +
+        (d.sources ? `, ${d.readable || 0}/${d.sources} mənbə oxundu` : "")
+      );
+    case "plan_failed":
+      return "Plan hazırlanmadı — birbaşa yazılır";
+    case "write":
+      return d.editing
+        ? `${d.model} dəyişikliyi hazırlayır — düşünür`
+        : `${d.model} sənədi yazmağa başlayır — düşünür`;
+    case "round":
+      return (
+        {
+          after_read: "Mənbə alındı — davam edir",
+          after_look: "Görüntüyə baxır və qərar verir",
+          after_finding: "Tapılan problemi düzəldir",
+          after_nudge: "Alət çağırışı gözlənilir",
+          after_settings: "Məzmunu yazmağa keçir",
+          after_refused: "Əlindəki məlumatla davam edir",
+        }[d.reason] || `${d.n || ""}-ci çağırış`
+      );
+    case "read":
+      return `Mənbəni oxumaq istəyir: ${d.name || "fayl"}${d.pages ? `, səh. ${d.pages}` : ""}`;
+    case "served":
+      return d.ok
+        ? `Göndərildi: ${d.name}${d.from ? `, səh. ${d.from}-${d.to}` : ""}${d.total ? ` (cəmi ${d.total} səh.)` : ""}`
+        : `${d.name || "Fayl"}: istənilən səhifə tapılmadı`;
+    case "refused_read":
+      return "Oxu limiti doldu — əlindəki məlumatla yazır";
+    case "wrote": {
+      const c = d.call || {};
+      if (c.name === "edit_material") return `Dəyişiklik gəldi: ${(c.input?.edits || []).length} parça`;
+      return `Sənəd yazıldı: ${S.countParts({ html: c.input?.html || "" })} hissə`;
+    }
+    case "settings":
+      return "Çap parametrləri dəyişdirilir";
+    case "settings_only":
+      return "Yalnız parametr dəyişdi, məzmun yazılmadı — modelə bildirildi";
+    case "asked":
+      return "Sual verir — cavabınızı gözləyəcək";
+    case "nudge":
+      return "Model mətni təsvir etdi, aləti çağırmadı — yenidən istənildi";
+    case "look":
+      return "Görünüş yoxlanılır — sənəd Chromium ilə PDF-ə çevrilir";
+    case "looked":
+      return d.pages
+        ? `PDF-də ${d.pages} səhifə çıxır${d.bands ? " — görüntü modelə göndərildi" : " — say modelə bildirildi"}`
+        : "Görüntü modelə göndərildi";
+    case "finding":
+      return `Yoxlamada ${n} problem tapıldı — düzəliş üçün modelə göndərildi`;
+    case "agree":
+      return "Model təsdiqlədi — dəyişiklik lazım deyil";
+    case "unresolved":
+      return `${n} problem həll olunmadı — sənəd olduğu kimi saxlanılır`;
+    default:
+      return "";
+  }
+}
+
+/*
  * Debit the turn, exactly once, and say so on the stream.
  *
  * `usable()` is the one-shot the meter hands out; calling it twice is safe.
@@ -133,6 +232,34 @@ const chargeTurn = (req, send) => {
 const logStudioUsage = async (req, { doc, out, hadBlocks }) => {
   const AiUsage = require("../models/aiUsageModel");
   const c = (out && out.cost) || {};
+  /*
+   * Where the minutes went, by code and by number only.
+   *
+   * "It is very slow" had no answer until this line existed: nothing recorded
+   * how long the plan took against the writing, how many provider rounds a
+   * turn made, whether it read a source or looked at its render, or whether
+   * the cache was hit. One line per finished turn, no text from anyone.
+   */
+  const t = (out && out.timing) || {};
+  console.log(
+    "[LESSON DOC] turn_done",
+    JSON.stringify({
+      op: hadBlocks ? "edit" : "generate",
+      model: c.model || (out && out.provider) || "unknown",
+      planMs: t.planMs || 0,
+      writeMs: t.writeMs || 0,
+      rounds: t.rounds || 0,
+      reads: t.reads || 0,
+      looked: Boolean(t.looked),
+      fixes: t.fixes || 0,
+      in: c.inputTokens || 0,
+      out: c.outputTokens || 0,
+      cacheRead: c.cacheReadTokens || 0,
+      cacheWrite: c.cacheWriteTokens || 0,
+      usd: c.usd || 0,
+      parts: S.countParts(doc),
+    })
+  );
   const row = {
     user: req.user._id,
     operation: hadBlocks ? "ai.edit.material" : "ai.generate.material",
@@ -216,12 +343,28 @@ async function commitTurn(doc, baseRevision, { next, out, hadBlocks, sum, reply,
  * wrote itself. Counting the rendered structure keeps the chips honest — a
  * teacher reading "12 nümunə" should be able to find twelve of them.
  */
+/*
+ * What the document is made of, for the receipt and the library card.
+ *
+ * `blocks` is NOT counted here any more. It was — with its own copy of the
+ * "what is a part" regex, and that copy is how this broke: a `\b` word
+ * boundary went into the file as a literal BACKSPACE byte (0x08), so the
+ * pattern demanded a control character after every tag name and matched
+ * nothing. Every material committed since read `0 hissə` on its receipt and
+ * `0` on its card while holding a hundred parts, and nothing failed loudly
+ * enough to say so. Two copies of one rule, and only one of them rotted.
+ *
+ * So there is one rule now, in lessonDocSchema, and both callers use it —
+ * this and `hadBlocks`, which decides whether a turn is a creation or an
+ * edit. A canary in scripts/staticCheck.cjs refuses any shipping file that
+ * contains a control character, so the class of fault cannot return silently.
+ */
 function summarizeHtml(html) {
   const count = (re) => (String(html).match(re) || []).length;
   return {
-    blocks: count(/<(h[1-4]|p|ul|ol|table|figure|blockquote)/gi),
-    examples: count(/class="[^"]*ex/gi),
-    tasks: count(/class="[^"]*task/gi),
+    blocks: S.countParts({ html }),
+    examples: count(/class="[^"]*\bex\b/gi),
+    tasks: count(/class="[^"]*\btask\b/gi),
   };
 }
 
@@ -637,6 +780,25 @@ const streamMessage = asyncHandler(async (req, res) => {
   // Committed with the turn rather than on their own, so a document never gains
   // notes about a turn that failed before it wrote anything.
   let notesToKeep = null;
+  /*
+   * What the turn is doing, as it does it — sent live and kept on the message.
+   *
+   * The plan used to be shown once and then nothing moved until the document
+   * landed. Each line here is a fact the loop reported (see aiDocDrivers
+   * onEvent) turned into a sentence; the client shows the newest as the live
+   * line and the whole list in the work log, and the list is stored with the
+   * turn so "what did it do?" has an answer later. Capped so a runaway loop
+   * cannot grow a message without bound.
+   */
+  const modelLabel = (S.DOC_MODELS.find((m) => m.id === model) || {}).label || model;
+  const activity = [];
+  const report = (kind, data) => {
+    const text = activityText(kind, data || {});
+    if (!text) return;
+    const entry = { kind, text, at: Date.now() };
+    if (activity.length < 80) activity.push(entry);
+    send("activity", entry);
+  };
 
   try {
     /*
@@ -648,6 +810,7 @@ const streamMessage = asyncHandler(async (req, res) => {
      */
     assertSourcesReadable(sending, parts, unreadable);
     if (unreadable.length) send("source_warning", { unreadable });
+    if (sending.length) report("files", { names: sending.map((f) => f.name) });
 
     /*
      * ---- phase 1: what are we about to do? ---------------------------------
@@ -659,6 +822,11 @@ const streamMessage = asyncHandler(async (req, res) => {
      * what are you about to do to my document.
      */
     send("phase", { phase: "plan", editing: hadBlocks });
+    report("plan", { model: modelLabel, editing: hadBlocks });
+    // Where the minutes go, measured — see turn_done in logStudioUsage.
+    const t0 = Date.now();
+    let planMs = 0;
+    let planCost = null;
     try {
       const p = await runDocument({
         ...S.buildPlanPrompt({ doc: doc.toObject(), instructions: text, editing: hadBlocks }),
@@ -671,8 +839,24 @@ const streamMessage = asyncHandler(async (req, res) => {
         model,
         provider: S.providerOf(model),
         signal: ac.signal,
+        /*
+         * A plan is a short structured answer — a title, a few headings, a
+         * sentence per source — and it was thinking at full effort over the
+         * whole attachment before the real work had started. Reading a file
+         * is perception, not reasoning; the outline of a creation gets a
+         * little thought because the writing pass is held to it, and the
+         * steps of an edit get the least.
+         */
+        effort: hadBlocks ? "low" : "medium",
       });
+      planMs = Date.now() - t0;
+      planCost = p.cost || null;
       plan = S.normalizePlan(p.doc || {});
+      report("planned", {
+        steps: plan.sections.length,
+        sources: plan.sources.length,
+        readable: plan.sources.filter((x) => x && x.readable).length,
+      });
       /*
        * What it read, before what it intends to write.
        *
@@ -718,6 +902,7 @@ const streamMessage = asyncHandler(async (req, res) => {
       }
       if (plan.sections.length) send("plan", { ...plan, editing: hadBlocks });
     } catch (e) {
+      planMs = Date.now() - t0;
       // A stop must stop the TURN, not just this one call — swallowing it here
       // would run the far more expensive write pass anyway, right after the
       // teacher asked to cancel.
@@ -732,10 +917,12 @@ const streamMessage = asyncHandler(async (req, res) => {
       plan = null;
       logStudioEvent("plan_pass_failed", e);
       send("planning_degraded", { message: "Plan hazırlanmadı — birbaşa yazıram." });
+      report("plan_failed");
     }
 
     // ---- phase 2: write it, reporting each block -----------------------------
     send("phase", { phase: "write", sections: plan?.sections?.length || 0 });
+    report("write", { model: modelLabel, editing: hadBlocks });
 
     /*
      * Did a file arrive WITH this message? That is the teacher pointing at it,
@@ -808,7 +995,9 @@ ${S.SOURCE_RULES}`;
      * lesson, and why a print change is instant instead of a full rewrite that
      * might mangle the document on the way past.
      */
+    const t1 = Date.now();
     const out = await runTools({
+      onEvent: report,
       system: base.system,
       prompt,
       parts,
@@ -834,7 +1023,7 @@ ${S.SOURCE_RULES}`;
        * instruction against a long document, and the cheap setting is the one
        * that produces a plausible-looking wrong answer on those.
        */
-      effort: hadBlocks ? "medium" : "high",
+      effort: hadBlocks ? EFFORT_EDIT : EFFORT_CREATE,
       /*
        * Checked before it is accepted, not asked for in the brief.
        *
@@ -845,7 +1034,7 @@ ${S.SOURCE_RULES}`;
        * not happen in. The finding goes back to the model as a tool error while
        * the source is still in front of it.
        */
-      validate: (name, input) => {
+      validate: (name, input, draft) => {
         /*
          * A patch that does not apply, reported rather than guessed at.
          *
@@ -858,7 +1047,10 @@ ${S.SOURCE_RULES}`;
          * rewrites the model's work; it states a fact about it.
          */
         if (name === "edit_material") {
-          const r = applyEdits(doc.html || "", input.edits);
+          // Against the DRAFT when the turn has one: a patch in round three
+          // applies to what round two left, not to the document the turn began
+          // on — and on a creation, to the page the model just wrote.
+          const r = applyEdits(draft || doc.html || "", input.edits);
           if (r.problems.length) return r.problems.join("\n");
           // The patched document still has to survive the same checks a written
           // one does — a valid patch can still produce a broken table.
@@ -992,6 +1184,9 @@ ${S.SOURCE_RULES}`;
         return {
           name: hit.name,
           part: got.part,
+          // For the report: which pages went, out of how many.
+          served: got.served || null,
+          total: got.total || 0,
           note:
             served +
             total +
@@ -1006,16 +1201,25 @@ ${S.SOURCE_RULES}`;
        * patch applied — computed here because the loop has no idea what the
        * current document is.
        */
-      htmlOf: (c) => {
+      htmlOf: (c, draft) => {
         if (!c) return "";
         if (c.name === "write_material") return c.input?.html || "";
         if (c.name === "edit_material") {
-          const r = applyEdits(doc.html || "", c.input?.edits);
+          const r = applyEdits(draft || doc.html || "", c.input?.edits);
           return r.problems.length ? "" : r.html;
         }
         return "";
       },
     });
+    /*
+     * The plan pass is part of the turn's bill. It never was: the usage row
+     * carried the tool loop alone, so a turn's recorded cost was short by a
+     * full read of every attachment — on a first-read turn, the second most
+     * expensive call it makes. The budget guard reads these rows; a cost it
+     * cannot see is a cost it cannot cap.
+     */
+    out.cost = require("../helper/aiDocAdapters").sumCost(out.cost, planCost);
+    out.timing = { planMs, writeMs: Date.now() - t1, ...(out.stats || {}) };
 
     /*
      * Two tools, one commit path.
@@ -1035,7 +1239,23 @@ ${S.SOURCE_RULES}`;
     const patch = out.calls.find((c) => c.name === "edit_material");
     let wrote = out.calls.find((c) => c.name === "write_material");
     let patchedCount = 0;
-    if (!wrote && patch) {
+    if (out.document && out.document.html) {
+      /*
+       * What the loop ended on, not what its last round said.
+       *
+       * The final round may be a sentence — "the render matches" — or a patch
+       * made against a draft two rounds old. The loop resolved every patch
+       * against the draft as it went and hands back the document that
+       * resulted; reading the last round's calls alone would drop a patch made
+       * in an earlier round, or apply this one to the wrong base.
+       */
+      const by = out.document.call || {};
+      patchedCount = by.name === "edit_material" ? (by.input?.edits || []).length : 0;
+      wrote = {
+        name: "write_material",
+        input: { html: out.document.html, reply: by.input?.reply || "", title: by.input?.title || "" },
+      };
+    } else if (!wrote && patch) {
       const r = applyEdits(doc.html || "", patch.input?.edits);
       if (!r.problems.length) {
         patchedCount = r.applied;
@@ -1181,8 +1401,8 @@ ${S.SOURCE_RULES}`;
             text: wrote.input.reply || (hadBlocks ? "Dəyişdirildi." : "Material hazırdır."),
             action: hadBlocks ? "edited" : "created",
             stats: sum,
-            ...(plan && (plan.sources?.length || plan.sections?.length)
-              ? { work: { sources: plan.sources || [], steps: plan.sections || [] } }
+            ...(plan?.sources?.length || plan?.sections?.length || activity.length
+              ? { work: { sources: plan?.sources || [], steps: plan?.sections || [], activity } }
               : {}),
             at: new Date(),
           },
@@ -1554,6 +1774,10 @@ const exportDoc = asyncHandler(async (req, res) => {
 });
 
 module.exports = { listDocs, createDoc, getDoc, streamMessage, addFile, getFile, removeFile, updateDoc, removeDoc, exportDoc, publicFailure, logStudioEvent };
+// Exported for their tests: the narration a teacher reads while a turn runs,
+// and the count that says how much of a document there is.
+module.exports.activityText = activityText;
+module.exports.summarizeHtml = summarizeHtml;
 // Exported for the redaction test: the funnel that decides what a teacher is
 // allowed to see is worth asserting on directly, not only through a live stream.
 module.exports.publicFailure = publicFailure;

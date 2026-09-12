@@ -107,6 +107,16 @@ const PRODUCT_UPDATES = [
       "Studiyada material yaratmaq 6, dəyişmək 2 kredit sərf edir — eyni kreditlər, yuxarıdakı balansdan. Qiymət düymənin üstündə yazılır; kredit çatmırsa heç nə başlamır və heç nə sərf olunmur.",
     where: "Dərs studiyası → göndər düyməsi · Planım → AI kredit sərfi",
     scene: "studioCredits",
+  },
+  {
+    id: "studio-live-progress",
+    publishedAt: "2026-09-12",
+    kind: "improvement",
+    title: "Studiya nə etdiyini canlı göstərir",
+    summary:
+      "İndi hər addım göründüyü kimi yazılır: hansı faylı oxuyur, neçənci səhifəni aldı, sənədi yoxlamaq üçün PDF-ə çevirir, nəyi düzəldir. Həm də daha sürətli və daha ucuz — düzəliş üçün bütün sənəd yenidən yazılmır, yalnız dəyişən hissə.",
+    where: "Dərs studiyası → «Nə etdiyimi göstər»",
+    scene: "studioLive",
   }
 ];
 

@@ -39,6 +39,28 @@ for (const file of files) {
   if (/^(?:<{7}|={7}|>{7})/m.test(source)) {
     failures.push(`${path.relative(root, file)}: conflict marker`);
   }
+  /*
+   * A control character in source is always an accident, and a silent one.
+   *
+   * One got into a regex — `\b` written as a literal BACKSPACE (0x08) — and
+   * the pattern then required a control character in the middle of HTML, so
+   * it matched nothing at all. Every lesson material reported "0 parts" for
+   * days. It parses, it lints, it reads correctly in an editor and in a
+   * terminal, because a backspace prints as nothing. Only the bytes show it.
+   *
+   * Tab, newline and carriage return are legitimate; nothing else is.
+   */
+  // eslint-disable-next-line no-control-regex
+  const control = source.match(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/);
+  if (control) {
+    const at = source.indexOf(control[0]);
+    const line = source.slice(0, at).split(/\r?\n/).length;
+    const code = `0x${control[0].charCodeAt(0).toString(16).padStart(2, "0")}`;
+    failures.push(
+      `${path.relative(root, file)}:${line}: control character ${code} in source — ` +
+        `an escape (\\b, \\0, \\f) was written as the character itself`
+    );
+  }
   const checked = spawnSync(process.execPath, ["--check", file], {
     cwd: root,
     encoding: "utf8",

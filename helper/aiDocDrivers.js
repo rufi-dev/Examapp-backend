@@ -54,9 +54,29 @@ async function runToolLoop(adapter, opts) {
       ? opts.htmlOf
       : (c) => (c && c.name === "write_material" ? c.input?.html || "" : "");
 
+  /*
+   * The document as it stands INSIDE this turn.
+   *
+   * A turn is several rounds, and the document changes between them: the
+   * model writes it, is shown a render, patches it, is told about a short
+   * table row, patches it again. Every round used to resolve a patch against
+   * the document the turn STARTED from, so a second patch in one turn was
+   * applied to the original and the first patch was thrown away — and on a
+   * creation there was no document at all to patch, so the only fix the model
+   * could make after seeing its own draft was to type the whole thing again.
+   * Measured on one real creation: 64,100 output tokens for a 145-part
+   * document, most of it the same document re-emitted, and twenty-one minutes.
+   *
+   * The draft is what the last producing call left behind, and every callback
+   * that resolves a patch gets it, so `edit_material` applies to what the
+   * model just wrote.
+   */
+  let draft = "";
+  let producedBy = null;
+
   const documentCall = (list) => {
     for (const c of list) {
-      const html = htmlOf(c);
+      const html = htmlOf(c, draft);
       if (html) return { call: c, html };
     }
     return null;
@@ -70,6 +90,28 @@ async function runToolLoop(adapter, opts) {
 
   let reads = 0;
   let looked = false;
+  // How the turn went, for the timing line the controller logs: rounds are
+  // provider calls, fixes are rounds spent answering a finding.
+  let rounds = 0;
+  let fixes = 0;
+  /*
+   * Progress, as it happens. The caller turns these into sentences for the
+   * teacher: which source is being read, that the draft is being rendered,
+   * that a finding went back. A turn used to be a single "Yazıram…" for its
+   * whole length; nothing said which of its several rounds it was in.
+   */
+  const emit =
+    typeof opts.onEvent === "function"
+      ? (k, d) => {
+          try {
+            opts.onEvent(k, d || {});
+          } catch {
+            /* reporting must never break the turn it reports on */
+          }
+        }
+      : () => {};
+  // Why the next round is happening, named for the report.
+  let reason = "start";
   let usage = { input_tokens: 0, output_tokens: 0 };
   /*
    * The turn's spend, as a breakdown rather than a scalar.
@@ -98,8 +140,16 @@ async function runToolLoop(adapter, opts) {
   const history = adapter.start(opts);
 
   for (let attempt = 0; ; attempt += 1) {
+    if (rounds > 0) emit("round", { n: rounds + 1, reason });
     // eslint-disable-next-line no-await-in-loop
     const turn = await adapter.send(history, opts);
+    rounds += 1;
+    for (const c of turn.calls || []) {
+      if (c.name === "read_source") emit("read", { name: String(c.input?.name || ""), pages: c.input?.pages });
+      else if (c.name === "write_material" || c.name === "edit_material") emit("wrote", { tool: c.name, call: c });
+      else if (c.name === "set_print_options") emit("settings");
+      else if (c.name === "ask_teacher") emit("asked");
+    }
 
     usage = {
       input_tokens: (usage.input_tokens || 0) + (turn.usage?.input_tokens || 0),
@@ -123,6 +173,7 @@ async function runToolLoop(adapter, opts) {
        */
       calls = lastWork.calls;
       said = said || lastWork.said;
+      emit("agree");
       break;
     }
 
@@ -150,6 +201,8 @@ async function runToolLoop(adapter, opts) {
         "Sən sənədi yazdığını dedin, amma heç bir alət çağırmadın — material hələ boşdur. " +
           "Mətni write_material aləti ilə göndər: cavab yazmaq sənədi yaratmır."
       );
+      emit("nudge");
+      reason = "after_nudge";
       // eslint-disable-next-line no-continue
       continue;
     }
@@ -181,6 +234,8 @@ async function runToolLoop(adapter, opts) {
         })),
         {}
       );
+      emit("refused_read");
+      reason = "after_refused";
       // Not a failed attempt on its part: it asked a fair question and we said no.
       attempt -= 1;
       // eslint-disable-next-line no-continue
@@ -214,8 +269,16 @@ async function runToolLoop(adapter, opts) {
             : `"${c.input?.name}" tapılmadı. Mövcud faylların adlarını promptdakı siyahıdan götür.`,
         });
         if (found && found.part) files.push(found.part);
+        emit("served", {
+          name: found ? found.name : String(c.input?.name || ""),
+          ok: Boolean(found && found.part && found.isError !== true),
+          from: found?.served?.from,
+          to: found?.served?.to,
+          total: found?.total || 0,
+        });
       }
       adapter.reply(history, turn, results, { parts: files });
+      reason = "after_read";
       attempt -= 1; // a fetch is not a failed attempt
       // eslint-disable-next-line no-continue
       continue;
@@ -255,18 +318,35 @@ async function runToolLoop(adapter, opts) {
           })),
         {}
       );
+      emit("settings_only");
+      reason = "after_settings";
       // eslint-disable-next-line no-continue
       continue;
     }
 
     // Findings: things that can be shown to be wrong without seeing the source.
     const faults = typeof validate === "function"
-      ? calls.map((c) => ({ call: c, why: validate(c.name, c.input || {}) })).filter((f) => f.why)
+      ? calls.map((c) => ({ call: c, why: validate(c.name, c.input || {}, draft) })).filter((f) => f.why)
       : [];
 
     // Whichever tool produced it, and the document it produced.
     const produced = documentCall(calls);
     const wrote = produced ? produced.call : null;
+    /*
+     * A document with a finding against it still becomes the draft.
+     *
+     * It is tempting to refuse a draft that failed a check, and it is wrong:
+     * the model's next move is a PATCH to exactly that document, so refusing
+     * it leaves the patch applying to the previous draft — on a creation, to
+     * nothing at all — and the fix silently misses. The finding is not a
+     * reason to forget what was written; it is a reason to change it. A patch
+     * that cannot be applied never gets here: `htmlOf` returns nothing for it,
+     * so `produced` is null and the draft stands.
+     */
+    if (produced) {
+      draft = produced.html;
+      producedBy = produced.call;
+    }
 
     /*
      * The picture and the arithmetic. Every other check here is arithmetic on the
@@ -279,6 +359,7 @@ async function runToolLoop(adapter, opts) {
       // The document as it will STAND, not as the call spelled it: for a patch
       // edit the call carries only the changed fragments, and reviewing those
       // would be reviewing the diff instead of the page.
+      emit("look");
       const seen = await look(produced.html);
       const shots = seen?.shots || [];
       const pages = seen?.pages || 0;
@@ -292,6 +373,8 @@ async function runToolLoop(adapter, opts) {
        */
       if (shots.length || pages) {
         looked = true;
+        emit("looked", { pages, bands: shots.length });
+        reason = "after_look";
         adapter.reply(
           history,
           turn,
@@ -313,14 +396,59 @@ async function runToolLoop(adapter, opts) {
        */
       unresolved = faults.map((f) => f.why);
       if (unresolved.length) console.error("[LESSON DOC] unresolved after retries:", unresolved[0].split("\n")[0]);
+      if (unresolved.length) emit("unresolved", { n: unresolved.length });
       break;
     }
 
-    adapter.reply(history, turn, faults.map((f) => ({ call: f.call, isError: true, text: f.why })), {});
+    fixes += 1;
+    emit("finding", { n: faults.length });
+    reason = "after_finding";
+    /*
+     * A finding against a document that exists in this turn is answered with a
+     * patch, not a rewrite. Said here, at the moment it matters, because the
+     * model that just wrote 20,000 tokens of HTML does not know the loop can
+     * apply a find/replace to them — it only knows the document it was asked
+     * to change does not exist yet.
+     */
+    const patchHint = draft ? `\n\n${PATCH_HINT}` : "";
+    adapter.reply(
+      history,
+      turn,
+      faults.map((f) => ({ call: f.call, isError: true, text: f.why + (f.call === wrote ? patchHint : "") })),
+      {}
+    );
   }
 
-  return { calls, said, cost, usage, unresolved, provider: adapter.name };
+  return {
+    calls,
+    said,
+    cost,
+    usage,
+    unresolved,
+    provider: adapter.name,
+    /*
+     * The document the turn ended on, whichever call produced it and however
+     * many patches followed. The caller commits THIS; reading the last round's
+     * calls alone would miss a patch made in an earlier round, or resolve a
+     * later patch against the wrong base.
+     */
+    document: draft ? { html: draft, call: producedBy } : null,
+    stats: { rounds, reads, looked, fixes },
+  };
 }
+
+/*
+ * How to answer a finding about the draft: change the part, not the page.
+ *
+ * `edit_material` was written for a document that already exists on disk, and
+ * its description says so — which left a model in the middle of a creation with
+ * no way to fix one row except by re-sending every row. It applies to the draft
+ * of this turn too, and this is how the model is told.
+ */
+const PATCH_HINT =
+  "Düzəlişi edit_material ilə göndər — yalnız dəyişən parçaları (find/replace); " +
+  "o, indi yazdığın mətnə tətbiq olunur. Bütün sənədi write_material ilə yenidən yazma — " +
+  "yalnız sənədin quruluşu bütövlükdə dəyişməlidirsə.";
 
 const lookNote = (bands, map, pages) =>
   [
@@ -335,10 +463,19 @@ const lookNote = (bands, map, pages) =>
     "\nDiqqət: geniş görünən xana geniş olmaya bilər — mətn uzun olduğu üçün sütun uzanır.",
     "Blokların hansı sütunlarda olduğunu yuxarıdakı siyahıdan yoxla və başlıq sətrindəki",
     "tarixlərlə tutuşdur.",
-    "\nFərq varsa write_material-ı düzəldilmiş HTML ilə yenidən çağır.",
-    "Hər şey uyğundursa eyni HTML-i yenidən göndər.",
+    /*
+     * This used to end "if everything matches, send the same HTML again" — an
+     * instruction to re-emit the entire document, at output price and output
+     * speed, to say nothing had changed. Agreement is a sentence. A difference
+     * is a patch. The whole page is rewritten only when its structure is wrong.
+     */
+    "\nFərq varsa: yalnız dəyişən parçaları edit_material ilə düzəlt (find/replace) —",
+    "o, indi yazdığın mətnə tətbiq olunur. Sənədin QURULUŞU bütövlükdə səhvdirsə,",
+    "yalnız onda write_material ilə yenidən yaz.",
+    "Hər şey uyğundursa HEÇ BİR alət çağırma — bir cümlə ilə uyğun olduğunu yaz.",
+    "Eyni HTML-i yenidən göndərmə.",
   ]
     .filter(Boolean)
     .join("\n");
 
-module.exports = { runToolLoop, lookNote, DEFAULT_MAX_FIXES, DEFAULT_MAX_READS };
+module.exports = { runToolLoop, lookNote, PATCH_HINT, DEFAULT_MAX_FIXES, DEFAULT_MAX_READS };
