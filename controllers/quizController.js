@@ -4394,7 +4394,10 @@ const EXPL_MAX_PTS_PER_MARK = 2000;
 const EXPL_MAX_TOTAL_PTS = 40000;
 const EXPL_MAX_TEXT = 500;
 const EXPL_COLOUR = /^#[0-9a-f]{3,8}$/i;
-const EXPL_SHAPES = new Set(["rect", "ellipse", "arrow", "line"]);
+// "poly" carries its own point list: a triangle, diamond or hexagon that
+// "Çək və saxla" tidied up from a hand-drawn stroke.
+const EXPL_SHAPES = new Set(["rect", "ellipse", "arrow", "line", "poly"]);
+const EXPL_MAX_POLY_PTS = 64;
 const EXPL_PENS = new Set(["fountain", "ball", "brush"]);
 
 const num = (v, lo, hi, dflt) => {
@@ -4462,6 +4465,18 @@ function sanitizeExplanationMarks(raw) {
         size: num(m.size, 8, 96, 18),
         text,
       });
+    } else if (m.kind === "shape" && m.shape === "poly") {
+      const pts = [];
+      for (const p of Array.isArray(m.pts) ? m.pts.slice(0, EXPL_MAX_POLY_PTS) : []) {
+        if (!p || typeof p !== "object") continue;
+        const x = Number(p.x);
+        const y = Number(p.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        pts.push({ x: Math.round(num(x, -1e5, 1e5, 0) * 10) / 10, y: Math.round(num(y, -1e5, 1e5, 0) * 10) / 10 });
+      }
+      // Fewer than three corners is not a polygon; dropping it beats storing
+      // something the renderer would silently skip.
+      if (pts.length >= 3) out.push({ kind: "shape", shape: "poly", colour, width, alpha, pts });
     } else if (m.kind === "shape" && EXPL_SHAPES.has(m.shape)) {
       out.push({
         kind: "shape",
