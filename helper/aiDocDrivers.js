@@ -37,6 +37,34 @@ const DEFAULT_MAX_READS = 4;
  */
 async function runToolLoop(adapter, opts) {
   const { validate, fetchSource, look, gridOf, signal, needsDocument } = opts;
+
+  /*
+   * Which call produced a document, and what its HTML is.
+   *
+   * There are now two ways to produce one: `write_material` carries the whole
+   * document in its input, and `edit_material` carries only the parts that
+   * changed — the caller has to apply those to the document it holds, which is
+   * why this is a callback rather than a field read. Everything downstream (the
+   * render check, the grid map, the "it described the work instead of doing it"
+   * guards) only cares THAT a document was produced and what it says, so asking
+   * once here keeps all of them working for both tools.
+   */
+  const htmlOf =
+    typeof opts.htmlOf === "function"
+      ? opts.htmlOf
+      : (c) => (c && c.name === "write_material" ? c.input?.html || "" : "");
+
+  const documentCall = (list) => {
+    for (const c of list) {
+      const html = htmlOf(c);
+      if (html) return { call: c, html };
+    }
+    return null;
+  };
+
+  // A turn that produced a document is not a turn that only fetched or fiddled
+  // with settings, whichever tool it used to do it.
+  const madeDocument = (list) => list.some((c) => c.name === "write_material" || c.name === "edit_material");
   const MAX_FIXES = opts.maxFixes || DEFAULT_MAX_FIXES;
   const MAX_READS = opts.maxReads || DEFAULT_MAX_READS;
 
@@ -142,7 +170,7 @@ async function runToolLoop(adapter, opts) {
      * document and the teacher would be told the answer could not be read, over
      * a request that was perfectly reasonable.
      */
-    if (!wants.length && asked.length && !calls.some((c) => c.name === "write_material")) {
+    if (!wants.length && asked.length && !madeDocument(calls)) {
       adapter.reply(
         history,
         turn,
@@ -164,16 +192,28 @@ async function runToolLoop(adapter, opts) {
       const files = [];
       for (const c of wants) {
         reads += 1;
+        /*
+         * The page request goes with the name. A turn that needs three pages of
+         * a twelve-page test bank should be sent three, and the fetcher reports
+         * back WHICH pages it served and how many the file has — the request and
+         * the answer are allowed to differ (a scan numbered by its printed pages
+         * does not line up with its file positions), and the model can only
+         * correct for that if it is told.
+         */
         // eslint-disable-next-line no-await-in-loop
-        const found = await fetchSource(String(c.input?.name || ""));
+        const found = await fetchSource(String(c.input?.name || ""), c.input?.pages);
         results.push({
           call: c,
-          isError: !found,
+          // A fetch can succeed at finding the file and still fail to answer the
+          // request — "page 22 of a 12-page file". That has to reach the model as
+          // an error, or it reads the note as a delivery and carries on without
+          // the pages it asked for.
+          isError: !found || found.isError === true,
           text: found
-            ? `"${found.name}" aşağıda göndərildi.`
+            ? found.note || `"${found.name}" aşağıda göndərildi.`
             : `"${c.input?.name}" tapılmadı. Mövcud faylların adlarını promptdakı siyahıdan götür.`,
         });
-        if (found) files.push(found.part);
+        if (found && found.part) files.push(found.part);
       }
       adapter.reply(history, turn, results, { parts: files });
       attempt -= 1; // a fetch is not a failed attempt
@@ -197,7 +237,7 @@ async function runToolLoop(adapter, opts) {
      */
     if (
       needsDocument &&
-      !calls.some((c) => c.name === "write_material") &&
+      !madeDocument(calls) &&
       calls.some((c) => c.name === "set_print_options") &&
       attempt < MAX_FIXES
     ) {
@@ -224,7 +264,9 @@ async function runToolLoop(adapter, opts) {
       ? calls.map((c) => ({ call: c, why: validate(c.name, c.input || {}) })).filter((f) => f.why)
       : [];
 
-    const wrote = calls.find((c) => c.name === "write_material");
+    // Whichever tool produced it, and the document it produced.
+    const produced = documentCall(calls);
+    const wrote = produced ? produced.call : null;
 
     /*
      * The picture and the arithmetic. Every other check here is arithmetic on the
@@ -234,10 +276,13 @@ async function runToolLoop(adapter, opts) {
      */
     if (!faults.length && typeof look === "function" && !looked && wrote && attempt < MAX_FIXES) {
       // eslint-disable-next-line no-await-in-loop
-      const seen = await look(wrote.input?.html || "");
+      // The document as it will STAND, not as the call spelled it: for a patch
+      // edit the call carries only the changed fragments, and reviewing those
+      // would be reviewing the diff instead of the page.
+      const seen = await look(produced.html);
       const shots = seen?.shots || [];
       const pages = seen?.pages || 0;
-      const map = typeof gridOf === "function" ? gridOf(wrote.input?.html || "") : "";
+      const map = typeof gridOf === "function" ? gridOf(produced.html) : "";
       /*
        * A page count alone is worth a round even with no pictures. Asked for two
        * pages a model writes what feels like two and produces five, because it

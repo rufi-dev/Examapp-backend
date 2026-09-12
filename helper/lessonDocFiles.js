@@ -239,6 +239,180 @@ async function saveFile({ buffer, mime, name }) {
 }
 
 /*
+ * How many pages a PDF has, so a page request can be answered or corrected.
+ *
+ * Ghostscript is already the tool of record here and this costs a fraction of a
+ * second, but it is cached anyway: the count never changes for a content-hashed
+ * file, and it is asked for on every read.
+ */
+const pageCounts = new Map();
+
+async function pageCountOf(srcPath, key) {
+  if (key && pageCounts.has(key)) return pageCounts.get(key);
+  const { execFile } = require("child_process");
+  const n = await new Promise((resolve) => {
+    execFile(
+      "gs",
+      ["-q", "-dNODISPLAY", "-dNOSAFER", "-c", `(${srcPath}) (r) file runpdfbegin pdfpagecount = quit`],
+      { timeout: 60000, maxBuffer: 1 << 16 },
+      (err, stdout) => resolve(err ? 0 : Number(String(stdout).trim()) || 0)
+    );
+  });
+  if (key && n > 0) pageCounts.set(key, n);
+  return n;
+}
+
+/*
+ * Parse a page request the way a person writes one: "3", "22-24", "1,4,7-9".
+ *
+ * Returns a normalised, de-duplicated, ascending list, or null when there is
+ * nothing to parse. Deliberately forgiving about spacing and about a reversed
+ * range ("24-22"), because the alternative is refusing a request whose meaning
+ * is obvious. Out-of-range numbers are NOT silently dropped here — the caller
+ * needs to know it was asked for a page that does not exist, so it can say the
+ * page count back and let the model correct itself.
+ */
+function parsePages(spec) {
+  const raw = String(spec == null ? "" : spec).trim();
+  if (!raw) return null;
+  const out = new Set();
+  for (const chunk of raw.split(/[,;\s]+/).filter(Boolean)) {
+    const range = chunk.match(/^(\d{1,4})\s*[-–—:]\s*(\d{1,4})$/);
+    if (range) {
+      let a = Number(range[1]);
+      let b = Number(range[2]);
+      if (a > b) [a, b] = [b, a];
+      // A runaway range must not be able to ask for ten thousand pages.
+      for (let p = a; p <= b && out.size < 64; p += 1) if (p >= 1) out.add(p);
+      continue;
+    }
+    const one = chunk.match(/^(\d{1,4})$/);
+    if (one && Number(one[1]) >= 1) out.add(Number(one[1]));
+  }
+  return out.size ? [...out].sort((x, y) => x - y) : null;
+}
+
+/*
+ * Cut the requested pages out of a PDF, downscaled, cached on disk.
+ *
+ * WHY. A turn that needs three pages of a twelve-page test bank was sending all
+ * twelve, every read. Measured on a real 9.95 MB scan: pages 1-3 come out at
+ * 1.18 MB and a single page at 0.37 MB — 8x and 27x less. Unlike downscaling,
+ * this is not a quality tradeoff at all: the model still sees the real page at
+ * the same resolution, there are simply fewer of them.
+ *
+ * Ghostscript takes one contiguous range, so a scattered request ("1,5,9") is
+ * served as the span that covers it. Spelling that out rather than hiding it:
+ * the caller tells the model which pages it actually got.
+ */
+async function slicePdf(srcPath, key, first, last) {
+  const a = Math.max(1, Number(first) || 1);
+  const b = Math.max(a, Number(last) || a);
+  const out = path.join(DIR, `${key}.p${a}-${b}.s${SLIM_DPI}.pdf`);
+  if (!out.startsWith(DIR + path.sep)) return null;
+
+  try {
+    const done = await fsp.stat(out);
+    if (done.size > 0) return out;
+  } catch {
+    /* not cut yet */
+  }
+
+  const { execFile } = require("child_process");
+  const ok = await new Promise((resolve) => {
+    execFile(
+      "gs",
+      [
+        "-sDEVICE=pdfwrite",
+        "-dCompatibilityLevel=1.5",
+        "-dNOPAUSE",
+        "-dBATCH",
+        "-dQUIET",
+        "-dSAFER",
+        `-dFirstPage=${a}`,
+        `-dLastPage=${b}`,
+        "-dAutoFilterColorImages=false",
+        "-dColorImageFilter=/DCTEncode",
+        "-dAutoFilterGrayImages=false",
+        "-dGrayImageFilter=/DCTEncode",
+        "-dDownsampleColorImages=true",
+        `-dColorImageResolution=${SLIM_DPI}`,
+        "-dColorImageDownsampleThreshold=1.0",
+        "-dDownsampleGrayImages=true",
+        `-dGrayImageResolution=${SLIM_DPI}`,
+        "-dGrayImageDownsampleThreshold=1.0",
+        `-dJPEGQ=${SLIM_JPEG_Q}`,
+        `-sOutputFile=${out}`,
+        srcPath,
+      ],
+      { timeout: SLIM_TIMEOUT_MS, maxBuffer: 1 << 20 },
+      (err) => resolve(!err)
+    );
+  });
+  if (!ok) {
+    await fsp.unlink(out).catch(() => {});
+    return null;
+  }
+  // A slice that is not a PDF is worse than no slice: the caller would send
+  // rubbish and the model would report it could not read the source.
+  try {
+    const head = Buffer.alloc(5);
+    const fh = await fsp.open(out, "r");
+    try {
+      await fh.read(head, 0, 5, 0);
+    } finally {
+      await fh.close();
+    }
+    if (head.toString("latin1") !== "%PDF-") {
+      await fsp.unlink(out).catch(() => {});
+      return null;
+    }
+    return out;
+  } catch {
+    await fsp.unlink(out).catch(() => {});
+    return null;
+  }
+}
+
+/*
+ * One attachment, optionally only some of its pages, as a provider part.
+ *
+ * Returns what was actually served alongside the bytes — the page span and the
+ * file's true page count — because the request and the answer are allowed to
+ * differ and the model has to be told when they do. A teacher's scan is numbered
+ * by its PRINTED pages ("с. 22-33") while the file has twelve; a model asking
+ * for page 22 of a twelve-page file is being reasonable and needs the count, not
+ * a failure.
+ */
+async function partForPages(file, spec) {
+  const src = pathForKey(file.key, file.ext);
+  const isPdf = file.mime === "application/pdf";
+  const pages = isPdf ? parsePages(spec) : null;
+  const total = isPdf ? await pageCountOf(src, file.key) : 0;
+
+  if (pages && total > 0) {
+    const inRange = pages.filter((p) => p <= total);
+    if (!inRange.length) {
+      return { part: null, total, served: null, outOfRange: true };
+    }
+    const cut = await slicePdf(src, file.key, inRange[0], inRange[inRange.length - 1]);
+    if (cut) {
+      const buf = await fsp.readFile(cut);
+      return {
+        part: { mime: file.mime, data: buf.toString("base64"), isPdf: true },
+        total,
+        served: { from: inRange[0], to: inRange[inRange.length - 1] },
+        outOfRange: inRange.length !== pages.length,
+      };
+    }
+    // Slicing failed — fall through and send the whole file rather than nothing.
+  }
+
+  const { parts } = await toParts([file]);
+  return { part: parts[0] || null, total, served: null, outOfRange: false };
+}
+
+/*
  * Read the attachments back in the shape the AI document path already speaks —
  * and REPORT the ones that could not be read.
  *
@@ -291,14 +465,28 @@ async function removeIfUnused(key, ext, stillUsed) {
   try {
     await fsp.unlink(pathForKey(key, ext));
     /*
-     * And the downscaled copy, which is derived from this file and useless
-     * without it. Deleting the original and leaving its slim twin behind would
-     * leak bytes that nothing references and nothing would ever look for — the
-     * orphan problem the store was built to avoid, reintroduced by a cache.
-     * Best-effort: the original is already gone, so a failure here is a stray
+     * And every copy DERIVED from it — the downscaled whole and each cached page
+     * slice. They are useless without the original and nothing would ever look
+     * for them again, so leaving them behind reintroduces exactly the orphan
+     * problem this store was built to avoid, by way of a cache.
+     *
+     * Matched by the `<key>.` prefix rather than by reconstructing each name: the
+     * set of derived shapes has already grown once (a downscale, then per-page
+     * slices at varying resolutions) and a list of guesses would silently miss
+     * whatever is added next. The key is 64 hex characters, so the prefix cannot
+     * collide with another file's.
+     *
+     * Best-effort: the original is already gone, so a failure here leaves a stray
      * file, not a blinded document.
      */
-    if (isValidKey(key)) await fsp.unlink(path.join(DIR, `${key}.s${SLIM_DPI}.pdf`)).catch(() => {});
+    if (isValidKey(key)) {
+      const derived = await fsp.readdir(DIR).catch(() => []);
+      await Promise.all(
+        derived
+          .filter((n) => n.startsWith(`${key}.`) && n !== `${key}.${ext}`)
+          .map((n) => fsp.unlink(path.join(DIR, n)).catch(() => {}))
+      );
+    }
     return true;
   } catch {
     return false;
@@ -316,6 +504,10 @@ module.exports = {
   SLIM_OVER_BYTES,
   saveFile,
   toParts,
+  partForPages,
+  parsePages,
+  pageCountOf,
+  slicePdf,
   pathForKey,
   slimPdf,
   removeIfUnused,

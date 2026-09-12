@@ -3,6 +3,7 @@ const LessonDoc = require("../models/lessonDocModel");
 const { httpError, isAppError } = require("../utils/appError");
 const S = require("../helper/lessonDocSchema");
 const { checkTables, gridMap } = require("../helper/lessonDocTables");
+const { applyEdits } = require("../helper/lessonDocPatch");
 const { buildLessonDocHtml } = require("../helper/lessonDocHtml");
 // Every write to a document goes through here. No path in this file may call
 // doc.save() — see the header of services/lessonDocService.js for why.
@@ -841,8 +842,14 @@ ${S.SOURCE_RULES}`;
         ? `${base.prompt}\n\nRAZILAŞDIRILMIŞ ADDIMLAR — yalnız bunları et, başqa heç nəyi dəyişmə:\n${planLines}`
         : `${base.prompt}\n\nRAZILAŞDIRILMIŞ PLAN — bölmələr məhz bunlar olmalıdır:\n${planLines}`;
 
-    // The document arrives as html now, so progress counts closed tags.
-    const readBlocks = S.makeHtmlStreamer();
+    /*
+     * Progress in the unit the running tool actually produces: finished parts
+     * when the model is writing a document, finished changes when it is patching
+     * one. Counting closed HTML tags in a patch would report a two-line edit as
+     * a hundred-part rewrite, because every quoted fragment carries its own
+     * markup — twice, once in `find` and once in `replace`.
+     */
+    const readBlocks = S.makeProgressStreamer();
     let seen = 0;
     const onText = (snapshot) => {
       lastSnapshot = snapshot;
@@ -900,6 +907,33 @@ ${S.SOURCE_RULES}`;
        * the source is still in front of it.
        */
       validate: (name, input) => {
+        /*
+         * A patch that does not apply, reported rather than guessed at.
+         *
+         * `edit_material` quotes the text to replace. A quote that matches
+         * nothing means the model retyped from memory instead of copying, and
+         * one that matches twice means the edit is ambiguous — applying it to
+         * the first hit would be a coin toss with the teacher's document. Both
+         * come back as a tool error naming the quote, which is exactly what the
+         * model needs to retry with more surrounding context. Nothing here
+         * rewrites the model's work; it states a fact about it.
+         */
+        if (name === "edit_material") {
+          const r = applyEdits(doc.html || "", input.edits);
+          if (r.problems.length) return r.problems.join("\n");
+          // The patched document still has to survive the same checks a written
+          // one does — a valid patch can still produce a broken table.
+          const patched = r.html;
+          const findings = [checkTables(patched)];
+          const lost = droppedStyles(patched, sanitizeDocHtml(patched));
+          if (lost.length) {
+            findings.push(
+              `Bu style xüsusiyyətləri sənəddə saxlanmır və silindi: ${lost.join(", ")}. ` +
+                "İcazə verilənlərlə eyni görünüşü ver və ya o detaldan imtina et."
+            );
+          }
+          return findings.filter(Boolean).join("\n\n");
+        }
         if (name !== "write_material") return "";
         const raw = input.html || "";
         const findings = [checkTables(raw)];
@@ -975,7 +1009,20 @@ ${S.SOURCE_RULES}`;
       // An empty document that comes back with only a print setting changed is a
       // turn that did not do what was asked — see the loop for what happened.
       needsDocument: !hadBlocks,
-      fetchSource: async (name) => {
+      /*
+       * A source, and only the pages of it that were asked for.
+       *
+       * Sending a whole twelve-page scan when three pages were wanted is the
+       * single largest avoidable input on a turn — measured, pages 1-3 of a real
+       * 9.95 MB bank come out at 1.18 MB. Unlike downscaling this costs no
+       * fidelity at all: the same pages at the same resolution, fewer of them.
+       *
+       * The reply always states what was served and how many pages the file has.
+       * A teacher's scan is numbered by its PRINTED pages — "с. 22-33" on a file
+       * that holds twelve — so a model asking for page 22 is being reasonable and
+       * needs the count rather than a refusal.
+       */
+      fetchSource: async (name, pages) => {
         const want = String(name || "").trim().toLowerCase();
         if (!want) return null;
         const all = doc.files || [];
@@ -984,12 +1031,83 @@ ${S.SOURCE_RULES}`;
           all.find((f) => String(f.name || "").toLowerCase().includes(want)) ||
           all.find((f) => want.includes(String(f.name || "").toLowerCase()));
         if (!hit) return null;
-        const { parts: got } = await require("../helper/lessonDocFiles").toParts([hit]);
-        return got.length ? { name: hit.name, part: got[0] } : null;
+
+        const F = require("../helper/lessonDocFiles");
+        const got = await F.partForPages(hit, pages);
+        const total = got.total ? ` Bu faylda cəmi ${got.total} səhifə var.` : "";
+
+        if (!got.part) {
+          return {
+            name: hit.name,
+            part: null,
+            isError: true,
+            note:
+              `"${hit.name}" faylında istədiyin səhifə(lər) yoxdur.${total} ` +
+              "Kitabın üzərində yazılan səhifə nömrəsi fayldaki sıra nömrəsi ilə üst-üstə " +
+              "düşməyə bilər — sıra nömrəsi ilə yenidən istə.",
+          };
+        }
+        const served = got.served
+          ? `"${hit.name}" faylının ${got.served.from}-${got.served.to} səhifəsi aşağıda göndərildi.`
+          : `"${hit.name}" bütövlükdə aşağıda göndərildi.`;
+        return {
+          name: hit.name,
+          part: got.part,
+          note:
+            served +
+            total +
+            (got.outOfRange ? " (İstədiyin bəzi səhifələr faylda yoxdur — yalnız mövcud olanlar göndərildi.)" : ""),
+        };
+      },
+      /*
+       * The document a call produces, for the loop's render check.
+       *
+       * `write_material` carries the whole thing. `edit_material` carries only
+       * the changed fragments, so the document it produces is this one with the
+       * patch applied — computed here because the loop has no idea what the
+       * current document is.
+       */
+      htmlOf: (c) => {
+        if (!c) return "";
+        if (c.name === "write_material") return c.input?.html || "";
+        if (c.name === "edit_material") {
+          const r = applyEdits(doc.html || "", c.input?.edits);
+          return r.problems.length ? "" : r.html;
+        }
+        return "";
       },
     });
 
-    const wrote = out.calls.find((c) => c.name === "write_material");
+    /*
+     * Two tools, one commit path.
+     *
+     * `edit_material` sends only what changed, so it is resolved HERE into the
+     * same `{ input: { html, reply, title } }` shape `write_material` produces —
+     * and everything downstream (sanitising, the summary, the revision commit,
+     * the reply the teacher reads) stays one code path rather than two that can
+     * drift. The patch is applied to the document this turn read, and the commit
+     * below is fenced on that same revision, so a manual edit landing in between
+     * loses to the CAS rather than being silently overwritten.
+     *
+     * A patch that no longer applies cannot get this far: `validate` reports it
+     * to the model inside the loop. If one somehow does, it is treated as no
+     * document at all rather than committing a half-applied edit.
+     */
+    const patch = out.calls.find((c) => c.name === "edit_material");
+    let wrote = out.calls.find((c) => c.name === "write_material");
+    let patchedCount = 0;
+    if (!wrote && patch) {
+      const r = applyEdits(doc.html || "", patch.input?.edits);
+      if (!r.problems.length) {
+        patchedCount = r.applied;
+        wrote = {
+          name: "write_material",
+          input: { html: r.html, reply: patch.input?.reply || "", title: patch.input?.title || "" },
+        };
+      } else {
+        console.error("[LESSON DOC] patch did not apply after the loop:", r.problems[0]);
+      }
+    }
     const printed = out.calls.find((c) => c.name === "set_print_options");
     const asked = out.calls.find((c) => c.name === "ask_teacher");
 

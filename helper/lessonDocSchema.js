@@ -239,14 +239,63 @@ const DOC_TOOLS = [
     description:
       "Sənədə əvvəllər əlavə edilmiş faylı OXU. Faylların adları promptda sadalanıb. " +
       "Fayl sənə hər növbədə göndərilmir — mənbəyə baxmaq lazımdırsa, bu aləti çağır. " +
-      "Xüsusilə köçürmə işində: yaddaşdan və ya ekran şəklindən deyil, FAYLIN ÖZÜNDƏN köçür.",
+      "Xüsusilə köçürmə işində: yaddaşdan və ya ekran şəklindən deyil, FAYLIN ÖZÜNDƏN köçür. " +
+      "LAZIM OLAN SƏHİFƏLƏRİ İSTƏ: `pages` verməsən, bütün fayl gəlir — 12 səhifəlik " +
+      "kitabdan 3 səhifə lazımsa, `pages` ilə yalnız onları istə. Cavabda faylın ümumi " +
+      "səhifə sayı da bildirilir; kitabın ÜZƏRİNDƏ yazılan səhifə nömrəsi fayldaki " +
+      "sıra nömrəsindən fərqli ola bilər, ona görə uyğun gəlmirsə sayı görüb düzəlt.",
     input_schema: {
       type: "object",
       additionalProperties: false,
       properties: {
         name: { type: "string", description: "Faylın adı — promptdakı siyahıdan olduğu kimi." },
+        pages: {
+          type: "string",
+          description:
+            "İstədiyin səhifələr, fayldaki sıra ilə (1-dən başlayır): \"3\", \"22-24\" və ya " +
+            "\"1,4,7-9\". Boş buraxsan bütün fayl göndərilir.",
+        },
       },
       required: ["name"],
+    },
+  },
+  {
+    name: "edit_material",
+    description:
+      "Mövcud materialın YALNIZ DƏYİŞƏN HİSSƏSİNİ əvəz et. Sənədi dəyişmək üçün ƏSAS ALƏT budur — " +
+      "write_material bütün sənədi yenidən yazır və uzun materialda bu həm yavaşdır, həm də " +
+      "dəyişməməli mətni yenidən yazarkən təsadüfi fərqlər yaranır. " +
+      "Hər `find` promptdaki HAZIRKI MATERİAL bölməsindən HƏRFİ-HƏRFİNƏ köçürülməlidir " +
+      "(boşluqlar, teqlər, atributlar daxil) və sənəddə YALNIZ BİR yerə uyğun gəlməlidir — " +
+      "unikal olması üçün ətrafından bir az da mətn al. " +
+      "Yalnız sənədin quruluşu bütövlükdə dəyişirsə write_material işlət.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        reply: { type: "string", description: "Müəllimə 1–2 cümlə: nə dəyişdirdin və niyə." },
+        title: { type: "string", description: "Yalnız materialın adı da dəyişirsə." },
+        edits: {
+          type: "array",
+          description: "Dəyişikliklər. Hamısı birlikdə tətbiq olunur — biri alınmasa, heç biri tətbiq edilmir.",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              find: {
+                type: "string",
+                description: "Əvəz olunacaq mətn — sənəddən olduğu kimi, unikal olacaq qədər uzun.",
+              },
+              replace: {
+                type: "string",
+                description: "Yerinə yazılacaq mətn. Silmək üçün boş sətir ver.",
+              },
+            },
+            required: ["find", "replace"],
+          },
+        },
+      },
+      required: ["reply", "edits"],
     },
   },
 ];const DOC_SCHEMA = {
@@ -405,8 +454,12 @@ Blokları sadalama, rəqəm hesabatı vermə (onu sistem özü göstərir). Nüm
 const EDIT_RULES = `
 REDAKTƏ REJİMİ — SƏNƏD ARTIQ MÖVCUDDUR:
 - Aşağıdakı HTML müəllimin hazırkı sənədidir. Onu YENİDƏN YAZMA, sıfırdan qurma.
-- write_material-a sənədin TAM HTML-ini qaytar — amma YALNIZ istənilən dəyişiklik
-  edilmiş halda. Toxunulmayan hər sətir hərfi-hərfinə eyni qayıtmalıdır.
+- DƏYİŞİKLİK ÜÇÜN edit_material İŞLƏT: yalnız dəyişən parçaları göndər.
+  Hər \`find\` aşağıdaki HAZIRKI MATERİAL-dan hərfi-hərfinə köçürülsün və sənəddə
+  yalnız BİR yerə uyğun gəlsin (unikal olması üçün ətrafından mətn əlavə et).
+  Toxunulmayan mətni ümumiyyətlə göndərmə — o, olduğu kimi qalır.
+- write_material YALNIZ sənədin quruluşu bütövlükdə dəyişəndə: onda TAM HTML-i
+  qaytar, amma toxunulmayan hər sətir hərfi-hərfinə eyni olsun.
 - Quruluşu, cədvəlləri, sütun sayını, sıranı, dili və üslubu DƏYİŞMƏ — müəllim
   məhz onu dəyişməyi istəməyibsə.
 - Əvvəlki növbələrdə edilmiş dəyişikliklər (tərcümə, rəng, əlavə bölmə) sənədin
@@ -1017,6 +1070,49 @@ const normalizePlan = (raw = {}) => {
  * the block-level tags that have CLOSED in the partial tool input, which is the
  * same honest signal: work finished, not time elapsed.
  */
+/*
+ * Live progress that matches the tool actually running.
+ *
+ * Progress is read from the streamed TOOL INPUT, and there are now two shapes of
+ * it. `write_material` streams a document, where a closed `</p>` is a finished
+ * part and counting them is honest. `edit_material` streams a list of
+ * find/replace pairs whose values are themselves full of HTML tags — counting
+ * closers there would report a small edit as "174 hissə", inflated by markup
+ * that appears twice per edit (once quoted, once replaced) and describes no part
+ * of the document at all. A progress number that large on a two-line change is
+ * worse than no number: it is a claim about work that did not happen.
+ *
+ * So the shape decides the unit: parts for a document, changes for a patch. The
+ * mode is fixed by whichever key streams first and never re-decided, because a
+ * counter that switches units halfway would run backwards.
+ */
+function makeProgressStreamer() {
+  const CLOSERS = /<\/(h[1-4]|p|li|tr|figure|blockquote|table)>/gi;
+  // A completed edit is one whose `replace` string has closed.
+  const DONE_EDIT = /"replace"\s*:\s*"(?:[^"\\]|\\.)*"/g;
+  let mode = null;
+  let seen = 0;
+
+  return (buf) => {
+    const s = String(buf || "");
+    if (!mode) {
+      const atEdits = s.search(/"edits"\s*:/);
+      const atHtml = s.search(/"html"\s*:/);
+      if (atEdits !== -1 && (atHtml === -1 || atEdits < atHtml)) mode = "edits";
+      else if (atHtml !== -1) mode = "html";
+      else return [];
+    }
+    const kind = mode === "edits" ? "dəyişiklik" : "hissə";
+    const total = (s.match(mode === "edits" ? DONE_EDIT : CLOSERS) || []).length;
+    const fresh = [];
+    while (seen < total) {
+      seen += 1;
+      fresh.push({ kind, text: "" });
+    }
+    return fresh;
+  };
+}
+
 function makeHtmlStreamer() {
   let seen = 0;
   const CLOSERS = /<\/(h[1-4]|p|li|tr|figure|blockquote|table)>/gi;
@@ -1096,6 +1192,7 @@ module.exports = {
   normalizePlan,
   makeBlockStreamer,
   makeHtmlStreamer,
+  makeProgressStreamer,
   BLOCK,
   BASE_RULES,
   EDIT_RULES,

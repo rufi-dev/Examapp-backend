@@ -183,7 +183,12 @@ console.log("\n7. The prompts carry the contract:");
     instructions: "bir nümunə əlavə et",
   });
   ok("the edit prompt sends the current document", edit.prompt.includes("qalmalıdır"));
-  ok("and says to leave everything else identical", /hərfi-hərfinə eyni qayıtmalıdır/.test(edit.system));
+  // An edit now sends only the changed fragments, so the instruction about
+  // untouched text moved: it applies to the write_material fallback, and the
+  // stronger rule is that untouched text is not sent at all.
+  ok("and says to leave everything else identical", /hərfi-hərfinə eyni olsun/.test(edit.system));
+  ok("it is told to patch, not to rewrite", /edit_material İŞLƏT/.test(edit.system));
+  ok("and that untouched text stays put by itself", /Toxunulmayan mətni ümumiyyətlə göndərmə/.test(edit.system));
   ok("and forbids a rewrite", /YENİDƏN YAZMA/.test(edit.system));
   /*
    * The attachment stays on the document for its whole life, so on turn ten it is
@@ -1247,13 +1252,29 @@ console.log("\n25. The model writes the document; the schema stops being the cei
    */
   const read = S.DOC_TOOLS.find((t) => t.name === "read_source");
   ok("the model can fetch a source it was given earlier", Boolean(read));
-  ok("by name", Object.keys(read.input_schema.properties).join() === "name");
+  ok("by name", read.input_schema.required.join() === "name");
+  /*
+   * And optionally by page. Without this the whole file came every read — a
+   * twelve-page scan for a turn that needed three pages of it.
+   */
+  ok("and optionally by page", Boolean(read.input_schema.properties.pages));
+  ok("pages stay optional", !read.input_schema.required.includes("pages"));
+  ok("the description says an omitted range means the whole file",
+    /Boş buraxsan bütün fayl göndərilir/.test(read.input_schema.properties.pages.description));
   ok("and the prompt tells it which names exist",
     S.sourceList({ files: [{ name: "4750.pdf" }] }).includes("4750.pdf"));
   ok("saying plainly that they are not sent automatically",
     /read_source ilə oxu/.test(S.sourceList({ files: [{ name: "a.pdf" }] })));
   ok("a document with no files says nothing", S.sourceList({}) === "");
-  ok("the turn can serve one", /fetchSource: async \(name\) =>/.test(ctl5));
+  ok("the turn can serve one", /fetchSource: async \(name, pages\) =>/.test(ctl5));
+  /*
+   * And it tells the model what it actually served. A teacher's scan is numbered
+   * by its PRINTED pages ("с. 22-33") on a file that holds twelve, so a request
+   * for page 22 is reasonable and needs the count back, not a refusal.
+   */
+  ok("the reply names the pages sent", /səhifəsi aşağıda göndərildi/.test(ctl5));
+  ok("and the file's real page count", /Bu faylda cəmi \$\{got\.total\} səhifə var/.test(ctl5));
+  ok("an impossible page is an error, not a silent whole-file send", /isError: true,/.test(ctl5));
   ok("from the document's own list only", /const all = doc\.files \|\| \[\];/.test(ctl5));
   /*
    * The loop moved out of aiDocument when the same conversation had to run on
@@ -1620,6 +1641,164 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("and no longer takes blocks", !tool.input_schema.properties.blocks);
   ok("the brief tells the model it writes a document", S.BASE_RULES.includes("SƏNƏDİ HTML KİMİ YAZIRSAN"));
   ok("and gives it the house styles to use", S.BASE_RULES.includes('class="def"'));
+}
+
+console.log("\nAn edit changes part of the document, not all of it:");
+{
+  const { applyEdits, MAX_EDITS } = require("../helper/lessonDocPatch");
+  const DOC = '<h1>Faizlər</h1><p class="def">Faiz yüzdə birdir.</p><p>Misal: 20%</p><p>Son söz.</p>';
+
+  /*
+   * write_material re-emitted the WHOLE document for every edit — 31 KB of HTML
+   * to move one heading. Output bills at five times input, and once caching
+   * landed the rewrite became the largest line on a turn: 64,100 output tokens,
+   * $1.60 of $2.94, most of it retyping text that was already correct.
+   */
+  const one = applyEdits(DOC, [{ find: "Faiz yüzdə birdir.", replace: "Faiz yüzdə bir hissədir." }]);
+  ok("a unique quote is replaced", one.problems.length === 0 && one.applied === 1);
+  ok("and only that part changes", one.html === DOC.replace("Faiz yüzdə birdir.", "Faiz yüzdə bir hissədir."));
+  ok("the rest is byte-identical", one.html.includes('<h1>Faizlər</h1>') && one.html.includes("<p>Son söz.</p>"));
+
+  /*
+   * THE RULE THAT MAKES IT SAFE. A quote matching nothing means the model retyped
+   * from memory; matching twice means the edit is ambiguous and the first hit
+   * would be a coin toss with a teacher's document. Both are refused AND
+   * reported, because the report is what lets the model fix it itself.
+   */
+  const missing = applyEdits(DOC, [{ find: "Bu mətn sənəddə yoxdur", replace: "x" }]);
+  ok("a quote that matches nothing is refused", missing.applied === 0 && missing.problems.length === 1);
+  ok("and the document is untouched", missing.html === DOC);
+  ok("the report tells it to copy, not recall", /YADDAŞDAN/.test(missing.problems[0]));
+
+  const twice = applyEdits("<p>bir</p><p>bir</p>", [{ find: "<p>bir</p>", replace: "<p>iki</p>" }]);
+  ok("an ambiguous quote is refused", twice.applied === 0);
+  ok("and says how many places it matched", /2 yerdə/.test(twice.problems[0]));
+  ok("nothing is applied on ambiguity", twice.html === "<p>bir</p><p>bir</p>");
+
+  // All or nothing: a batch where one edit fails must not half-apply the rest.
+  const mixed = applyEdits(DOC, [
+    { find: "Misal: 20%", replace: "Misal: 25%" },
+    { find: "yoxdur-bu", replace: "x" },
+  ]);
+  ok("one bad edit rejects the whole batch", mixed.applied === 0 && mixed.html === DOC);
+
+  const many = applyEdits(DOC, [
+    { find: "<h1>Faizlər</h1>", replace: "<h1>Faiz</h1>" },
+    { find: "<p>Son söz.</p>", replace: "" },
+  ]);
+  ok("several edits apply together", many.applied === 2 && many.problems.length === 0);
+  ok("an empty replace deletes", !many.html.includes("Son söz"));
+  ok("and order does not matter to the result", many.html.startsWith("<h1>Faiz</h1>"));
+
+  // Two edits over the same characters cannot both be honoured, and the loser
+  // would lose silently.
+  const overlap = applyEdits(DOC, [
+    { find: "Faiz yüzdə birdir.", replace: "A" },
+    { find: "yüzdə birdir.</p>", replace: "B" },
+  ]);
+  ok("overlapping edits are refused", overlap.applied === 0 && /eyni hissəsini/.test(overlap.problems[0]));
+
+  ok("an empty document says to write instead", applyEdits("", [{ find: "a", replace: "b" }]).problems.length === 1);
+  ok("an empty edit list is refused", applyEdits(DOC, []).problems.length === 1);
+  const flood = Array.from({ length: MAX_EDITS + 1 }, () => ({ find: "x", replace: "y" }));
+  ok("a flood of edits is sent back as a rewrite", /write_material/.test(applyEdits(DOC, flood).problems[0]));
+}
+
+console.log("\nA patch edit reaches the document through one commit path:");
+{
+  const path6 = require("path");
+  const ctl6 = require("fs").readFileSync(path6.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  const drv6 = require("fs").readFileSync(path6.join(__dirname, "../helper/aiDocDrivers.js"), "utf8");
+  const S6 = require("../helper/lessonDocSchema");
+
+  const tool = S6.DOC_TOOLS.find((t) => t.name === "edit_material");
+  ok("the tool exists", Boolean(tool));
+  ok("it takes a list of find/replace edits", Boolean(tool.input_schema.properties.edits.items.properties.find));
+  ok("and a sentence for the teacher", tool.input_schema.required.includes("reply"));
+  ok("it tells the model to copy the quote exactly", /HƏRFİ-HƏRFİNƏ/.test(tool.description));
+  ok("and that the quote must be unique", /YALNIZ BİR yerə uyğun/.test(tool.description));
+  ok("write_material is named as the whole-rewrite fallback", /write_material işlət/.test(tool.description));
+
+  /*
+   * ONE commit path, not two. The patch is resolved into the same shape
+   * write_material produces, so sanitising, the summary, the revision CAS and
+   * the reply the teacher reads stay a single code path — two would drift.
+   */
+  ok("a patch is resolved into the write shape", /name: "write_material",\s*\n\s*input: \{ html: r\.html/.test(ctl6));
+  ok("and only when the model did not write outright", /if \(!wrote && patch\)/.test(ctl6));
+  ok("a patch that will not apply commits nothing", /patch did not apply after the loop/.test(ctl6));
+
+  // The loop has to know a patch produced a document, or its "you described the
+  // work instead of doing it" guards would fire on a perfectly good edit.
+  ok("the loop counts either tool as producing a document", /c\.name === "write_material" \|\| c\.name === "edit_material"/.test(drv6));
+  ok("and asks the caller to resolve the html", /typeof opts\.htmlOf === "function"/.test(drv6));
+  ok("the render check reviews the finished page, not the diff", /await look\(produced\.html\)/.test(drv6));
+  ok("the caller resolves a patch for that check", /if \(c\.name === "edit_material"\)/.test(ctl6));
+
+  // An unmatched quote must come back as a tool error the model can act on.
+  ok("an unapplicable patch is reported to the model", /if \(name === "edit_material"\)/.test(ctl6));
+  ok("and a valid patch still faces the table check", /const findings = \[checkTables\(patched\)\]/.test(ctl6));
+
+  /*
+   * Progress in the unit the running tool produces. A patch streams find/replace
+   * pairs whose values are full of markup — twice per edit — so counting closed
+   * tags would report a two-line change as a hundred-part rewrite. That number
+   * is not merely wrong, it is a claim about work that did not happen.
+   */
+  const prog = S6.makeProgressStreamer();
+  ok("the turn uses the adaptive streamer", /S\.makeProgressStreamer\(\)/.test(ctl6));
+  const asHtml = prog('{"title":"T","html":"<h1>A</h1><p>one</p><p>two</p>');
+  ok("a document counts parts", asHtml.length === 3 && asHtml[0].kind === "hissə");
+
+  const p2 = S6.makeProgressStreamer();
+  const asEdits = p2('{"reply":"ok","edits":[{"find":"<p>a</p>","replace":"<p>b</p>"},{"find":"<p>c</p>","replace":"<p>d</p>"}');
+  ok("a patch counts changes, not tags", asEdits.length === 2);
+  ok("and names the unit", asEdits[0].kind === "dəyişiklik");
+
+  // The unit is fixed by the first key seen; a counter that changed units
+  // halfway would run backwards in front of the teacher.
+  const p3 = S6.makeProgressStreamer();
+  p3('{"reply":"x","edits":[{"find":"<p>a</p>","replace":"<p>b</p>"}');
+  const later = p3('{"reply":"x","edits":[{"find":"<p>a</p>","replace":"<p>b</p>"},{"find":"q","replace":"r"}');
+  ok("the unit never switches mid-turn", later.every((b) => b.kind === "dəyişiklik"));
+  ok("nothing is emitted before a shape is known", S6.makeProgressStreamer()('{"repl').length === 0);
+}
+
+console.log("\nOnly the pages the model asks for:");
+{
+  const F7 = require("../helper/lessonDocFiles");
+  const p = F7.parsePages;
+
+  /*
+   * A twelve-page scan was sent whole on every read. Measured on a real 9.95 MB
+   * bank: pages 1-3 come out at 1.18 MB and one page at 0.37 MB — 8x and 27x
+   * less, at the SAME resolution. This is the one saving that costs no fidelity.
+   */
+  ok("a single page", JSON.stringify(p("3")) === "[3]");
+  ok("a range", JSON.stringify(p("22-24")) === "[22,23,24]");
+  ok("a mixed list", JSON.stringify(p("1,4,7-9")) === "[1,4,7,8,9]");
+  ok("spaces and semicolons", JSON.stringify(p(" 2 ; 5 ")) === "[2,5]");
+  ok("an en-dash, as a person would type it", JSON.stringify(p("3–5")) === "[3,4,5]");
+  ok("a reversed range is read the obvious way", JSON.stringify(p("24-22")) === "[22,23,24]");
+  ok("duplicates collapse", JSON.stringify(p("2,2,3")) === "[2,3]");
+  ok("nothing asked for is null", p("") === null && p(null) === null && p(undefined) === null);
+  ok("junk is null, not page zero", p("abc") === null && p("0") === null);
+  // A runaway range must not be able to ask for ten thousand pages.
+  ok("an absurd range is capped", p("1-9999").length <= 64);
+
+  ok("a slicer exists", typeof F7.slicePdf === "function");
+  ok("and a page counter", typeof F7.pageCountOf === "function");
+  ok("and a one-call fetch that reports what it served", typeof F7.partForPages === "function");
+
+  const src7 = require("fs").readFileSync(require("path").join(__dirname, "../helper/lessonDocFiles.js"), "utf8");
+  ok("the slice is a real page range", /-dFirstPage=\$\{a\}/.test(src7) && /-dLastPage=\$\{b\}/.test(src7));
+  ok("a slice that is not a PDF is thrown away", /head\.toString\("latin1"\) !== "%PDF-"/.test(src7));
+  /*
+   * Derived copies are matched by key PREFIX rather than by rebuilding each
+   * name. The set of derived shapes has grown once already (a downscale, then
+   * per-page slices) and a list of guesses would silently miss the next one.
+   */
+  ok("every derived copy dies with its original", /n\.startsWith\(`\$\{key\}\.`\)/.test(src7));
 }
 
 console.log("\nWhat a turn costs, and the three things that decide it:");
