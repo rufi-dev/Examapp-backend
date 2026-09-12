@@ -43,7 +43,15 @@ async function runToolLoop(adapter, opts) {
   let reads = 0;
   let looked = false;
   let usage = { input_tokens: 0, output_tokens: 0 };
-  let cost = 0;
+  /*
+   * The turn's spend, as a breakdown rather than a scalar.
+   *
+   * This started at 0, which made the Claude adapter's `cost + computeCost(...)`
+   * concatenate an object onto a number and produce "0[object Object]". Null is
+   * the honest starting value — nothing has been spent and nothing has been
+   * measured — and the adapters build the breakdown the usage row reads.
+   */
+  let cost = null;
   let unresolved = [];
   let calls = [];
   let said = "";

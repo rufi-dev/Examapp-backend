@@ -60,42 +60,66 @@ const BLOCK = {
  * the old block path, which would quietly hand the teacher a worse document under
  * the name of a better model.
  */
+/*
+ * The models a teacher may pick, and nothing else.
+ *
+ * WHAT THIS LIST IS FOR. Writing a lesson material is the hardest thing the
+ * platform asks a model to do: read a teacher's PDF, copy a timetable's ruling
+ * exactly, draw a geometric figure, and hold a multi-turn conversation about its
+ * own draft without losing the document. The weaker and older models were on
+ * this list because they were cheap, and cheap is not a property anybody wants
+ * from a material they are about to hand thirty students. Studio charges nothing
+ * and limits nothing by decision, so a cheap tier buys the teacher nothing and
+ * costs them quality.
+ *
+ * GEMINI IS GONE FROM HERE, NOT FROM THE PLATFORM. Exam extraction still runs on
+ * it (controllers/aiController) and GEMINI_API_KEY is still required for that —
+ * this removes it only as a Studio choice.
+ *
+ * A material saved with a model that has since left this list keeps working:
+ * pickModel falls back to the default rather than failing the turn.
+ *
+ * Order matters — the first entry is the default.
+ */
 const DOC_MODELS = [
   {
-    id: "claude-opus-4-8",
+    id: "claude-opus-5",
     provider: "claude",
-    label: "Claude Opus 4.8",
-    note: "Ən güclü — mürəkkəb sənəd, dəqiq köçürmə. Yazarkən canlı gedişat göstərir.",
+    label: "Claude Opus 5",
+    note: "Standart seçim — güclü, sürətli, dəqiq köçürmə. Yazarkən canlı gedişat göstərir.",
   },
   {
-    id: "claude-haiku-4-5-20251001",
+    id: "claude-fable-5-1",
     provider: "claude",
-    label: "Claude Haiku 4.5",
-    note: "Sürətli və ucuz — sadə dəyişikliklər. Canlı gedişat göstərir.",
+    label: "Claude Fable 5.1",
+    note: "Ən güclü — ən mürəkkəb sənədlər üçün. Daha uzun çəkir və daha bahalıdır.",
   },
+  {
+    id: "claude-sonnet-5",
+    provider: "claude",
+    label: "Claude Sonnet 5",
+    note: "Sürətli və güclü — gündəlik iş və düzəlişlər üçün. Canlı gedişat göstərir.",
+  },
+  /*
+   * OpenAI's side is limited to models with a PRICE in aiController's AI_MODELS
+   * table — the rule that table already states about itself. An unpriced model
+   * computes to $0, and since Studio's usage row is the only meter on a feature
+   * with no ceiling, a $0 row does not read as "unknown", it reads as "free".
+   * gpt-6-astra is newer than both of these and deliberately absent for exactly
+   * that reason; add its published price to AI_MODELS (or AI_MODEL_PRICES) and
+   * it can join this list.
+   */
   {
     id: "gpt-5.6-sol",
     provider: "openai",
     label: "GPT-5.6 Sol",
-    note: "OpenAI — güclü. Canlı gedişat yoxdur, yalnız mərhələ.",
+    note: "OpenAI-ın ən güclüsü. Canlı gedişat yoxdur, yalnız mərhələ.",
   },
   {
-    id: "gpt-4.1-mini",
+    id: "gpt-5.6-terra",
     provider: "openai",
-    label: "GPT-4.1 mini",
-    note: "OpenAI — ucuz və sürətli. Canlı gedişat yoxdur.",
-  },
-  {
-    id: "gemini-2.5-pro",
-    provider: "gemini",
-    label: "Gemini 2.5 Pro",
-    note: "Google — güclü, uzun sənədlər. Canlı gedişat yoxdur.",
-  },
-  {
-    id: "gemini-2.5-flash",
-    provider: "gemini",
-    label: "Gemini 2.5 Flash",
-    note: "Google — çox sürətli və ucuz. Canlı gedişat yoxdur.",
+    label: "GPT-5.6 Terra",
+    note: "OpenAI — güclü və daha sərfəli. Canlı gedişat yoxdur.",
   },
 ];
 

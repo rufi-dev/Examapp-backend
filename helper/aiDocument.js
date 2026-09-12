@@ -131,7 +131,11 @@ async function documentWithTools({
   } else {
     const client = anthropic();
     if (!client) throw docError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)", true);
-    adapter = claudeAdapter({ client, model: model || "claude-opus-4-8", tools, maxTokens, onText });
+    // The fallback comes from the catalogue rather than being spelled again
+    // here: a second copy of the default is a second thing to forget, and this
+    // one was still naming Opus 4.8 after the picker had moved on. It also
+    // decides what the turn is PRICED at, so a stale name here bills wrongly.
+    adapter = claudeAdapter({ client, model: model || require("./lessonDocSchema").DEFAULT_DOC_MODEL, tools, maxTokens, onText });
   }
 
   const out = await runToolLoop(adapter, {

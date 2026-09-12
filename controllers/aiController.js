@@ -218,26 +218,60 @@ const presetHint = (presetId) => {
 const buildInstructions = (presetId, typed) =>
   clampInstr([presetHint(presetId), clampInstr(typed)].filter(Boolean).join("\n\n"));
 
-// Claude Opus 4.8 pricing (USD per 1M tokens). Cache write (5-min ephemeral) is
-// 1.25x base input; cache read is 0.1x base input. Output includes thinking.
-const PRICE_PER_MTOK = { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 };
+/*
+ * Claude pricing, USD per 1M tokens, per model.
+ *
+ * This was a single Opus 4.8 constant, which was true while Opus 4.8 was the
+ * only Claude model we called. Studio now offers several tiers spanning a 10x
+ * spread — Fable 5.1 costs twice Opus and ten times Haiku — so one rate would
+ * mis-state the bill by a multiple, and always in the same direction: the most
+ * expensive model would report the cheapest-looking number.
+ *
+ * Cache write (5-min ephemeral) is 1.25x base input; cache read is 0.1x base
+ * input; output includes thinking tokens. Those ratios hold across models, so
+ * only the two base rates are listed.
+ */
+const CLAUDE_PRICE_PER_MTOK = {
+  "claude-fable-5-1": { input: 10, output: 50 },
+  "claude-opus-5": { input: 5, output: 25 },
+  "claude-opus-4-8": { input: 5, output: 25 },
+  "claude-sonnet-5": { input: 2, output: 10 },
+  "claude-haiku-4-5": { input: 1, output: 5 },
+};
+
+// The model the exam-extraction paths have always used, and the rate an unknown
+// id falls back to. An unrecognised model is priced rather than free: a $0 row
+// reads as "this cost nothing", which is the one thing it certainly did not.
+const COST_MODEL_DEFAULT = "claude-opus-4-8";
+
+const claudePriceFor = (model) => {
+  const base =
+    CLAUDE_PRICE_PER_MTOK[model] ||
+    // A dated snapshot ("claude-haiku-4-5-20251001") prices as its family.
+    CLAUDE_PRICE_PER_MTOK[String(model || "").replace(/-\d{8}$/, "")] ||
+    CLAUDE_PRICE_PER_MTOK[COST_MODEL_DEFAULT];
+  return { ...base, cacheWrite: base.input * 1.25, cacheRead: base.input * 0.1 };
+};
+
+const PRICE_PER_MTOK = claudePriceFor(COST_MODEL_DEFAULT);
 
 // Turn an Anthropic usage object into a token breakdown + USD cost for THIS call,
 // so the teacher can see (and tally) what each extraction cost.
-function computeCost(u) {
+function computeCost(u, model = COST_MODEL_DEFAULT) {
   if (!u) return null;
+  const price = claudePriceFor(model);
   const input = u.input_tokens || 0;
   const output = u.output_tokens || 0;
   const cacheWrite = u.cache_creation_input_tokens || 0;
   const cacheRead = u.cache_read_input_tokens || 0;
   const usd =
-    (input * PRICE_PER_MTOK.input +
-      output * PRICE_PER_MTOK.output +
-      cacheWrite * PRICE_PER_MTOK.cacheWrite +
-      cacheRead * PRICE_PER_MTOK.cacheRead) /
+    (input * price.input +
+      output * price.output +
+      cacheWrite * price.cacheWrite +
+      cacheRead * price.cacheRead) /
     1e6;
   return {
-    model: "claude-opus-4-8",
+    model,
     inputTokens: input,
     outputTokens: output,
     cacheWriteTokens: cacheWrite,

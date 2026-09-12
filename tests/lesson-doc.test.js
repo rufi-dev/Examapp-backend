@@ -1406,8 +1406,14 @@ console.log("\n25. The model writes the document; the schema stops being the cei
    * between them and the adapter is chosen by this field.
    */
   ok("every entry names its provider", S.DOC_MODELS.every((m) => ["claude", "openai", "gemini"].includes(m.provider)));
-  ok("all three providers are offered", new Set(S.DOC_MODELS.map((m) => m.provider)).size === 3);
-  ok("the provider is read from the catalogue, not the name", S.providerOf("gpt-4.1-mini") === "openai");
+  /*
+   * Two providers, not three. Gemini was dropped from the picker — writing a
+   * material is the hardest thing asked of a model here and the cheap tiers were
+   * on the list for being cheap, which is not a property anybody wants in a
+   * handout. It still extracts exams elsewhere.
+   */
+  ok("more than one provider is offered", new Set(S.DOC_MODELS.map((m) => m.provider)).size >= 2);
+  ok("the provider is read from the catalogue, not the name", S.providerOf("gpt-5.6-sol") === "openai");
   ok("an unknown id routes to the default's provider", S.providerOf("nope") === S.DOC_MODELS[0].provider);
   /*
    * Which of them stream. Claude reports the document as it is written, so live
@@ -1418,7 +1424,9 @@ console.log("\n25. The model writes the document; the schema stops being the cei
     S.DOC_MODELS.filter((m) => m.provider !== "claude").every((m) => /gedişat yoxdur/.test(m.note)));
   ok("the turn validates what it was sent", /S\.pickModel\(String\(\(req\.body && req\.body\.model\)/.test(ctl5));
   ok("and remembers it on the document", /"settings\.model": model/.test(ctl5));
-  ok("the request carries it", /model: model \|\| "claude-opus-4-8"/.test(aiSrc));
+  // The fallback is the catalogue's default, not a second hand-written copy of
+  // it — that copy had already drifted a model generation behind the picker.
+  ok("the request carries it", /model: model \|\| require\("\.\/lessonDocSchema"\)\.DEFAULT_DOC_MODEL/.test(aiSrc));
 
   /*
    * The wire format each provider wants, checked without calling anyone. A tool
@@ -1612,6 +1620,78 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("and no longer takes blocks", !tool.input_schema.properties.blocks);
   ok("the brief tells the model it writes a document", S.BASE_RULES.includes("SƏNƏDİ HTML KİMİ YAZIRSAN"));
   ok("and gives it the house styles to use", S.BASE_RULES.includes('class="def"'));
+}
+
+console.log("\nThe model picker, and the meter behind it:");
+{
+  const S9 = require("../helper/lessonDocSchema");
+  const A9 = require("../controllers/aiController");
+  const ids = S9.DOC_MODELS.map((m) => m.id);
+
+  // Gemini still extracts exams; it is only gone as a Studio choice.
+  ok("no Gemini model is offered in Studio", !S9.DOC_MODELS.some((m) => m.provider === "gemini"));
+  ok("Gemini remains available to the rest of the app", typeof A9.computeGeminiCost === "function");
+
+  ok("the default is a Claude model", S9.providerOf(S9.DOC_MODELS[0].id) === "claude");
+  ok("a retired id falls back rather than failing", S9.pickModel("gemini-2.5-pro") === S9.DOC_MODELS[0].id);
+  ok("a known id is kept", S9.pickModel("claude-sonnet-5") === "claude-sonnet-5");
+
+  /*
+   * EVERY offered model must be priced. Studio has no rate limit and no budget
+   * guard by decision, so its usage row is the only meter on it — and an
+   * unpriced model computes to $0, which on a spend page does not read as
+   * "unknown", it reads as "free". This is the check that stops a newer,
+   * pricier model being added to the picker before its price is.
+   */
+  const usage = { input_tokens: 10000, output_tokens: 10000 };
+  for (const m of S9.DOC_MODELS) {
+    if (m.provider === "claude") {
+      ok(`${m.id} is priced`, (A9.computeCost(usage, m.id) || {}).usd > 0);
+    } else {
+      const c = A9.computeOpenAIGenCost(
+        { prompt_tokens: 10000, completion_tokens: 10000, total_tokens: 20000, prompt_tokens_details: { cached_tokens: 0 } },
+        m.id,
+        m.id
+      );
+      ok(`${m.id} is priced`, (c || {}).usd > 0);
+    }
+  }
+
+  // The tiers span 10x, so one flat rate would misreport by a multiple — and
+  // always downward for the models that cost the most.
+  const usd = (id) => A9.computeCost(usage, id).usd;
+  ok("Fable 5.1 costs more than Opus 5", usd("claude-fable-5-1") > usd("claude-opus-5"));
+  ok("Opus 5 costs more than Sonnet 5", usd("claude-opus-5") > usd("claude-sonnet-5"));
+  ok("a dated snapshot prices as its family", usd("claude-haiku-4-5-20251001") === usd("claude-haiku-4-5"));
+  ok("an unknown model is priced, never free", usd("some-unreleased-model") > 0);
+  ok("and the row records the model it was asked for", A9.computeCost(usage, "claude-sonnet-5").model === "claude-sonnet-5");
+
+  /*
+   * The accumulator. `cost` began at 0 and the Claude adapter did
+   * `cost + computeCost(...)` — adding an object to a number, which produced
+   * the string "0[object Object]". logStudioUsage then read .usd/.inputTokens
+   * off it, found undefined, and wrote a real $0.28 turn as $0 with no tokens:
+   * 19 of the 32 rows in production. A turn is several calls, so they must add.
+   */
+  const { claudeAdapter } = require("../helper/aiDocAdapters");
+  const ad = claudeAdapter({ client: null, model: "claude-opus-5", tools: [], maxTokens: 1000 });
+  const turn = { usage: { input_tokens: 12000, output_tokens: 9000 } };
+  const once = ad.addCost(null, turn);
+  ok("a turn's spend is a breakdown, not a scalar", once && typeof once === "object");
+  ok("it is never a string", typeof once !== "string");
+  ok("it carries dollars", once.usd > 0);
+  ok("and the tokens the row records", once.inputTokens === 12000 && once.outputTokens === 9000);
+  ok("and the model that ran", once.model === "claude-opus-5");
+
+  const twice = ad.addCost(once, turn);
+  ok("a second call adds rather than replaces", twice.inputTokens === 24000);
+  ok("dollars add too", Math.abs(twice.usd - once.usd * 2) < 1e-6);
+  ok("and the model is not overwritten", twice.model === "claude-opus-5");
+
+  // What logStudioUsage actually reads off it.
+  for (const f of ["model", "inputTokens", "outputTokens", "totalTokens", "usd"]) {
+    ok(`the usage row can read .${f}`, twice[f] !== undefined);
+  }
 }
 
 console.log("\nAn admin's library lists every teacher's materials:");

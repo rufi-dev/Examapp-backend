@@ -49,6 +49,49 @@ const OUT_OF_CREDIT =
  */
 const PROVIDER_LABEL = { claude: "Claude (Anthropic)", openai: "OpenAI", gemini: "Gemini (Google)" };
 
+/*
+ * Add one turn's spend to the running total for the whole turn.
+ *
+ * WHY THIS EXISTS. Each adapter used to do `cost + computeXCost(...)`, starting
+ * from the driver's `cost = 0`. The Claude branch added an OBJECT to a number,
+ * so the total became the string "0[object Object]"; the other two added a bare
+ * `.usd` number, so the token breakdown was thrown away. Either way the row
+ * written by logStudioUsage read `c.usd`, `c.inputTokens` and `c.model` off a
+ * value that had none of them, and recorded a real $0.28 turn as $0 with zero
+ * tokens — 19 of the 32 rows in production. Studio has no rate limit and no
+ * budget guard BY DECISION, which makes that row the only meter there is, and
+ * it was reading zero on the one surface with no ceiling.
+ *
+ * A turn is several provider calls (a fix, a fetched source, a look at the
+ * render), so these accumulate. The model name comes from the first call that
+ * reported one and is not overwritten: one turn runs on one model.
+ */
+const EMPTY_COST = {
+  model: "",
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheWriteTokens: 0,
+  cacheReadTokens: 0,
+  totalTokens: 0,
+  usd: 0,
+};
+
+const sumCost = (acc, next) => {
+  if (!next) return acc;
+  const a = acc || EMPTY_COST;
+  return {
+    model: a.model || next.model || "",
+    inputTokens: a.inputTokens + (next.inputTokens || 0),
+    outputTokens: a.outputTokens + (next.outputTokens || 0),
+    cacheWriteTokens: a.cacheWriteTokens + (next.cacheWriteTokens || 0),
+    cacheReadTokens: a.cacheReadTokens + (next.cacheReadTokens || 0),
+    totalTokens: a.totalTokens + (next.totalTokens || 0),
+    // Six places: a cheap turn on a cheap model is worth a fraction of a cent,
+    // and rounding it to zero is how a meter stops meaning anything.
+    usd: Number((a.usd + (next.usd || 0)).toFixed(6)),
+  };
+};
+
 const billingError = (provider) => {
   const label = PROVIDER_LABEL[provider] || "AI";
   console.error(`[AI BILLING] ${label} refuses this account (credit or key) — Studio is down on this provider's models until it is fixed.`);
@@ -119,7 +162,8 @@ function claudeAdapter({ client, model, tools, maxTokens, onText }) {
       };
     },
 
-    addCost: (cost, turn) => cost + (computeCost(turn.usage) || 0),
+    // Priced at the model the teacher actually picked — the tiers span 10x.
+    addCost: (cost, turn) => sumCost(cost, computeCost(turn.usage, model)),
 
     /*
      * Say something when there is no call to answer.
@@ -228,17 +272,19 @@ function openaiAdapter({ model, tools, maxTokens }) {
     },
 
     addCost: (cost, turn) =>
-      cost +
-      (computeOpenAIGenCost(
-        {
-          prompt_tokens: turn.usage.input_tokens,
-          completion_tokens: turn.usage.output_tokens,
-          total_tokens: turn.usage.input_tokens + turn.usage.output_tokens,
-          prompt_tokens_details: { cached_tokens: 0 },
-        },
-        turn.model,
-        model
-      )?.usd || 0),
+      sumCost(
+        cost,
+        computeOpenAIGenCost(
+          {
+            prompt_tokens: turn.usage.input_tokens,
+            completion_tokens: turn.usage.output_tokens,
+            total_tokens: turn.usage.input_tokens + turn.usage.output_tokens,
+            prompt_tokens_details: { cached_tokens: 0 },
+          },
+          turn.model,
+          model
+        )
+      ),
 
     // Nothing to attach a result to: the model answered in prose rather than
     // acting. Same shape as any other user turn on this API.
@@ -381,10 +427,15 @@ function geminiAdapter({ model, tools, maxTokens }) {
     },
 
     addCost: (cost, turn) =>
-      cost +
-      (computeGeminiCost
-        ? computeGeminiCost({ promptTokenCount: turn.usage.input_tokens, candidatesTokenCount: turn.usage.output_tokens }, model)?.usd || 0
-        : 0),
+      sumCost(
+        cost,
+        computeGeminiCost
+          ? computeGeminiCost(
+              { promptTokenCount: turn.usage.input_tokens, candidatesTokenCount: turn.usage.output_tokens },
+              model
+            )
+          : null
+      ),
 
     nudge(history, turn, text) {
       history.push(turn.raw);
