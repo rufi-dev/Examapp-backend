@@ -1657,6 +1657,35 @@ console.log("\nThe model picker, and the meter behind it:");
     }
   }
 
+  /*
+   * A model may be priced here without being offered on the EXAM picker.
+   *
+   * gpt-6-astra needs a price because this table is what prices a Studio turn,
+   * but at $10/$50 it is ~25x gpt-4.1-mini on input, and the exam picker's own
+   * rule is that no click should cost far more than a teacher expects. So it is
+   * priced everywhere and offered only where it was chosen deliberately.
+   */
+  const astra = A9.findAiModel("gpt-6-astra");
+  ok("gpt-6-astra has a real price", astra && astra.usd && astra.usd.in === 10 && astra.usd.out === 50);
+  ok("and is flagged off the exam picker", astra.studioOnly === true);
+  ok("while still being offered in Studio", ids.includes("gpt-6-astra"));
+
+  /*
+   * The 5.6 prices were each one model's row out of step — sol carried gpt-5.5's
+   * numbers, terra carried gpt-5.4's, and luna was five times its real rate — so
+   * OpenAI spend was over-reported. Pinned against OpenAI's published table.
+   */
+  const published = {
+    "gpt-6-astra": { in: 10, cached: 1, out: 50 },
+    "gpt-5.6-sol": { in: 4, cached: 0.4, out: 20 },
+    "gpt-5.6-terra": { in: 2, cached: 0.2, out: 12 },
+    "gpt-5.6-luna": { in: 0.2, cached: 0.02, out: 1.2 },
+  };
+  for (const [id, want] of Object.entries(published)) {
+    const got = A9.findAiModel(id)?.usd || {};
+    ok(`${id} is priced as published`, got.in === want.in && got.cached === want.cached && got.out === want.out);
+  }
+
   // The tiers span 10x, so one flat rate would misreport by a multiple — and
   // always downward for the models that cost the most.
   const usd = (id) => A9.computeCost(usage, id).usd;

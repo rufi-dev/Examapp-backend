@@ -105,15 +105,18 @@ const DOC_MODELS = [
    * table — the rule that table already states about itself. An unpriced model
    * computes to $0, and since Studio's usage row is the only meter on a feature
    * with no ceiling, a $0 row does not read as "unknown", it reads as "free".
-   * gpt-6-astra is newer than both of these and deliberately absent for exactly
-   * that reason; add its published price to AI_MODELS (or AI_MODEL_PRICES) and
-   * it can join this list.
    */
+  {
+    id: "gpt-6-astra",
+    provider: "openai",
+    label: "GPT-6 Astra",
+    note: "OpenAI-ın ən yenisi və ən güclüsü — ən bahalı. Canlı gedişat yoxdur.",
+  },
   {
     id: "gpt-5.6-sol",
     provider: "openai",
     label: "GPT-5.6 Sol",
-    note: "OpenAI-ın ən güclüsü. Canlı gedişat yoxdur, yalnız mərhələ.",
+    note: "OpenAI — çox güclü. Canlı gedişat yoxdur, yalnız mərhələ.",
   },
   {
     id: "gpt-5.6-terra",

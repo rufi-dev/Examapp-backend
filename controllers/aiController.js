@@ -2005,8 +2005,10 @@ const AI_MODELS = [
     id: "gpt-5.6-luna",
     label: "GPT-5.6 luna",
     provider: "openai",
-    note: "Güclü, orta qiymət",
-    usd: { in: 1, cached: 0.1, out: 6 },
+    note: "Güclü və çox sərfəli",
+    // Was 1 / 0.1 / 6 — five times the real rate. Corrected against OpenAI's
+    // published table; see the note on gpt-6-astra below.
+    usd: { in: 0.2, cached: 0.02, out: 1.2 },
   },
   {
     id: "gpt-5.4",
@@ -2018,7 +2020,8 @@ const AI_MODELS = [
     id: "gpt-5.6-terra",
     label: "GPT-5.6 terra",
     provider: "openai",
-    usd: { in: 2.5, cached: 0.25, out: 15 },
+    // Was 2.5 / 0.25 / 15 — gpt-5.4's row, evidently copied.
+    usd: { in: 2, cached: 0.2, out: 12 },
   },
   {
     id: "gpt-5.5",
@@ -2031,8 +2034,32 @@ const AI_MODELS = [
     id: "gpt-5.6-sol",
     label: "GPT-5.6 sol",
     provider: "openai",
-    note: "Ən güclü — bahalı",
-    usd: { in: 5, cached: 0.5, out: 30 },
+    note: "Çox güclü — bahalı",
+    // Was 5 / 0.5 / 30 — gpt-5.5's row. Every 5.6 price here was one model's
+    // row out of step, so OpenAI spend has been over-reported on this page.
+    usd: { in: 4, cached: 0.4, out: 20 },
+  },
+  /*
+   * OpenAI's newest, priced but NOT offered on the exam picker.
+   *
+   * Studio needs it in this table because this table is what prices a turn, and
+   * an unpriced model computes to $0 — which on a spend page does not read as
+   * "unknown", it reads as "free". Studio's usage row is the only meter on a
+   * feature with no rate limit and no budget guard, so that mattered.
+   *
+   * It is kept OFF the exam picker for the reason stated just below about the
+   * pro tiers: at $10/$50 it is twenty-five times gpt-4.1-mini on input, and a
+   * teacher generating an exam should not be one click from that without asking
+   * for it. `studioOnly` is honoured by listAiModels, not by priceFor — so it is
+   * priced everywhere and offered only where it was chosen deliberately.
+   */
+  {
+    id: "gpt-6-astra",
+    label: "GPT-6 astra",
+    provider: "openai",
+    note: "Ən yenisi — ən bahalı",
+    studioOnly: true,
+    usd: { in: 10, cached: 1, out: 50 },
   },
   {
     id: "gpt-4.1",
@@ -2079,6 +2106,8 @@ const priceFor = (id) => {
 // GET /api/quiz/ai/models — what the picker offers, and which one is preselected.
 const listAiModels = asyncHandler(async (req, res) => {
   const available = AI_MODELS.filter((m) => {
+    // Priced for Studio, deliberately not offered here — see gpt-6-astra.
+    if (m.studioOnly) return false;
     if (m.provider === "openai") return !!process.env.OPENAI_API_KEY;
     if (m.provider === "gemini") return !!process.env.GEMINI_API_KEY;
     if (m.provider === "claude") return !!process.env.ANTHROPIC_API_KEY;
