@@ -1887,7 +1887,15 @@ console.log("\nEffort, ceiling and attachment size:");
    */
   ok("image encoding is forced, not inherited", /-dAutoFilterColorImages=false/.test(src) && /-dColorImageFilter=\/DCTEncode/.test(src));
   ok("and the downsample threshold is lowered", /-dColorImageDownsampleThreshold=1\.0/.test(src));
-  ok("JPEG quality stays above the digit-mangling range", F8b.SLIM_JPEG_Q >= 55);
+  /*
+   * Quality is set for FIDELITY, not size. count_tokens settled it: the same
+   * 12-page scan bills 18,921 tokens at 9.95 MB and 18,921 at 4.65 MB — a page
+   * costs the same whatever its resolution, because the provider normalises it
+   * before tokenising. Re-encoding buys request-cap headroom and nothing else,
+   * so trading legibility for bytes would now be a loss on both sides.
+   */
+  ok("JPEG quality favours legibility over size", F8b.SLIM_JPEG_Q >= 75);
+  ok("and only cap-threatening files are touched", F8b.SLIM_OVER_BYTES >= 4 * 1024 * 1024);
   ok("it verifies the output is really a PDF", /head\.toString\("latin1"\) !== "%PDF-"/.test(src));
   ok("it keeps the original unless the copy is meaningfully smaller", /after\.size >= before\.size \* 0\.9/.test(src));
   ok("a failed conversion falls back to the original", /return srcPath;/.test(src));

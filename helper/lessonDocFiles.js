@@ -95,19 +95,40 @@ async function ensureDir() {
  * The result is content-addressed beside the original (`<key>.s200.pdf`), so the
  * conversion happens once per file rather than once per turn.
  *
- * HONEST SCOPE. Measured on that file this halves the bytes (9.95 MB -> 4.65 MB),
- * which cuts upload time and keeps a multi-file turn under the provider's 32 MB
- * request cap. Whether it cuts TOKENS proportionally is NOT established: a
- * provider normalises a page image to a maximum dimension before tokenising, so
- * a 600 dpi and a 200 dpi scan of the same page may well bill the same. The
- * change that is certain about tokens is prompt caching in aiDocAdapters. Verify
- * this one with /v1/messages/count_tokens on both files when there is credit to
- * call it; if the counts match, the honest thing is to keep it for the size cap
- * and stop describing it as a cost saving.
+ * MEASURED SCOPE — IT SAVES NO TOKENS. count_tokens on the real file, both ways:
+ *
+ *     original      9.95 MB, 12 pages -> 18,921 tokens
+ *     downscaled    4.65 MB, 12 pages -> 18,921 tokens   (identical)
+ *     pages 1-3     1.18 MB,  3 pages ->  4,755 tokens
+ *
+ * A provider normalises every page image to a fixed maximum dimension before
+ * tokenising, so a page costs about 1,580 tokens whatever its resolution. Half
+ * the bytes, exactly the same bill. What actually cuts tokens is sending fewer
+ * PAGES (slicePdf below) and re-reading the prefix from cache instead of paying
+ * for it again (aiDocAdapters).
+ *
+ * SO WHY KEEP IT. One reason, and it is not cost: the provider caps a single
+ * request at 32 MB, base64 inflates a file by a third, and this store accepts up
+ * to 32 MB of attachments per document — so a teacher who attaches the maximum
+ * would build a request that is refused outright. Halving the biggest files
+ * keeps that request inside the cap. It also cuts upload time on a slow line.
+ *
+ * And because bytes no longer buy anything, the settings below are tuned for
+ * FIDELITY rather than size: quality 75 instead of 60, and only files large
+ * enough to threaten the cap are touched at all. A JPEG artefact that turns an 8
+ * into a 3 was a bad trade when it saved money; it is an indefensible one now
+ * that it does not.
+ *
+ * Known limitation: the threshold is per FILE, while the cap applies to the
+ * whole request. Several files each just under the threshold can still add up.
+ * A budget-aware pass would fix that, and has not been needed yet.
  */
-const SLIM_OVER_BYTES = Number(process.env.LESSON_DOC_SLIM_OVER_MB || 2) * 1024 * 1024;
+// 6 MB, not 2: only files big enough to threaten the 32 MB request cap are worth
+// re-encoding at all, now that re-encoding is known to save no tokens.
+const SLIM_OVER_BYTES = Number(process.env.LESSON_DOC_SLIM_OVER_MB || 6) * 1024 * 1024;
 const SLIM_DPI = Number(process.env.LESSON_DOC_SLIM_DPI || 200);
-const SLIM_JPEG_Q = Number(process.env.LESSON_DOC_SLIM_JPEG_Q || 60);
+// 75, not 60. Quality costs nothing here — the token count is the same either way.
+const SLIM_JPEG_Q = Number(process.env.LESSON_DOC_SLIM_JPEG_Q || 75);
 // Enough for a big scan on a busy box; a slow conversion must not hold a turn.
 const SLIM_TIMEOUT_MS = 120000;
 
