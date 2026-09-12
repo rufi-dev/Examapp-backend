@@ -1,5 +1,13 @@
 node_modules
 .env
+# Every .env VARIANT too, not just the file itself. A key rotation or a hurried
+# debug session leaves .env.bak / .env.local / .env.2026-09-12 sitting next to
+# the real one, holding the same live keys — and a bare ".env" rule does not
+# match any of them, so the next "git add ." commits the secrets.
+# .env.example is the deliberate exception: it is the template, and carries
+# names without values.
+.env.*
+!.env.example
 *.log
 # Runtime data — never commit (uploaded PDFs, study materials, WhatsApp sessions)
 uploads/
