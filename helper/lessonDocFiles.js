@@ -26,8 +26,9 @@ const MAX_FILES = 6;
 // request, and four large PDFs is a slower, costlier call than any teacher wants.
 const MAX_TOTAL_MB = 32;
 
-// Exactly what the providers can actually read. A .docx attached here would be
-// silently ignored by every one of them, so it is refused with a reason instead.
+// Exactly what the providers can actually read, as stored. Anything else that is
+// accepted arrives as one of these — an Office file is converted to a PDF on the
+// way in (see trustedType / the controller), never stored as itself.
 const ACCEPT = {
   "application/pdf": "pdf",
   "image/png": "png",
@@ -35,6 +36,53 @@ const ACCEPT = {
   "image/webp": "webp",
   "image/gif": "gif",
 };
+
+// Word, PowerPoint and spreadsheets: accepted, then converted to PDF by the
+// LibreOffice already installed for the materials library. The model reads the
+// PDF; the teacher sees their own filename.
+const OFFICE_EXTS = new Set([".doc", ".docx", ".odt", ".rtf", ".ppt", ".pptx", ".odp", ".xls", ".xlsx", ".ods"]);
+
+/*
+ * What a file actually IS, decided from its bytes.
+ *
+ * The upload used to be typed by `mimetype` — a header the browser fills in from
+ * the filename — and that string was the only gate between an upload and the
+ * disk, the model, and every later viewer. A file renamed to .pdf was a PDF as
+ * far as this code could tell. The magic bytes are the one thing about an
+ * upload the client does not get to assert, so they decide here; the declared
+ * type is not consulted at all.
+ *
+ * Returns { ok, ext, mime, office } or { ok:false, reason }. `office` marks a
+ * container that still needs the deep structural pass and a conversion before
+ * it can be stored — a ZIP is only a .docx once word/document.xml is in it.
+ */
+function trustedType({ buffer, name }) {
+  const { detectHead } = require("../utils/fileValidation");
+  const head = Buffer.isBuffer(buffer) ? buffer.subarray(0, 32) : Buffer.alloc(0);
+  const found = detectHead(head);
+  if (!found) return { ok: false, reason: "unrecognised" };
+
+  const ext = path.extname(decodeUploadName(name)).toLowerCase();
+
+  const direct = { pdf: ["pdf", "application/pdf"], png: ["png", "image/png"], jpg: ["jpg", "image/jpeg"], webp: ["webp", "image/webp"], gif: ["gif", "image/gif"] };
+  if (direct[found.type]) {
+    const [e, mime] = direct[found.type];
+    return { ok: true, ext: e, mime, office: false };
+  }
+
+  // A container. Which Office format it is comes from the NAME, but only if the
+  // bytes agree: .docx/.pptx/.xlsx/.od* are ZIPs, .doc/.ppt/.xls are OLE, .rtf
+  // is RTF. A .docx whose bytes are not a ZIP is refused, whatever it is called.
+  if (!OFFICE_EXTS.has(ext)) return { ok: false, reason: "unsupported" };
+  const zipExts = new Set([".docx", ".pptx", ".xlsx", ".odt", ".odp", ".ods"]);
+  const oleExts = new Set([".doc", ".ppt", ".xls"]);
+  const consistent =
+    (found.type === "zip" && zipExts.has(ext)) ||
+    (found.type === "ole" && oleExts.has(ext)) ||
+    (found.type === "rtf" && ext === ".rtf");
+  if (!consistent) return { ok: false, reason: "mismatch" };
+  return { ok: true, ext: ext.slice(1), mime: "", office: true };
+}
 
 /*
  * multer 1.x (busboy) decodes multipart filenames as latin1, so a UTF-8 name like
@@ -242,9 +290,11 @@ async function slimPdf(srcPath, key) {
  * Store one uploaded buffer. The key is the CONTENT HASH, so attaching the same
  * page twice costs one file on disk, and re-uploading after a failure is idempotent.
  */
-async function saveFile({ buffer, mime, name }) {
-  const ext = ACCEPT[mime];
-  if (!ext) throw new Error("unsupported type");
+async function saveFile({ buffer, mime, ext: givenExt, name }) {
+  // The extension comes from trustedType now, never from the declared mime; the
+  // mime lookup remains only for callers that pass one of the four storable types.
+  const ext = givenExt || ACCEPT[mime];
+  if (!ext || !ACCEPT[mime]) throw new Error("unsupported type");
   await ensureDir();
   const key = crypto.createHash("sha256").update(buffer).digest("hex");
   const file = pathForKey(key, ext);
@@ -524,6 +574,8 @@ module.exports = {
   SLIM_JPEG_Q,
   SLIM_OVER_BYTES,
   saveFile,
+  trustedType,
+  OFFICE_EXTS,
   toParts,
   partForPages,
   parsePages,

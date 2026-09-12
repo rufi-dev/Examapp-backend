@@ -32,7 +32,12 @@ router.get("/:id", c.getDoc);
 router.patch("/:id", c.updateDoc);
 router.delete("/:id", c.removeDoc);
 /*
- * The two AI routes, and the only two things gating them.
+ * The AI route, and the only two things gating it.
+ *
+ * A non-streaming twin (POST /:id/message) used to be mounted beside it and ran
+ * the older whole-document path — no patch edits, no page reads, no render
+ * check. The app had stopped calling it; it is gone rather than left for an old
+ * client to find, so every AI edit enters the same turn.
  *
  * `requireStudioAi` is the kill switch; `requireActiveOperation` refuses if the
  * operation is ever set back to `active: false` in config/aiOperations.js, so an
@@ -47,7 +52,6 @@ router.delete("/:id", c.removeDoc);
  * in the usage table, which is where the distinction actually matters.
  */
 const aiChain = [requireStudioAi, requireActiveOperation("ai.generate.material")];
-router.post("/:id/message", ...aiChain, c.sendMessage);
 router.post("/:id/message/stream", ...aiChain, c.streamMessage);
 router.post("/:id/files", runUpload, c.addFile);
 router.get("/:id/files/:key", c.getFile);

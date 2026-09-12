@@ -49,6 +49,23 @@ function requireRevision(expectedRevision) {
  * field existed have no `revision` at all, and `{ revision: 0 }` would not find
  * them. Same reasoning as lessonPlanService.
  */
+/*
+ * How much conversation one document keeps.
+ *
+ * Messages, their work logs and the source notes all live INSIDE the document,
+ * and nothing bounded them: a material used every day for a year would grow its
+ * row without limit toward Mongo's 16 MB ceiling and slow every read of itself
+ * on the way. The model only ever reads the last few turns (historyOf), so the
+ * oldest ones carry no working value — they are kept for the teacher to scroll
+ * back through, and 400 is more scrolling back than anyone does. The newest
+ * are kept: `$slice` with a negative count trims from the front.
+ */
+const MAX_MESSAGES = 400;
+
+// Every appended message list goes through this, so the cap cannot be forgotten
+// on one path and remembered on another.
+const pushMessages = (list) => ({ $each: [].concat(list), $slice: -MAX_MESSAGES });
+
 async function commit(docId, ownerId, patch, expectedRevision, { unset, push } = {}) {
   const expected = requireRevision(expectedRevision);
   const revMatch = expected === 0 ? { $in: [0, null] } : expected;
@@ -67,7 +84,9 @@ async function commit(docId, ownerId, patch, expectedRevision, { unset, push } =
    * explains them, or vice versa.
    */
   if (push && Object.keys(push).length) {
-    update.$push = Object.fromEntries(Object.entries(push).map(([k, v]) => [k, { $each: [].concat(v) }]));
+    update.$push = Object.fromEntries(
+      Object.entries(push).map(([k, v]) => [k, k === "messages" ? pushMessages(v) : { $each: [].concat(v) }])
+    );
   }
 
   const updated = await LessonDoc.findOneAndUpdate(
@@ -101,7 +120,7 @@ async function appendMessages(docId, ownerId, messages) {
   if (!list.length) return null;
   return LessonDoc.findOneAndUpdate(
     { _id: docId, owner: ownerId },
-    { $push: { messages: { $each: list } } },
+    { $push: { messages: pushMessages(list) } },
     { new: true }
   );
 }
@@ -159,12 +178,45 @@ async function reserveDocSlot(User, ownerId, max) {
   );
   void seeded;
 
-  const claimed = await User.updateOne(
+  let claimed = await User.updateOne(
     { _id: ownerId, lessonDocCount: { $lt: max } },
     { $inc: { lessonDocCount: 1 } }
   );
   if (!claimed.modifiedCount) {
-    throw httpError(422, "too_many_docs", `Ən çox ${max} material saxlaya bilərsiniz.`);
+    /*
+     * Before refusing, ask the documents themselves. The counter is a
+     * projection of how many materials exist, and a projection can drift — a
+     * release that failed mid-deploy, a row deleted by hand — always upward,
+     * because a claim happens before the create and a release after the delete.
+     * Left alone, drift ends with a teacher who owns three materials being told
+     * they have two hundred. Recount from the truth, and if there is room,
+     * repair the counter and claim again. Still refused if the recount agrees.
+     */
+    const actual = await LessonDoc.countDocuments({ owner: ownerId, archivedAt: null });
+    const seen = (await User.findById(ownerId).select("lessonDocCount").lean())?.lessonDocCount;
+    /*
+     * A document count is NOT the whole truth, and the first version of this
+     * treated it as one. A slot is claimed BEFORE its document exists, so ten
+     * concurrent claims on a fresh account are ten reservations and zero
+     * documents — and a heal that trusted the count reset the counter to zero
+     * for each refused racer, granting all ten against a limit of three. The
+     * CAS test caught it.
+     *
+     * So the heal fires only for drift no amount of in-flight work could
+     * explain: the counter sits more than INFLIGHT_SLACK above the documents.
+     * And the repair itself is a compare-and-set on the value that was just
+     * refused, so among racers exactly one performs it; the rest see a
+     * no-match, and every one of them then claims through the same `$lt: max`
+     * that was atomic all along.
+     */
+    const INFLIGHT_SLACK = 5;
+    if (Number.isFinite(seen) && seen > actual + INFLIGHT_SLACK && actual < max) {
+      await User.updateOne({ _id: ownerId, lessonDocCount: seen }, { $set: { lessonDocCount: actual } });
+      claimed = await User.updateOne({ _id: ownerId, lessonDocCount: { $lt: max } }, { $inc: { lessonDocCount: 1 } });
+    }
+    if (!claimed.modifiedCount) {
+      throw httpError(422, "too_many_docs", `Ən çox ${max} material saxlaya bilərsiniz.`);
+    }
   }
 }
 
@@ -175,7 +227,23 @@ async function reserveDocSlot(User, ownerId, max) {
  * drift that breaks the limit rather than merely tightening it.
  */
 async function releaseDocSlot(User, ownerId) {
-  await User.updateOne({ _id: ownerId, lessonDocCount: { $gt: 0 } }, { $inc: { lessonDocCount: -1 } }).catch(() => {});
+  /*
+   * A failed release used to vanish. It is still best-effort — the document is
+   * already deleted, and failing the request now would tell the teacher a
+   * deletion that happened did not — but it gets a second try, and the final
+   * failure is said out loud by code. reserveDocSlot's recount above is what
+   * makes the miss recoverable rather than permanent.
+   */
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await User.updateOne({ _id: ownerId, lessonDocCount: { $gt: 0 } }, { $inc: { lessonDocCount: -1 } });
+      return;
+    } catch (e) {
+      if (attempt === 1) {
+        console.error("[LESSON DOC] slot_release_failed", JSON.stringify({ code: typeof e?.code === "string" ? e.code : "unknown" }));
+      }
+    }
+  }
 }
 
-module.exports = { commit, appendMessages, stageFile, clearStaged, requireRevision, reserveDocSlot, releaseDocSlot, CONFLICT };
+module.exports = { commit, appendMessages, stageFile, clearStaged, requireRevision, reserveDocSlot, releaseDocSlot, CONFLICT, MAX_MESSAGES };

@@ -81,6 +81,28 @@ const PUBLIC_FAILURE = {
 };
 
 /*
+ * The only shape a Studio failure takes in the logs.
+ *
+ * Six sites logged `e.message`. A provider error carries fragments of the
+ * request, model output, a source filename, sometimes a URL with credentials in
+ * it; a Mongo error carries the connection string. The SSE path was closed to
+ * that a while ago (publicFailure below curates what the teacher sees), and the
+ * log line was the channel left open. This writes a stable event name and the
+ * error's CODE — nothing the error composed itself. A canary test throws an
+ * error stuffed with secrets through every path and asserts none reach the
+ * console.
+ */
+const logStudioEvent = (event, e, extra) => {
+  const code =
+    typeof e?.code === "string" ? e.code : Number.isFinite(e?.aiStatus) ? `ai_${e.aiStatus}` : e ? "unknown" : "";
+  const status = Number.isFinite(e?.status) ? e.status : Number.isFinite(e?.aiStatus) ? e.aiStatus : null;
+  const provider = typeof e?.provider === "string" ? e.provider : null;
+  console.error(`[LESSON DOC] ${event}`, JSON.stringify({ code, status, provider, ...(extra || {}) }));
+};
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/*
  * What a turn cost, recorded where the admin AI-cost page already looks.
  *
  * Studio has no rate limit, no daily budget guard and no credit charge — by
@@ -92,23 +114,36 @@ const PUBLIC_FAILURE = {
  * material they just waited for.
  */
 const logStudioUsage = async (req, { doc, out, hadBlocks }) => {
-  try {
-    const AiUsage = require("../models/aiUsageModel");
-    const c = (out && out.cost) || {};
-    await AiUsage.create({
-      user: req.user._id,
-      operation: hadBlocks ? "ai.edit.material" : "ai.generate.material",
-      model: c.model || (out && out.provider) || "unknown",
-      inputTokens: c.inputTokens || 0,
-      outputTokens: c.outputTokens || 0,
-      cacheWriteTokens: c.cacheWriteTokens || 0,
-      cacheReadTokens: c.cacheReadTokens || 0,
-      totalTokens: c.totalTokens || 0,
-      usd: c.usd || 0,
-      blocks: S.countParts(doc),
-    });
-  } catch (e) {
-    console.error("[LESSON DOC] usage log failed:", e?.message);
+  const AiUsage = require("../models/aiUsageModel");
+  const c = (out && out.cost) || {};
+  const row = {
+    user: req.user._id,
+    operation: hadBlocks ? "ai.edit.material" : "ai.generate.material",
+    model: c.model || (out && out.provider) || "unknown",
+    inputTokens: c.inputTokens || 0,
+    outputTokens: c.outputTokens || 0,
+    cacheWriteTokens: c.cacheWriteTokens || 0,
+    cacheReadTokens: c.cacheReadTokens || 0,
+    totalTokens: c.totalTokens || 0,
+    usd: c.usd || 0,
+    blocks: S.countParts(doc),
+  };
+  /*
+   * Three attempts, because the moment this row fails to write is the moment
+   * the database is having a bad second — which a single try turns into a turn
+   * of paid provider work that no meter ever saw. Still best-effort at the end:
+   * a usage row must not cost the teacher the material they waited for. But
+   * the final failure is logged by CODE with the dollar amount, so the gap is
+   * visible and recoverable rather than silent.
+   */
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await AiUsage.create(row);
+      return;
+    } catch (e) {
+      if (attempt === 2) logStudioEvent("usage_settlement_failed", e, { attempts: 3, usd: row.usd, operation: row.operation });
+      else await wait(200 * 4 ** attempt);
+    }
   }
 };
 
@@ -245,10 +280,18 @@ function assertSourcesReadable(sending, parts, unreadable) {
 }
 
 function publicFailure(e) {
-  // Log the real thing exactly once, where only we can read it.
-  console.error("[LESSON DOC] turn failed:", e?.code || e?.aiStatus || "", e?.message);
+  // Logged once, by code — never the message, which is the provider's to compose.
+  logStudioEvent("turn_failed", e);
   const code = typeof e?.code === "string" && PUBLIC_FAILURE[e.code] ? e.code : null;
-  if (code) return { code, message: e.userMessage || e.message || PUBLIC_FAILURE[code] };
+  /*
+   * A known code does NOT make the message safe. This used to fall through to
+   * `e.message` for any error carrying a recognised code, so a provider error
+   * that happened to be tagged provider_unavailable handed its raw body — with
+   * whatever request fragment, filename or URL it quoted — straight to the
+   * teacher's toast. The canary test found it. Only text written FOR a teacher
+   * passes: a docError's userMessage, an AppError's message, or the fixed line.
+   */
+  if (code) return { code, message: e.userMessage || (isAppError(e) ? e.message : "") || PUBLIC_FAILURE[code] };
   // A docError/AppError carries a message written for a teacher; anything else
   // is an internal detail and gets the generic line.
   const curated = e?.userMessage || (isAppError(e) ? e.message : "");
@@ -382,165 +425,15 @@ const getDoc = asyncHandler(async (req, res) => {
 });
 
 /*
- * POST /:id/message — one turn.
+ * There is ONE way an AI turn changes a document: the streaming turn below.
  *
- * The FIRST turn writes the document; every turn after edits it. Both go through
- * the same schema, so a material is the same shape however far into the
- * conversation it was written.
- *
- * The teacher's message is stored BEFORE the model runs. A provider timeout must
- * not lose what they typed — they should reopen the page and see their own words
- * still there, with a failure beside them.
+ * A second, non-streaming POST /:id/message used to sit beside it and ran the
+ * older whole-document generation — no tool loop, no patch edits, no render
+ * check, no read_source. The app had stopped calling it, but it was still
+ * mounted, so any old client or direct caller could rewrite a material through a
+ * path that none of the guarantees on this page applied to. Two editing
+ * contracts that evolve separately is a bug factory; there is now one.
  */
-const sendMessage = asyncHandler(async (req, res) => {
-  const doc = await mine(req, req.params.id);
-  const text = String((req.body && req.body.text) || "").trim();
-  if (!text) throw httpError(400, "message_empty", "Nə yaratmaq istədiyinizi yazın.");
-  if (text.length > 4000) throw httpError(422, "message_long", "Mesaj çox uzundur.");
-
-  // What this turn is ADDING, not everything the document holds — see stagedFiles.
-  const sent = stagedFiles(doc);
-  await svc.appendMessages(doc._id, doc.owner, {
-    role: "user",
-    text,
-    at: new Date(),
-    ...(sent.length ? { files: sent } : {}),
-  });
-  // This turn is carrying them now, so they are no longer waiting to be carried.
-  // By key, so a file attached while this turn was starting stays for the next.
-  await svc.clearStaged(doc._id, doc.owner, sent.map((f) => f.key));
-
-  const { runDocument } = require("../helper/aiDocument");
-  const { toGeminiSchema } = require("../helper/curriculumSchema");
-
-  /*
-   * Is there already a document, or is this the first turn?
-   *
-   * This asked whether there were BLOCKS, which an html document never has — so
-   * every turn on one looked like a first turn. The model was handed the create
-   * prompt, never saw the material it was meant to be changing, and rebuilt it
-   * from the attached file: a teacher asking to remove blank rows got their
-   * translation and their colour thrown away and the English original back.
-   * Everything downstream rode on the same flag, so the turn was also logged as a
-   * generation and recorded in the transcript as "created".
-   */
-  const hadBlocks = S.countParts(doc) > 0;
-  /*
-   * The revision this turn is answering. The commit at the end must still match
-   * it: a generation takes tens of seconds, and if the teacher edited a block in
-   * the meantime this turn is writing a document that no longer exists.
-   */
-  const baseRevision = doc.revision || 0;
-  // The references go with EVERY turn, not just the first.
-  /*
-   * What this turn ATTACHED, not everything the document has ever held.
-   *
-   * Files stay on the document, and every one of them was re-encoded and resent on
-   * every turn afterwards. A teacher who attached a textbook page in turn one and
-   * typed "make it shorter" in turn nine paid to upload that page nine times —
-   * and, worse than the cost, the model kept being handed a source together with
-   * instructions about sources on a turn that was about the document.
-   *
-   * The bytes are needed once. What has to persist is the KNOWLEDGE that the file
-   * was sent and what came of it, and that lives in the transcript now: the
-   * history names each attachment on the turn it arrived, so "the file I sent
-   * earlier" stays answerable without shipping it again.
-   */
-  /*
-   * Until a source has actually BEEN read, it keeps being sent.
-   *
-   * "Only this turn's attachments" was right about cost and wrong about a first
-   * draft. A teacher attached ÇEVRƏ.pdf with "copy exactly as is"; the model
-   * answered that turn by calling set_print_options, so nothing was written and
-   * nothing was read — and from the next turn on the file was no longer sent,
-   * because it was no longer newly attached. The model then wrote about the
-   * document's TITLE, which was the only subject it had, and the teacher watched
-   * their circles PDF turn into a lesson on inequalities.
-   *
-   * `sourceNotes` is the record of having read something. While it is empty, no
-   * turn has ever seen inside these files, so no turn can be expected to know
-   * them: they travel. Once one has, the notes carry the knowledge and
-   * read_source fetches the page itself when the work needs the page. Bounded by
-   * a fact about the document rather than by a guess about the request.
-   */
-  const neverRead = !(doc.sourceNotes || []).length;
-  const sending = (doc.files || []).filter(
-    (f) => neverRead || sent.some((x) => x.key === f.key)
-  );
-  const { parts, unreadable } = await require("../helper/lessonDocFiles").toParts(sending);
-  assertSourcesReadable(sending, parts, unreadable);
-  const { system, prompt } = hadBlocks
-    ? S.buildEditPrompt({ doc: doc.toObject(), instructions: text, freshFiles: sent.length > 0 })
-    : S.buildCreatePrompt({ doc: doc.toObject(), instructions: text });
-
-  /*
-   * The teacher's choice applies here too.
-   *
-   * This is the non-streaming turn — the same job, a different endpoint — and it
-   * called the model with no provider at all, so it took whatever the fallback
-   * chain offered and ignored the picker completely. Two ways into one feature
-   * that disagree about which company does the work is exactly the kind of split
-   * nobody finds until a bill arrives from a provider nobody selected.
-   */
-  const model = S.pickModel(String(doc.settings?.model || ""));
-
-  let out;
-  try {
-    out = await runDocument({
-      system,
-      prompt,
-      parts,
-      model,
-      provider: S.providerOf(model),
-      schema: S.DOC_SCHEMA,
-      geminiSchema: toGeminiSchema(S.DOC_SCHEMA),
-      // No override — inherit aiDocument's own ceiling. A full-document rewrite
-      // grows with the document; the fixed 8000 here used to truncate long edits.
-    });
-  } catch (e) {
-    const pub = publicFailure(e);
-    await svc.appendMessages(doc._id, doc.owner, {
-      role: "assistant",
-      text: pub.message,
-      action: "failed",
-      at: new Date(),
-    });
-    // An AppError so the curated message survives errorMiddleware, which replaces
-    // the text of any non-AppError at 5xx with "Internal server error".
-    throw httpError(e?.aiStatus === 422 ? 422 : 502, pub.code, pub.message);
-  }
-
-  const keepIds = (doc.blocks || []).map((b) => b.id);
-  const next = S.normalizeDoc(out.doc || {}, { keepIds });
-
-  if (!next.blocks.length) {
-    await svc.appendMessages(doc._id, doc.owner, {
-      role: "assistant",
-      text: "Məzmun qaytarılmadı — istəyinizi bir az dəqiqləşdirin.",
-      action: "failed",
-      at: new Date(),
-    });
-    throw httpError(502, "empty_doc", "Material boş qayıtdı — istəyinizi dəqiqləşdirin.");
-  }
-
-  const sum = S.summarize(next.blocks);
-  /*
-   * The commit, against the revision this turn started from. If the teacher edited
-   * a block while the model was writing, this loses with a 409 rather than
-   * overwriting them — the whole point of taking `baseRevision` at the top.
-   */
-  const saved = await commitTurn(doc, baseRevision, {
-    next,
-    out,
-    hadBlocks,
-    sum,
-    reply: next.reply || (hadBlocks ? "Dəyişdirildi." : "Material hazırdır."),
-  });
-
-  await logStudioUsage(req, { doc: saved, out, hadBlocks });
-  res.json({ doc: saved, summary: sum, provider: out.provider });
-});
-
 /*
  * POST /:id/message/stream — the same turn, reported as it happens.
  *
@@ -774,7 +667,7 @@ const streamMessage = asyncHandler(async (req, res) => {
           await LessonDoc.updateOne(
             { _id: doc._id, owner: doc.owner },
             { $set: { sourceNotes: notesToKeep } }
-          ).catch((e) => console.error("[LESSON DOC] source notes not saved:", e?.message));
+          ).catch((e) => logStudioEvent("source_notes_not_saved", e));
         }
       }
       if (plan.sections.length) send("plan", { ...plan, editing: hadBlocks });
@@ -791,7 +684,7 @@ const streamMessage = asyncHandler(async (req, res) => {
        * committed to a shape first.
        */
       plan = null;
-      console.error("[LESSON DOC] plan pass failed:", e?.message);
+      logStudioEvent("plan_pass_failed", e);
       send("planning_degraded", { message: "Plan hazırlanmadı — birbaşa yazıram." });
     }
 
@@ -993,7 +886,7 @@ ${S.SOURCE_RULES}`;
         } catch (e) {
           // A failed render must cost the teacher nothing: skip the look and let
           // the turn finish on the checks that did run.
-          console.error("[LESSON DOC] draft render failed:", e?.message);
+          logStudioEvent("draft_render_failed", e);
           return null;
         }
       },
@@ -1105,7 +998,8 @@ ${S.SOURCE_RULES}`;
           input: { html: r.html, reply: patch.input?.reply || "", title: patch.input?.title || "" },
         };
       } else {
-        console.error("[LESSON DOC] patch did not apply after the loop:", r.problems[0]);
+        // A count, not the problem text: it quotes the document.
+        logStudioEvent("patch_unapplicable", null, { problems: r.problems.length });
       }
     }
     const printed = out.calls.find((c) => c.name === "set_print_options");
@@ -1265,28 +1159,46 @@ ${S.SOURCE_RULES}`;
       let salvaged = false;
       if (lastSnapshot) {
         try {
+          /*
+           * What was streaming was the write_material call's INPUT — a JSON
+           * object whose `html` is the document — so that is what a cut-off
+           * looks like: valid JSON up to some point, then nothing. This used to
+           * repair the snapshot into the old block shape and look for `blocks`,
+           * which the model has not written for some time; every Stop fell
+           * through to the bare note and the half-page the teacher watched
+           * arrive was thrown away. A patch (edit_material) is not salvaged: a
+           * list of replacements cut off mid-way gives no way to know which the
+           * model had finished deciding on, and applying some is worse than none.
+           */
           const repaired = require("../helper/aiDocument").repairTruncatedJson(lastSnapshot);
-          const keepIds = (doc.blocks || []).map((b) => b.id);
-          const next = repaired ? S.normalizeDoc(repaired, { keepIds }) : null;
-          if (next?.blocks?.length) {
-            /*
-             * Salvage still goes through the CAS. A stop is not a licence to
-             * overwrite: if the teacher edited a block while this turn was
-             * running, the half-written version they cancelled must not win over
-             * the edit they made deliberately. Losing here is the right outcome
-             * and leaves the plain "Dayandırıldı." note below.
-             */
-            await commitTurn(doc, baseRevision, {
-              next,
-              // The provider that was actually running when the stop landed,
-              // named by runDocument — never a guessed brand.
-              out: { provider: e?.provider || "unknown" },
-              hadBlocks,
-              sum: S.summarize(next.blocks),
-              reply: "Dayandırıldı — buraya qədər olan hissə saxlanıldı.",
-              audience: plan?.audience,
-              plan,
-            });
+          const html = repaired && typeof repaired.html === "string" ? sanitizeDocHtml(repaired.html) : "";
+          const sum = html ? summarizeHtml(html) : null;
+          if (sum && sum.blocks > 0) {
+            // Through the CAS, like every write: a stop is not a licence to
+            // overwrite an edit the teacher made while this was running.
+            await svc.commit(
+              doc._id,
+              doc.owner,
+              {
+                html,
+                partCount: sum.blocks,
+                blocks: [],
+                status: "ready",
+                aiMeta: { provider: e?.provider || "unknown", at: new Date() },
+              },
+              baseRevision,
+              {
+                push: {
+                  messages: {
+                    role: "assistant",
+                    text: "Dayandırıldı — buraya qədər yazılan hissə saxlanıldı.",
+                    action: "stopped",
+                    stats: sum,
+                    at: new Date(),
+                  },
+                },
+              }
+            );
             salvaged = true;
           }
         } catch {
@@ -1324,20 +1236,77 @@ const addFile = asyncHandler(async (req, res) => {
   const F = require("../helper/lessonDocFiles");
   const f = req.file;
   if (!f) throw httpError(400, "no_file", "Fayl seçilmədi.");
-  if (!F.ACCEPT[f.mimetype]) {
-    throw httpError(415, "bad_type", "Yalnız PDF və şəkil (PNG, JPG, WEBP) əlavə etmək olar.");
+
+  /*
+   * Typed by its BYTES. `f.mimetype` is a header the browser fills in from the
+   * filename, and it was the only gate: a file renamed to .pdf was a PDF as far
+   * as this path could tell, and went to disk, to the model and to every later
+   * viewer as one. The magic bytes are the one thing about an upload the client
+   * cannot assert, so they decide, and the declared type is not consulted.
+   */
+  const typed = F.trustedType({ buffer: f.buffer, name: f.originalname });
+  if (!typed.ok) {
+    throw httpError(
+      415,
+      "bad_type",
+      typed.reason === "mismatch"
+        ? "Faylın məzmunu adındakı uzantı ilə uyğun gəlmir."
+        : "Yalnız PDF, şəkil (PNG, JPG, WEBP, GIF), Word, PowerPoint və ya Excel faylı əlavə etmək olar."
+    );
   }
 
   const files = doc.files || [];
   if (files.length >= F.MAX_FILES) {
     throw httpError(422, "too_many_files", `Ən çox ${F.MAX_FILES} fayl əlavə edə bilərsiniz.`);
   }
-  const total = files.reduce((n, x) => n + (x.bytes || 0), 0) + f.size;
-  if (total > F.MAX_TOTAL_MB * 1024 * 1024) {
+  const already = files.reduce((n, x) => n + (x.bytes || 0), 0);
+  const overTotal = (bytes) => already + bytes > F.MAX_TOTAL_MB * 1024 * 1024;
+  if (!typed.office && overTotal(f.size)) {
     throw httpError(413, "too_large", `Faylların ümumi həcmi ${F.MAX_TOTAL_MB}MB-dan çox ola bilməz.`);
   }
 
-  const saved = await F.saveFile({ buffer: f.buffer, mime: f.mimetype, name: f.originalname });
+  let saved;
+  if (typed.office) {
+    /*
+     * Word, PowerPoint, Excel: converted to PDF here, with the LibreOffice the
+     * materials library already runs, and stored AS the PDF under the teacher's
+     * own filename. No provider reads a .docx; every one of them reads a PDF.
+     * Before the conversion the container gets the same deep structural check
+     * the materials library applies — a ZIP is only a .docx once the right
+     * member is inside it — and the whole thing runs through the conversion
+     * queue, so ten uploads cannot start ten LibreOffice processes at once.
+     */
+    const os = require("os");
+    const fsp = require("fs/promises");
+    const path = require("path");
+    const { validateUploadFile } = require("../utils/fileValidation");
+    const { convertOfficeToPdf } = require("../utils/officeToPdf");
+    const { enqueueConversion } = require("../utils/convertQueue");
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "studio-office-"));
+    try {
+      const src = path.join(dir, `source.${typed.ext}`);
+      await fsp.writeFile(src, f.buffer);
+      const check = await validateUploadFile(src, `.${typed.ext}`);
+      if (!check.ok) throw httpError(415, "bad_type", "Faylın məzmunu adındakı uzantı ilə uyğun gəlmir.");
+      const pdfPath = await enqueueConversion(String(req.user._id), () => convertOfficeToPdf(src, dir));
+      const pdf = await fsp.readFile(pdfPath);
+      if (pdf.length > F.MAX_FILE_MB * 1024 * 1024 || overTotal(pdf.length)) {
+        throw httpError(413, "too_large", `Çevrilmiş fayl ${F.MAX_FILE_MB}MB limitini keçir.`);
+      }
+      saved = await F.saveFile({ buffer: pdf, mime: "application/pdf", ext: "pdf", name: f.originalname });
+    } catch (e) {
+      if (isAppError(e)) throw e;
+      // officeToPdf and convertQueue compose their own teacher-facing sentences;
+      // anything else is an internal detail and gets the generic line.
+      logStudioEvent("office_convert_failed", e, { ext: typed.ext });
+      throw httpError(422, "convert_failed", "Fayl PDF-ə çevrilə bilmədi — faylı PDF kimi yükləyin.");
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  } else {
+    saved = await F.saveFile({ buffer: f.buffer, mime: typed.mime, ext: typed.ext, name: f.originalname });
+  }
+
   /*
    * The same page attached twice is one entry, not two identical ones in the
    * list — but it IS attached again. Re-uploading a file the document already
@@ -1458,6 +1427,20 @@ const removeDoc = asyncHandler(async (req, res) => {
   // row — a double-click would otherwise refund twice for one deletion.
   if (gone.deletedCount === 1) {
     await svc.releaseDocSlot(require("../models/userModel"), doc.owner);
+    /*
+     * And the attachments. Deleting the row used to leave every attached file on
+     * disk forever — someone's textbook pages, orphaned under a hash nothing
+     * would ever look up again. Same ordering as removeFile: the row is already
+     * gone, so the reference check naturally excludes it, and a file another
+     * material still holds (content-addressed, so that happens) stays.
+     */
+    const F = require("../helper/lessonDocFiles");
+    for (const f of doc.files || []) {
+      // eslint-disable-next-line no-await-in-loop
+      const stillUsed = await LessonDoc.exists({ "files.key": f.key });
+      // eslint-disable-next-line no-await-in-loop
+      await F.removeIfUnused(f.key, f.ext, Boolean(stillUsed));
+    }
   }
   res.json({ ok: true });
 });
@@ -1513,7 +1496,7 @@ const exportDoc = asyncHandler(async (req, res) => {
   res.send(body);
 });
 
-module.exports = { listDocs, createDoc, getDoc, sendMessage, streamMessage, addFile, getFile, removeFile, updateDoc, removeDoc, exportDoc };
+module.exports = { listDocs, createDoc, getDoc, streamMessage, addFile, getFile, removeFile, updateDoc, removeDoc, exportDoc, publicFailure, logStudioEvent };
 // Exported for the redaction test: the funnel that decides what a teacher is
 // allowed to see is worth asserting on directly, not only through a live stream.
 module.exports.publicFailure = publicFailure;

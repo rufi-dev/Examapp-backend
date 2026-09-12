@@ -219,7 +219,8 @@ console.log("\n7. The prompts carry the contract:");
   const svcSrc = fs.readFileSync(path.join(__dirname, "../services/lessonDocService.js"), "utf8");
   // A provider timeout must not lose what the teacher typed: they should reopen
   // the page and find their own words with a failure beside them.
-  ok("the teacher's message is stored before the model runs", /appendMessages\([\s\S]{0,300}role: "user"[\s\S]{0,600}runDocument/.test(ctl));
+  // One route now (LS-R3-004): the message is appended before the plan pass.
+  ok("the teacher's message is stored before the model runs", ctl.indexOf('role: "user",') > 0 && ctl.indexOf('role: "user",') < ctl.indexOf("await runDocument({"));
   ok("a hand edit never calls the model", /const updateDoc[\s\S]{0,1200}/.test(ctl) && !/const updateDoc[\s\S]{0,1200}runDocument/.test(ctl));
   ok("edits are guarded by the revision CAS", /svc\.commit\(/.test(ctl) && /doc_conflict/.test(svcSrc));
   ok("Word is sent as an attachment", /attachment/.test(ctl));
@@ -329,7 +330,7 @@ console.log("\n9. Attached references travel with every turn:");
    * that were about the document. What has to survive is the knowledge that the
    * file was sent, and that is what the transcript carries.
    */
-  ok("both turns send this turn's attachments", (ctl.match(/toParts\(sending\)/g) || []).length === 2);
+  ok("the turn sends this turn's attachments", (ctl.match(/toParts\(sending\)/g) || []).length === 1);
   ok("and nothing resends the whole file list", !/toParts\(doc\.files/.test(ctl));
   ok("the PLAN pass sees them too", /buildPlanPrompt[\s\S]{0,140}parts,/.test(ctl));
   ok("a shared file is not deleted while another doc holds it", /stillUsed/.test(ctl));
@@ -526,7 +527,7 @@ console.log("\n13. The transcript shows what the model was given:");
    * — the model still receives them all, but the message shows what was attached
    * for it.
    */
-  ok("both turns stamp the files onto the message", (ctl.match(/const sent = stagedFiles\(doc\);/g) || []).length === 2);
+  ok("the turn stamps the files onto the message", (ctl.match(/const sent = stagedFiles\(doc\);/g) || []).length === 1);
   /*
    * Staging asked the transcript — "has this key been mentioned yet?" — and a key
    * is a content hash, so re-uploading a page the document already held answered
@@ -538,7 +539,7 @@ console.log("\n13. The transcript shows what the model was given:");
   ok("not a gap in the transcript", !/already\.has\(f\.key\)/.test(ctl));
   ok("attaching a file the document already holds stages it again", /svc\.stageFile\(doc\._id, doc\.owner, saved\.key\)/.test(ctl));
   ok("a new attachment arrives staged", /push: \{ files: \{ \.\.\.saved, stagedAt: new Date\(\) \} \}/.test(ctl));
-  ok("and a turn takes them with it", (ctl.match(/svc\.clearStaged\(doc\._id, doc\.owner,/g) || []).length === 2);
+  ok("and a turn takes them with it", (ctl.match(/svc\.clearStaged\(doc\._id, doc\.owner,/g) || []).length === 1);
   ok("names and keys only — never the bytes", /key: f\.key, name: f\.name, mime: f\.mime/.test(ctl));
   ok("a turn with no attachment stays clean", /\.\.\.\(sent\.length \? \{ files: sent \} : \{\}\)/.test(ctl));
 
@@ -641,7 +642,7 @@ console.log("\n16. Stop actually stops the bill, and salvages what streamed:");
   ok("an abort during planning does not fall through to the write pass", /if \(ac\.signal\.aborted\) throw e;/.test(ctl));
   ok("a stop is recorded as its own outcome, not a failure", /"Dayandırıldı/.test(ctl) && /action: "stopped"/.test(ctl));
   ok("a stop still tries to save whatever had streamed", /repairTruncatedJson\(lastSnapshot\)/.test(ctl));
-  ok("salvaged content is saved through the same normaliser as a real turn", /next\?\.blocks\?\.length/.test(ctl));
+  ok("salvaged content is sanitised like a real turn's", /sanitizeDocHtml\(repaired\.html\)/.test(ctl));
 
   // documentWithClaude must actually forward the signal into the SDK call — the
   // whole point is that stopping in the browser stops the bill, not just the UI.
@@ -737,7 +738,7 @@ console.log("\n19. A dropped source is never silently improvised over (LS-007):"
     ok("nothing attached means nothing unreadable", r.parts.length === 0 && r.unreadable.length === 0);
 
     // Calls only — the declaration has the same signature and must not be counted.
-    ok("both turns check readability", (ctlSrc.match(/^\s+assertSourcesReadable\(sending, parts, unreadable\);$/gm) || []).length === 2);
+    ok("the turn checks readability", (ctlSrc.match(/^\s+assertSourcesReadable\(sending, parts, unreadable\);$/gm) || []).length === 1);
     /*
      * Asked about THIS turn's attachments, not the document's whole file list.
      * Attachments live on the document forever, so against that list a turn that
@@ -1341,7 +1342,7 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("measured by paginating the real stylesheet, not guessed",
     pdfSrc.includes("await page.pdf({ format: \"A4\"") && pdfSrc.includes("Type"));
   ok("and the model is told what to do with it", /PDF-də \$\{pages\} səhifə çıxır/.test(ai2));
-  ok("a failed render costs the teacher nothing", /draft render failed/.test(ctl5));
+  ok("a failed render costs the teacher nothing", /logStudioEvent\("draft_render_failed"/.test(ctl5));
   ok("the renderer exists", typeof require("../helper/lessonPlanPdf").renderPng === "function");
 
   /*
@@ -1726,7 +1727,7 @@ console.log("\nA patch edit reaches the document through one commit path:");
    */
   ok("a patch is resolved into the write shape", /name: "write_material",\s*\n\s*input: \{ html: r\.html/.test(ctl6));
   ok("and only when the model did not write outright", /if \(!wrote && patch\)/.test(ctl6));
-  ok("a patch that will not apply commits nothing", /patch did not apply after the loop/.test(ctl6));
+  ok("a patch that will not apply commits nothing", /logStudioEvent\("patch_unapplicable"/.test(ctl6));
 
   // The loop has to know a patch produced a document, or its "you described the
   // work instead of doing it" guards would fire on a perfectly good edit.
@@ -2006,6 +2007,216 @@ console.log("\nThe model picker, and the meter behind it:");
   for (const f of ["model", "inputTokens", "outputTokens", "totalTokens", "usd"]) {
     ok(`the usage row can read .${f}`, twice[f] !== undefined);
   }
+}
+
+console.log("\nFailures are logged by code, never by message (LS-R3-014):");
+{
+  /*
+   * Six sites logged `e.message`. A provider error carries request fragments,
+   * model output, a source filename, sometimes a URL with credentials; a Mongo
+   * error carries the connection string. The SSE frame was curated long ago;
+   * the log line was the channel still open. Throw an error stuffed with
+   * canaries through both loggers and read the console back.
+   */
+  const CANARIES = ["mongodb://leak-user:LEAK-PASS@leak-host", "sk-ant-LEAKKEY", "teacher@leak.test", "SECRET-SOURCE-TEXT", "leaked-filename.pdf"];
+  const canary = new Error(`boom ${CANARIES.join(" ")}`);
+  canary.code = "provider_unavailable";
+  canary.aiStatus = 502;
+  canary.provider = "claude";
+  canary.body = CANARIES.join("|");
+
+  const captured = [];
+  const orig = console.error;
+  console.error = (...a) => captured.push(a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "));
+  try {
+    const c = require("../controllers/lessonDocController");
+    const pub = c.publicFailure(canary);
+    c.logStudioEvent("turn_failed", canary);
+    c.logStudioEvent("usage_settlement_failed", canary, { attempts: 3, usd: 0.28 });
+    c.logStudioEvent("patch_unapplicable", null, { problems: 2 });
+    ok("the teacher gets the curated line", pub.code === "provider_unavailable" && !CANARIES.some((x) => pub.message.includes(x)));
+  } finally {
+    console.error = orig;
+  }
+  const all = captured.join("\n");
+  ok("something was logged", captured.length >= 3);
+  ok("the event and the code are there", /turn_failed/.test(all) && /"code":"provider_unavailable"/.test(all) && /"provider":"claude"/.test(all));
+  ok("no canary reaches the console", !CANARIES.some((x) => all.includes(x)));
+  ok("not even through an extra field", /"usd":0\.28/.test(all) && !/leak/.test(all));
+
+  const ctlSrc = require("fs").readFileSync(require("path").join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  ok("no console.error in the controller prints a message field", !/console\.error\([^)]*\.message/.test(ctlSrc));
+  ok("every failure site goes through the one logger", (ctlSrc.match(/logStudioEvent\(/g) || []).length >= 7);
+}
+
+console.log("\nAn upload is what its bytes say it is (LS-R3-006):");
+{
+  const F = require("../helper/lessonDocFiles");
+  const pdf = Buffer.from("%PDF-1.4\n%âãÏÓ\n1 0 obj");
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
+  const zip = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0, 0, 0, 0, 0, 0, 0]);
+  const ole = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0, 0, 0, 0]);
+
+  /*
+   * `mimetype` is a header the browser fills in from the filename, and it was
+   * the only gate between an upload and the disk, the model and every later
+   * viewer. The bytes are the one thing the client cannot assert.
+   */
+  ok("a PDF is a PDF whatever it is called", F.trustedType({ buffer: pdf, name: "photo.png" }).ext === "pdf");
+  ok("and gets its real mime, not the declared one", F.trustedType({ buffer: pdf, name: "photo.png" }).mime === "application/pdf");
+  ok("a PNG is a PNG", F.trustedType({ buffer: png, name: "a.png" }).ext === "png");
+  ok("plain text named .pdf is refused", F.trustedType({ buffer: Buffer.from("hello"), name: "x.pdf" }).ok === false);
+  ok("an empty upload is refused", F.trustedType({ buffer: Buffer.alloc(0), name: "x.pdf" }).ok === false);
+
+  ok("a ZIP named .docx is an Office file awaiting the deep check", (() => { const t = F.trustedType({ buffer: zip, name: "dərs.docx" }); return t.ok && t.office && t.ext === "docx"; })());
+  ok("an OLE file named .doc likewise", (() => { const t = F.trustedType({ buffer: ole, name: "old.doc" }); return t.ok && t.office && t.ext === "doc"; })());
+  ok("a ZIP named .pdf is refused, not stored as a PDF", F.trustedType({ buffer: zip, name: "fake.pdf" }).ok === false);
+  ok("a ZIP named .doc is refused — the bytes disagree with the name", F.trustedType({ buffer: zip, name: "fake.doc" }).reason === "mismatch");
+  ok("a ZIP named .exe is refused", F.trustedType({ buffer: zip, name: "run.exe" }).ok === false);
+
+  const ctlSrc = require("fs").readFileSync(require("path").join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  const addSrc = ctlSrc.slice(ctlSrc.indexOf("const addFile = asyncHandler"), ctlSrc.indexOf("const getFile = asyncHandler"));
+  ok("the upload path types by bytes", /F\.trustedType\(\{ buffer: f\.buffer, name: f\.originalname \}\)/.test(addSrc));
+  ok("and no longer consults the declared mimetype", !/F\.ACCEPT\[f\.mimetype\]/.test(addSrc) && !/mime: f\.mimetype/.test(addSrc));
+  ok("a mismatch is refused with its own reason", /typed\.reason === "mismatch"/.test(addSrc));
+
+  // Office files: deep-validated, converted through the queue, stored as PDF.
+  ok("an Office file gets the structural check", /validateUploadFile\(src, `\.\$\{typed\.ext\}`\)/.test(addSrc));
+  ok("is converted through the shared LibreOffice queue", /enqueueConversion\(String\(req\.user\._id\), \(\) => convertOfficeToPdf\(src, dir\)\)/.test(addSrc));
+  ok("and is stored as a PDF under the teacher's own name", /saveFile\(\{ buffer: pdf, mime: "application\/pdf", ext: "pdf", name: f\.originalname \}\)/.test(addSrc));
+  ok("the scratch directory is always removed", /fsp\.rm\(dir, \{ recursive: true, force: true \}\)/.test(addSrc));
+  ok("a conversion failure is logged by code, told generically", /logStudioEvent\("office_convert_failed"/.test(addSrc) && /"convert_failed"/.test(addSrc));
+}
+
+console.log("\nDeleting a material releases its bytes (LS-R3-006):");
+{
+  const ctlSrc = require("fs").readFileSync(require("path").join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  const rm = ctlSrc.slice(ctlSrc.indexOf("const removeDoc = asyncHandler"), ctlSrc.indexOf("const exportDoc = asyncHandler"));
+  /*
+   * Deleting the row used to leave every attached file on disk forever — a
+   * teacher's textbook pages under a hash nothing would look up again.
+   */
+  ok("attachments are released with the document", /F\.removeIfUnused\(f\.key, f\.ext, Boolean\(stillUsed\)\)/.test(rm));
+  ok("after the row is gone, so the reference check excludes it", rm.indexOf("deleteOne") < rm.indexOf("removeIfUnused"));
+  ok("and only when no other material still holds the same bytes", /LessonDoc\.exists\(\{ "files\.key": f\.key \}\)/.test(rm));
+  ok("only the request that actually deleted the row does this", rm.indexOf("gone.deletedCount === 1") < rm.indexOf("removeIfUnused"));
+}
+
+console.log("\nThere is one AI route (LS-R3-004):");
+{
+  const routes = require("fs").readFileSync(require("path").join(__dirname, "../routes/lessonDocRoute.js"), "utf8");
+  const c = require("../controllers/lessonDocController");
+  /*
+   * A non-streaming POST /:id/message ran the older whole-document generation —
+   * no tool loop, no patch edits, no render check, no read_source — and was
+   * still mounted after the app stopped calling it. Two editing contracts that
+   * evolve separately is a bug factory.
+   */
+  ok("the legacy route is gone", !/router\.post\("\/:id\/message",/.test(routes));
+  ok("the streaming route remains", /router\.post\("\/:id\/message\/stream"/.test(routes));
+  ok("the legacy handler is gone from the controller", typeof c.sendMessage === "undefined");
+}
+
+console.log("\nStop keeps the half-written page (LS-R3-018):");
+{
+  const ctlSrc = require("fs").readFileSync(require("path").join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  const salvage = ctlSrc.slice(ctlSrc.indexOf("let salvaged = false;"), ctlSrc.indexOf("if (!salvaged) {"));
+  /*
+   * What streams is the write_material call's input — JSON whose `html` is the
+   * document. The salvage repaired it into the old block shape and looked for
+   * `blocks`, which the model has not written for some time, so every Stop
+   * threw the half-page away.
+   */
+  ok("salvage reads the html the model actually writes", /typeof repaired\.html === "string"/.test(salvage));
+  ok("and no longer looks for blocks that are never there", !/normalizeDoc\(repaired/.test(salvage) && !/next\?\.blocks\?\.length/.test(salvage));
+  ok("it is sanitised before it is stored", /sanitizeDocHtml\(repaired\.html\)/.test(salvage));
+  ok("committed through the CAS, not around it", /svc\.commit\(/.test(salvage) && /baseRevision/.test(salvage));
+  ok("and recorded as a stop, with its stats", /action: "stopped"/.test(salvage) && /stats: sum/.test(salvage));
+  ok("a cut-off patch is never applied", !/edits/.test(salvage.replace(/\/\*[\s\S]*?\*\//g, "")));
+}
+
+console.log("\nUsage settlement retries before it gives up (LS-R3-008):");
+{
+  const ctlSrc = require("fs").readFileSync(require("path").join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  const usage = ctlSrc.slice(ctlSrc.indexOf("const logStudioUsage = async"), ctlSrc.indexOf("async function commitTurn"));
+  ok("three attempts with backoff", /attempt < 3/.test(usage) && /wait\(200 \* 4 \*\* attempt\)/.test(usage));
+  ok("the final failure says how much went unmetered", /usage_settlement_failed/.test(usage) && /usd: row\.usd/.test(usage));
+  ok("and still never fails the teacher's turn", !/throw/.test(usage));
+}
+
+console.log("\nThe transcript is bounded and the quota heals (LS-R3-015, LS-R3-017):");
+{
+  const svc = require("../services/lessonDocService");
+  const svcSrc = require("fs").readFileSync(require("path").join(__dirname, "../services/lessonDocService.js"), "utf8");
+  ok("there is a cap on messages", svc.MAX_MESSAGES === 400);
+  ok("the append path keeps the newest", /\$slice: -MAX_MESSAGES/.test(svcSrc));
+  ok("the commit's push path uses the same cap", /k === "messages" \? pushMessages\(v\)/.test(svcSrc));
+  // The counter is a projection of the documents; a projection can drift.
+  ok("a refused claim recounts from the documents", /const actual = await LessonDoc\.countDocuments\(\{ owner: ownerId, archivedAt: null \}\)/.test(svcSrc));
+  ok("repairs the counter and claims again", /\$set: \{ lessonDocCount: actual \}/.test(svcSrc));
+  ok("a failed release is retried and then said out loud", /slot_release_failed/.test(svcSrc));
+}
+
+console.log("\nEvery tool call is answered, or the API refuses the whole conversation:");
+{
+  /*
+   * The live failure behind "AI sənədi hazırlaya bilmədi", three times in a
+   * row on "copy this PDF": the model called set_print_options for the page's
+   * accent colour AND write_material in one response, the render check replied
+   * to the write alone, and the next call was a 400 — "tool_use ids were found
+   * without tool_result blocks". The contract is the API's, so it is enforced
+   * in the adapter, where no loop path can get around it.
+   */
+  const { claudeAdapter } = require("../helper/aiDocAdapters");
+  const ad = claudeAdapter({ client: null, model: "claude-opus-5", tools: [], maxTokens: 10 });
+  const history = [{ role: "user", content: [{ type: "text", text: "start" }] }];
+  const turn = {
+    raw: {
+      content: [
+        { type: "text", text: "Rəngi saxladım, sənədi yazıram." },
+        { type: "tool_use", id: "toolu_print", name: "set_print_options", input: { accent: "orange" } },
+        { type: "tool_use", id: "toolu_write", name: "write_material", input: { html: "<h1>x</h1>" } },
+      ],
+    },
+  };
+  // The loop answers only the write, as the render check does.
+  ad.reply(history, turn, [{ call: { id: "toolu_write" }, isError: false, text: "render note" }], {});
+  const user = history[history.length - 1];
+  const results = user.content.filter((b) => b.type === "tool_result");
+  ok("the assistant turn is replayed as it was", history[history.length - 2].content === turn.raw.content);
+  ok("both calls get a result", results.map((r) => r.tool_use_id).sort().join() === "toolu_print,toolu_write");
+  ok("the loop's own answer is kept verbatim", results.find((r) => r.tool_use_id === "toolu_write").text === undefined && results.find((r) => r.tool_use_id === "toolu_write").content === "render note");
+  ok("the unanswered one is acknowledged, not errored", results.find((r) => r.tool_use_id === "toolu_print").content === "Qəbul edildi." && !results.find((r) => r.tool_use_id === "toolu_print").is_error);
+  ok("tool results lead the message", user.content[0].type === "tool_result");
+
+  // With an image handed back, the results still come first.
+  const h2 = [{ role: "user", content: [{ type: "text", text: "start" }] }];
+  ad.reply(h2, turn, [], { images: [Buffer.from("png")] });
+  const u2 = h2[h2.length - 1];
+  ok("even a reply with no findings answers every call", u2.content.filter((b) => b.type === "tool_result").length === 2);
+  ok("and the picture follows them", u2.content[u2.content.length - 1].type === "image");
+}
+
+console.log("\nA known error code does not make its message safe (LS-R3-014):");
+{
+  /*
+   * publicFailure used to fall through to `e.message` for any error carrying a
+   * recognised code — so a provider error tagged provider_unavailable handed
+   * its raw body to the teacher's toast. Only text written FOR a teacher
+   * passes: a docError's userMessage, an AppError's message, or the fixed line.
+   */
+  const c = require("../controllers/lessonDocController");
+  const raw = new Error("500 upstream at https://leak.example/?key=SECRET-LEAK");
+  raw.code = "provider_unavailable";
+  const pub = c.publicFailure(raw);
+  ok("a raw error with a known code gets the fixed line", pub.code === "provider_unavailable" && !/SECRET-LEAK/.test(pub.message));
+  const { httpError } = require("../utils/appError");
+  const app = httpError(422, "validation_failed", "Cədvəl sətri qısadır.");
+  ok("an AppError's own sentence still passes", c.publicFailure(app).message === "Cədvəl sətri qısadır.");
+  const docErr = new Error("anthropic 500 <html>");
+  docErr.code = "provider_unavailable";
+  docErr.userMessage = "AI xidməti cavab vermir.";
+  ok("a docError's userMessage still passes", c.publicFailure(docErr).message === "AI xidməti cavab vermir.");
 }
 
 console.log("\nAn admin's library lists every teacher's materials:");

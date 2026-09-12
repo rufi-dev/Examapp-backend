@@ -248,6 +248,25 @@ function claudeAdapter({ client, model, tools, maxTokens, onText, effort = "high
 
     reply(history, turn, results, { parts = [], images = [] }) {
       history.push({ role: "assistant", content: turn.raw.content });
+      /*
+       * EVERY tool_use in the assistant turn gets a tool_result, not only the
+       * ones the loop had something to say about.
+       *
+       * The API refuses the whole conversation otherwise — "tool_use ids were
+       * found without tool_result blocks" — and that is exactly what happened
+       * to "copy this PDF": the model called set_print_options for the page's
+       * accent colour AND write_material in one response, the render check
+       * replied to the write alone, and the next call was a 400 that surfaced
+       * as "AI sənədi hazırlaya bilmədi", three times in a row. The loop has
+       * several reply paths and each answered only its own concern; making the
+       * contract hold HERE means none of them can break it. A call nobody had a
+       * finding about is simply acknowledged, which is what the OpenAI adapter
+       * has done for its replays all along.
+       */
+      const answered = new Set(results.map((r) => r.call.id));
+      const unanswered = (turn.raw.content || [])
+        .filter((b) => b.type === "tool_use" && !answered.has(b.id))
+        .map((b) => ({ type: "tool_result", tool_use_id: b.id, content: "Qəbul edildi." }));
       history.push({
         role: "user",
         content: [
@@ -258,6 +277,7 @@ function claudeAdapter({ client, model, tools, maxTokens, onText, effort = "high
             ...(r.isError ? { is_error: true } : {}),
             content: r.text,
           })),
+          ...unanswered,
           ...claudeContentParts(parts),
           ...images.map((b) => ({
             type: "image",

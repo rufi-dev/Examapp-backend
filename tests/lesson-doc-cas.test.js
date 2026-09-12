@@ -204,6 +204,63 @@ const ok = (name, cond, extra) => {
     ok("releasing below zero is refused", (await User.findById(empty)).lessonDocCount === 0);
   }
 
+  console.log("\n10. The counter heals when it drifts shut (LS-R3-017):");
+  {
+    /*
+     * The counter is a projection of how many materials exist, and a projection
+     * drifts — always upward, because a claim happens before the create and a
+     * release after the delete, so any failure between them leaves a phantom.
+     * Left alone, a teacher who owns nothing is eventually told they own two
+     * hundred. A refused claim now recounts from the documents themselves.
+     */
+    const drifted = new mongoose.Types.ObjectId();
+    await User.collection.insertOne({ _id: drifted, name: "d", email: "d@e.test", role: "teacher", lessonDocCount: 999 });
+    await svc.reserveDocSlot(User, drifted, 3);
+    ok("a claim on a drifted counter succeeds after a recount", (await User.findById(drifted)).lessonDocCount === 1);
+
+    // And a genuinely full account is still refused: the counter and the
+    // documents agree, so there is nothing to heal.
+    const full = new mongoose.Types.ObjectId();
+    await User.collection.insertOne({ _id: full, name: "f", email: "f@e.test", role: "teacher", lessonDocCount: 3 });
+    for (let i = 0; i < 3; i += 1) await LessonDoc.create({ owner: full, title: `t${i}`, blocks: [] });
+    let refused = false;
+    try {
+      await svc.reserveDocSlot(User, full, 3);
+    } catch (e) {
+      refused = e.code === "too_many_docs";
+    }
+    ok("a full account is still refused after the recount", refused);
+
+    // Drift within in-flight range is NOT healed — that is a reservation whose
+    // document has not been created yet, not a phantom. Counter 4, documents
+    // 0, limit 3: refused, and the counter is left alone.
+    const inflight = new mongoose.Types.ObjectId();
+    await User.collection.insertOne({ _id: inflight, name: "i", email: "i@e.test", role: "teacher", lessonDocCount: 4 });
+    let held = false;
+    try {
+      await svc.reserveDocSlot(User, inflight, 3);
+    } catch (e) {
+      held = e.code === "too_many_docs";
+    }
+    ok("small drift is treated as in-flight work and refused", held && (await User.findById(inflight)).lessonDocCount === 4);
+  }
+
+  console.log("\n11. The transcript is bounded (LS-R3-015):");
+  {
+    const d = await fresh();
+    const many = Array.from({ length: svc.MAX_MESSAGES + 50 }, (_, i) => ({ role: "user", text: `m${i}`, at: new Date() }));
+    await svc.appendMessages(d._id, owner, many);
+    const after = await LessonDoc.findById(d._id).lean();
+    ok("appending past the cap keeps exactly the cap", after.messages.length === svc.MAX_MESSAGES);
+    ok("and keeps the NEWEST", after.messages[after.messages.length - 1].text === `m${svc.MAX_MESSAGES + 49}`);
+
+    // The commit's own push rides the same cap, so no path can grow past it.
+    const c = await svc.commit(d._id, owner, { title: "x" }, after.revision, {
+      push: { messages: { role: "assistant", text: "last", at: new Date() } },
+    });
+    ok("a commit's message rides the same cap", c.messages.length === svc.MAX_MESSAGES && c.messages[c.messages.length - 1].text === "last");
+  }
+
   await mongoose.disconnect();
   await mem.stop();
 

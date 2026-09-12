@@ -88,6 +88,16 @@ const PRODUCT_UPDATES = [
     where: "İmtahan kartı → ⋯ → Nüsxə / B variantı",
     scene: "examVariants",
   },
+  {
+    id: "result-explain-mode",
+    publishedAt: "2026-09-12",
+    kind: "feature",
+    title: "Nəticənin üzərində izah edin",
+    summary:
+      "Şagirdin cavablarını açın, «İzah et» düyməsinə basın və düz ekranda cızın, yazın, fiqur çəkin — ekranı paylaşarkən səhvi göstərmək üçün. Saxlasanız, şagird öz telefonunda da eyni izahı görür.",
+    where: "Nəticə → Cavabların təhlili → İzah et",
+    scene: "resultExplain",
+  }
 ];
 
 // Newest first. Sorting here rather than trusting the file's order means an entry
