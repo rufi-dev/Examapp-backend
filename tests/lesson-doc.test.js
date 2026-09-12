@@ -1622,6 +1622,104 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("and gives it the house styles to use", S.BASE_RULES.includes('class="def"'));
 }
 
+console.log("\nWhat a turn costs, and the three things that decide it:");
+{
+  const path8 = require("path");
+  const ad8 = require("fs").readFileSync(path8.join(__dirname, "../helper/aiDocAdapters.js"), "utf8");
+  const doc8 = require("fs").readFileSync(path8.join(__dirname, "../helper/aiDocument.js"), "utf8");
+  const ctl8 = require("fs").readFileSync(path8.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  const F8 = require("../helper/lessonDocFiles");
+
+  /*
+   * 1. CACHING. A turn is up to seven API calls and each re-sends the whole
+   * conversation, attachments included. One measured turn: 267,264 input tokens,
+   * cache_read 0, $1.34 of input on a $2.94 bill. The breakpoints are the fix.
+   */
+  ok("the system block is cached", /system: \[\{ type: "text", text: system, cache_control: EPHEMERAL \}\]/.test(ad8));
+  ok("breakpoints are re-placed before every call", /markCachePoints\(history\);/.test(ad8));
+  ok("the file-bearing first user turn is cached", /setCache\(history\[users\[0\]\]\)/.test(ad8));
+  ok("and the growing tail too", /setCache\(history\[users\[users\.length - 1\]\]\)/.test(ad8));
+
+  // Three live breakpoints, not one per loop step: the cap is four, and a stale
+  // one is a breakpoint spent on a prefix nothing reads again.
+  {
+    const hist = [
+      { role: "user", content: [{ type: "text", text: "files+prompt" }] },
+      { role: "assistant", content: [{ type: "text", text: "a" }] },
+      { role: "user", content: [{ type: "text", text: "finding 1" }] },
+      { role: "assistant", content: [{ type: "text", text: "b" }] },
+      { role: "user", content: [{ type: "text", text: "finding 2" }] },
+    ];
+    // Reach the module's private helper the way the adapter does — through a send
+    // that cannot reach the network, so only the marking runs.
+    const { claudeAdapter } = require("../helper/aiDocAdapters");
+    const a = claudeAdapter({
+      client: { messages: { stream: () => { throw new Error("no network in test"); } } },
+      model: "claude-opus-5",
+      tools: [],
+      maxTokens: 10,
+    });
+    // The send throws before any request is made; the marking has already run.
+    pending.push(
+      a.send(hist, { system: "s" }).catch(() => {
+        const marked = hist.filter((m) => (m.content || []).some((b) => b.cache_control));
+        ok("exactly two message breakpoints are live", marked.length === 2);
+        ok("the first is the attachment turn", marked[0] === hist[0]);
+        ok("the second is the newest turn", marked[1] === hist[4]);
+        ok("the middle turn's stale breakpoint is cleared", !(hist[2].content || []).some((b) => b.cache_control));
+      })
+    );
+  }
+}
+
+console.log("\nEffort, ceiling and attachment size:");
+{
+  const path8b = require("path");
+  const ad8b = require("fs").readFileSync(path8b.join(__dirname, "../helper/aiDocAdapters.js"), "utf8");
+  const doc8b = require("fs").readFileSync(path8b.join(__dirname, "../helper/aiDocument.js"), "utf8");
+  const ctl8b = require("fs").readFileSync(path8b.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  const F8b = require("../helper/lessonDocFiles");
+
+  /*
+   * 2. EFFORT. Thinking bills at the output rate and was the larger half of the
+   * measured turn. Creation earns it; an edit against an existing document
+   * mostly re-derives decisions already made.
+   */
+  ok("effort is a parameter, not a constant", /output_config: \{ effort \}/.test(ad8b));
+  ok("it defaults to full", /effort = "high"/.test(ad8b));
+  ok("creation gets high and an edit less", /effort: hadBlocks \? "medium" : "high"/.test(ctl8b));
+  ok("and it reaches the adapter", /effort,/.test(doc8b));
+
+  /*
+   * 3. THE ATTACHMENT. The 10.4 MB scan was the biggest single input, re-sent
+   * every step. Downscaling is the one change here that must never be able to
+   * blind the model, so every failure path returns the original.
+   */
+  ok("a slimmer is exported", typeof F8b.slimPdf === "function");
+  ok("only large files are touched", F8b.SLIM_OVER_BYTES >= 1024 * 1024);
+  ok("at a resolution that keeps digits legible", F8b.SLIM_DPI >= 200);
+  const src = require("fs").readFileSync(path8b.join(__dirname, "../helper/lessonDocFiles.js"), "utf8");
+  /*
+   * The two flags that make it do anything. Without them the function ran, exited
+   * 0, and changed a 9.95 MB scan by nothing: AutoFilter left the original
+   * encoding in place, and the default downsample threshold of 1.5 meant a 200
+   * dpi target only triggered above 300 dpi. With both set the same file came out
+   * at 4.65 MB. A silent no-op is the failure mode worth a test here.
+   */
+  ok("image encoding is forced, not inherited", /-dAutoFilterColorImages=false/.test(src) && /-dColorImageFilter=\/DCTEncode/.test(src));
+  ok("and the downsample threshold is lowered", /-dColorImageDownsampleThreshold=1\.0/.test(src));
+  ok("JPEG quality stays above the digit-mangling range", F8b.SLIM_JPEG_Q >= 55);
+  ok("it verifies the output is really a PDF", /head\.toString\("latin1"\) !== "%PDF-"/.test(src));
+  ok("it keeps the original unless the copy is meaningfully smaller", /after\.size >= before\.size \* 0\.9/.test(src));
+  ok("a failed conversion falls back to the original", /return srcPath;/.test(src));
+  ok("the derived copy is deleted with its original", /\$\{key\}\.s\$\{SLIM_DPI\}\.pdf/.test(src));
+
+  // max_tokens is a ceiling, not a charge — and a truncated document costs more
+  // than a generous ceiling, because the repair or retry pays for the prefix again.
+  ok("the streaming loop has its own higher ceiling", /const DOC_MAX_TOKENS_STREAMING = 64000;/.test(doc8b));
+  ok("and the tool loop uses it", /maxTokens = DOC_MAX_TOKENS_STREAMING/.test(doc8b));
+}
+
 console.log("\nThe model picker, and the meter behind it:");
 {
   const S9 = require("../helper/lessonDocSchema");

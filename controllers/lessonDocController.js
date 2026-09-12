@@ -874,6 +874,22 @@ ${S.SOURCE_RULES}`;
       signal: ac.signal,
       onText,
       /*
+       * How hard to think, by what the turn actually is.
+       *
+       * Creating a material from a teacher's PDF is the hardest thing here and
+       * gets everything the model has. An EDIT is not that: the document exists,
+       * the request is usually local ("make the headings bigger", "add one more
+       * example"), and the reasoning is mostly re-derivation of decisions already
+       * made. Thinking bills at the OUTPUT rate, and on the turn that prompted
+       * this change it was the larger half — 64,100 output tokens, $1.60 of
+       * $2.94.
+       *
+       * "medium" rather than "low" deliberately: an edit can still be a hard
+       * instruction against a long document, and the cheap setting is the one
+       * that produces a plausible-looking wrong answer on those.
+       */
+      effort: hadBlocks ? "medium" : "high",
+      /*
        * Checked before it is accepted, not asked for in the brief.
        *
        * A row that stops short of the table's width is arithmetic — no source is

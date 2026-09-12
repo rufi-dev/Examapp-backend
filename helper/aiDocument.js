@@ -43,8 +43,19 @@ const Anthropic = AnthropicPkg.default || AnthropicPkg;
  * parseDoc's truncation repair below is the second, independent line of defence
  * for whatever ceiling is chosen — this number reduces how often it is needed,
  * it does not replace it.
+ *
+ * 64K on the CLAUDE TOOL LOOP, for a different reason: `max_tokens` is a ceiling,
+ * not a charge. Nothing is billed for headroom, and a document that hits the
+ * ceiling costs MORE than one that does not — it is truncated, then repaired or
+ * retried, and the retry pays for the whole prefix again. On a turn where
+ * thinking and a 31 KB document share one budget, 32K can genuinely bind. This
+ * is the "hand the whole job to the model" half of the change: the ceiling should
+ * be the model's, not an artificial one of ours. Claude supports 128K; the extra
+ * headroom above 64K buys less than the risk of a turn that runs for many
+ * minutes with the teacher watching.
  */
 const DOC_MAX_TOKENS = 32000;
+const DOC_MAX_TOKENS_STREAMING = 64000;
 
 let _client = null;
 function anthropic() {
@@ -104,7 +115,8 @@ async function documentWithTools({
   system,
   tools,
   signal,
-  maxTokens = DOC_MAX_TOKENS,
+  // The tool loop streams, so the higher ceiling carries no timeout risk.
+  maxTokens = DOC_MAX_TOKENS_STREAMING,
   onText,
   validate,
   fetchSource,
@@ -112,6 +124,7 @@ async function documentWithTools({
   gridOf,
   model,
   provider = "claude",
+  effort = "high",
 }) {
   const { runToolLoop } = require("./aiDocDrivers");
   const { claudeAdapter, openaiAdapter, geminiAdapter } = require("./aiDocAdapters");
@@ -135,7 +148,14 @@ async function documentWithTools({
     // here: a second copy of the default is a second thing to forget, and this
     // one was still naming Opus 4.8 after the picker had moved on. It also
     // decides what the turn is PRICED at, so a stale name here bills wrongly.
-    adapter = claudeAdapter({ client, model: model || require("./lessonDocSchema").DEFAULT_DOC_MODEL, tools, maxTokens, onText });
+    adapter = claudeAdapter({
+      client,
+      model: model || require("./lessonDocSchema").DEFAULT_DOC_MODEL,
+      tools,
+      maxTokens,
+      onText,
+      effort,
+    });
   }
 
   const out = await runToolLoop(adapter, {

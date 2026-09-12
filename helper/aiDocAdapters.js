@@ -103,7 +103,65 @@ const billingError = (provider) => {
 
 /* ------------------------------------------------------------------ Claude -- */
 
-function claudeAdapter({ client, model, tools, maxTokens, onText }) {
+const EPHEMERAL = { type: "ephemeral" };
+
+/*
+ * Cache breakpoints, and why a studio turn cannot afford to skip them.
+ *
+ * A turn is NOT one request. The model reads a source, gets a finding back, is
+ * shown a render of its own draft, corrects it — and every one of those steps is
+ * a fresh API call that re-sends the ENTIRE conversation, attached PDFs and all.
+ * A teacher's 10 MB scanned test bank was therefore billed at full input price
+ * on all seven steps of one turn: 267,264 input tokens, $1.34 of a $2.94 turn,
+ * with cache_read_input_tokens sitting at exactly 0.
+ *
+ * Caching is a PREFIX match, so the breakpoints go where the prefix stops being
+ * stable. Three of them, under the limit of four:
+ *   1. the system block — fixed for the whole turn, and it sits after `tools`,
+ *      so one breakpoint there covers the tool definitions too;
+ *   2. the first user message — the one carrying the files. Once attached they
+ *      never change, and they are the expensive part;
+ *   3. the newest user message — a moving breakpoint that extends the cache as
+ *      the loop grows, so step five reads steps one-to-four instead of paying
+ *      for them again.
+ *
+ * A write costs 1.25x and a read 0.1x, so the first call is slightly dearer and
+ * every call after it is a tenth of the price. On a seven-step turn that is not
+ * a marginal saving.
+ *
+ * (There is a note in aiDocument.js saying generation "deliberately does not"
+ * cache. That was written when generation was a single call, where a cache write
+ * pays for itself never. It predates the tool loop.)
+ */
+const setCache = (msg) => {
+  const blocks = msg && Array.isArray(msg.content) ? msg.content : null;
+  if (!blocks || !blocks.length) return;
+  const last = blocks[blocks.length - 1];
+  if (last && typeof last === "object") last.cache_control = EPHEMERAL;
+};
+
+const clearCache = (msg) => {
+  const blocks = msg && Array.isArray(msg.content) ? msg.content : null;
+  if (!blocks) return;
+  for (const b of blocks) if (b && typeof b === "object" && b.cache_control) delete b.cache_control;
+};
+
+/*
+ * Re-place the moving breakpoint. Every user turn except the first is cleared
+ * and the newest one is marked, which keeps the count at three no matter how
+ * long the loop runs — a fourth stale breakpoint would be spent on a prefix
+ * nothing reads again.
+ */
+const markCachePoints = (history) => {
+  const users = [];
+  for (let i = 0; i < history.length; i += 1) if (history[i] && history[i].role === "user") users.push(i);
+  if (!users.length) return;
+  setCache(history[users[0]]); // the files
+  for (let i = 1; i < users.length - 1; i += 1) clearCache(history[users[i]]);
+  if (users.length > 1) setCache(history[users[users.length - 1]]); // the growing tail
+};
+
+function claudeAdapter({ client, model, tools, maxTokens, onText, effort = "high" }) {
   const { claudeContentParts, computeCost } = require("../controllers/aiController");
 
   return {
@@ -116,13 +174,22 @@ function claudeAdapter({ client, model, tools, maxTokens, onText }) {
 
     async send(history, { system, signal }) {
       let message;
+      // Before every call, not just the first: the breakpoint has to follow the
+      // end of the conversation as the loop appends to it.
+      markCachePoints(history);
       try {
         const run = client.messages.stream(
           {
             model,
             max_tokens: maxTokens,
-            system: [{ type: "text", text: system }],
-            output_config: { effort: "high" },
+            system: [{ type: "text", text: system, cache_control: EPHEMERAL }],
+            /*
+             * Creation gets the full effort; an edit does not need to re-reason
+             * its way to a document that already exists. Thinking is billed as
+             * output at the output rate, and on the turn that prompted this it
+             * was the larger half of the bill — 64,100 output tokens, $1.60.
+             */
+            output_config: { effort },
             tools,
             messages: history,
           },
