@@ -87,6 +87,34 @@ const resultSchema = Schema(
         required: false,
       }
     ],
+    /*
+     * A teacher's drawn explanation of THIS paper.
+     *
+     * A teacher shares their screen, marks up the student's answers — circling
+     * the wrong step, writing the correction beside it — and saves, so the
+     * student can open the same page later and see what was explained.
+     *
+     * Stored as VECTOR marks rather than a flattened picture, and with the
+     * `width` the teacher drew at, because that pair is what lets a phone
+     * reproduce the drawing exactly: render the answers at the saved width and
+     * every mark lands where it was put. Reflowing to the phone's width would
+     * move the content out from under the marks, which is the one thing that
+     * must not happen to "this bit here is wrong".
+     *
+     * Mixed, because a mark is one of three unrelated shapes (a stroke, a text
+     * label, a figure) and a discriminated union buys nothing here — nothing on
+     * the server interprets them. They are sanitised and capped on the way in
+     * (see saveResultExplanation) and drawn to a CANVAS on the way out, never
+     * inserted as markup, so there is no text here that can execute.
+     */
+    explanation: {
+      marks: { type: [Schema.Types.Mixed], default: undefined },
+      // CSS pixels of the panel the teacher drew on.
+      width: { type: Number, default: null },
+      by: { type: Schema.Types.ObjectId, ref: "User", default: null },
+      byName: { type: String, default: "" },
+      at: { type: Date, default: null },
+    },
     correctAnswersByType: [
       {
         type: {

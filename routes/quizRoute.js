@@ -45,6 +45,7 @@ const {
   getLatestExams,
   getPublicExams,
   reviewByResult,
+  saveResultExplanation,
   deleteMyExam,
   addExamToUserById,
   getExams,
@@ -272,6 +273,13 @@ router.get("/getLatestExams", protect, verifiedOnly, getLatestExams);
 // Public landing feed removed — all classes are code-only now.
 router.get("/getExams", protect, requireCapability("results:view:own"), getExams);
 router.get("/reviewByResult/:resultId", protect, verifiedOnly, reviewByResult);
+/*
+ * The teacher's drawn explanation of one paper. teacherOnly gates the surface;
+ * the controller then checks this teacher actually owns the exam, so one
+ * teacher cannot annotate another's. Reading it needs nothing extra — it rides
+ * back with the review above, under the same reveal policy as solution photos.
+ */
+router.put("/result/:resultId/explanation", protect, teacherOnly, saveResultExplanation);
 router.delete("/deleteMyExam/:examId", protect, verifiedOnly, deleteMyExam);
 // router.post('/uploadpdf', upload.single('./pdf'), uploadFile);
 module.exports = router;

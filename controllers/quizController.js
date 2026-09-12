@@ -1950,6 +1950,15 @@ function applyResultVisibility(result, vis) {
     // Per-result solution/feedback photos (teacher-added) also reveal answers —
     // hide them until answers are allowed to be shown.
     obj.photos = [];
+    /*
+     * And the teacher's drawn explanation, for exactly the same reason and by
+     * the same rule: a circle round a wrong answer with "səhv" written next to
+     * it reveals the answer key as surely as a solution photo does. Following
+     * the precedent above rather than inventing a second policy for the same
+     * kind of teacher-added feedback — a teacher who cannot see why one appears
+     * and the other does not is right to be confused.
+     */
+    obj.explanation = null;
   }
   // Sanitize the populated exam (examId): a student never gets the password or
   // pdf location through a result, and solution media + the answer key only once
@@ -4370,6 +4379,137 @@ async function loadResultForTeacher(req, res, resultId, user) {
   return { result, frozen };
 }
 
+/*
+ * Bounds for a saved explanation.
+ *
+ * The marks come from a browser, so every one of these is a limit on what a
+ * client can make this document grow to rather than a guess at what a teacher
+ * needs. A page of dense annotation is a few hundred marks; 2,000 points in one
+ * stroke is a second of scribbling at full sample rate. The document ceiling is
+ * Mongo's 16 MB and a result already carries the exam, so the real budget here
+ * is small — hence a cap on the total point count as well as on each piece.
+ */
+const EXPL_MAX_MARKS = 600;
+const EXPL_MAX_PTS_PER_MARK = 2000;
+const EXPL_MAX_TOTAL_PTS = 40000;
+const EXPL_MAX_TEXT = 500;
+const EXPL_COLOUR = /^#[0-9a-f]{3,8}$/i;
+const EXPL_SHAPES = new Set(["rect", "ellipse", "arrow", "line"]);
+const EXPL_PENS = new Set(["fountain", "ball", "brush"]);
+
+const num = (v, lo, hi, dflt) => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(hi, Math.max(lo, n));
+};
+
+/*
+ * Rebuild each mark from scratch, field by field.
+ *
+ * Deliberately a whitelist rather than a scrub: the marks are stored as Mixed,
+ * so anything the client sent that is not read here would be persisted verbatim
+ * and handed back to every later viewer. Copying only the fields the renderer
+ * actually draws means an unknown field cannot survive the trip, whatever it is.
+ */
+function sanitizeExplanationMarks(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  let totalPts = 0;
+
+  for (const m of raw.slice(0, EXPL_MAX_MARKS)) {
+    if (!m || typeof m !== "object") continue;
+    const colour = EXPL_COLOUR.test(String(m.colour || "")) ? String(m.colour) : "#e03131";
+    const width = num(m.width, 0.5, 60, 2);
+    const alpha = num(m.alpha, 0.05, 1, 1);
+
+    if (m.kind === "ink") {
+      if (!Array.isArray(m.pts) || !m.pts.length) continue;
+      const room = Math.max(0, Math.min(EXPL_MAX_PTS_PER_MARK, EXPL_MAX_TOTAL_PTS - totalPts));
+      if (!room) break;
+      const pts = [];
+      for (const p of m.pts.slice(0, room)) {
+        if (!p || typeof p !== "object") continue;
+        const x = Number(p.x);
+        const y = Number(p.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        /*
+         * Rounded to a tenth of a pixel — invisible on screen, and it roughly
+         * halves what a long stroke costs to store and to send — and bounded to
+         * the same range as every other coordinate here. A stroke's points were
+         * the one place that took the client's number unchecked, so a page
+         * coordinate of 1e12 went straight into the document.
+         */
+        pts.push({
+          x: Math.round(num(x, -1e5, 1e5, 0) * 10) / 10,
+          y: Math.round(num(y, -1e5, 1e5, 0) * 10) / 10,
+          w: num(p.w, 0.2, 60, width),
+        });
+      }
+      if (!pts.length) continue;
+      totalPts += pts.length;
+      const mark = { kind: "ink", colour, width, alpha, pts };
+      if (EXPL_PENS.has(m.pen)) mark.pen = m.pen;
+      out.push(mark);
+    } else if (m.kind === "text") {
+      const text = String(m.text == null ? "" : m.text).slice(0, EXPL_MAX_TEXT);
+      if (!text.trim()) continue;
+      out.push({
+        kind: "text",
+        colour,
+        alpha,
+        x: num(m.x, -1e5, 1e5, 0),
+        y: num(m.y, -1e5, 1e5, 0),
+        size: num(m.size, 8, 96, 18),
+        text,
+      });
+    } else if (m.kind === "shape" && EXPL_SHAPES.has(m.shape)) {
+      out.push({
+        kind: "shape",
+        shape: m.shape,
+        colour,
+        width,
+        alpha,
+        x0: num(m.x0, -1e5, 1e5, 0),
+        y0: num(m.y0, -1e5, 1e5, 0),
+        x1: num(m.x1, -1e5, 1e5, 0),
+        y1: num(m.y1, -1e5, 1e5, 0),
+      });
+    }
+  }
+  return out;
+}
+
+/*
+ * PUT /result/:resultId/explanation — save (or clear) a teacher's marks.
+ *
+ * Authorised by loadResultForTeacher, so it is the exam's own author or an
+ * admin; a teacher cannot annotate a paper from somebody else's exam. Sending an
+ * empty list is how the explanation is removed, which keeps "undo this" a normal
+ * save rather than a second endpoint with its own permissions to get wrong.
+ */
+const saveResultExplanation = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id);
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found!");
+  }
+  const { result } = await loadResultForTeacher(req, res, req.params.resultId, user);
+
+  const marks = sanitizeExplanationMarks(req.body?.marks);
+  // The width the teacher drew at is half the data: without it a phone cannot
+  // reproduce the layout the marks were placed on.
+  const width = Math.round(num(req.body?.width, 200, 4000, 900));
+
+  result.explanation = marks.length
+    ? { marks, width, by: user._id, byName: user.name || "", at: new Date() }
+    : { marks: undefined, width: null, by: null, byName: "", at: null };
+  await result.save();
+
+  res.status(200).json({
+    explanation: marks.length ? { marks, width, byName: user.name || "", at: result.explanation.at } : null,
+  });
+});
+
 // GET /exam/:examId/pending-reviews — the teacher's grading queue.
 const getPendingReviews = asyncHandler(async (req, res) => {
   const { flags } = require("../config/featureFlags");
@@ -5407,6 +5547,8 @@ module.exports = {
   getPublicExams,
   getExams,
   reviewByResult,
+  saveResultExplanation,
+  sanitizeExplanationMarks,
   deleteMyExam,
   addExamToUserById,
   getPdfByExam,
