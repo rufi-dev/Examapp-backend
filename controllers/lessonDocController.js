@@ -8,6 +8,7 @@ const { buildLessonDocHtml } = require("../helper/lessonDocHtml");
 // Every write to a document goes through here. No path in this file may call
 // doc.save() — see the header of services/lessonDocService.js for why.
 const svc = require("../services/lessonDocService");
+const { meterFor } = require("../middleware/aiCredit");
 const { sanitizeDocHtml, droppedStyles } = require("../helper/lessonDocSanitize");
 
 /*
@@ -101,6 +102,22 @@ const logStudioEvent = (event, e, extra) => {
 };
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/*
+ * Debit the turn, exactly once, and say so on the stream.
+ *
+ * `usable()` is the one-shot the meter hands out; calling it twice is safe.
+ * The `credits` event carries the charge and the estimated balance so the
+ * header badge can move without a round trip — the client refetches the user
+ * for the true figure, this is just for the badge not to lie for a second.
+ * Nothing is sent for an unmetered turn (free op, billing off, admin).
+ */
+const chargeTurn = (req, send) => {
+  const m = req.aiCredit;
+  if (!m) return;
+  m.usable();
+  send("credits", { operation: m.operation, charged: m.cost, left: Math.max(0, m.balance - m.cost) });
+};
 
 /*
  * What a turn cost, recorded where the admin AI-cost page already looks.
@@ -459,12 +476,41 @@ const streamMessage = asyncHandler(async (req, res) => {
   if (!text) throw httpError(400, "message_empty", "Nə yaratmaq istədiyinizi yazın.");
   if (text.length > 4000) throw httpError(422, "message_long", "Mesaj çox uzundur.");
 
+  /*
+   * The same click twice is one turn.
+   *
+   * The browser mints an id per send. A reconnect, a double-tap or a page that
+   * re-sends on reload arrives here with the id of a turn this document has
+   * already recorded, and is refused BEFORE anything is stored or charged. It
+   * is not a cache — the answer is "already sent, reload", not a replay — but
+   * it is the whole difference between a retry and a second bill.
+   */
+  const turnId = String((req.body && req.body.turnId) || "").slice(0, 80);
+  if (turnId && (doc.messages || []).some((m) => m.role === "user" && m.turnId === turnId)) {
+    throw httpError(409, "duplicate_turn", "Bu mesaj artıq göndərilib — səhifəni yeniləyin.");
+  }
+
+  /*
+   * METERED — here, and not one line later.
+   *
+   * Which operation this is, and so what it costs, depends on whether the
+   * document already has content: a first draft is priced as a generation, a
+   * change as an edit. The document is loaded, so that is decidable now; the
+   * SSE headers are not out yet, so a 402 still leaves as a proper JSON error
+   * the client can read (it never could once the stream had started). Nothing
+   * below this line runs unless the teacher can afford it, and the teacher's
+   * message is not stored for a turn that was refused.
+   */
+  const hadBlocks = S.countParts(doc) > 0;
+  req.aiCredit = meterFor(req, hadBlocks ? "ai.edit.material" : "ai.generate.material");
+
   // What this turn is ADDING, not everything the document holds — see stagedFiles.
   const sent = stagedFiles(doc);
   await svc.appendMessages(doc._id, doc.owner, {
     role: "user",
     text,
     at: new Date(),
+    ...(turnId ? { turnId } : {}),
     ...(sent.length ? { files: sent } : {}),
   });
   // This turn is carrying them now, so they are no longer waiting to be carried.
@@ -544,7 +590,7 @@ const streamMessage = asyncHandler(async (req, res) => {
    * Everything downstream rode on the same flag, so the turn was also logged as a
    * generation and recorded in the transcript as "created".
    */
-  const hadBlocks = S.countParts(doc) > 0;
+  // (hadBlocks was decided above, before the headers went out: the meter needed it.)
   // Attached references travel with every turn, and with the PLAN too — deciding
   // what to write from a page the model cannot see is deciding blind.
   /*
@@ -1047,6 +1093,8 @@ ${S.SOURCE_RULES}`;
         }
       );
       await logStudioUsage(req, { doc: saved, out, hadBlocks });
+      // The turn ran to its end: it is charged. A question back is free.
+      chargeTurn(req, send);
       send("done", { doc: saved, summary: S.summarize(saved.blocks || []), provider: out.provider });
       return;
     }
@@ -1074,6 +1122,8 @@ ${S.SOURCE_RULES}`;
         at: new Date(),
       });
       const fresh = saved || doc;
+      // The turn ran to its end: it is charged. A question back is free.
+      chargeTurn(req, send);
       send("done", { doc: fresh, summary: S.summarize(fresh.blocks || []), provider: out.provider });
       return;
     }
@@ -1141,6 +1191,8 @@ ${S.SOURCE_RULES}`;
     );
 
     await logStudioUsage(req, { doc: saved, out, hadBlocks });
+    // The turn ran to its end: it is charged. A question back is free.
+    chargeTurn(req, send);
     send("done", { doc: saved, summary: sum, provider: out.provider });
     return;
   } catch (e) {
@@ -1200,6 +1252,11 @@ ${S.SOURCE_RULES}`;
               }
             );
             salvaged = true;
+            // The teacher keeps this content, so the turn is charged — otherwise
+            // Stop at 95% would be a free generation. A stop that kept nothing
+            // costs nothing. There is no client left to tell; the badge catches
+            // up on the next reload.
+            if (req.aiCredit) req.aiCredit.usable();
           }
         } catch {
           /* nothing usable, or a newer revision won — fall through to the note */

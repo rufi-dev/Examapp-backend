@@ -90,6 +90,15 @@ const messageSchema = new Schema(
      * Names and keys only; the bytes stay in the file store.
      */
     files: { type: [{ _id: false, key: String, name: String, mime: String }], default: undefined },
+    /*
+     * The client's id for this send, on the teacher's own messages only.
+     *
+     * A retry of the same click — a reconnect, a double-tap, a page that
+     * re-sent on reload — must not run and charge a second turn. The id is
+     * minted in the browser per send, stored here, and a second arrival of the
+     * same id on the same document is refused before anything is charged.
+     */
+    turnId: { type: String, default: undefined },
     at: { type: Date, default: Date.now },
   },
   { _id: false }

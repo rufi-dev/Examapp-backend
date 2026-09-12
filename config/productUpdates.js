@@ -97,6 +97,16 @@ const PRODUCT_UPDATES = [
       "Şagirdin cavablarını açın, «İzah et» düyməsinə basın və düz ekranda cızın, yazın, fiqur çəkin — ekranı paylaşarkən səhvi göstərmək üçün. Saxlasanız, şagird öz telefonunda da eyni izahı görür.",
     where: "Nəticə → Cavabların təhlili → İzah et",
     scene: "resultExplain",
+  },
+  {
+    id: "studio-credits",
+    publishedAt: "2026-09-12",
+    kind: "improvement",
+    title: "Dərs studiyası kreditlə işləyir",
+    summary:
+      "Studiyada material yaratmaq 6, dəyişmək 2 kredit sərf edir — eyni kreditlər, yuxarıdakı balansdan. Qiymət düymənin üstündə yazılır; kredit çatmırsa heç nə başlamır və heç nə sərf olunmur.",
+    where: "Dərs studiyası → göndər düyməsi · Planım → AI kredit sərfi",
+    scene: "studioCredits",
   }
 ];
 

@@ -70,7 +70,7 @@ eq("OP_COST projection (existing operations unchanged)", unchanged(reg.costTable
 eq("WEIGHTS projection (existing operations unchanged)", unchanged(WEIGHTS, WEIGHT_BASELINE), []);
 
 // The full set, so an operation cannot be added invisibly. Lesson Studio's two
-// are cost 0 by owner decision — see the comment in config/aiOperations.js.
+// are priced since 2026-09-13 — see the comment in config/aiOperations.js.
 eq("the operation set is exactly what is declared here", Object.keys(reg.costTable()).sort(), [
   "ai.chat.message",
   "ai.edit.material",
@@ -83,8 +83,11 @@ eq("the operation set is exactly what is declared here", Object.keys(reg.costTab
   "ai.regenerate.question",
   "ai.transcribe.audio",
 ]);
-ok("Lesson Studio's operations charge nothing", reg.costFor("ai.generate.material") === 0 && reg.costFor("ai.edit.material") === 0);
-eq("AI_ACTION_COSTS projection", AI_ACTION_COSTS, { generateExam: 10, rewriteQuestion: 2, supportChat: 0, generateLessonPlan: 6 });
+// Priced on the owner's decision of 2026-09-13; they were 0 by the earlier one.
+ok("Lesson Studio's operations are priced", reg.costFor("ai.generate.material") === 6 && reg.costFor("ai.edit.material") === 2);
+ok("and published, so a teacher can learn the price before spending it", reg.operationConfig("ai.generate.material").display === "generateMaterial" && reg.operationConfig("ai.edit.material").display === "editMaterial");
+ok("but not confirm-before — a chat turn must not pop a dialog", !reg.operationConfig("ai.generate.material").confirmBefore && !reg.operationConfig("ai.edit.material").confirmBefore);
+eq("AI_ACTION_COSTS projection", AI_ACTION_COSTS, { generateExam: 10, rewriteQuestion: 2, supportChat: 0, generateLessonPlan: 6, generateMaterial: 6, editMaterial: 2 });
 eq("CONFIRM_BEFORE projection", [...CONFIRM_BEFORE].sort(), [
   "ai.extract.questions",
   "ai.generate.lessonplan",

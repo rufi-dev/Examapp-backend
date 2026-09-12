@@ -2219,6 +2219,68 @@ console.log("\nA known error code does not make its message safe (LS-R3-014):");
   ok("a docError's userMessage still passes", c.publicFailure(docErr).message === "AI xidməti cavab vermir.");
 }
 
+console.log("\nA turn is metered (LS-R3-001, owner decision 2026-09-13):");
+{
+  const { meterFor, chargeAi } = require("../middleware/aiCredit");
+  const routes = require("fs").readFileSync(require("path").join(__dirname, "../routes/lessonDocRoute.js"), "utf8");
+  const ctlSrc = require("fs").readFileSync(require("path").join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+
+  // The guards every other paid AI route carries.
+  ok("the route rate-limits", /aiRateLimit,/.test(routes.slice(routes.indexOf("const aiChain"))));
+  ok("and caps daily spend", /aiBudgetGuard,/.test(routes.slice(routes.indexOf("const aiChain"))));
+  ok("both operations must be active for the route to exist", /requireActiveOperation\("ai\.edit\.material"\)/.test(routes));
+
+  /*
+   * The charge is decided in the controller because the route cannot know
+   * whether this is a creation or an edit — and it is decided BEFORE the SSE
+   * headers, so a refusal is a JSON 402 the client can read.
+   */
+  const stream = ctlSrc.slice(ctlSrc.indexOf("const streamMessage = asyncHandler"));
+  const meterAt = stream.indexOf("req.aiCredit = meterFor(req, hadBlocks");
+  ok("the meter runs in the controller", meterAt > 0);
+  ok("before the headers go out", meterAt < stream.indexOf("res.writeHead(200"));
+  ok("and before the teacher's message is stored, so a refused turn leaves no orphan", meterAt < stream.indexOf("await svc.appendMessages(doc._id, doc.owner, {\n    role: \"user\""));
+  ok("a creation and an edit are priced differently", /hadBlocks \? "ai\.edit\.material" : "ai\.generate\.material"/.test(stream));
+
+  // The decision itself, against a fake request.
+  const teacher = (credits) => ({ user: { _id: "t", role: "teacher", aiCredits: credits } });
+  let refused = null;
+  try { meterFor(teacher(1), "ai.generate.material"); } catch (e) { refused = e; }
+  ok("a teacher who cannot afford it is refused", refused && refused.code === "insufficient_credits");
+  ok("with a 402", refused && (refused.status === 402 || refused.statusCode === 402));
+  ok("and told the cost and the balance", refused && /6 kredit/.test(refused.message) && /balansınızda 1/.test(refused.message));
+  const m = meterFor(teacher(10), "ai.edit.material");
+  ok("a teacher who can afford it gets a one-shot meter", m && m.cost === 2 && typeof m.usable === "function");
+  ok("an admin is never charged", meterFor({ user: { _id: "a", role: "admin", aiCredits: 0 } }, "ai.generate.material") === null);
+  ok("an unpriced operation cannot be metered at all", (() => { try { meterFor(teacher(100), "ai.generate.lessonplan"); return true; } catch { return false; } })() === true);
+  ok("the route middleware is a wrapper over the same meter", typeof chargeAi("ai.generate.material") === "function");
+
+  /*
+   * Charged at the genuine success points, and not at a question back — the
+   * model has not done the work yet — nor on failure, stop or refusal.
+   */
+  const doneSites = (stream.match(/send\("done", \{/g) || []).length;
+  const chargedSites = (stream.match(/chargeTurn\(req, send\);\n\s*send\("done", \{/g) || []).length;
+  ok("every done except the question is charged", doneSites >= 3 && chargedSites === doneSites - 1);
+  const askedBlock = stream.slice(stream.indexOf('action: "asked"'), stream.indexOf('action: "asked"') + 700);
+  ok("a question back is free", !/chargeTurn/.test(askedBlock));
+  ok("a failed turn is free", !/chargeTurn/.test(stream.slice(stream.indexOf("const pub = publicFailure(e);"), stream.indexOf("const pub = publicFailure(e);") + 400)));
+  ok("the client is told what it cost", /send\("credits", \{ operation: m\.operation, charged: m\.cost, left:/.test(ctlSrc));
+  const stopAt = stream.indexOf("salvaged = true;");
+  ok("a stop that kept content is charged", /req\.aiCredit\.usable\(\)/.test(stream.slice(stopAt, stopAt + 500)));
+  const noneAt = stream.indexOf("if (!salvaged) {");
+  ok("a stop that kept nothing is not", !/usable/.test(stream.slice(noneAt, noneAt + 300)));
+
+  /*
+   * Idempotency: the same send twice is one turn. The id is the browser's, stored
+   * on the teacher's message, and a second arrival is refused before anything
+   * is stored or charged.
+   */
+  ok("a repeated turn id is refused", /"duplicate_turn"/.test(stream));
+  ok("before the meter and the message", stream.indexOf('"duplicate_turn"') < meterAt);
+  ok("and the id is kept with the message", /\.\.\.\(turnId \? \{ turnId \} : \{\}\)/.test(stream));
+}
+
 console.log("\nAn admin's library lists every teacher's materials:");
 {
   const path9 = require("path");

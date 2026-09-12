@@ -48,22 +48,24 @@ const AI_OPERATIONS = {
   "ai.generate.lessonplan": { cost: 6, ledgerWeight: 3, confirmBefore: true, active: true, display: "generateLessonPlan" },
 
   /*
-   * Lesson Studio — DELIBERATELY cost 0, by owner decision.
+   * Lesson Studio — PRICED, by owner decision on 2026-09-13.
    *
-   * These are named here so Studio stops being the one AI surface outside the
-   * app's own conventions: the route can be gated by `requireActiveOperation`,
-   * every turn can be attributed in the usage table, and pricing later is a
-   * one-number change rather than a new integration. `cost: 0` charges nothing
-   * and enforces nothing — it is not an oversight and must not be "fixed" to a
-   * positive number without the owner asking for it.
+   * It was cost 0 by an earlier decision ("no limits on AI usage"), and a
+   * re-audit made the consequence plain: one approved account could run up an
+   * unbounded provider bill while the header showed a finite allowance that
+   * Studio ignored. The owner chose full metering. The prices sit on the
+   * existing scale: writing a handout from nothing is a lesson plan's worth of
+   * generation (6); changing one that exists is a rewrite's worth (2) — patch
+   * edits and prompt caching made an edit turn genuinely cheap to serve.
    *
-   * The ledger weights record the RELATIVE work for the day a price is chosen:
-   * writing a handout from nothing is a lesson plan's worth of generation (3);
-   * changing one that exists is less (2). `display: null` keeps both off the
-   * public pricing list, which is correct while they are free.
+   * Not confirm-before. A chat turn that pops a confirmation dialog every time
+   * is hostile; the composer shows the cost on the send button instead, which
+   * is the same fact, delivered where the decision is made. Both are on the
+   * public pricing list, because a teacher must be able to find out what a
+   * turn costs BEFORE they have spent one.
    */
-  "ai.generate.material": { cost: 0, ledgerWeight: 3, confirmBefore: false, active: true, display: null },
-  "ai.edit.material": { cost: 0, ledgerWeight: 2, confirmBefore: false, active: true, display: null },
+  "ai.generate.material": { cost: 6, ledgerWeight: 3, confirmBefore: false, active: true, display: "generateMaterial" },
+  "ai.edit.material": { cost: 2, ledgerWeight: 1, confirmBefore: false, active: true, display: "editMaterial" },
 };
 
 const OPERATION_NAMES = Object.keys(AI_OPERATIONS);

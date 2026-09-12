@@ -32,26 +32,35 @@ router.get("/:id", c.getDoc);
 router.patch("/:id", c.updateDoc);
 router.delete("/:id", c.removeDoc);
 /*
- * The AI route, and the only two things gating it.
+ * The AI route, and what gates it.
  *
  * A non-streaming twin (POST /:id/message) used to be mounted beside it and ran
  * the older whole-document path — no patch edits, no page reads, no render
  * check. The app had stopped calling it; it is gone rather than left for an old
  * client to find, so every AI edit enters the same turn.
  *
- * `requireStudioAi` is the kill switch; `requireActiveOperation` refuses if the
- * operation is ever set back to `active: false` in config/aiOperations.js, so an
- * unpriced operation can never quietly run for free by accident.
+ * `requireStudioAi` is the kill switch; `requireActiveOperation` refuses if
+ * either operation is ever set back to `active: false` in config/aiOperations.js,
+ * so an unpriced operation can never quietly run for free by accident.
  *
- * Deliberately absent, by owner decision: aiRateLimit, aiBudgetGuard, chargeAi.
- * Studio charges nothing and limits nothing. What replaces them is the per-turn
- * usage row the controller writes — spend is visible even though it is unbounded.
- *
- * One operation name gates both routes because the entitlement is the same; the
- * controller attributes each turn to `ai.generate.material` or `ai.edit.material`
- * in the usage table, which is where the distinction actually matters.
+ * METERED, by owner decision on 2026-09-13 — it charged nothing and limited
+ * nothing until then. `aiRateLimit` and `aiBudgetGuard` are the same guards every
+ * other paid AI route carries. The credit charge itself is NOT a route middleware
+ * here, because a creation and an edit share this route and cost different
+ * amounts, and which one this is depends on the document: the controller calls
+ * the same meter (middleware/aiCredit.js `meterFor`) once the document is
+ * loaded, still before the first byte of the stream goes out, so a refusal is a
+ * proper 402. The per-turn usage row the controller writes stays, so the spend
+ * is visible as well as bounded.
  */
-const aiChain = [requireStudioAi, requireActiveOperation("ai.generate.material")];
+const { aiRateLimit, aiBudgetGuard } = require("../middleware/aiLimit");
+const aiChain = [
+  requireStudioAi,
+  requireActiveOperation("ai.generate.material"),
+  requireActiveOperation("ai.edit.material"),
+  aiRateLimit,
+  aiBudgetGuard,
+];
 router.post("/:id/message/stream", ...aiChain, c.streamMessage);
 router.post("/:id/files", runUpload, c.addFile);
 router.get("/:id/files/:key", c.getFile);

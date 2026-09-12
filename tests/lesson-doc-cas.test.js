@@ -261,6 +261,29 @@ const ok = (name, cond, extra) => {
     ok("a commit's message rides the same cap", c.messages.length === svc.MAX_MESSAGES && c.messages[c.messages.length - 1].text === "last");
   }
 
+  console.log("\n12. A charged turn debits exactly once (LS-R3-001):");
+  {
+    const { meterFor } = require("../middleware/aiCredit");
+    const payer = new mongoose.Types.ObjectId();
+    await User.collection.insertOne({ _id: payer, name: "p", email: "p@e.test", role: "teacher", aiCredits: 10 });
+    const req = { user: { _id: payer, role: "teacher", aiCredits: 10 } };
+
+    const m = await meterFor(req, "ai.edit.material");
+    m.usable();
+    m.usable(); // a second call is a no-op, not a second charge
+    await new Promise((r) => setTimeout(r, 150)); // the debit is fire-and-forget
+    ok("one usable() is one debit, however often it is called", (await User.findById(payer)).aiCredits === 8);
+
+    // Two turns are two charges — and the $gte guard can never take it negative.
+    const m2 = meterFor({ user: { _id: payer, role: "teacher", aiCredits: 8 } }, "ai.generate.material");
+    m2.usable();
+    await new Promise((r) => setTimeout(r, 150));
+    ok("a second turn is a second, separate charge", (await User.findById(payer)).aiCredits === 2);
+    let refused = false;
+    try { meterFor({ user: { _id: payer, role: "teacher", aiCredits: 2 } }, "ai.generate.material"); } catch (e) { refused = e.code === "insufficient_credits"; }
+    ok("and the next one is refused before any provider work", refused);
+  }
+
   await mongoose.disconnect();
   await mem.stop();
 
