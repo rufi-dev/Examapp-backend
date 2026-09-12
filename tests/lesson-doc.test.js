@@ -698,7 +698,21 @@ console.log("\n18. A foreign material is indistinguishable from a missing one (L
   // 403-on-foreign vs 404-on-missing answers "does this id exist and belong to
   // someone" for anyone who can type a URL.
   ok("both answers come from one helper", /const missing = \(\) => httpError\(404, "doc_missing"/.test(ctlSrc));
-  ok("a non-admin gets the missing answer for a foreign doc", /throw admin \? httpError\(403, "not_owner"[\s\S]{0,40}: missing\(\);/.test(ctlSrc));
+  /*
+   * This used to pin the exact ternary `throw admin ? httpError(403, …) : missing()`.
+   * That line sat INSIDE `if (!admin && …)`, so its 403 half could never run —
+   * the test was holding unreachable code in place, under a name describing
+   * behaviour the reachable half already provided.
+   *
+   * So assert the guarantee instead of the spelling: the ownership guard throws
+   * `missing()`, and no "not_owner" answer exists anywhere in the controller to
+   * distinguish a foreign material from an absent one.
+   */
+  ok(
+    "a non-admin gets the missing answer for a foreign doc",
+    /if \(!admin && String\(doc\.owner\) !== String\(req\.user\._id\)\) throw missing\(\);/.test(ctlSrc)
+  );
+  ok("and no 403 tells them the material exists", !/not_owner/.test(ctlSrc));
   // A mistyped id used to throw a CastError and surface as a 500.
   ok("a malformed id is a 404, not a 500", /catch \{\s*throw missing\(\);/.test(ctlSrc));
 }
@@ -1598,6 +1612,46 @@ console.log("\n25. The model writes the document; the schema stops being the cei
   ok("and no longer takes blocks", !tool.input_schema.properties.blocks);
   ok("the brief tells the model it writes a document", S.BASE_RULES.includes("SƏNƏDİ HTML KİMİ YAZIRSAN"));
   ok("and gives it the house styles to use", S.BASE_RULES.includes('class="def"'));
+}
+
+console.log("\nAn admin's library lists every teacher's materials:");
+{
+  const path9 = require("path");
+  const ctl9 = require("fs").readFileSync(path9.join(__dirname, "../controllers/lessonDocController.js"), "utf8");
+  const listSrc = ctl9.slice(ctl9.indexOf("const listDocs ="), ctl9.indexOf("// POST /"));
+
+  /*
+   * mine() has always let an admin OPEN any material; nothing listed them, so an
+   * admin could reach one only by being handed its URL. The pairing is what
+   * matters — read access that cannot discover anything is not access — so both
+   * halves are pinned here.
+   */
+  ok("mine() exempts an admin", /const admin = req\.user\?\.role === "admin"/.test(ctl9));
+  ok("the list scope is owner-based for a teacher", /owner: req\.user\._id, archivedAt: null/.test(listSrc));
+  ok("and unscoped for an admin", /isAdmin\s*\?\s*\{ archivedAt: null \}/.test(listSrc));
+
+  // A teacher's rows are all their own, so the owner id is of no use to them and
+  // is dropped rather than shipped.
+  ok("a teacher's response carries no owner id", /if \(!isAdmin\) \{[\s\S]{0,160}map\(\(\{ owner, \.\.\.d \}\) => d\)/.test(listSrc));
+
+  // Without the author, a platform-wide grid is indistinguishable from the
+  // admin's own work.
+  ok("an admin's rows name the author", /ownerName: author\?\.name/.test(listSrc));
+  ok("and mark which rows are the admin's own", /mine: String\(owner\) === String\(req\.user\._id\)/.test(listSrc));
+  ok("a deleted author still renders", /Silinmiş istifadəçi/.test(listSrc));
+
+  // One query for the page's authors, not one per row.
+  ok("authors are fetched in a single query", /\$in: ownerIds/.test(listSrc));
+
+  /*
+   * A teacher's list is bounded by MAX_DOCS; the admin's is every teacher's
+   * added together and grows with the platform. The cap keeps the response
+   * renderable and `total` is what stops a truncated page reading as the whole
+   * library.
+   */
+  ok("the admin list is capped", /\$limit: ADMIN_LIST_CAP/.test(listSrc));
+  ok("and the cap is configurable", /STUDIO_ADMIN_LIST_MAX/.test(ctl9));
+  ok("the true total is reported alongside", /total = await LessonDoc\.countDocuments\(match\)/.test(listSrc));
 }
 
 Promise.all(pending).then(() => {

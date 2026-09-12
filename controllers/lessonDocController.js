@@ -28,7 +28,8 @@ const MAX_DOCS = 200;
  * given id exists and belongs to somebody. A teacher can only ever act on their
  * own materials, so the distinction buys them nothing and costs privacy.
  *
- * An admin still gets the truthful answer — they are allowed to know.
+ * An admin is exempt: they may read any material, so there is no foreign
+ * document for them to be refused and nothing to disguise.
  * A malformed id takes the same path rather than throwing a CastError, which
  * used to surface as a 500 on a mistyped URL.
  */
@@ -43,9 +44,9 @@ const mine = async (req, id) => {
     throw missing();
   }
   if (!doc) throw missing();
-  if (!admin && String(doc.owner) !== String(req.user._id)) {
-    throw admin ? httpError(403, "not_owner", "Bu material sizə aid deyil.") : missing();
-  }
+  // An admin reads every material, so they never reach this: the old ternary
+  // here offered them a 403 that no code path could produce.
+  if (!admin && String(doc.owner) !== String(req.user._id)) throw missing();
   return doc;
 };
 
@@ -253,14 +254,48 @@ function publicFailure(e) {
   return { code: e?.code || "generation_failed", message: curated || PUBLIC_FAILURE.generation_failed };
 }
 
+/*
+ * How many of everyone's materials an admin's library will draw at once.
+ *
+ * A teacher's list is bounded by MAX_DOCS; the admin view has no such bound —
+ * it is every teacher's list added together, and it grows with the platform.
+ * The cap is what stops this route from one day building a response nobody can
+ * render; `total` is reported alongside so the page can say what it is not
+ * showing instead of silently presenting a truncated list as the whole truth.
+ */
+const ADMIN_LIST_CAP = Number(process.env.STUDIO_ADMIN_LIST_MAX || 500);
+
 // GET /
+/*
+ * The library: a teacher's own materials, or EVERY teacher's for an admin.
+ *
+ * `mine()` has always let an admin open any document — supporting a teacher who
+ * says "the table came out wrong" means looking at the material they are looking
+ * at. But nothing ever listed those documents, so an admin could reach one only
+ * by being handed its URL. Read access without discovery is not really access;
+ * this is the missing half, and it is the same owner-scope-with-admin-override
+ * that listBoards already uses.
+ *
+ * The owner's NAME is looked up here rather than stored on the document. A
+ * denormalised copy is wrong the moment a teacher is renamed, and it would need
+ * a backfill for every material that already exists.
+ */
 const listDocs = asyncHandler(async (req, res) => {
+  const isAdmin = req.user.role === "admin";
+  const match = isAdmin
+    ? { archivedAt: null }
+    : { owner: req.user._id, archivedAt: null };
+
   const docs = await LessonDoc.aggregate([
-    { $match: { owner: req.user._id, archivedAt: null } },
+    { $match: match },
     { $sort: { updatedAt: -1 } },
+    ...(isAdmin ? [{ $limit: ADMIN_LIST_CAP }] : []),
     {
       $project: {
         title: 1, topic: 1, subject: 1, grade: 1, format: 1, status: 1, updatedAt: 1,
+        // Needed to name the author and to mark a row as the admin's own. Kept
+        // out of a teacher's response below — every row there is already theirs.
+        owner: 1,
         // The card needs a shape, not the document: sending every block to draw
         // "12 blok" would be hundreds of kilobytes per row.
         // An html document has no blocks; it carries its own part count.
@@ -279,7 +314,38 @@ const listDocs = asyncHandler(async (req, res) => {
       },
     },
   ]);
-  res.json({ docs });
+
+  // A teacher's own library — unchanged in shape, and `owner` never leaves the
+  // server since it tells them nothing they do not already know.
+  if (!isAdmin) {
+    return res.json({ docs: docs.map(({ owner, ...d }) => d) });
+  }
+
+  /*
+   * The authors, in ONE query for the whole page rather than one per row. Only
+   * the owners actually present in this page of results are fetched.
+   */
+  const User = require("../models/userModel");
+  const ownerIds = [...new Set(docs.map((d) => String(d.owner)).filter(Boolean))];
+  const authors = await User.find({ _id: { $in: ownerIds } }).select("name email").lean();
+  const authorOf = new Map(authors.map((u) => [String(u._id), u]));
+
+  const total = await LessonDoc.countDocuments(match);
+  res.json({
+    admin: true,
+    total,
+    docs: docs.map(({ owner, ...d }) => {
+      const author = authorOf.get(String(owner));
+      return {
+        ...d,
+        mine: String(owner) === String(req.user._id),
+        // A deleted account leaves its materials behind; say so rather than
+        // rendering a card with a blank author.
+        ownerName: author?.name || "Silinmiş istifadəçi",
+        ownerEmail: author?.email || "",
+      };
+    }),
+  });
 });
 
 // POST /
