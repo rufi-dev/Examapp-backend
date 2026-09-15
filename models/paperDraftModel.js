@@ -12,12 +12,17 @@ const paperDraftSchema = new Schema(
     photos: [{ type: String }],
     // Plain answer values, one per key question (no key information).
     answers: { type: Schema.Types.Mixed, default: undefined },
-    // The last AI read: [{ answer, confidence, note }].
+    // What the machine read (platform, then AI for the unclear ones):
+    // [{ answer, confidence, note, source: "omr" | "ocr" | "ai" | null }].
     aiAnswers: { type: Schema.Types.Mixed, default: undefined },
+    // Question indices the platform couldn't read — waiting for the AI check.
+    unresolved: { type: [Number], default: undefined },
     // Name/class boxes read off the sheet.
     sheetStudent: { type: Schema.Types.Mixed, default: undefined },
-    // AI reads used (each is a paid model call).
+    // AI fallback checks used (each is a paid model call).
     readCount: { type: Number, default: 0 },
+    // Platform reads used (OMR + OCR; cheap but not free).
+    platformReadCount: { type: Number, default: 0 },
     // Submit lock: set while a submit is being processed.
     submittedAt: { type: Date, default: null },
   },

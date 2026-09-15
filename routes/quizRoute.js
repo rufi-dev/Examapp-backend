@@ -9,11 +9,13 @@ const {
   serverTime,
   getPaperSheet,
   readPaperSheetForTeacher,
+  readPaperSheetAiForTeacher,
   savePaperResult,
   deletePaperResult,
   getMyPaper,
   saveMyPaperDraft,
   readMyPaper,
+  readMyPaperAi,
   submitMyPaper,
   addExam,
   getExamsByClass,
@@ -191,6 +193,7 @@ router.get("/live-exams", protect, getLiveExams);
 // save/update a student's graded sheet (or preview its score), remove one.
 router.get("/exam/:examId/paper", protect, teacherOnly, getPaperSheet);
 router.post("/exam/:examId/paper/read", protect, teacherOnly, readPaperSheetForTeacher);
+router.post("/exam/:examId/paper/read/ai", protect, teacherOnly, readPaperSheetAiForTeacher);
 router.post("/exam/:examId/paper/result", protect, teacherOnly, savePaperResult);
 router.delete("/exam/:examId/paper/result/:resultId", protect, teacherOnly, deletePaperResult);
 // Paper exams — student self-upload of their own answer sheet (checked, then
@@ -198,6 +201,7 @@ router.delete("/exam/:examId/paper/result/:resultId", protect, teacherOnly, dele
 router.get("/exam/:examId/paper/me", protect, getMyPaper);
 router.put("/exam/:examId/paper/me/draft", protect, saveMyPaperDraft);
 router.post("/exam/:examId/paper/me/read", protect, verifiedOnly, readMyPaper);
+router.post("/exam/:examId/paper/me/read/ai", protect, verifiedOnly, readMyPaperAi);
 router.post("/exam/:examId/paper/me/submit", protect, verifiedOnly, submitMyPaper);
 router.post("/exam/:examId/violation", protect, reportViolation);
 router.get("/exam/:examId/rank", protect, getExamRank);

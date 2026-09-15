@@ -952,20 +952,23 @@ function alignSection(questions, items) {
   rows.forEach((r) => {
     if (r.num != null) repeats.set(r.num, (repeats.get(r.num) || 0) + 1);
   });
-  const claimed = new Set();
   const out = new Map();
-  const take = (q, r, doubtful) => {
-    claimed.add(r.pos);
-    out.set(q.index, { item: r.it, doubtful });
-  };
-  questions.forEach((q) => {
-    const r = rows.find((x) => !claimed.has(x.pos) && x.num === q.number);
-    if (r) take(q, r, repeats.get(r.num) > 1);
-  });
+  // Printed numbers are trusted only when they're consistent: every row numbered,
+  // no repeats, each one a question of this section. Otherwise (a card with
+  // numbering typos, or numbered differently from the exam) rows go by position.
+  const wanted = new Set(questions.map((q) => q.number));
+  const byNumber =
+    rows.length > 0 && rows.every((r) => r.num != null && repeats.get(r.num) === 1 && wanted.has(r.num));
+  if (byNumber) {
+    questions.forEach((q) => {
+      const r = rows.find((x) => x.num === q.number);
+      if (r) out.set(q.index, { item: r.it, doubtful: false });
+    });
+    return out;
+  }
   questions.forEach((q, k) => {
-    if (out.has(q.index)) return;
-    const r = (rows[k] && !claimed.has(k) ? rows[k] : null) || rows.find((x) => !claimed.has(x.pos));
-    if (r) take(q, r, true);
+    const r = rows[k];
+    if (r) out.set(q.index, { item: r.it, doubtful: r.num == null || repeats.get(r.num) > 1 || r.num !== q.number });
   });
   return out;
 }
@@ -1051,7 +1054,7 @@ const cleanSheetStudent = (s) => {
 // Read a student's sheet photos against an exam key.
 // → { answers: [{ type, answer, confidence, note }], student, cost }
 // Throws aiError (aiStatus + userMessage) for the caller to turn into a response.
-async function readSheetImages(key, images) {
+async function readSheetImages(key, images, { focus = [] } = {}) {
   const list = (Array.isArray(images) ? images : [])
     .filter((s) => typeof s === "string" && s)
     .slice(0, PAPER_MAX_IMAGES);
@@ -1084,7 +1087,13 @@ async function readSheetImages(key, images) {
               })),
               {
                 type: "text",
-                text: `İmtahanın strukturu (${key.length} sual):\n${sheetLayout(key)}\n\nBu cavab kartında şagirdin məlumatlarını və hər cavabını oxu.`,
+                text: `İmtahanın strukturu (${key.length} sual):\n${sheetLayout(key)}\n\nBu cavab kartında şagirdin məlumatlarını və hər cavabını oxu.${
+                  focus.length
+                    ? `\nPlatforma bu sualları dəqiq oxuya bilmədi — onlara xüsusi diqqət et: ${numberRanges(
+                        focus.map((i) => i + 1)
+                      )}.`
+                    : ""
+                }`,
               },
             ],
           },
@@ -1136,4 +1145,6 @@ module.exports = {
   getAiUsage,
   readSheetImages,
   logPaperAiUsage,
+  alignSection,
+  parseSheetAnswer,
 };

@@ -3224,6 +3224,9 @@ const serverTime = asyncHandler(async (req, res) => {
 });
 
 // ---- Paper exams ------------------------------------------------------------
+// Sheets are read by the platform first (bubbles by OMR, handwriting by OCR);
+// only what it can't read with confidence goes to the AI fallback.
+const { platformReadSheet } = require("../helper/paperReader");
 // exam.mode "paper": written in class on answer cards. A sheet is graded one of
 // two ways, both producing a normal Result (source "paper") scored by the same
 // gradeSelections as online exams:
@@ -3234,8 +3237,10 @@ const serverTime = asyncHandler(async (req, res) => {
 
 const PAPER_PHOTO_HOST = /(^|\.)res\.cloudinary\.com$/i;
 const CORRECT_TYPES = ["Cm", "Cs", "Co", "Cd", "Cma", "Cmu"];
-// AI reads a student may run per exam (each one is a paid model call).
+// AI fallback checks a student may run per exam (each one is a paid model call).
 const PAPER_STUDENT_READS = 5;
+// Platform reads (OMR + OCR) a student may run per exam.
+const PAPER_PLATFORM_READS = 20;
 // Self-upload stays open this long after the exam's endDate.
 const PAPER_UPLOAD_GRACE_MS = 30 * 60 * 1000;
 
@@ -3497,32 +3502,70 @@ const getPaperSheet = asyncHandler(async (req, res) => {
   });
 });
 
-// POST /exam/:examId/paper/read { images } — teacher: AI read of a sheet, plus the
-// roster student the name on it matches.
+// The class roster student the name read off a sheet matches.
+async function matchSheetForExam(exam, info) {
+  const rows = await Enrollment.find({ class: exam.class, status: "approved" })
+    .populate("student", "name photo")
+    .lean();
+  const students = rows.filter((r) => r.student).map((r) => r.student);
+  const { match, suggestions } = matchSheetStudent(students, info);
+  const brief = (s) => ({ _id: s._id, name: s.name, photo: s.photo });
+  return { match: match ? brief(match) : null, suggestions: suggestions.map(brief) };
+}
+
+// Sets the status of a failed sheet read and returns the error to throw.
+const paperReadFailure = (res, e, fallback) => {
+  res.status(e.aiStatus || 502);
+  return new Error(e.userMessage || fallback);
+};
+
+// POST /exam/:examId/paper/read { images } — teacher: platform read (no AI).
+// Answers it couldn't read with confidence come back in `unresolved`.
 const readPaperSheetForTeacher = asyncHandler(async (req, res) => {
   const exam = await loadPaperExamForTeacher(req, res);
   const key = exam.questions?.correctAnswers || [];
   let read;
   try {
-    read = await readSheetImages(key, req.body?.images);
+    read = await platformReadSheet(key, req.body?.images, { wantName: true });
   } catch (e) {
-    res.status(e.aiStatus || 502);
-    throw new Error(e.userMessage || "AI vərəqi oxuya bilmədi");
+    throw paperReadFailure(res, e, "Vərəq oxunmadı");
   }
-  logPaperAiUsage(req.user._id, exam._id, read.cost, key.length);
-
-  const rows = await Enrollment.find({ class: exam.class, status: "approved" })
-    .populate("student", "name photo")
-    .lean();
-  const students = rows.filter((r) => r.student).map((r) => r.student);
-  const { match, suggestions } = matchSheetStudent(students, read.student);
-  const brief = (s) => ({ _id: s._id, name: s.name, photo: s.photo });
-
+  const named = read.nameResolved ? await matchSheetForExam(exam, read.student) : { match: null, suggestions: [] };
   res.status(200).json({
     answers: read.answers,
+    unresolved: read.unresolved,
     student: read.student,
-    match: match ? brief(match) : null,
-    suggestions: suggestions.map(brief),
+    nameResolved: read.nameResolved,
+    platform: read.platform,
+    ...named,
+  });
+});
+
+// POST /exam/:examId/paper/read/ai { images, questions: [index], name } — teacher:
+// AI fallback for only what the platform couldn't read.
+const readPaperSheetAiForTeacher = asyncHandler(async (req, res) => {
+  const exam = await loadPaperExamForTeacher(req, res);
+  const key = exam.questions?.correctAnswers || [];
+  const questions = [...new Set((Array.isArray(req.body?.questions) ? req.body.questions : []).map(Number))].filter(
+    (i) => Number.isInteger(i) && i >= 0 && i < key.length
+  );
+  const wantName = req.body?.name === true;
+  if (!questions.length && !wantName) {
+    res.status(400);
+    throw new Error("AI ilə yoxlanacaq sual yoxdur");
+  }
+  let read;
+  try {
+    read = await readSheetImages(key, req.body?.images, { focus: questions });
+  } catch (e) {
+    throw paperReadFailure(res, e, "AI vərəqi oxuya bilmədi");
+  }
+  logPaperAiUsage(req.user._id, exam._id, read.cost, key.length);
+  const named = wantName ? await matchSheetForExam(exam, read.student) : { match: null, suggestions: [] };
+  res.status(200).json({
+    answers: questions.map((i) => ({ index: i, ...read.answers[i], source: "ai" })),
+    student: wantName ? read.student : null,
+    ...named,
     cost: read.cost,
   });
 });
@@ -3588,6 +3631,7 @@ const savePaperResult = asyncHandler(async (req, res) => {
           aiAnswers: aiAnswers.slice(0, key.length).map((x) => ({
             answer: x && x.answer !== undefined ? x.answer : "",
             confidence: ["high", "medium", "low"].includes(x?.confidence) ? x.confidence : "high",
+            source: ["omr", "ocr", "ai"].includes(x?.source) ? x.source : null,
           })),
         }
       : {}),
@@ -3746,11 +3790,13 @@ const getMyPaper = asyncHandler(async (req, res) => {
             photos: draft.photos || [],
             answers: Array.isArray(draft.answers) ? draft.answers : null,
             aiAnswers: Array.isArray(draft.aiAnswers) ? draft.aiAnswers : null,
+            unresolved: Array.isArray(draft.unresolved) ? draft.unresolved : [],
             student: draft.sheetStudent || null,
           }
         : null,
     nameCheck: !result && draft?.sheetStudent ? sheetNameCheck(req.user.name, draft.sheetStudent) : null,
     readsLeft: Math.max(0, PAPER_STUDENT_READS - (draft?.readCount || 0)),
+    platformReadsLeft: Math.max(0, PAPER_PLATFORM_READS - (draft?.platformReadCount || 0)),
     readLimit: PAPER_STUDENT_READS,
     me: { name: req.user.name || "" },
   });
@@ -3780,8 +3826,25 @@ const saveMyPaperDraft = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true });
 });
 
-// POST /exam/:examId/paper/me/read { images } — AI read of the student's own
-// sheet (limited per student). Returns the reading only — no key, no score.
+// Atomically use one of a draft counter's reads (null at the limit). Reserved
+// BEFORE the read so parallel requests can't pass the limit; with upsert, a
+// request at the limit collides with the unique index instead.
+async function reservePaperRead(exam, req, field, limit, upsert) {
+  try {
+    return await PaperDraft.findOneAndUpdate(
+      { exam: exam._id, student: req.user._id, [field]: { $not: { $gte: limit } } },
+      { $inc: { [field]: 1 } },
+      { upsert, new: true }
+    );
+  } catch (e) {
+    if (e?.code === 11000) return null;
+    throw e;
+  }
+}
+
+// POST /exam/:examId/paper/me/read { images } — platform read of the student's own
+// sheet (OMR + OCR, no AI). Returns the reading only — no key, no score. Answers
+// it couldn't read come back in `unresolved` for the AI check below.
 const readMyPaper = asyncHandler(async (req, res) => {
   const exam = await loadPaperExamForStudent(req, res);
   await assertCanUpload(exam, req, res);
@@ -3790,51 +3853,98 @@ const readMyPaper = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("Müəllim hələ cavab açarını hazırlamayıb");
   }
-
-  // Reserve the read BEFORE the model call so parallel requests can't pass the
-  // limit (at the limit the upsert collides with the unique index).
-  let reserved;
-  try {
-    reserved = await PaperDraft.findOneAndUpdate(
-      { exam: exam._id, student: req.user._id, readCount: { $lt: PAPER_STUDENT_READS } },
-      { $inc: { readCount: 1 } },
-      { upsert: true, new: true }
-    );
-  } catch (e) {
-    if (e?.code === 11000) {
-      res.status(429);
-      throw new Error(`AI ilə oxuma limiti bitib (${PAPER_STUDENT_READS} dəfə). Cavablarını əl ilə doldur.`);
-    }
-    throw e;
+  const reserved = await reservePaperRead(exam, req, "platformReadCount", PAPER_PLATFORM_READS, true);
+  if (!reserved) {
+    res.status(429);
+    throw new Error(`Vərəqi oxutma limiti bitib (${PAPER_PLATFORM_READS} dəfə). Cavablarını əl ilə doldur.`);
   }
 
   let read;
   try {
-    read = await readSheetImages(key, req.body?.images);
+    read = await platformReadSheet(key, req.body?.images, { wantName: true });
   } catch (e) {
-    await PaperDraft.updateOne({ _id: reserved._id }, { $inc: { readCount: -1 } }); // failed read is free
-    res.status(e.aiStatus || 502);
-    throw new Error(e.userMessage || "AI vərəqi oxuya bilmədi");
+    await PaperDraft.updateOne({ _id: reserved._id }, { $inc: { platformReadCount: -1 } }); // failed read is free
+    throw paperReadFailure(res, e, "Vərəq oxunmadı");
   }
-  logPaperAiUsage(req.user._id, exam._id, read.cost, key.length);
 
-  const answers = read.answers.map((a) => ({ answer: a.answer }));
+  const student = read.nameResolved ? read.student : null;
   await PaperDraft.updateOne(
     { _id: reserved._id },
     {
       $set: {
         photos: cleanSheetPhotos(req.body?.images),
-        answers: coerceSheetAnswers(key, answers),
-        aiAnswers: read.answers.map((a) => ({ answer: a.answer, confidence: a.confidence, note: a.note })),
-        sheetStudent: read.student,
+        answers: coerceSheetAnswers(key, read.answers),
+        aiAnswers: read.answers.map((a) => ({ answer: a.answer, confidence: a.confidence, note: a.note, source: a.source })),
+        unresolved: read.unresolved,
+        sheetStudent: student || undefined,
       },
     }
   );
 
   res.status(200).json({
     answers: read.answers,
-    student: read.student,
-    nameCheck: sheetNameCheck(req.user.name, read.student),
+    unresolved: read.unresolved,
+    platform: read.platform,
+    student,
+    nameCheck: student ? sheetNameCheck(req.user.name, student) : "unknown",
+    readsLeft: Math.max(0, PAPER_STUDENT_READS - (reserved.readCount || 0)),
+    platformReadsLeft: Math.max(0, PAPER_PLATFORM_READS - reserved.platformReadCount),
+  });
+});
+
+// POST /exam/:examId/paper/me/read/ai — AI check of the answers the platform read
+// couldn't settle (taken from the draft, so only those are paid for). Merges them
+// into the draft, keeping any value the student already changed by hand.
+const readMyPaperAi = asyncHandler(async (req, res) => {
+  const exam = await loadPaperExamForStudent(req, res);
+  await assertCanUpload(exam, req, res);
+  const key = exam.questions?.correctAnswers || [];
+  const draft = await PaperDraft.findOne({ exam: exam._id, student: req.user._id }).lean();
+  const questions = (Array.isArray(draft?.unresolved) ? draft.unresolved : []).filter(
+    (i) => Number.isInteger(i) && i >= 0 && i < key.length
+  );
+  if (!draft || !questions.length || !draft.photos?.length) {
+    res.status(400);
+    throw new Error("AI ilə yoxlanacaq sual yoxdur");
+  }
+  const reserved = await reservePaperRead(exam, req, "readCount", PAPER_STUDENT_READS, false);
+  if (!reserved) {
+    res.status(429);
+    throw new Error(`AI yoxlama limiti bitib (${PAPER_STUDENT_READS} dəfə). Qalan cavabları vərəqinlə müqayisə edib əl ilə doldur.`);
+  }
+
+  let read;
+  try {
+    read = await readSheetImages(key, draft.photos, { focus: questions });
+  } catch (e) {
+    await PaperDraft.updateOne({ _id: reserved._id }, { $inc: { readCount: -1 } });
+    throw paperReadFailure(res, e, "AI vərəqi oxuya bilmədi");
+  }
+  logPaperAiUsage(req.user._id, exam._id, read.cost, key.length);
+
+  const machine = key.map((q, i) =>
+    isPlainMap(draft.aiAnswers?.[i]) ? { ...draft.aiAnswers[i] } : { answer: "", confidence: "low", note: "", source: null }
+  );
+  const current = key.map((q, i) => (Array.isArray(draft.answers) ? draft.answers[i] : machine[i].answer));
+  questions.forEach((i) => {
+    const got = read.answers[i];
+    if (sameSheetAnswer(key[i], current[i], machine[i].answer)) current[i] = got.answer;
+    machine[i] = { answer: got.answer, confidence: got.confidence, note: got.note, source: "ai" };
+  });
+  const answers = coerceSheetAnswers(
+    key,
+    current.map((answer) => ({ answer }))
+  );
+  const known = draft.sheetStudent && (draft.sheetStudent.firstName || draft.sheetStudent.lastName);
+  const sheetStudent = known ? draft.sheetStudent : read.student;
+  await PaperDraft.updateOne({ _id: reserved._id }, { $set: { answers, aiAnswers: machine, unresolved: [], sheetStudent } });
+
+  res.status(200).json({
+    answers,
+    machine,
+    aiQuestions: questions,
+    student: sheetStudent,
+    nameCheck: sheetNameCheck(req.user.name, sheetStudent),
     readsLeft: Math.max(0, PAPER_STUDENT_READS - reserved.readCount),
   });
 });
@@ -3919,7 +4029,13 @@ const submitMyPaper = asyncHandler(async (req, res) => {
       sheetPhotos: photos,
       studentEdited,
       ...(ai
-        ? { aiAnswers: ai.map((x) => ({ answer: x?.answer ?? "", confidence: x?.confidence || "low" })) }
+        ? {
+            aiAnswers: ai.map((x) => ({
+              answer: x?.answer ?? "",
+              confidence: x?.confidence || "low",
+              source: x?.source || null,
+            })),
+          }
         : {}),
       ...(draft?.sheetStudent ? { sheetStudent: draft.sheetStudent } : {}),
     });
@@ -3945,11 +4061,13 @@ module.exports = {
   serverTime,
   getPaperSheet,
   readPaperSheetForTeacher,
+  readPaperSheetAiForTeacher,
   savePaperResult,
   deletePaperResult,
   getMyPaper,
   saveMyPaperDraft,
   readMyPaper,
+  readMyPaperAi,
   submitMyPaper,
   addExam,
   getExamsByClass,
