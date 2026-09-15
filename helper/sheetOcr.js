@@ -61,6 +61,15 @@ async function visionWords(jpegBuffer) {
             x1: Math.max(...xs),
             y0: Math.min(...ys),
             y1: Math.max(...ys),
+            // Per-character boxes: used to find marks OCR skipped (e.g. a fraction slash).
+            symbols: symbols
+              .filter((s) => (s.boundingBox?.vertices || []).length >= 4)
+              .map((s) => {
+                const sv = s.boundingBox.vertices;
+                const sxs = sv.map((v) => v.x || 0);
+                const sys = sv.map((v) => v.y || 0);
+                return { text: s.text || "", x0: Math.min(...sxs), x1: Math.max(...sxs), y0: Math.min(...sys), y1: Math.max(...sys) };
+              }),
           });
         })
       )
@@ -86,10 +95,12 @@ const labelKey = (t) =>
  * without a grid the open column is assumed to be the right half.
  */
 function parseCardText(rawWords, { width, height, flipped = false, grid = null, openCount = 0 } = {}) {
-  const words = rawWords.map((w) => {
-    let { x0, x1, y0, y1 } = w;
-    if (flipped) [x0, x1, y0, y1] = [width - 1 - w.x1, width - 1 - w.x0, height - 1 - w.y1, height - 1 - w.y0];
-    return { ...w, x0, x1, y0, y1, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, h: Math.max(1, y1 - y0), key: labelKey(w.text) };
+  const upright = (b) =>
+    flipped ? { ...b, x0: width - 1 - b.x1, x1: width - 1 - b.x0, y0: height - 1 - b.y1, y1: height - 1 - b.y0 } : { ...b };
+  const words = rawWords.map((raw) => {
+    const w = upright(raw);
+    const symbols = (raw.symbols || []).map(upright);
+    return { ...w, symbols, cx: (w.x0 + w.x1) / 2, cy: (w.y0 + w.y1) / 2, h: Math.max(1, w.y1 - w.y0), key: labelKey(w.text) };
   });
   const sameLine = (label, w) => w.cy > label.y0 - 0.7 * label.h && w.cy < label.y1 + 0.7 * label.h;
 
@@ -197,6 +208,9 @@ function parseCardText(rawWords, { width, height, flipped = false, grid = null, 
           conf: inRow.length ? Math.min(...inRow.map((w) => w.conf)) : 1,
           multiline: inRow.length > 1 && Math.max(...ys) - Math.min(...ys) > 0.8 * hs,
           empty: !inRow.length,
+          symbols: inRow
+            .flatMap((w) => (w.symbols.length ? w.symbols : [{ text: w.text, x0: w.x0, x1: w.x1, y0: w.y0, y1: w.y1 }]))
+            .sort((a, b) => a.x0 - b.x0),
         });
       });
     }

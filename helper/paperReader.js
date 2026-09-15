@@ -6,7 +6,7 @@
  *  - anything not read with confidence is returned in `unresolved`, for the
  *    caller to send to the AI fallback (aiController.readSheetImages).
  */
-const { runOmr } = require("./sheetOmr");
+const { runOmr, runGlyphs } = require("./sheetOmr");
 const { visionConfigured, visionWords, parseCardText } = require("./sheetOcr");
 const { alignSection, parseSheetAnswer } = require("../controllers/aiController");
 
@@ -174,6 +174,23 @@ async function platformReadSheet(key, images, { wantName = false } = {}) {
       }
       if (!openDone && parsed.open.length) {
         openDone = true;
+        // Restore marks OCR skipped between characters (fraction slash, dot, minus).
+        if (parsed.open.some((o) => !o.empty)) {
+          try {
+            const fixes = await runGlyphs(bufs[i], {
+              flipped: onGrid ? omr.flipped : false,
+              rows: parsed.open.map((o) => ({ symbols: o.empty || o.multiline ? [] : o.symbols })),
+            });
+            fixes.forEach((f, k) => {
+              if (f?.added?.length) {
+                parsed.open[k].answer = f.text;
+                parsed.open[k].added = f.added;
+              }
+            });
+          } catch (e) {
+            console.error("Glyph check failed:", e?.message);
+          }
+        }
         const aligned = alignSection(
           openQ,
           parsed.open.map((o) => ({ printed: o.printed, answer: o.answer, confidence: "high", note: "", o }))
@@ -191,7 +208,10 @@ async function platformReadSheet(key, images, { wantName = false } = {}) {
           // Handwritten digits often read at 0.6–0.8; accept them flagged for a look.
           else if (o.conf < 0.6) a.note = "yazı aydın oxunmadı";
           else if (!ALLOWED_TEXT.test(o.answer)) a.note = "tanınmayan simvol";
-          else settle(it.index, o.answer.slice(0, 300), o.conf >= 0.9 ? "high" : "medium", "ocr");
+          else {
+            settle(it.index, o.answer.slice(0, 300), o.conf >= 0.9 && !o.added ? "high" : "medium", "ocr");
+            if (o.added) a.note = `şəkildən əlavə edildi: ${[...new Set(o.added)].join(" ")}`;
+          }
         });
       }
       if (parsed.nameFound || parsed.open.length) textStatus = "ok";

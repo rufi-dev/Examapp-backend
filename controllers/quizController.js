@@ -3434,10 +3434,32 @@ const paperResultView = (r) => ({
 
 // ---- teacher ----
 
+// Students a paper sheet can belong to: approved members of the exam's class; for
+// an OPEN class (no join needed) every student account, members listed first.
+async function paperRoster(exam, fields = "name email photo") {
+  const classId = exam.class?._id || exam.class;
+  const cls =
+    exam.class && exam.class.requireCode !== undefined
+      ? exam.class
+      : await Class.findById(classId).select("requireCode").lean();
+  const rows = await Enrollment.find({ class: classId, status: "approved" })
+    .populate("student", fields)
+    .sort({ createdAt: -1 })
+    .lean();
+  const members = rows.filter((r) => r.student).map((r) => r.student);
+  if (!classIsPublic(cls)) return { students: members, openClass: false };
+  const others = await User.find({ role: "student", _id: { $nin: members.map((s) => s._id) } })
+    .select(fields)
+    .sort({ name: 1 })
+    .limit(5000)
+    .lean();
+  return { students: [...members, ...others], openClass: true };
+}
+
 // Load a paper exam the requesting teacher/admin may grade (responds + throws otherwise).
 async function loadPaperExamForTeacher(req, res, populateClass = false) {
   let q = Exam.findById(req.params.examId).populate("questions");
-  if (populateClass) q = q.populate("class", "name");
+  if (populateClass) q = q.populate("class", "name requireCode");
   const exam = await q;
   if (!exam) {
     res.status(404);
@@ -3460,11 +3482,8 @@ const getPaperSheet = asyncHandler(async (req, res) => {
   const exam = await loadPaperExamForTeacher(req, res, true);
   const key = exam.questions?.correctAnswers || [];
   const classId = exam.class?._id || exam.class;
-  const [rows, results] = await Promise.all([
-    Enrollment.find({ class: classId, status: "approved" })
-      .populate("student", "name email photo")
-      .sort({ createdAt: -1 })
-      .lean(),
+  const [roster, results] = await Promise.all([
+    paperRoster(exam),
     Result.find({ examId: exam._id, source: "paper" })
       .populate("userId", "name email photo")
       .sort({ updatedAt: -1 })
@@ -3481,6 +3500,7 @@ const getPaperSheet = asyncHandler(async (req, res) => {
       passingMarks: exam.passingMarks,
       preset: exam.preset || "",
       paperSelfUpload: exam.paperSelfUpload !== false,
+      openClass: roster.openClass,
     },
     key: key.map((ca) => ({
       type: ca.type,
@@ -3491,24 +3511,14 @@ const getPaperSheet = asyncHandler(async (req, res) => {
       rightCount: ca.rightCount,
       key: ca.key,
     })),
-    students: rows
-      .filter((r) => r.student)
-      .map((r) => ({
-        _id: r.student._id,
-        name: r.student.name,
-        email: r.student.email,
-        photo: r.student.photo,
-      })),
+    students: roster.students.map((s) => ({ _id: s._id, name: s.name, email: s.email, photo: s.photo })),
     results: results.map(paperResultView),
   });
 });
 
 // The class roster student the name read off a sheet matches.
 async function matchSheetForExam(exam, info) {
-  const rows = await Enrollment.find({ class: exam.class, status: "approved" })
-    .populate("student", "name photo")
-    .lean();
-  const students = rows.filter((r) => r.student).map((r) => r.student);
+  const { students } = await paperRoster(exam, "name photo");
   const { match, suggestions } = matchSheetStudent(students, info);
   const brief = (s) => ({ _id: s._id, name: s.name, photo: s.photo });
   return { match: match ? brief(match) : null, suggestions: suggestions.map(brief) };
@@ -3606,11 +3616,9 @@ const savePaperResult = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("Şagird tapılmadı");
   }
-  const enrolled = await Enrollment.exists({
-    student: student._id,
-    class: exam.class,
-    status: "approved",
-  });
+  const enrolled =
+    (await Enrollment.exists({ student: student._id, class: exam.class, status: "approved" })) ||
+    classIsPublic(await Class.findById(exam.class).select("requireCode").lean());
   if (!enrolled) {
     res.status(400);
     throw new Error("Bu şagird imtahanın sinfində deyil");

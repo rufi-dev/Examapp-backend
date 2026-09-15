@@ -528,6 +528,165 @@ async function analyzeJpeg(buffer, opts) {
   return analyzeImage(cv, img, opts);
 }
 
+// ---- handwriting punctuation check ----
+
+const GLYPH_INK = 90;
+
+/*
+ * OCR reads handwritten digits well but can drop thin marks between them — a
+ * fraction slash ("7/5" → "75"), a decimal dot, a leading minus. For each answer
+ * (its OCR characters with boxes, in upright coordinates) look at the actual ink:
+ * a stroke no recognised character accounts for is classified as "/" (tall,
+ * rising diagonal), "." (small blob near the baseline) or "-" (short flat dash
+ * before the number) and inserted by position.
+ *   rows: [{ symbols: [{ text, x0, x1, y0, y1 }] }]  →  [{ text, added: [char] } | null]
+ */
+function analyzeGlyphsImage(cv, img, { flipped = false, rows = [], debug = false } = {}) {
+  const mats = [];
+  const keep = (m) => {
+    mats.push(m);
+    return m;
+  };
+  try {
+    const rgba = keep(cv.matFromImageData(img));
+    const gray = keep(new cv.Mat());
+    cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
+    const W = gray.cols;
+    const H = gray.rows;
+    const ink = inkMap(cv, gray, keep);
+
+    return rows.map((row) => {
+      const syms = (row?.symbols || []).filter((s) => s.x1 > s.x0 && s.y1 > s.y0);
+      if (!syms.length) return null;
+      const hs = median(syms.map((s) => s.y1 - s.y0)) || 1;
+      const textTop = Math.min(...syms.map((s) => s.y0));
+      const textBot = Math.max(...syms.map((s) => s.y1));
+      const firstX = Math.min(...syms.map((s) => s.x0));
+      const ux0 = firstX - 0.6 * hs;
+      const ux1 = Math.max(...syms.map((s) => s.x1)) + 0.6 * hs;
+      const uy0 = textTop - 0.35 * hs;
+      const uy1 = textBot + 0.35 * hs;
+      const px0 = Math.max(0, Math.floor(flipped ? W - 1 - ux1 : ux0));
+      const px1 = Math.min(W - 1, Math.ceil(flipped ? W - 1 - ux0 : ux1));
+      const py0 = Math.max(0, Math.floor(flipped ? H - 1 - uy1 : uy0));
+      const py1 = Math.min(H - 1, Math.ceil(flipped ? H - 1 - uy0 : uy1));
+      const cw = px1 - px0 + 1;
+      const chh = py1 - py0 + 1;
+      const plain = { text: syms.map((s) => s.text).join(""), added: [] };
+      if (cw < 4 || chh < 4) return plain;
+
+      const bin = keep(new cv.Mat(chh, cw, cv.CV_8UC1));
+      const bd = bin.data;
+      for (let y = 0; y < chh; y++) {
+        for (let x = 0; x < cw; x++) bd[y * cw + x] = ink[(py0 + y) * W + px0 + x] > GLYPH_INK ? 255 : 0;
+      }
+      // Erase the answer box's printed border (long straight runs): handwriting that
+      // touches the border would otherwise merge with it into one big blob.
+      const eraseRuns = (len, lines, along, at) => {
+        for (let a = 0; a < lines; a++) {
+          let start = -1;
+          for (let b = 0; b <= along; b++) {
+            const on = b < along && bd[at(a, b)];
+            if (on && start < 0) start = b;
+            if (!on && start >= 0) {
+              if (b - start >= len) for (let k = start; k < b; k++) bd[at(a, k)] = 0;
+              start = -1;
+            }
+          }
+        }
+      };
+      eraseRuns(Math.max(12, Math.round(2 * hs)), chh, cw, (y, x) => y * cw + x); // horizontal
+      eraseRuns(Math.max(12, Math.round(1.8 * hs)), cw, chh, (x, y) => y * cw + x); // vertical
+      const labels = keep(new cv.Mat());
+      const stats = keep(new cv.Mat());
+      const cents = keep(new cv.Mat());
+      const n = cv.connectedComponentsWithStats(bin, labels, stats, cents, 8, cv.CV_32S);
+      const st = stats.data32S;
+      const lb = labels.data32S;
+      const up = (x, y) => (flipped ? [W - 1 - (px0 + x), H - 1 - (py0 + y)] : [px0 + x, py0 + y]);
+
+      const added = [];
+      const comps = [];
+      for (let i = 1; i < n; i++) {
+        const l = st[i * 5];
+        const t = st[i * 5 + 1];
+        const w = st[i * 5 + 2];
+        const h = st[i * 5 + 3];
+        const area = st[i * 5 + 4];
+        if (area < Math.max(4, 0.01 * hs * hs)) continue; // speckle
+        if (w > 3 * hs || h > 2 * hs) continue; // box border / underline
+        const [ax, ay] = up(l, t);
+        const [bx, by] = up(l + w - 1, t + h - 1);
+        const cx = (ax + bx) / 2;
+        const cy = (ay + by) / 2;
+        // Part of a character OCR already read?
+        const owner = syms.find((s) => cx > s.x0 + 0.15 * (s.x1 - s.x0) && cx < s.x1 - 0.15 * (s.x1 - s.x0));
+        if (debug) comps.push({ x0: Math.min(ax, bx), x1: Math.max(ax, bx), y0: Math.min(ay, by), y1: Math.max(ay, by), w, h, area, owner: owner?.text || null });
+        if (owner) continue;
+
+        let char = null;
+        const rel = (cy - textTop) / Math.max(1, textBot - textTop);
+        if (w <= 0.4 * hs && h <= 0.4 * hs && rel > 0.55) {
+          char = ".";
+        } else if (h >= 0.55 * hs && w <= 1.1 * h) {
+          let k = 0;
+          let sx = 0;
+          let sy = 0;
+          let sxx = 0;
+          let syy = 0;
+          let sxy = 0;
+          for (let y = t; y < t + h; y++) {
+            for (let x = l; x < l + w; x++) {
+              if (lb[y * cw + x] !== i) continue;
+              const [X, Y] = up(x, y);
+              k++;
+              sx += X;
+              sy += Y;
+              sxx += X * X;
+              syy += Y * Y;
+              sxy += X * Y;
+            }
+          }
+          const vx = sxx / k - (sx / k) ** 2;
+          const vy = syy / k - (sy / k) ** 2;
+          const corr = vx > 0 && vy > 0 ? (sxy / k - (sx / k) * (sy / k)) / Math.sqrt(vx * vy) : 0;
+          if (debug) comps[comps.length - 1].corr = Math.round(corr * 100) / 100;
+          if (corr < -0.6) char = "/"; // rises left → right
+        } else if (h <= 0.3 * hs && w >= 0.35 * hs && rel > 0.25 && rel < 0.8 && cx < firstX) {
+          char = "-";
+        }
+        if (!char) continue;
+        if (syms.some((s) => s.text === char && Math.abs((s.x0 + s.x1) / 2 - cx) < 0.6 * hs)) continue;
+        added.push({ char, cx });
+      }
+      if (debug) plain.comps = comps;
+      if (!added.length) return plain;
+      const text = [
+        ...syms.map((s) => ({ t: s.text, cx: (s.x0 + s.x1) / 2 })),
+        ...added.map((a) => ({ t: a.char, cx: a.cx })),
+      ]
+        .sort((a, b) => a.cx - b.cx)
+        .map((x) => x.t)
+        .join("");
+      return { text, added: added.map((a) => a.char) };
+    });
+  } finally {
+    mats.forEach((m) => {
+      try {
+        m.delete();
+      } catch {
+        /* already freed */
+      }
+    });
+  }
+}
+
+async function analyzeGlyphsJpeg(buffer, opts) {
+  const { cv } = await loadCv();
+  const img = jpeg.decode(buffer, { useTArray: true, formatAsRGBA: true, maxMemoryUsageInMB: 1024, maxResolutionInMP: 80 });
+  return analyzeGlyphsImage(cv, img, opts);
+}
+
 // ---- worker pool (one worker, reused; freed after idle) ----
 
 const IDLE_MS = 5 * 60 * 1000;
@@ -572,16 +731,28 @@ function getWorker() {
   return w;
 }
 
-// Analyse one JPEG photo in the worker → the analyzeImage result.
-function runOmr(buffer, opts = {}, timeoutMs = 45000) {
+function runInWorker(kind, buffer, opts, timeoutMs) {
   return new Promise((resolve, reject) => {
     const w = getWorker();
     const id = ++seq;
     clearTimeout(idleTimer);
     const timer = setTimeout(() => killWorker(new Error("OMR vaxtı bitdi")), timeoutMs);
     pending.set(id, { resolve, reject, timer });
-    w.postMessage({ id, buffer, opts });
+    w.postMessage({ id, kind, buffer, opts });
   });
 }
 
-module.exports = { runOmr, analyzeJpeg, analyzeImage, loadCv, _internals: { inkMap, detectCircles, locateGrid } };
+// Bubble grid of one JPEG photo → the analyzeImage result.
+const runOmr = (buffer, opts = {}, timeoutMs = 45000) => runInWorker("omr", buffer, opts, timeoutMs);
+// Punctuation check of OCR'd answers on one JPEG photo → analyzeGlyphsImage result.
+const runGlyphs = (buffer, opts = {}, timeoutMs = 30000) => runInWorker("glyphs", buffer, opts, timeoutMs);
+
+module.exports = {
+  runOmr,
+  runGlyphs,
+  analyzeJpeg,
+  analyzeImage,
+  analyzeGlyphsJpeg,
+  loadCv,
+  _internals: { inkMap, detectCircles, locateGrid },
+};
