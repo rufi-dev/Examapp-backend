@@ -118,6 +118,16 @@ const resultSchema = Schema(
     aiAnswers: { type: Schema.Types.Mixed, default: undefined },
     // Paper exams: the teacher/admin who saved the grade.
     gradedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
+    // Paper exams: who submitted the sheet — the teacher, or the student uploading
+    // their own (locked for them once submitted).
+    submittedBy: { type: String, enum: ["teacher", "student"], default: undefined },
+    // Student uploads: question indices whose submitted answer differs from what
+    // the AI read off the photo — the teacher checks these against the sheet.
+    studentEdited: { type: [Number], default: undefined },
+    // Set when a teacher saves/reviews the sheet in the grading workspace.
+    teacherReviewedAt: { type: Date, default: null },
+    // Name/class boxes read off the sheet ({ firstName, lastName, fatherName, className }).
+    sheetStudent: { type: Schema.Types.Mixed, default: undefined },
     // Set once a termination-upgrade notification has been confirmed-delivered, so
     // a retry (or a crash-recovered pass) never double-sends the staff alert. This
     // is ONLY the termination marker, not a general "finished notified" gate.

@@ -8,8 +8,13 @@ const {
 const {
   serverTime,
   getPaperSheet,
+  readPaperSheetForTeacher,
   savePaperResult,
   deletePaperResult,
+  getMyPaper,
+  saveMyPaperDraft,
+  readMyPaper,
+  submitMyPaper,
   addExam,
   getExamsByClass,
   getPdfByExam,
@@ -62,7 +67,6 @@ const {
   extractQuestions,
   extractQuestionsStream,
   getAiUsage,
-  readAnswerSheet,
 } = require("../controllers/aiController");
 const {
   joinClass,
@@ -186,9 +190,15 @@ router.get("/live-exams", protect, getLiveExams);
 // Paper exams: grading workspace data, AI read of a photographed answer sheet,
 // save/update a student's graded sheet (or preview its score), remove one.
 router.get("/exam/:examId/paper", protect, teacherOnly, getPaperSheet);
-router.post("/exam/:examId/paper/read", protect, teacherOnly, readAnswerSheet);
+router.post("/exam/:examId/paper/read", protect, teacherOnly, readPaperSheetForTeacher);
 router.post("/exam/:examId/paper/result", protect, teacherOnly, savePaperResult);
 router.delete("/exam/:examId/paper/result/:resultId", protect, teacherOnly, deletePaperResult);
+// Paper exams — student self-upload of their own answer sheet (checked, then
+// submitted once and locked).
+router.get("/exam/:examId/paper/me", protect, getMyPaper);
+router.put("/exam/:examId/paper/me/draft", protect, saveMyPaperDraft);
+router.post("/exam/:examId/paper/me/read", protect, verifiedOnly, readMyPaper);
+router.post("/exam/:examId/paper/me/submit", protect, verifiedOnly, submitMyPaper);
 router.post("/exam/:examId/violation", protect, reportViolation);
 router.get("/exam/:examId/rank", protect, getExamRank);
 router.post("/addResult/:examId", protect, verifiedOnly, addResult);

@@ -8,6 +8,8 @@ const Result = require("../models/resultModel");
 const Attempt = require("../models/attemptModel");
 const User = require("../models/userModel");
 const Enrollment = require("../models/enrollmentModel");
+const PaperDraft = require("../models/paperDraftModel");
+const { readSheetImages, logPaperAiUsage } = require("./aiController");
 const { notifyExamStarted, notifyExamFinished } = require("../helper/telegram");
 const { notifyStudentsNewExam } = require("../helper/whatsapp");
 const { PRESETS } = require("../helper/examPresets");
@@ -256,6 +258,7 @@ const addExam = asyncHandler(async (req, res) => {
     coverImage,
     pdf,
     mode,
+    paperSelfUpload,
   } = req.body;
   const { classId } = req.params;
 
@@ -312,6 +315,8 @@ const addExam = asyncHandler(async (req, res) => {
       shuffleOptions: shuffleOptions === "true" || shuffleOptions === true,
       studentSolutionPhotos: studentSolutionPhotos === "true" || studentSolutionPhotos === true,
       coverImage: typeof coverImage === "string" ? coverImage : "",
+      paperSelfUpload:
+        paperSelfUpload === undefined ? true : paperSelfUpload === true || paperSelfUpload === "true",
       videoLink,
       startDate,
       endDate,
@@ -2650,6 +2655,7 @@ const editExam = asyncHandler(async (req, res) => {
     studentSolutionPhotos,
     coverImage,
     pdfPath,
+    paperSelfUpload,
   } = req.body;
   const examExists = await Exam.findById(examId);
   if (examExists && !ownsOrAdmin(req.user, examExists)) {
@@ -2689,6 +2695,9 @@ const editExam = asyncHandler(async (req, res) => {
     if (typeof coverImage === "string") update.coverImage = coverImage;
     // Empty string disables the password; undefined leaves it unchanged.
     if (typeof password === "string") update.password = password;
+    // Paper exams: student self-upload switch (untouched when not sent).
+    if (paperSelfUpload !== undefined)
+      update.paperSelfUpload = paperSelfUpload === true || paperSelfUpload === "true";
     await Exam.findByIdAndUpdate(examId, update);
 
     if (pdfPath) {
@@ -3215,13 +3224,24 @@ const serverTime = asyncHandler(async (req, res) => {
 });
 
 // ---- Paper exams ------------------------------------------------------------
-// exam.mode "paper": written on answer cards in class. The teacher enters the
-// answer key, photographs each student's sheet, reviews/corrects what the AI
-// read (aiController.readAnswerSheet), and saves a normal Result (source
-// "paper") scored by the same gradeSelections as online exams.
+// exam.mode "paper": written in class on answer cards. A sheet is graded one of
+// two ways, both producing a normal Result (source "paper") scored by the same
+// gradeSelections as online exams:
+//  - the TEACHER photographs sheets, reviews what the AI read, assigns + saves;
+//  - the STUDENT uploads their own sheet, checks the AI read and submits once
+//    (locked afterwards). Answers the student changed from the AI read are
+//    recorded so the teacher can verify them against the photo.
 
 const PAPER_PHOTO_HOST = /(^|\.)res\.cloudinary\.com$/i;
 const CORRECT_TYPES = ["Cm", "Cs", "Co", "Cd", "Cma", "Cmu"];
+// AI reads a student may run per exam (each one is a paid model call).
+const PAPER_STUDENT_READS = 5;
+// Self-upload stays open this long after the exam's endDate.
+const PAPER_UPLOAD_GRACE_MS = 30 * 60 * 1000;
+
+// The unique (exam, student) index is the student submit lock, so build it
+// explicitly (new collection; createIndexes ignores the autoIndex setting).
+PaperDraft.createIndexes().catch((e) => console.error("PaperDraft index build failed:", e?.message));
 
 // Only Cloudinary HTTPS images (what the browser uploads) are stored.
 const cleanSheetPhotos = (arr) =>
@@ -3236,18 +3256,21 @@ const cleanSheetPhotos = (arr) =>
     })
     .slice(0, 10);
 
-// Coerce teacher-edited selections to the KEY's shape — one per question, type
-// taken from the key, answer normalized per type — so a malformed payload can
-// never skew scoring or the stored review.
-function normalizePaperSelections(key, answers) {
+const isPlainMap = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+
+// Coerce submitted answers ([{ answer }]) to the key's layout — one value per
+// question, shaped per type — using only non-secret layout (option letters, grid
+// size). Everything a student sees BEFORE submitting goes through this, never the
+// key-aware normalizePaperSelections (which would leak which answers match).
+function coerceSheetAnswers(key, answers) {
   const src = Array.isArray(answers) ? answers : [];
   return key.map((ca, i) => {
-    const a = src[i]?.answer;
+    const a = isPlainMap(src[i]) && "answer" in src[i] ? src[i].answer : undefined;
     if (ca.type === "Cmu") {
       const n = Number(ca.leftCount) || 0;
       const m = Number(ca.rightCount) || 0;
       const out = {};
-      if (a && typeof a === "object" && !Array.isArray(a)) {
+      if (isPlainMap(a)) {
         for (let k = 0; k < n; k++) {
           const row = Array.isArray(a[k]) ? a[k] : [];
           const v = [...new Set(row.map(Number).filter((x) => Number.isInteger(x) && x >= 0 && x < m))].sort(
@@ -3256,29 +3279,134 @@ function normalizePaperSelections(key, answers) {
           if (v.length) out[k] = v;
         }
       }
-      return { type: ca.type, answer: out };
+      return out;
     }
     if (ca.type === "Cm") {
-      // Store the letter in the KEY's own casing (the scorer compares exactly), so
-      // "b" still matches a key written as "B".
-      const letter = typeof a === "string" ? a.trim().toLowerCase().slice(0, 3) : "";
-      const pool = [ca.answer, ...(Array.isArray(ca.options) ? ca.options : [])].map((o) => String(o ?? ""));
-      const hit = letter ? pool.find((o) => o.trim().toLowerCase() === letter) : undefined;
-      return { type: ca.type, answer: hit !== undefined ? hit.trim() : letter };
+      const opts = (Array.isArray(ca.options) && ca.options.length ? ca.options : ["a", "b", "c", "d", "e"]).map(
+        (o) => String(o).trim().toLowerCase()
+      );
+      const letter = typeof a === "string" ? a.trim().toLowerCase() : "";
+      return opts.includes(letter) ? letter : "";
     }
-    // Open answers: spacing in handwriting is meaningless ("2 + x" vs "2+x"), but
-    // the shared scorer only collapses whitespace. When the answer equals an
-    // accepted variant once spaces are ignored, store that variant so it scores —
-    // online (typed) scoring is left untouched.
-    const text = typeof a === "string" || typeof a === "number" ? String(a).trim().slice(0, 300) : "";
-    const compact = (v) => String(v ?? "").toLowerCase().replace(/\s+/g, "");
-    const accepted = (Array.isArray(ca.answers) && ca.answers.length ? ca.answers : [ca.answer]).filter(
-      (v) => String(v ?? "").trim() !== ""
-    );
-    const hit = text ? accepted.find((v) => compact(v) === compact(text)) : undefined;
-    return { type: ca.type, answer: hit !== undefined ? String(hit).trim() : text };
+    return typeof a === "string" || typeof a === "number" ? String(a).trim().slice(0, 300) : "";
   });
 }
+
+// Scoring form of a sheet: coerced, then closed letters in the KEY's casing (the
+// scorer compares exactly) and open answers matched ignoring handwriting spacing
+// ("2 + x" = "2+x"; the shared scorer only collapses whitespace). Result-side only.
+function normalizePaperSelections(key, answers) {
+  const values = coerceSheetAnswers(key, answers);
+  const compact = (x) => String(x ?? "").toLowerCase().replace(/\s+/g, "");
+  return key.map((ca, i) => {
+    const v = values[i];
+    if (ca.type === "Cm" && v) {
+      const pool = [ca.answer, ...(Array.isArray(ca.options) ? ca.options : [])].map((o) => String(o ?? "").trim());
+      const hit = pool.find((o) => o.toLowerCase() === v);
+      return { type: ca.type, answer: hit !== undefined ? hit : v };
+    }
+    if ((ca.type === "Co" || ca.type === "Cd") && v) {
+      const accepted = (Array.isArray(ca.answers) && ca.answers.length ? ca.answers : [ca.answer]).filter(
+        (x) => String(x ?? "").trim() !== ""
+      );
+      const hit = accepted.find((x) => compact(x) === compact(v));
+      return { type: ca.type, answer: hit !== undefined ? String(hit).trim() : v };
+    }
+    return { type: ca.type, answer: v };
+  });
+}
+
+// Did the student's value change from what the AI read? (spacing/case-insensitive)
+function sameSheetAnswer(q, a, b) {
+  if (q.type === "Cmu") {
+    const canon = (m) =>
+      JSON.stringify(
+        Object.keys(isPlainMap(m) ? m : {})
+          .filter((k) => Array.isArray(m[k]) && m[k].length)
+          .sort((x, y) => Number(x) - Number(y))
+          .map((k) => [Number(k), [...m[k]].map(Number).sort((x, y) => x - y)])
+      );
+    return canon(a) === canon(b);
+  }
+  const f = (v) => String(v ?? "").trim().toLowerCase().replace(/\s+/g, "");
+  return f(a) === f(b);
+}
+
+// ---- matching the name on a sheet to a student ----
+
+// Comparable name tokens: Azerbaijani letters folded to their base form (ə→e,
+// ı→i, ö→o, ü→u, ğ→g, ş→s, ç→c), lower-cased, punctuation dropped.
+function nameTokens(s) {
+  return String(s || "")
+    .toLocaleLowerCase("az")
+    .replace(/ə/g, "e")
+    .replace(/ı/g, "i")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z\s-]/g, " ")
+    .split(/[\s-]+/)
+    .filter(Boolean);
+}
+
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// A written name part matches an account token exactly, or one letter off for
+// names of 4+ letters (handwriting / reading slips).
+const tokenMatches = (tokens, want) =>
+  !!want &&
+  tokens.some(
+    (t) =>
+      t === want ||
+      (want.length >= 4 && t.length >= 4 && Math.abs(t.length - want.length) <= 1 && editDistance(t, want) <= 1)
+  );
+
+// Auto-assign only on an unambiguous first + last name match (father's name breaks
+// ties); weaker hits come back as suggestions for the teacher to pick.
+function matchSheetStudent(students, info) {
+  const first = nameTokens(info?.firstName)[0];
+  const last = nameTokens(info?.lastName)[0];
+  const father = nameTokens(info?.fatherName)[0];
+  if (!first && !last) return { match: null, suggestions: [] };
+  const scored = (students || [])
+    .map((s) => {
+      const t = nameTokens(s.name);
+      const f = tokenMatches(t, first);
+      const l = tokenMatches(t, last);
+      const score = (f ? 2 : 0) + (l ? 2 : 0) + (father && tokenMatches(t, father) ? 1 : 0);
+      return { s, score, both: f && l };
+    })
+    .filter((x) => x.score >= 2)
+    .sort((a, b) => b.score - a.score);
+  const strong = scored.filter((x) => x.both);
+  const match =
+    strong.length === 1 || (strong.length > 1 && strong[0].score > strong[1].score) ? strong[0].s : null;
+  return { match, suggestions: scored.slice(0, 4).map((x) => x.s) };
+}
+
+// Does the name written on a student's own sheet fit their account?
+function sheetNameCheck(userName, info) {
+  const first = nameTokens(info?.firstName)[0];
+  const last = nameTokens(info?.lastName)[0];
+  if (!first && !last) return "unknown";
+  const t = nameTokens(userName);
+  return (!first || tokenMatches(t, first)) && (!last || tokenMatches(t, last)) ? "match" : "mismatch";
+}
+
+const cleanSheetStudentInfo = (s) => {
+  if (!isPlainMap(s)) return undefined;
+  const f = (v) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
+  return { firstName: f(s.firstName), lastName: f(s.lastName), fatherName: f(s.fatherName), className: f(s.className) };
+};
 
 const paperResultView = (r) => ({
   _id: r._id,
@@ -3291,13 +3419,20 @@ const paperResultView = (r) => ({
   selectedAnswers: r.selectedAnswers || [],
   sheetPhotos: r.sheetPhotos || [],
   aiAnswers: r.aiAnswers || null,
+  submittedBy: r.submittedBy || "teacher",
+  studentEdited: Array.isArray(r.studentEdited) ? r.studentEdited : [],
+  teacherReviewedAt: r.teacherReviewedAt || null,
+  sheetStudent: r.sheetStudent || null,
   updatedAt: r.updatedAt,
 });
 
-// GET /exam/:examId/paper — everything the grading workspace needs: the key (with
-// accepted answers, owner-only), the class roster, and existing paper results.
-const getPaperSheet = asyncHandler(async (req, res) => {
-  const exam = await Exam.findById(req.params.examId).populate("questions").populate("class", "name");
+// ---- teacher ----
+
+// Load a paper exam the requesting teacher/admin may grade (responds + throws otherwise).
+async function loadPaperExamForTeacher(req, res, populateClass = false) {
+  let q = Exam.findById(req.params.examId).populate("questions");
+  if (populateClass) q = q.populate("class", "name");
+  const exam = await q;
   if (!exam) {
     res.status(404);
     throw new Error("İmtahan tapılmadı");
@@ -3310,6 +3445,13 @@ const getPaperSheet = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("Bu imtahan kağız imtahanı deyil");
   }
+  return exam;
+}
+
+// GET /exam/:examId/paper — everything the grading workspace needs: the key (with
+// accepted answers, owner-only), the class roster, and existing paper results.
+const getPaperSheet = asyncHandler(async (req, res) => {
+  const exam = await loadPaperExamForTeacher(req, res, true);
   const key = exam.questions?.correctAnswers || [];
   const classId = exam.class?._id || exam.class;
   const [rows, results] = await Promise.all([
@@ -3332,6 +3474,7 @@ const getPaperSheet = asyncHandler(async (req, res) => {
       totalMarks: exam.totalMarks,
       passingMarks: exam.passingMarks,
       preset: exam.preset || "",
+      paperSelfUpload: exam.paperSelfUpload !== false,
     },
     key: key.map((ca) => ({
       type: ca.type,
@@ -3354,26 +3497,45 @@ const getPaperSheet = asyncHandler(async (req, res) => {
   });
 });
 
+// POST /exam/:examId/paper/read { images } — teacher: AI read of a sheet, plus the
+// roster student the name on it matches.
+const readPaperSheetForTeacher = asyncHandler(async (req, res) => {
+  const exam = await loadPaperExamForTeacher(req, res);
+  const key = exam.questions?.correctAnswers || [];
+  let read;
+  try {
+    read = await readSheetImages(key, req.body?.images);
+  } catch (e) {
+    res.status(e.aiStatus || 502);
+    throw new Error(e.userMessage || "AI vərəqi oxuya bilmədi");
+  }
+  logPaperAiUsage(req.user._id, exam._id, read.cost, key.length);
+
+  const rows = await Enrollment.find({ class: exam.class, status: "approved" })
+    .populate("student", "name photo")
+    .lean();
+  const students = rows.filter((r) => r.student).map((r) => r.student);
+  const { match, suggestions } = matchSheetStudent(students, read.student);
+  const brief = (s) => ({ _id: s._id, name: s.name, photo: s.photo });
+
+  res.status(200).json({
+    answers: read.answers,
+    student: read.student,
+    match: match ? brief(match) : null,
+    suggestions: suggestions.map(brief),
+    cost: read.cost,
+  });
+});
+
 // POST /exam/:examId/paper/result
-//   { studentId, answers: [{answer}], photos: [url], aiAnswers, preview }
+//   { studentId, answers: [{answer}], photos: [url], aiAnswers, sheetStudent, preview }
 // preview:true → score only (no student needed, nothing saved), for the live
 // score while the teacher corrects the sheet. Otherwise creates the student's
-// paper Result, or updates it when they were already graded.
+// paper Result, or updates it when they were already graded (incl. a sheet the
+// student uploaded themselves).
 const savePaperResult = asyncHandler(async (req, res) => {
-  const { studentId, answers, photos, aiAnswers, preview } = req.body || {};
-  const exam = await Exam.findById(req.params.examId).populate("questions");
-  if (!exam) {
-    res.status(404);
-    throw new Error("İmtahan tapılmadı");
-  }
-  if (!ownsOrAdmin(req.user, exam)) {
-    res.status(403);
-    throw new Error("Bu imtahan sizə aid deyil");
-  }
-  if (exam.mode !== "paper") {
-    res.status(400);
-    throw new Error("Bu imtahan kağız imtahanı deyil");
-  }
+  const { studentId, answers, photos, aiAnswers, sheetStudent, preview } = req.body || {};
+  const exam = await loadPaperExamForTeacher(req, res);
   const key = exam.questions?.correctAnswers || [];
   if (!key.length) {
     res.status(400);
@@ -3410,6 +3572,7 @@ const savePaperResult = asyncHandler(async (req, res) => {
     throw new Error("Bu şagird imtahanın sinfində deyil");
   }
 
+  const info = cleanSheetStudentInfo(sheetStudent);
   const fields = {
     earnPoints: earnedPoints,
     attempts: answeredCount,
@@ -3419,6 +3582,7 @@ const savePaperResult = asyncHandler(async (req, res) => {
     source: "paper",
     sheetPhotos: cleanSheetPhotos(photos),
     gradedBy: req.user._id,
+    teacherReviewedAt: new Date(),
     ...(Array.isArray(aiAnswers)
       ? {
           aiAnswers: aiAnswers.slice(0, key.length).map((x) => ({
@@ -3427,6 +3591,7 @@ const savePaperResult = asyncHandler(async (req, res) => {
           })),
         }
       : {}),
+    ...(info ? { sheetStudent: info } : {}),
   };
 
   let result = await Result.findOne({ examId: exam._id, userId: student._id, source: "paper" });
@@ -3447,6 +3612,7 @@ const savePaperResult = asyncHandler(async (req, res) => {
       attemptId,
       violations: 0,
       terminated: false,
+      submittedBy: "teacher",
       ...fields,
     });
     await Attempt.create({
@@ -3467,7 +3633,8 @@ const savePaperResult = asyncHandler(async (req, res) => {
   });
 });
 
-// DELETE /exam/:examId/paper/result/:resultId — remove a graded paper sheet.
+// DELETE /exam/:examId/paper/result/:resultId — remove a graded paper sheet (the
+// student may then upload again).
 const deletePaperResult = asyncHandler(async (req, res) => {
   const exam = await Exam.findById(req.params.examId).select("owner mode");
   if (!exam) {
@@ -3492,15 +3659,298 @@ const deletePaperResult = asyncHandler(async (req, res) => {
     result.attemptId ? Attempt.deleteOne({ _id: result.attemptId }) : null,
     Exam.updateOne({ _id: exam._id }, { $pull: { results: result._id } }),
     User.updateOne({ _id: result.userId }, { $pull: { results: result._id } }),
+    PaperDraft.deleteOne({ exam: exam._id, student: result.userId }),
   ]);
   res.status(200).json({ success: true });
+});
+
+// ---- student self-upload ----
+
+// A paper exam the requesting student may upload a sheet for: not archived or
+// hidden, and they're approved in its class (or the class is public).
+async function loadPaperExamForStudent(req, res) {
+  const exam = await Exam.findById(req.params.examId)
+    .populate("questions")
+    .populate("class", "name requireCode");
+  if (!exam || exam.deletedAt) {
+    res.status(404);
+    throw new Error("İmtahan tapılmadı");
+  }
+  if (exam.mode !== "paper") {
+    res.status(400);
+    throw new Error("Bu imtahan kağız imtahanı deyil");
+  }
+  const classId = exam.class?._id || exam.class;
+  const allowed = (await studentApprovedInClass(req.user._id, classId)) || classIsPublic(exam.class);
+  if (!allowed) {
+    res.status(403);
+    throw new Error("Bu imtahana giriş yoxdur");
+  }
+  if (exam.hidden) {
+    res.status(403);
+    throw new Error("İmtahan hələ açıq deyil");
+  }
+  return exam;
+}
+
+// Whether the student can upload right now. No start/end date = no time limit.
+function paperUploadWindow(exam) {
+  const now = Date.now();
+  if (exam.paperSelfUpload === false) {
+    return { open: false, reason: "disabled", message: "Bu imtahanın vərəqlərini müəllim özü yoxlayır" };
+  }
+  if (exam.startDate && now < new Date(exam.startDate).getTime()) {
+    return { open: false, reason: "not_started", message: "İmtahan hələ başlamayıb" };
+  }
+  if (exam.endDate && now > new Date(exam.endDate).getTime() + PAPER_UPLOAD_GRACE_MS) {
+    return { open: false, reason: "ended", message: "Vərəq yükləmə müddəti bitib" };
+  }
+  return { open: true, reason: "", message: "" };
+}
+
+const myPaperResult = (exam, req) =>
+  Result.exists({ examId: exam._id, userId: req.user._id, source: "paper" });
+
+// GET /exam/:examId/paper/me — the student's upload page state. Never includes the
+// answer key or a score.
+const getMyPaper = asyncHandler(async (req, res) => {
+  const exam = await loadPaperExamForStudent(req, res);
+  const key = exam.questions?.correctAnswers || [];
+  const [result, draft] = await Promise.all([
+    Result.findOne({ examId: exam._id, userId: req.user._id, source: "paper" })
+      .select("_id createdAt submittedBy")
+      .lean(),
+    PaperDraft.findOne({ exam: exam._id, student: req.user._id }).lean(),
+  ]);
+  res.status(200).json({
+    exam: {
+      _id: exam._id,
+      name: exam.name,
+      className: exam.class?.name || "",
+      startDate: exam.startDate || null,
+      endDate: exam.endDate || null,
+    },
+    layout: key.map((q) => ({
+      type: q.type,
+      options: q.options,
+      leftCount: q.leftCount,
+      rightCount: q.rightCount,
+    })),
+    window: paperUploadWindow(exam),
+    submitted: result
+      ? { resultId: result._id, at: result.createdAt, byTeacher: result.submittedBy !== "student" }
+      : null,
+    draft:
+      !result && draft
+        ? {
+            photos: draft.photos || [],
+            answers: Array.isArray(draft.answers) ? draft.answers : null,
+            aiAnswers: Array.isArray(draft.aiAnswers) ? draft.aiAnswers : null,
+            student: draft.sheetStudent || null,
+          }
+        : null,
+    nameCheck: !result && draft?.sheetStudent ? sheetNameCheck(req.user.name, draft.sheetStudent) : null,
+    readsLeft: Math.max(0, PAPER_STUDENT_READS - (draft?.readCount || 0)),
+    readLimit: PAPER_STUDENT_READS,
+    me: { name: req.user.name || "" },
+  });
+});
+
+// Refuse uploads outside the window or after the sheet was submitted.
+async function assertCanUpload(exam, req, res) {
+  const win = paperUploadWindow(exam);
+  if (!win.open) {
+    res.status(403);
+    throw new Error(win.message);
+  }
+  if (await myPaperResult(exam, req)) {
+    res.status(409);
+    throw new Error("Vərəq artıq təqdim edilib");
+  }
+}
+
+// PUT /exam/:examId/paper/me/draft { photos, answers } — autosave.
+const saveMyPaperDraft = asyncHandler(async (req, res) => {
+  const exam = await loadPaperExamForStudent(req, res);
+  await assertCanUpload(exam, req, res);
+  const key = exam.questions?.correctAnswers || [];
+  const set = { photos: cleanSheetPhotos(req.body?.photos) };
+  if (Array.isArray(req.body?.answers) && key.length) set.answers = coerceSheetAnswers(key, req.body.answers);
+  await PaperDraft.updateOne({ exam: exam._id, student: req.user._id }, { $set: set }, { upsert: true });
+  res.status(200).json({ success: true });
+});
+
+// POST /exam/:examId/paper/me/read { images } — AI read of the student's own
+// sheet (limited per student). Returns the reading only — no key, no score.
+const readMyPaper = asyncHandler(async (req, res) => {
+  const exam = await loadPaperExamForStudent(req, res);
+  await assertCanUpload(exam, req, res);
+  const key = exam.questions?.correctAnswers || [];
+  if (!key.length) {
+    res.status(400);
+    throw new Error("Müəllim hələ cavab açarını hazırlamayıb");
+  }
+
+  // Reserve the read BEFORE the model call so parallel requests can't pass the
+  // limit (at the limit the upsert collides with the unique index).
+  let reserved;
+  try {
+    reserved = await PaperDraft.findOneAndUpdate(
+      { exam: exam._id, student: req.user._id, readCount: { $lt: PAPER_STUDENT_READS } },
+      { $inc: { readCount: 1 } },
+      { upsert: true, new: true }
+    );
+  } catch (e) {
+    if (e?.code === 11000) {
+      res.status(429);
+      throw new Error(`AI ilə oxuma limiti bitib (${PAPER_STUDENT_READS} dəfə). Cavablarını əl ilə doldur.`);
+    }
+    throw e;
+  }
+
+  let read;
+  try {
+    read = await readSheetImages(key, req.body?.images);
+  } catch (e) {
+    await PaperDraft.updateOne({ _id: reserved._id }, { $inc: { readCount: -1 } }); // failed read is free
+    res.status(e.aiStatus || 502);
+    throw new Error(e.userMessage || "AI vərəqi oxuya bilmədi");
+  }
+  logPaperAiUsage(req.user._id, exam._id, read.cost, key.length);
+
+  const answers = read.answers.map((a) => ({ answer: a.answer }));
+  await PaperDraft.updateOne(
+    { _id: reserved._id },
+    {
+      $set: {
+        photos: cleanSheetPhotos(req.body?.images),
+        answers: coerceSheetAnswers(key, answers),
+        aiAnswers: read.answers.map((a) => ({ answer: a.answer, confidence: a.confidence, note: a.note })),
+        sheetStudent: read.student,
+      },
+    }
+  );
+
+  res.status(200).json({
+    answers: read.answers,
+    student: read.student,
+    nameCheck: sheetNameCheck(req.user.name, read.student),
+    readsLeft: Math.max(0, PAPER_STUDENT_READS - reserved.readCount),
+  });
+});
+
+// POST /exam/:examId/paper/me/submit { answers, photos, confirmed:true } — the
+// student submits their checked sheet. One submission; locked afterwards.
+const submitMyPaper = asyncHandler(async (req, res) => {
+  const exam = await loadPaperExamForStudent(req, res);
+  await assertCanUpload(exam, req, res);
+  const key = exam.questions?.correctAnswers || [];
+  if (!key.length) {
+    res.status(400);
+    throw new Error("Müəllim hələ cavab açarını hazırlamayıb");
+  }
+  if (req.body?.confirmed !== true) {
+    res.status(400);
+    throw new Error("Cavablarını yoxladığını təsdiqlə");
+  }
+  const photos = cleanSheetPhotos(req.body?.photos);
+  if (!photos.length) {
+    res.status(400);
+    throw new Error("Cavab vərəqinin şəklini yüklə");
+  }
+
+  // Lock: stamp submittedAt on the draft. A concurrent second submit misses the
+  // filter and collides with the unique index (409). A lock left by a crashed
+  // submit expires after two minutes.
+  let draft;
+  try {
+    draft = await PaperDraft.findOneAndUpdate(
+      {
+        exam: exam._id,
+        student: req.user._id,
+        $or: [{ submittedAt: null }, { submittedAt: { $lt: new Date(Date.now() - 2 * 60 * 1000) } }],
+      },
+      { $set: { submittedAt: new Date() } },
+      { upsert: true, new: false }
+    ).lean();
+  } catch (e) {
+    if (e?.code === 11000) {
+      res.status(409);
+      throw new Error("Vərəq artıq təqdim edilir");
+    }
+    throw e;
+  }
+  const unlock = () =>
+    PaperDraft.updateOne({ exam: exam._id, student: req.user._id }, { $set: { submittedAt: null } });
+  if (await myPaperResult(exam, req)) {
+    await unlock();
+    res.status(409);
+    throw new Error("Vərəq artıq təqdim edilib");
+  }
+
+  const literal = coerceSheetAnswers(key, req.body?.answers);
+  const sel = normalizePaperSelections(
+    key,
+    literal.map((answer) => ({ answer }))
+  );
+  const { earnedPoints, counts } = gradeSelections(exam, sel);
+  const ai = Array.isArray(draft?.aiAnswers) ? draft.aiAnswers : null;
+  const studentEdited = ai
+    ? key.reduce((acc, q, i) => (sameSheetAnswer(q, literal[i], ai[i]?.answer) ? acc : [...acc, i]), [])
+    : [];
+
+  const attemptId = new mongoose.Types.ObjectId();
+  const now = new Date();
+  let result;
+  try {
+    result = await Result.create({
+      userId: req.user._id,
+      examId: exam._id,
+      attemptId,
+      violations: 0,
+      terminated: false,
+      earnPoints: earnedPoints,
+      attempts: sel.filter(isAnswered).length,
+      selectedAnswers: sel.map((a) => ({ type: a.type, answer: storableAnswer(a.answer) })),
+      correctAnswers: key.map((a) => ({ type: a.type, answer: renderableCorrect(a) })),
+      correctAnswersByType: CORRECT_TYPES.map((t) => ({ type: t, count: counts[t] || 0 })),
+      source: "paper",
+      submittedBy: "student",
+      sheetPhotos: photos,
+      studentEdited,
+      ...(ai
+        ? { aiAnswers: ai.map((x) => ({ answer: x?.answer ?? "", confidence: x?.confidence || "low" })) }
+        : {}),
+      ...(draft?.sheetStudent ? { sheetStudent: draft.sheetStudent } : {}),
+    });
+  } catch (e) {
+    await unlock();
+    throw e;
+  }
+  await Attempt.create({
+    _id: attemptId,
+    userId: req.user._id,
+    examId: exam._id,
+    startedAt: now,
+    expiresAt: now,
+    submitted: true,
+  });
+  await linkResult(exam._id, req.user._id, result._id);
+  await PaperDraft.deleteOne({ exam: exam._id, student: req.user._id });
+
+  res.status(200).json({ success: true, resultId: result._id });
 });
 
 module.exports = {
   serverTime,
   getPaperSheet,
+  readPaperSheetForTeacher,
   savePaperResult,
   deletePaperResult,
+  getMyPaper,
+  saveMyPaperDraft,
+  readMyPaper,
+  submitMyPaper,
   addExam,
   getExamsByClass,
   addTag,

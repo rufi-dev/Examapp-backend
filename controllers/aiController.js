@@ -4,7 +4,6 @@ const AnthropicPkg = require("@anthropic-ai/sdk");
 const Anthropic = AnthropicPkg.default || AnthropicPkg;
 const AiUsage = require("../models/aiUsageModel");
 const User = require("../models/userModel");
-const Exam = require("../models/examModel");
 
 // Lazy client so the server still boots without the key (the feature just
 // returns a clear error until ANTHROPIC_API_KEY is set in the env).
@@ -808,78 +807,111 @@ const getAiUsage = asyncHandler(async (req, res) => {
   res.status(200).json({ rows, totals, recent });
 });
 
-// ---- Paper exams: read a photographed answer sheet --------------------------
-// The teacher photographs a student's paper answer card. Claude transcribes ONLY
-// what the student marked/wrote per question — it never grades or solves; the
-// server scores the (teacher-reviewed) selections against the key. The key's
-// layout (types, option letters, correspondence grid size) is sent so the model
-// knows what each question number looks like on the sheet.
+// ---- Paper exams: read a photographed answer card ---------------------------
+// Claude transcribes ONLY what the student marked or wrote — it never grades or
+// solves; the server scores the reviewed selections against the key. Used by the
+// teacher grading workspace and by student self-upload (quizController).
 
 const PAPER_READ_MODEL = process.env.PAPER_READ_MODEL || "claude-opus-4-8";
 const PAPER_READ_EFFORT = process.env.PAPER_READ_EFFORT || "medium";
 const PAPER_MAX_IMAGES = 6;
 const SHEET_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 // Sheets are uploaded to Cloudinary by the browser first; only those URLs are
-// fetched, so this endpoint can't be used to make the server request arbitrary
-// hosts (SSRF).
+// fetched, so these endpoints can't make the server request arbitrary hosts.
 const SHEET_IMAGE_HOST = /(^|\.)res\.cloudinary\.com$/i;
+
+const SHEET_ITEM = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    printed: { type: "string" },
+    answer: { type: "string" },
+    confidence: { type: "string", enum: ["high", "medium", "low"] },
+    note: { type: "string" },
+  },
+  required: ["printed", "answer", "confidence", "note"],
+};
 
 const SHEET_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    studentName: { type: "string" },
-    answers: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          number: { type: "integer" },
-          answer: { type: "string" },
-          confidence: { type: "string", enum: ["high", "medium", "low"] },
-          note: { type: "string" },
-        },
-        required: ["number", "answer", "confidence", "note"],
+    student: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        firstName: { type: "string" },
+        lastName: { type: "string" },
+        fatherName: { type: "string" },
+        className: { type: "string" },
       },
+      required: ["firstName", "lastName", "fatherName", "className"],
     },
+    closed: { type: "array", items: SHEET_ITEM },
+    open: { type: "array", items: SHEET_ITEM },
+    matching: { type: "array", items: SHEET_ITEM },
   },
-  required: ["studentName", "answers"],
+  required: ["student", "closed", "open", "matching"],
 };
 
-const SHEET_PROMPT = `You transcribe a student's PAPER answer sheet (answer card) for a math exam platform in Azerbaijan. The images are photos — possibly several pages, taken at an angle, with shadows or glare — of ONE student's sheet. You do NOT grade and you do NOT solve anything: you only report what the student marked or wrote.
+const SHEET_PROMPT = `You transcribe a student's PAPER answer card ("CAVAB KARTI") for a math exam platform in Azerbaijan. The images are photos of ONE student's card — possibly several pages, taken at an angle, with shadows or glare. You do NOT grade and you do NOT solve anything: you only report what is marked or written.
 
-The exam layout lists every question number with its type:
-- "closed" (single choice): the student fills, circles or crosses ONE option letter. Return that letter in lowercase (e.g. "c"). Blank → "". If two or more options are marked, or a mark was corrected and the final choice is unclear, return your best reading with confidence "low".
-- "open" (short written answer): return the final answer exactly as written, as plain keyboard text with no LaTeX (e.g. 12, -3/4, x=5, 0.25). Blank → "".
-- "matching" (numbers → letters grid): return every number in order with its marked letters, lowercase, comma-separated: "1:a,c;2:b;3:". Leave the part after the colon empty when a number has no mark.
+The standard card:
+- Header boxes: "Ad" (first name), "Soyad" (last name), "Ata adı" (father's name), "Sinif" (class), "Dərs saatı" (lesson hour).
+- A "TESTLƏR" section with two columns:
+  - "QAPALI SUALLAR" (closed): numbered rows, each with bubbles A B C D E. The student fills, shades, circles or crosses one bubble per row.
+  - "AÇIQ SUALLAR" (open): numbered boxes where the student writes a short answer on the line.
+- Some exams add a matching grid (numbers × letters).
+Other card designs may appear; read them with the same meaning.
+
+Report:
+- "student": the header boxes exactly as handwritten, keeping Azerbaijani letters (ə ı ö ü ğ ş ç). "" for an empty or missing box. Ignore "Dərs saatı".
+- "closed": ONE item per closed row, in reading order (top to bottom, then the next column or page), INCLUDING rows with no mark.
+  "printed" = the row number printed on the card, exactly as printed, even if it repeats or skips.
+  "answer" = the marked letter in lowercase (e.g. "c"); "" when no bubble is marked.
+- "open": ONE item per open answer box, in reading order, INCLUDING empty boxes.
+  "printed" = the printed number; "answer" = the final written answer as plain keyboard text with no LaTeX (e.g. 12, -3/4, x=5, 0.25, 2√3); "" when empty.
+- "matching": only when the card has a matching grid — ONE item per matching question: "printed" = its number, "answer" = every number of the grid with its marked letters in lowercase: "1:a,c;2:b;3:". Otherwise an empty array.
 
 Rules:
-- Return exactly one item per question number in the layout, in order. Never skip a number and never invent extra ones.
-- Ignore crossed-out or erased answers when a clear corrected answer exists.
-- confidence: "high" = one clearly readable mark/answer; "medium" = readable but faint or partly hidden; "low" = ambiguous, several marks, unreadable, or not visible in the images.
-- note: an empty string when confidence is "high"; otherwise a very short reason in Azerbaijani (e.g. "iki variant işarələnib", "oxunmur", "şəkildə görünmür").
-- studentName: the student's name as written on the sheet, or "" if there is none.`;
+- Never invent rows or boxes that are not on the card, and never skip one that is.
+- When a correction is clear (an answer crossed out and another marked), report the corrected answer. When two or more bubbles look marked or the final choice is unclear, report your best reading with confidence "low".
+- "confidence": "high" = clear; "medium" = readable but faint or partly hidden; "low" = ambiguous, unreadable, or not visible.
+- "note": "" when confidence is "high"; otherwise a very short reason in Azerbaijani (e.g. "iki variant işarələnib", "oxunmur", "şəkildə görünmür").`;
 
 const sheetLetter = (i) => String.fromCharCode(97 + i);
 
-// The exam's answer-key shape → the numbered layout the model reads against.
+// [1,2,3,5] → "1–3, 5"
+function numberRanges(nums) {
+  const out = [];
+  for (let i = 0; i < nums.length; i++) {
+    let j = i;
+    while (j + 1 < nums.length && nums[j + 1] === nums[j] + 1) j++;
+    out.push(i === j ? `${nums[i]}` : `${nums[i]}–${nums[j]}`);
+    i = j;
+  }
+  return out.join(", ");
+}
+
+// The exam's key → which question numbers the model should expect in each section.
 function sheetLayout(key) {
-  return key
-    .map((q, i) => {
-      const n = i + 1;
-      if (q.type === "Cm") {
-        const opts = Array.isArray(q.options) && q.options.length ? q.options : ["a", "b", "c", "d", "e"];
-        return `${n}: closed, options ${opts.map((o) => String(o).toLowerCase()).join("/")}`;
-      }
-      if (q.type === "Cmu") {
-        const n2 = Number(q.leftCount) || 0;
-        const m = Number(q.rightCount) || 0;
-        return `${n}: matching, numbers 1-${n2}, letters a-${sheetLetter(Math.max(0, m - 1))}`;
-      }
-      return `${n}: open`;
-    })
-    .join("\n");
+  const closed = [];
+  const open = [];
+  const matching = [];
+  key.forEach((q, i) => {
+    const n = i + 1;
+    if (q.type === "Cm" || q.type === "Cs") closed.push(n);
+    else if (q.type === "Cmu" || q.type === "Cma") {
+      const rows = Number(q.leftCount) || 0;
+      const cols = Number(q.rightCount) || 1;
+      matching.push(`${n} (numbers 1-${rows}, letters a-${sheetLetter(Math.max(0, cols - 1))})`);
+    } else open.push(n);
+  });
+  const lines = [];
+  if (closed.length) lines.push(`Closed questions (bubbles): ${numberRanges(closed)}`);
+  if (open.length) lines.push(`Open questions (written): ${numberRanges(open)}`);
+  if (matching.length) lines.push(`Matching questions: ${matching.join("; ")}`);
+  return lines.join("\n");
 }
 
 // Fetch one uploaded sheet image as base64 (Cloudinary-hosted HTTPS only).
@@ -907,105 +939,128 @@ async function fetchSheetImage(url) {
   return { media, data: buf.toString("base64") };
 }
 
-// Model items → one selection per key question, in the scorer's answer shapes
-// (Cm letter string, open text, Cmu {numberIdx: [letterIdx]} map), plus the
-// confidence/note the teacher's review screen highlights.
-function sheetSelections(key, items) {
-  const byNum = new Map();
-  for (const it of Array.isArray(items) ? items : []) {
-    if (it && Number.isInteger(it.number) && !byNum.has(it.number)) byNum.set(it.number, it);
+// Assign one card section's rows to the key's questions of that type. A row whose
+// printed number names one of those questions takes it; rows the card numbers
+// wrongly (repeated or skipped numbers) fall back to their position in the
+// section, and those answers are marked less certain so they get checked.
+function alignSection(questions, items) {
+  const rows = (Array.isArray(items) ? items : []).map((it, pos) => {
+    const n = parseInt(String(it?.printed ?? "").replace(/[^\d]/g, ""), 10);
+    return { it, pos, num: Number.isInteger(n) ? n : null };
+  });
+  const repeats = new Map();
+  rows.forEach((r) => {
+    if (r.num != null) repeats.set(r.num, (repeats.get(r.num) || 0) + 1);
+  });
+  const claimed = new Set();
+  const out = new Map();
+  const take = (q, r, doubtful) => {
+    claimed.add(r.pos);
+    out.set(q.index, { item: r.it, doubtful });
+  };
+  questions.forEach((q) => {
+    const r = rows.find((x) => !claimed.has(x.pos) && x.num === q.number);
+    if (r) take(q, r, repeats.get(r.num) > 1);
+  });
+  questions.forEach((q, k) => {
+    if (out.has(q.index)) return;
+    const r = (rows[k] && !claimed.has(k) ? rows[k] : null) || rows.find((x) => !claimed.has(x.pos));
+    if (r) take(q, r, true);
+  });
+  return out;
+}
+
+// One raw reading → the scorer's answer shape for this question type, using only
+// the key's layout (option letters, grid size) — never its answers.
+function parseSheetAnswer(q, raw) {
+  if (q.type === "Cm" || q.type === "Cs") {
+    const opts = (Array.isArray(q.options) && q.options.length ? q.options : ["a", "b", "c", "d", "e"]).map((o) =>
+      String(o).trim().toLowerCase()
+    );
+    const letter = raw.toLowerCase().replace(/[^a-z]/g, "");
+    const ok = opts.includes(letter);
+    return { answer: ok ? letter : "", invalid: !!letter && !ok };
   }
+  if (q.type === "Cmu" || q.type === "Cma") {
+    const nCount = Number(q.leftCount) || 0;
+    const mCount = Number(q.rightCount) || 0;
+    const map = {};
+    raw.split(";").forEach((part) => {
+      const m = part.match(/^\s*(\d+)\s*:\s*(.*)$/);
+      if (!m) return;
+      const k = Number(m[1]) - 1;
+      if (k < 0 || k >= nCount) return;
+      const idx = m[2]
+        .toLowerCase()
+        .split(/[,\s]+/)
+        .map((s) => s.replace(/[^a-z]/g, ""))
+        .filter(Boolean)
+        .map((s) => s.charCodeAt(0) - 97)
+        .filter((v) => v >= 0 && v < mCount);
+      if (idx.length) map[k] = [...new Set(idx)].sort((a, b) => a - b);
+    });
+    return { answer: map, invalid: false };
+  }
+  return { answer: raw.slice(0, 300), invalid: false };
+}
+
+// Model output → one { type, answer, confidence, note } per key question.
+function sheetSelections(key, parsed) {
+  const pick = (types) =>
+    key.map((q, i) => ({ q, index: i, number: i + 1 })).filter((x) => types.includes(x.q.type));
+  const found = new Map([
+    ...alignSection(pick(["Cm", "Cs"]), parsed?.closed),
+    ...alignSection(pick(["Cmu", "Cma"]), parsed?.matching),
+    ...alignSection(pick(["Co", "Cd"]), parsed?.open),
+  ]);
   return key.map((q, i) => {
-    const it = byNum.get(i + 1);
-    const raw = String(it?.answer ?? "").trim();
-    const out = {
-      type: q.type,
-      confidence: it ? it.confidence : "low",
-      note: it ? String(it.note || "") : "şəkildə tapılmadı",
-    };
-    if (q.type === "Cm") {
-      const opts = (Array.isArray(q.options) && q.options.length ? q.options : ["a", "b", "c", "d", "e"]).map(
-        (o) => String(o).toLowerCase()
-      );
-      const letter = raw.toLowerCase().replace(/[^a-z]/g, "");
-      if (letter && !opts.includes(letter)) {
-        return { ...out, answer: "", confidence: "low", note: out.note || `oxunan: ${raw}` };
-      }
-      return { ...out, answer: letter };
+    const hit = found.get(i);
+    if (!hit) {
+      return {
+        type: q.type,
+        answer: q.type === "Cmu" || q.type === "Cma" ? {} : "",
+        confidence: "low",
+        note: "vərəqdə tapılmadı",
+      };
     }
-    if (q.type === "Cmu") {
-      const nCount = Number(q.leftCount) || 0;
-      const mCount = Number(q.rightCount) || 0;
-      const map = {};
-      raw.split(";").forEach((part) => {
-        const m = part.match(/^\s*(\d+)\s*:\s*(.*)$/);
-        if (!m) return;
-        const k = Number(m[1]) - 1;
-        if (k < 0 || k >= nCount) return;
-        const idx = m[2]
-          .toLowerCase()
-          .split(/[,\s]+/)
-          .map((s) => s.replace(/[^a-z]/g, ""))
-          .filter(Boolean)
-          .map((s) => s.charCodeAt(0) - 97)
-          .filter((v) => v >= 0 && v < mCount);
-        if (idx.length) map[k] = [...new Set(idx)].sort((a, b) => a - b);
-      });
-      return { ...out, answer: map };
+    const raw = String(hit.item?.answer ?? "").trim();
+    const { answer, invalid } = parseSheetAnswer(q, raw);
+    let confidence = ["high", "medium", "low"].includes(hit.item?.confidence) ? hit.item.confidence : "low";
+    let note = String(hit.item?.note || "").slice(0, 120);
+    if (invalid) {
+      confidence = "low";
+      note = note || `oxunan: ${raw.slice(0, 20)}`;
+    } else if (hit.doubtful && confidence === "high") {
+      confidence = "medium";
+      note = note || "kartdakı nömrə aydın deyil";
     }
-    return { ...out, answer: raw };
+    return { type: q.type, answer, confidence, note };
   });
 }
 
-// May this user grade this exam? Admin, the owner, or any teacher for a legacy
-// ownerless exam (same rule as quizController.ownsOrAdmin).
-const canGradeExam = (user, exam) =>
-  !!user &&
-  (user.role === "admin" || !exam.owner || String(exam.owner) === String(user._id));
+const cleanSheetStudent = (s) => {
+  const f = (v) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
+  return {
+    firstName: f(s?.firstName),
+    lastName: f(s?.lastName),
+    fatherName: f(s?.fatherName),
+    className: f(s?.className),
+  };
+};
 
-// POST /exam/:examId/paper/read  { images: [cloudinaryUrl, …] }
-// → { answers: [{ type, answer, confidence, note }], studentName, cost }
-const readAnswerSheet = asyncHandler(async (req, res) => {
-  const images = (Array.isArray(req.body?.images) ? req.body.images : [])
+// Read a student's sheet photos against an exam key.
+// → { answers: [{ type, answer, confidence, note }], student, cost }
+// Throws aiError (aiStatus + userMessage) for the caller to turn into a response.
+async function readSheetImages(key, images) {
+  const list = (Array.isArray(images) ? images : [])
     .filter((s) => typeof s === "string" && s)
     .slice(0, PAPER_MAX_IMAGES);
-  if (!images.length) {
-    res.status(400);
-    throw new Error("Ən azı bir şəkil lazımdır");
-  }
-
-  const exam = await Exam.findById(req.params.examId).populate("questions");
-  if (!exam) {
-    res.status(404);
-    throw new Error("İmtahan tapılmadı");
-  }
-  if (!canGradeExam(req.user, exam)) {
-    res.status(403);
-    throw new Error("Bu imtahan sizə aid deyil");
-  }
-  if (exam.mode !== "paper") {
-    res.status(400);
-    throw new Error("Bu imtahan kağız imtahanı deyil");
-  }
-  const key = exam.questions?.correctAnswers || [];
-  if (!key.length) {
-    res.status(400);
-    throw new Error("Əvvəlcə cavab açarını daxil edin");
-  }
-
+  if (!list.length) throw aiError(400, "Ən azı bir şəkil lazımdır");
+  if (!Array.isArray(key) || !key.length) throw aiError(400, "Əvvəlcə cavab açarını daxil edin");
   const client = getClient();
-  if (!client) {
-    res.status(503);
-    throw new Error("AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)");
-  }
+  if (!client) throw aiError(503, "AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)");
 
-  let fetched;
-  try {
-    fetched = await Promise.all(images.map(fetchSheetImage));
-  } catch (e) {
-    res.status(e.aiStatus || 400);
-    throw new Error(e.userMessage || "Şəkil yüklənmədi");
-  }
+  const fetched = await Promise.all(list.map(fetchSheetImage));
 
   let message;
   try {
@@ -1029,7 +1084,7 @@ const readAnswerSheet = asyncHandler(async (req, res) => {
               })),
               {
                 type: "text",
-                text: `İmtahanın strukturu (${key.length} sual):\n${sheetLayout(key)}\n\nBu cavab vərəqində şagirdin hər suala verdiyi cavabı oxu.`,
+                text: `İmtahanın strukturu (${key.length} sual):\n${sheetLayout(key)}\n\nBu cavab kartında şagirdin məlumatlarını və hər cavabını oxu.`,
               },
             ],
           },
@@ -1038,48 +1093,47 @@ const readAnswerSheet = asyncHandler(async (req, res) => {
       .finalMessage();
   } catch (e) {
     console.error("Paper sheet read error:", e?.status, e?.message);
-    res.status(502);
-    throw new Error("AI vərəqi oxuya bilmədi. Yenidən cəhd edin.");
+    throw aiError(502, "AI vərəqi oxuya bilmədi. Yenidən cəhd edin.");
   }
-  if (message.stop_reason === "refusal") {
-    res.status(422);
-    throw new Error("AI bu şəkli emal edə bilmədi.");
-  }
+  if (message.stop_reason === "refusal") throw aiError(422, "AI bu şəkli emal edə bilmədi.");
 
   let parsed;
   try {
     parsed = JSON.parse(message.content.find((b) => b.type === "text")?.text || "{}");
   } catch {
-    res.status(502);
-    throw new Error("AI cavabı oxunmadı. Yenidən cəhd edin.");
+    throw aiError(502, "AI cavabı oxunmadı. Yenidən cəhd edin.");
   }
 
   const cost = computeCost(message.usage);
   if (cost) cost.model = PAPER_READ_MODEL;
-  if (cost && req.user?._id) {
-    try {
-      await AiUsage.create({
-        user: req.user._id,
-        exam: exam._id,
-        model: cost.model,
-        inputTokens: cost.inputTokens,
-        outputTokens: cost.outputTokens,
-        cacheWriteTokens: cost.cacheWriteTokens,
-        cacheReadTokens: cost.cacheReadTokens,
-        totalTokens: cost.totalTokens,
-        usd: cost.usd,
-        questions: key.length,
-      });
-    } catch (e) {
-      console.error("AiUsage log failed:", e?.message);
-    }
+  return { answers: sheetSelections(key, parsed), student: cleanSheetStudent(parsed.student), cost };
+}
+
+// Best-effort spend log for a sheet read (never breaks the request).
+async function logPaperAiUsage(userId, examId, cost, questions) {
+  if (!cost || !userId) return;
+  try {
+    await AiUsage.create({
+      user: userId,
+      exam: examId,
+      model: cost.model,
+      inputTokens: cost.inputTokens,
+      outputTokens: cost.outputTokens,
+      cacheWriteTokens: cost.cacheWriteTokens,
+      cacheReadTokens: cost.cacheReadTokens,
+      totalTokens: cost.totalTokens,
+      usd: cost.usd,
+      questions,
+    });
+  } catch (e) {
+    console.error("AiUsage log failed:", e?.message);
   }
+}
 
-  res.status(200).json({
-    answers: sheetSelections(key, parsed.answers),
-    studentName: String(parsed.studentName || "").trim(),
-    cost,
-  });
-});
-
-module.exports = { extractQuestions, extractQuestionsStream, getAiUsage, readAnswerSheet };
+module.exports = {
+  extractQuestions,
+  extractQuestionsStream,
+  getAiUsage,
+  readSheetImages,
+  logPaperAiUsage,
+};

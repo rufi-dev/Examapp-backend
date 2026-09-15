@@ -110,6 +110,9 @@ const examSchema = Schema({
     // key and grades photographed sheets (never started online). Default pdf
     // keeps every existing exam unchanged.
     mode: { type: String, enum: ["pdf", "structured", "paper"], default: "pdf" },
+    // Paper exams: students may photograph and submit their own answer sheet
+    // (checked + locked on submit). Off = only the teacher uploads sheets.
+    paperSelfUpload: { type: Boolean, default: true },
     // The teacher/admin who created this exam (visibility/ownership scoping).
     owner: { type: Schema.Types.ObjectId, ref: "User", index: true },
     // Structured exam pagination: how many questions a student sees per page
