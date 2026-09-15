@@ -5,7 +5,9 @@
  * each bubble is. The card has no corner markers, so the bubbles themselves are
  * the landmarks: circles of one dominant size in regularly spaced rows. Handles
  * a tilted or keystoned photo, an upside-down photo, several bubble blocks side
- * by side, and uneven lighting (ink is measured against the local paper tone).
+ * by side, uneven lighting (ink is measured against the local paper tone) and
+ * cards printed in red (marks are then measured in the red channel, where the
+ * printed rings and letters vanish and pen/pencil stays dark).
  *
  * Each row comes back as "marked" (one clear bubble), "blank" or "unclear"
  * (two marks, a faint/partial mark, a cross…); unclear rows are what the caller
@@ -130,7 +132,10 @@ function detectCircles(cv, ink, W, H, keep) {
       const circularity = per > 0 ? (4 * Math.PI * area) / (per * per) : 0;
       const fill = area / (Math.PI * (d / 2) ** 2);
       // Squares (table cells) fill ~1.27 of their inscribed circle; bubbles ~1.
-      if (circularity > 0.7 && fill > 0.8 && fill < 1.12) out.push({ x: r.x + r.width / 2, y: r.y + r.height / 2, d });
+      // (blurred small squares creep down toward ~1.1, printed rings sit at ~0.92–0.96)
+      if (circularity > 0.75 && fill > 0.8 && fill < 1.08) {
+        out.push({ x: r.x + r.width / 2, y: r.y + r.height / 2, d, circularity, fill });
+      }
     } finally {
       c.delete();
     }
@@ -159,7 +164,7 @@ function locateGrid(cands, options) {
   });
   const merged = [];
   cands
-    .filter((c) => c.d >= 0.7 * d0 && c.d <= 1.45 * d0)
+    .filter((c) => c.d >= 0.75 * d0 && c.d <= 1.3 * d0)
     .sort((a, b) => b.d - a.d)
     .forEach((p) => {
       if (!merged.some((m) => Math.hypot(m.x - p.x, m.y - p.y) < 0.45 * m.d)) merged.push(p);
@@ -181,7 +186,7 @@ function locateGrid(cands, options) {
         bv = [q.x - p.x, q.y - p.y];
       }
     });
-    if (bv && Math.sqrt(best) < 2.5 * d0) {
+    if (bv && Math.sqrt(best) < 4 * d0) {
       const a = Math.atan2(bv[1], bv[0]);
       sx += Math.cos(4 * a);
       sy += Math.sin(4 * a);
@@ -192,14 +197,15 @@ function locateGrid(cands, options) {
   const sin = Math.sin(theta);
   const P = merged.map((p) => ({ ...p, u: p.x * cos + p.y * sin, v: -p.x * sin + p.y * cos }));
 
-  // Horizontal runs of `options` evenly spaced bubbles = answer rows.
+  // Horizontal runs of `options` evenly spaced bubbles = answer rows. Cards space
+  // columns anywhere from ~1.4 to ~3.5 bubble widths apart.
   const groups = chainBy(P, "v", 0.5 * d0);
   const gaps = [];
   groups.forEach((g) => {
     g.pts.sort((a, b) => a.u - b.u);
     for (let i = 1; i < g.pts.length; i++) {
       const gp = g.pts[i].u - g.pts[i - 1].u;
-      if (gp > 1.05 * d0 && gp < 2.3 * d0) gaps.push(gp);
+      if (gp > 1.05 * d0 && gp < 4 * d0) gaps.push(gp);
     }
   });
   if (gaps.length < options) return fail("no_grid");
@@ -221,6 +227,10 @@ function locateGrid(cands, options) {
     }
     flush();
   });
+  if (process.env.OMR_DEBUG) {
+    console.log("[omr] d0", d0.toFixed(1), "pu", pu.toFixed(1), "θ", ((theta * 180) / Math.PI).toFixed(1), "runs", runs.length, "long", long,
+      "groups", groups.map((g) => g.pts.length).join(","));
+  }
   if (runs.length < 3 || long > runs.length) return fail(long ? "rotated" : "no_grid");
 
   // Runs starting at the same place form one block (cards may have several).
@@ -249,7 +259,7 @@ function locateGrid(cands, options) {
           bestC = c;
         }
       }
-      if (bestE < 0.3 * pu) assigned.push({ ...p, c: bestC });
+      if (bestE < Math.min(0.3 * pu, 0.6 * d0)) assigned.push({ ...p, c: bestC });
     });
     const rows = chainBy(assigned, "v", 0.5 * d0)
       .filter((g) => new Set(g.pts.map((p) => p.c)).size >= Math.min(3, options))
@@ -259,7 +269,7 @@ function locateGrid(cands, options) {
     // Keep the longest evenly spaced chain of rows; fill in up to two missing rows.
     const diffs = [];
     for (let i = 1; i < rows.length; i++) diffs.push(rows[i].v - rows[i - 1].v);
-    const pv = median(diffs.filter((d) => d > 1.0 * d0 && d < 2.2 * d0)) || pu;
+    const pv = median(diffs.filter((d) => d > 1.0 * d0 && d < 4 * d0)) || pu;
     const chains = [];
     let chain = [rows[0]];
     for (let i = 1; i < rows.length; i++) {
@@ -294,7 +304,7 @@ function locateGrid(cands, options) {
         return { u, v };
       });
     });
-    blocks.push({ cells, lines, uStart: median(blockRuns.map((r) => r[0].u)) });
+    blocks.push({ cells, lines, pv, uStart: median(blockRuns.map((r) => r[0].u)) });
   });
   if (!blocks.length) return fail("no_grid");
   blocks.sort((a, b) => a.uStart - b.uStart);
@@ -303,7 +313,7 @@ function locateGrid(cands, options) {
   return { ok: true, d0, pu, theta, blocks, toXY };
 }
 
-// Share of a disk that is inked.
+// Share of a disk that is inked (+ its mean darkness).
 function diskInk(ink, W, H, x, y, r) {
   let n = 0;
   let dark = 0;
@@ -325,25 +335,60 @@ function diskInk(ink, W, H, x, y, r) {
   return { frac: n ? dark / n : 0, mean: n ? sum / n : 0 };
 }
 
-// Upside-down check: printed row numbers sit LEFT of the first column; right of
-// the last column is empty paper.
-function looksFlipped(grid, ink, W, H) {
-  const first = grid.blocks[0];
-  const last = grid.blocks[grid.blocks.length - 1];
-  const r = 0.3 * grid.pu;
-  let left = 0;
-  let right = 0;
-  first.cells.forEach((row) => {
-    const p = grid.toXY({ u: row[0].u - grid.pu, v: row[0].v });
-    left += diskInk(ink, W, H, p.x, p.y, r).mean;
+// Upside-down check. On an upright card the printed row numbers sit LEFT of the
+// first column (right of the last is paper or a divider) and the column header /
+// section title sits ABOVE the first row (below the last row is paper).
+function orientationScore(grid, ink, W, H) {
+  const sample = (u, v, r) => {
+    const p = grid.toXY({ u, v });
+    return diskInk(ink, W, H, p.x, p.y, r).mean;
+  };
+  let side = 0;
+  let sideN = 0;
+  let vert = 0;
+  let vertN = 0;
+  grid.blocks.forEach((b) => {
+    const r = 0.3 * Math.min(grid.pu, b.pv);
+    b.cells.forEach((row) => {
+      const a = row[0];
+      const z = row[row.length - 1];
+      side += sample(a.u - grid.pu, a.v, r) - sample(z.u + grid.pu, z.v, r);
+      sideN++;
+    });
+    const first = b.cells[0];
+    const last = b.cells[b.cells.length - 1];
+    first.forEach((cell, c) => {
+      vert += sample(cell.u, cell.v - b.pv, r) - sample(last[c].u, last[c].v + b.pv, r);
+      vertN++;
+    });
   });
-  last.cells.forEach((row) => {
-    const p = grid.toXY({ u: row[row.length - 1].u + grid.pu, v: row[row.length - 1].v });
-    right += diskInk(ink, W, H, p.x, p.y, r).mean;
+  return (sideN ? side / sideN : 0) + (vertN ? vert / vertN : 0);
+}
+
+// Per-row decision from bubble fill shares. Printed letters inside empty bubbles
+// carry some ink: baseline per column = its typical empty level (never above the
+// sheet-wide empty level, so a letter most students chose doesn't hide its marks).
+function decideRows(fracRows, options) {
+  const all = median(fracRows.flat());
+  const baseline = Array.from({ length: options }, (_, c) =>
+    Math.min(median(fracRows.map((r) => r[c])), all + 0.06)
+  );
+  return fracRows.map((fracs) => {
+    const scores = fracs.map((f, c) => Math.max(0, f - baseline[c]));
+    const order = scores.map((s, c) => ({ s, c })).sort((a, b) => b.s - a.s);
+    const s1 = order[0].s;
+    const s2 = order[1] ? order[1].s : 0;
+    if (s1 >= 0.35 && s2 < 0.18 && s1 - s2 >= 0.25) return { status: "marked", col: order[0].c, note: "", scores };
+    // Empty bubbles score ~0–0.04; anything more (a thin cross, a light tick) is
+    // left for the AI rather than silently treated as blank.
+    if (s1 < 0.08) return { status: "blank", col: -1, note: "", scores };
+    return {
+      status: "unclear",
+      col: -1,
+      note: s2 >= 0.18 ? "iki variant işarələnib" : "işarə aydın deyil",
+      scores,
+    };
   });
-  left /= first.cells.length;
-  right /= last.cells.length;
-  return right > left * 1.5 + 3;
 }
 
 // ---- main ----
@@ -355,26 +400,26 @@ function analyzeImage(cv, img, { options = 5 } = {}) {
     return m;
   };
   try {
-    const rgba = keep(cv.matFromImageData(img));
-    let gray = keep(new cv.Mat());
-    cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
-    const scale = Math.min(1, MAX_DIM / Math.max(gray.cols, gray.rows));
+    let rgba = keep(cv.matFromImageData(img));
+    const scale = Math.min(1, MAX_DIM / Math.max(rgba.cols, rgba.rows));
     if (scale < 1) {
-      const g = keep(new cv.Mat());
-      cv.resize(gray, g, new cv.Size(Math.round(gray.cols * scale), Math.round(gray.rows * scale)), 0, 0, cv.INTER_AREA);
-      gray = g;
+      const r = keep(new cv.Mat());
+      cv.resize(rgba, r, new cv.Size(Math.round(rgba.cols * scale), Math.round(rgba.rows * scale)), 0, 0, cv.INTER_AREA);
+      rgba = r;
     }
-    const W = gray.cols;
-    const H = gray.rows;
+    const W = rgba.cols;
+    const H = rgba.rows;
+    const gray = keep(new cv.Mat());
+    cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
     const ink = inkMap(cv, gray, keep);
     const cands = detectCircles(cv, ink, W, H, keep);
     const base = { width: img.width, height: img.height };
 
     let grid = locateGrid(cands, options);
     if (!grid.ok) return { ok: false, reason: grid.reason, ...base };
-    let flipped = false;
-    if (looksFlipped(grid, ink, W, H)) {
-      flipped = true;
+    const orientation = orientationScore(grid, ink, W, H);
+    const flipped = orientation < -4;
+    if (flipped) {
       grid = locateGrid(
         cands.map((c) => ({ ...c, x: W - 1 - c.x, y: H - 1 - c.y })),
         options
@@ -382,60 +427,72 @@ function analyzeImage(cv, img, { options = 5 } = {}) {
       if (!grid.ok) return { ok: false, reason: grid.reason, ...base };
     }
     // Upright coordinates → analysed-image pixels.
-    const px = (x, y) => (flipped ? [W - 1 - x, H - 1 - y] : [x, y]);
+    const at = (x, y) => (flipped ? [W - 1 - x, H - 1 - y] : [x, y]);
+
+    const centerRows = grid.blocks.flatMap((block) => block.cells.map((row) => row.map((cell) => grid.toXY(cell))));
+
+    // Colour-printed card? Sample the printed rings: red rings → measure marks in
+    // the red channel, where red print disappears and pen/pencil stays dark.
+    const px = rgba.data;
+    let redDiff = 0;
+    let redN = 0;
+    const ringR = 0.47 * grid.d0;
+    centerRows.forEach((row) =>
+      row.forEach(({ x, y }) => {
+        for (let k = 0; k < 16; k++) {
+          const [ax, ay] = at(x + ringR * Math.cos((k * Math.PI) / 8), y + ringR * Math.sin((k * Math.PI) / 8));
+          const xi = Math.round(ax);
+          const yi = Math.round(ay);
+          if (xi < 0 || yi < 0 || xi >= W || yi >= H) continue;
+          const i = yi * W + xi;
+          if (ink[i] <= EDGE_INK) continue;
+          redDiff += px[i * 4] - px[i * 4 + 1];
+          redN++;
+        }
+      })
+    );
+    const redPrint = redN > 40 && redDiff / redN > 45;
 
     const rr = 0.3 * grid.d0;
-    const rows = [];
-    grid.blocks.forEach((block) => {
-      block.cells.forEach((row) => {
-        const centers = row.map((cell) => grid.toXY(cell));
-        const fracs = centers.map(({ x, y }) => {
-          const [ax, ay] = px(x, y);
-          return diskInk(ink, W, H, ax, ay, rr).frac;
-        });
-        rows.push({ centers, fracs });
-      });
-    });
+    const measure = (map) =>
+      centerRows.map((row) =>
+        row.map(({ x, y }) => {
+          const [ax, ay] = at(x, y);
+          return diskInk(map, W, H, ax, ay, rr).frac;
+        })
+      );
+    let decided;
+    if (redPrint) {
+      const red = keep(new cv.Mat(H, W, cv.CV_8UC1));
+      const rd = red.data;
+      for (let i = 0; i < rd.length; i++) rd[i] = px[i * 4];
+      const byRed = decideRows(measure(inkMap(cv, red, keep)), options);
+      const byGray = decideRows(measure(ink), options);
+      // A mark visible in gray but not in red = drawn in red/pink pen: ask AI.
+      decided = byRed.map((row, i) =>
+        row.status === "blank" && byGray[i].status !== "blank"
+          ? { ...row, status: "unclear", note: "rəngli qələmlə işarələnib ola bilər" }
+          : row
+      );
+    } else {
+      decided = decideRows(measure(ink), options);
+    }
 
-    // Printed letters inside empty bubbles carry some ink. Baseline per column =
-    // its typical empty level (never above the sheet-wide empty level, so a
-    // letter most students chose doesn't hide its own marks).
-    const all = median(rows.flatMap((r) => r.fracs));
-    const baseline = Array.from({ length: options }, (_, c) =>
-      Math.min(median(rows.map((r) => r.fracs[c])), all + 0.06)
-    );
-
-    const out = rows.map(({ centers, fracs }) => {
-      const scores = fracs.map((f, c) => Math.max(0, f - baseline[c]));
-      const order = scores.map((s, c) => ({ s, c })).sort((a, b) => b.s - a.s);
-      const [s1, s2] = [order[0].s, order[1] ? order[1].s : 0];
-      let status;
-      let col = -1;
-      let note = "";
-      if (s1 >= 0.35 && s2 < 0.18 && s1 - s2 >= 0.25) {
-        status = "marked";
-        col = order[0].c;
-      } else if (s1 < 0.12) {
-        status = "blank";
-      } else {
-        status = "unclear";
-        note = s2 >= 0.18 ? "iki variant işarələnib" : "işarə aydın deyil";
-      }
-      return {
-        status,
-        col,
-        note,
-        scores: scores.map((s) => Math.round(s * 100) / 100),
-        centers: centers.map(({ x, y }) => [Math.round(x / scale), Math.round(y / scale)]),
-      };
-    });
-
-    const pts = out.flatMap((r) => r.centers);
+    const rows = decided.map((row, i) => ({
+      status: row.status,
+      col: row.col,
+      note: row.note,
+      scores: row.scores.map((s) => Math.round(s * 100) / 100),
+      centers: centerRows[i].map(({ x, y }) => [Math.round(x / scale), Math.round(y / scale)]),
+    }));
+    const pts = rows.flatMap((r) => r.centers);
     const pad = grid.d0 / scale;
     return {
       ok: true,
       flipped,
-      theta: Math.round((grid.theta * 180) / Math.PI * 10) / 10,
+      redPrint,
+      orientation: Math.round(orientation * 10) / 10,
+      theta: Math.round(((grid.theta * 180) / Math.PI) * 10) / 10,
       blocks: grid.blocks.length,
       bubble: Math.round(grid.d0 / scale),
       pitch: Math.round(grid.pu / scale),
@@ -446,7 +503,7 @@ function analyzeImage(cv, img, { options = 5 } = {}) {
         x1: Math.max(...pts.map((p) => p[0])) + pad,
         y1: Math.max(...pts.map((p) => p[1])) + pad,
       },
-      rows: out,
+      rows,
       ...base,
     };
   } finally {

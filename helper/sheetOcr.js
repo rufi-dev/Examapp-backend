@@ -102,8 +102,9 @@ function parseCardText(rawWords, { width, height, flipped = false, grid = null, 
   const ata = find("ata");
   const adi = ata && top.find((w) => /^ad[ıil]$/.test(w.key) && sameLine(ata, w) && w.x0 >= ata.x1 - 4);
   const sinif = find("sinif");
+  const gun = sinif && top.find((w) => /^g[üu]n$/.test(w.key) && sameLine(sinif, w) && w.x0 > sinif.x1);
   const ders = sinif && top.find((w) => /^d[əe]rs/.test(w.key) && sameLine(sinif, w) && w.x0 > sinif.x1);
-  const labels = new Set([ad, soyad, ata, adi, sinif, ders].filter(Boolean));
+  const labels = new Set([ad, soyad, ata, adi, sinif, gun, ders].filter(Boolean));
   const valueAfter = (label, next) => {
     if (!label) return { text: "", conf: 1 };
     const ws = top
@@ -121,7 +122,7 @@ function parseCardText(rawWords, { width, height, flipped = false, grid = null, 
   const first = valueAfter(ad, soyad);
   const last = valueAfter(soyad, ata);
   const father = valueAfter(adi || ata, null);
-  const cls = valueAfter(sinif, ders);
+  const cls = valueAfter(sinif, gun || ders); // newer cards put "Gün:" after "Sinif:"
   const nameFound = !!(ad && soyad);
   const student = {
     firstName: first.text.slice(0, 80),
@@ -137,7 +138,8 @@ function parseCardText(rawWords, { width, height, flipped = false, grid = null, 
     const regionX = grid ? grid.x1 : width * 0.45;
     const regionY = grid ? grid.y0 - (grid.y1 - grid.y0) * 0.15 : headerBottom * 0.5;
     const nums = words
-      .filter((w) => w.x0 > regionX && w.cy > regionY && /^\d{1,2}$/.test(w.text))
+      // Labels print as "14" or "14." (Vision may keep the period on the word).
+      .filter((w) => w.x0 > regionX && w.cy > regionY && /^\d{1,2}\.?$/.test(w.text))
       .sort((a, b) => a.x0 - b.x0);
     // Printed labels share one x; handwritten digits don't line up like that.
     const clusters = [];
@@ -163,7 +165,7 @@ function parseCardText(rawWords, { width, height, flipped = false, grid = null, 
             for (let j = 1; j < k; j++) rows.push({ printed: "", cy: sorted[i - 1].cy + (j * gap) / k, x1: w.x1, label: null });
           }
         }
-        rows.push({ printed: w.text, cy: w.cy, x1: w.x1, label: w });
+        rows.push({ printed: w.text.replace(/\.$/, ""), cy: w.cy, x1: w.x1, label: w });
       });
       const labelX1 = median(sorted.map((w) => w.x1));
       const labelSet = new Set(sorted);

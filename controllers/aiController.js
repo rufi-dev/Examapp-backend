@@ -857,15 +857,15 @@ const SHEET_SCHEMA = {
 const SHEET_PROMPT = `You transcribe a student's PAPER answer card ("CAVAB KARTI") for a math exam platform in Azerbaijan. The images are photos of ONE student's card — possibly several pages, taken at an angle, with shadows or glare. You do NOT grade and you do NOT solve anything: you only report what is marked or written.
 
 The standard card:
-- Header boxes: "Ad" (first name), "Soyad" (last name), "Ata adı" (father's name), "Sinif" (class), "Dərs saatı" (lesson hour).
-- A "TESTLƏR" section with two columns:
-  - "QAPALI SUALLAR" (closed): numbered rows, each with bubbles A B C D E. The student fills, shades, circles or crosses one bubble per row.
-  - "AÇIQ SUALLAR" (open): numbered boxes where the student writes a short answer on the line.
+- Header boxes: "Ad" (first name), "Soyad" (last name), "Ata adı" (father's name), "Sinif" (class), "Gün" (date, on newer cards), "Dərs saatı" (lesson hour).
+- Two columns:
+  - "QAPALI SUALLAR" (closed, e.g. "(1 – 13)"): a table of numbered rows ("№"), each with bubbles A B C D E. The student fills, shades, circles or crosses one bubble per row. Bubbles and their letters may be PRINTED in red — printed rings/letters are never marks; only the student's pen or pencil counts.
+  - "AÇIQ SUALLAR" (open, e.g. "(14 – 25)"): numbered boxes (labels like "14.") where the student writes a short answer.
 - Some exams add a matching grid (numbers × letters).
 Other card designs may appear; read them with the same meaning.
 
 Report:
-- "student": the header boxes exactly as handwritten, keeping Azerbaijani letters (ə ı ö ü ğ ş ç). "" for an empty or missing box. Ignore "Dərs saatı".
+- "student": the header boxes exactly as handwritten, keeping Azerbaijani letters (ə ı ö ü ğ ş ç). "" for an empty or missing box. Ignore "Gün" and "Dərs saatı".
 - "closed": ONE item per closed row, in reading order (top to bottom, then the next column or page), INCLUDING rows with no mark.
   "printed" = the row number printed on the card, exactly as printed, even if it repeats or skips.
   "answer" = the marked letter in lowercase (e.g. "c"); "" when no bubble is marked.
@@ -1102,6 +1102,9 @@ async function readSheetImages(key, images, { focus = [] } = {}) {
       .finalMessage();
   } catch (e) {
     console.error("Paper sheet read error:", e?.status, e?.message);
+    if (/credit balance/i.test(String(e?.message || ""))) {
+      throw aiError(402, "AI balansı bitib — bu cavabları vərəqlə müqayisə edib əl ilə doldurun.");
+    }
     throw aiError(502, "AI vərəqi oxuya bilmədi. Yenidən cəhd edin.");
   }
   if (message.stop_reason === "refusal") throw aiError(422, "AI bu şəkli emal edə bilmədi.");
