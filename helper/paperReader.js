@@ -188,9 +188,10 @@ async function platformReadSheet(key, images, { wantName = false } = {}) {
           const { o } = hit.item;
           if (o.empty) settle(it.index, "", "high", "ocr");
           else if (o.multiline) a.note = "cavab bir neçə sətirdə yazılıb";
-          else if (o.conf < 0.8) a.note = "yazı aydın oxunmadı";
+          // Handwritten digits often read at 0.6–0.8; accept them flagged for a look.
+          else if (o.conf < 0.6) a.note = "yazı aydın oxunmadı";
           else if (!ALLOWED_TEXT.test(o.answer)) a.note = "tanınmayan simvol";
-          else settle(it.index, o.answer.slice(0, 300), o.conf >= 0.92 ? "high" : "medium", "ocr");
+          else settle(it.index, o.answer.slice(0, 300), o.conf >= 0.9 ? "high" : "medium", "ocr");
         });
       }
       if (parsed.nameFound || parsed.open.length) textStatus = "ok";

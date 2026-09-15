@@ -3302,7 +3302,8 @@ function coerceSheetAnswers(key, answers) {
 // ("2 + x" = "2+x"; the shared scorer only collapses whitespace). Result-side only.
 function normalizePaperSelections(key, answers) {
   const values = coerceSheetAnswers(key, answers);
-  const compact = (x) => String(x ?? "").toLowerCase().replace(/\s+/g, "");
+  // Decimal comma = decimal point ("5,2" = "5.2").
+  const compact = (x) => String(x ?? "").toLowerCase().replace(/\s+/g, "").replace(/,/g, ".");
   return key.map((ca, i) => {
     const v = values[i];
     if (ca.type === "Cm" && v) {
@@ -3333,7 +3334,7 @@ function sameSheetAnswer(q, a, b) {
       );
     return canon(a) === canon(b);
   }
-  const f = (v) => String(v ?? "").trim().toLowerCase().replace(/\s+/g, "");
+  const f = (v) => String(v ?? "").trim().toLowerCase().replace(/\s+/g, "").replace(/,/g, ".");
   return f(a) === f(b);
 }
 

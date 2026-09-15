@@ -169,7 +169,8 @@ function parseCardText(rawWords, { width, height, flipped = false, grid = null, 
       });
       const labelX1 = median(sorted.map((w) => w.x1));
       const labelSet = new Set(sorted);
-      const region = words.filter((w) => !labelSet.has(w) && w.cx > labelX1 + 0.2 * lh && w.cy > rows[0].cy - pitch / 2);
+      // Answer words start clearly right of the label (Vision often splits "15." into "15" + ".").
+      const region = words.filter((w) => !labelSet.has(w) && w.x0 > labelX1 + 0.5 * lh && w.cy > rows[0].cy - pitch / 2);
       const boxRight = region.length ? Math.max(...region.map((w) => w.x1)) : width;
       const span = Math.max(1, boxRight - labelX1);
       rows.forEach((row, i) => {
@@ -191,7 +192,8 @@ function parseCardText(rawWords, { width, height, flipped = false, grid = null, 
         const ys = inRow.map((w) => w.cy);
         open.push({
           printed: row.printed,
-          answer: inRow.map((w) => w.text).join(" "),
+          // One answer = one value: gaps in handwriting are not spaces ("72 47" → "7247").
+          answer: inRow.map((w) => w.text).join(""),
           conf: inRow.length ? Math.min(...inRow.map((w) => w.conf)) : 1,
           multiline: inRow.length > 1 && Math.max(...ys) - Math.min(...ys) > 0.8 * hs,
           empty: !inRow.length,
