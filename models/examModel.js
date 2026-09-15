@@ -105,9 +105,11 @@ const examSchema = Schema({
     // answer sharing during the exam window).
     revealAfterEnd: { type: Boolean, default: true },
     // "pdf" = questions live in an uploaded PDF (answer key only). "structured"
-    // = native questions (text/options/images/latex) built in-app. Default pdf
+    // = native questions (text/options/images/latex) built in-app. "paper" =
+    // written on paper answer cards in class: the teacher enters only the answer
+    // key and grades photographed sheets (never started online). Default pdf
     // keeps every existing exam unchanged.
-    mode: { type: String, enum: ["pdf", "structured"], default: "pdf" },
+    mode: { type: String, enum: ["pdf", "structured", "paper"], default: "pdf" },
     // The teacher/admin who created this exam (visibility/ownership scoping).
     owner: { type: Schema.Types.ObjectId, ref: "User", index: true },
     // Structured exam pagination: how many questions a student sees per page

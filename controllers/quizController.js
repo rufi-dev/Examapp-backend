@@ -259,21 +259,23 @@ const addExam = asyncHandler(async (req, res) => {
   } = req.body;
   const { classId } = req.params;
 
-  // "structured" exams have native in-app questions (no PDF). Any other value
-  // (or absent) means the legacy PDF flow, which still hard-requires a PDF.
+  // "structured" exams have native in-app questions (no PDF). "paper" exams are
+  // written on paper answer cards (answer key only, no PDF). Any other value (or
+  // absent) means the legacy PDF flow, which still hard-requires a PDF.
   const isStructured = mode === "structured";
+  const isPaper = mode === "paper";
 
   // Check if all required fields are present
-  if (!name || !duration || !totalMarks || !passingMarks || (!isStructured && !pdf)) {
+  if (!name || !duration || !totalMarks || !passingMarks || (!isStructured && !isPaper && !pdf)) {
     res
       .status(400)
       .json({ success: false, message: "All fields are required" });
     return;
   }
   try {
-    // Create a PDF entry only in PDF mode. Structured exams have no PDF doc.
+    // Create a PDF entry only in PDF mode. Structured/paper exams have no PDF doc.
     let savedPdf = null;
-    if (!isStructured) {
+    if (!isStructured && !isPaper) {
       const pdfModel = new PDF({
         path: pdf,
       });
@@ -295,7 +297,7 @@ const addExam = asyncHandler(async (req, res) => {
       totalMarks,
       passingMarks,
       maxTry,
-      mode: isStructured ? "structured" : "pdf",
+      mode: isStructured ? "structured" : isPaper ? "paper" : "pdf",
       showScore: showScore === "true" || showScore === true,
       showCorrectAnswers: showCorrectAnswers === "true" || showCorrectAnswers === true,
       revealAfterEnd: revealAfterEnd === "true" || revealAfterEnd === true,
@@ -1114,6 +1116,13 @@ const startAttempt = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("Exam not found");
   }
+  // Paper exams are written in class on answer cards and graded by the teacher
+  // from photos — they can never be started online.
+  if (exam.mode === "paper") {
+    return res
+      .status(409)
+      .json({ reason: "paper_exam", message: "Bu imtahan kağız üzərində keçirilir" });
+  }
   const now = Date.now();
   const correctAnswers = exam.questions?.correctAnswers || [];
 
@@ -1649,6 +1658,64 @@ function renderableCorrect(ca) {
   return norm(ca.answer);
 }
 
+// Score canonical-order selections against the exam's key: per-question points
+// from the preset (or the legacy 18/55-45 split), manual per-type overrides, and
+// optional negative marking. Pure — shared by the online submit path and
+// teacher-graded paper sheets so both are scored exactly the same way.
+function gradeSelections(exam, sel) {
+  const correct = exam.questions?.correctAnswers || [];
+  const picks = Array.isArray(sel) ? sel : [];
+  // Per-question points come from the exam's preset (server-authoritative) and
+  // adapt to the actual question count; legacy/custom exams fall back to the
+  // original 18/55-45 split (total 100).
+  const presetCfg = exam.preset ? PRESETS[exam.preset] : null;
+  const autoPoints =
+    presetCfg && typeof presetCfg.pointsPlan === "function"
+      ? presetCfg.pointsPlan(correct.length, correct.map((c) => c && c.type))
+      : questionPoints(correct.length);
+  // Manual per-type override (builder scoring panel) wins for the types it sets;
+  // other types keep the preset's auto points.
+  const tp = exam.typePoints && typeof exam.typePoints === "object" ? exam.typePoints : null;
+  const points = tp
+    ? correct.map((c, i) => {
+        const v = c && c.type != null ? tp[c.type] : undefined;
+        return v === undefined || v === null || Number.isNaN(Number(v)) ? autoPoints[i] || 0 : Number(v);
+      })
+    : autoPoints;
+  // Negative marking only penalizes wrong answers in questions 1..until
+  // (0 / unset = every question, the legacy behavior).
+  const until = exam.negMarkUntil > 0 ? Math.min(exam.negMarkUntil, correct.length) : correct.length;
+
+  const counts = { Cm: 0, Cs: 0, Co: 0, Cd: 0, Cma: 0, Cmu: 0 };
+  let earnedPoints = 0;
+  let wrongCount = 0;
+  correct.forEach((ca, i) => {
+    const s = picks[i];
+    if (!isAnswered(s)) return;
+    const frac = answerScore(ca, s, exam.partialCredit);
+    earnedPoints += (points[i] || 0) * frac;
+    if (frac >= 1) {
+      if (counts[ca.type] !== undefined) counts[ca.type]++;
+    } else if (frac <= 0 && i < until) {
+      // Wrong only penalizes inside the negative-marking range; blanks never do.
+      wrongCount += 1;
+    }
+  });
+
+  if (exam.negativeMarking && (exam.wrongPerPenalty || 0) > 0) {
+    // "One correct's worth" = the average points of a question in the penalized
+    // range (the closed section for Blok; all questions for legacy 100-pt exams).
+    let rangeSum = 0;
+    for (let i = 0; i < until; i++) rangeSum += points[i] || 0;
+    const avgPerQuestion = until > 0 ? rangeSum / until : 0;
+    const units = Math.floor(wrongCount / exam.wrongPerPenalty);
+    const cancelledCorrects = units * (exam.correctPerPenalty || 1);
+    earnedPoints = Math.max(0, earnedPoints - cancelledCorrects * avgPerQuestion);
+  }
+  earnedPoints = Math.round(earnedPoints * 100) / 100;
+  return { earnedPoints, counts };
+}
+
 // Idempotently link a Result into the exam's + user's result arrays. $addToSet so
 // a retry / crash-recovery never double-adds (unlike push+save).
 async function linkResult(examId, userId, resultId) {
@@ -1751,26 +1818,6 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
 
   // Score on the server, against answers the client never received.
   const correct = exam.questions?.correctAnswers || [];
-  // Per-question points come from the exam's preset (server-authoritative) and
-  // adapt to the actual question count; legacy/custom exams fall back to the
-  // original 18/55-45 split (total 100).
-  const presetCfg = exam.preset ? PRESETS[exam.preset] : null;
-  const autoPoints =
-    presetCfg && typeof presetCfg.pointsPlan === "function"
-      ? presetCfg.pointsPlan(correct.length, correct.map((c) => c && c.type))
-      : questionPoints(correct.length);
-  // Manual per-type override (builder scoring panel) wins for the types it sets;
-  // other types keep the preset's auto points.
-  const tp = exam.typePoints && typeof exam.typePoints === "object" ? exam.typePoints : null;
-  const points = tp
-    ? correct.map((c, i) => {
-        const v = c && c.type != null ? tp[c.type] : undefined;
-        return v === undefined || v === null || Number.isNaN(Number(v)) ? autoPoints[i] || 0 : Number(v);
-      })
-    : autoPoints;
-  // Negative marking only penalizes wrong answers in questions 1..until
-  // (0 / unset = every question, the legacy behavior).
-  const until = exam.negMarkUntil > 0 ? Math.min(exam.negMarkUntil, correct.length) : correct.length;
   let sel = Array.isArray(selectedAnswers) ? selectedAnswers : [];
 
   // Per-student option shuffle: map the student's DISPLAY-order picks back to the
@@ -1794,33 +1841,7 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
     });
   }
 
-  const counts = { Cm: 0, Cs: 0, Co: 0, Cd: 0, Cma: 0, Cmu: 0 };
-  let earnedPoints = 0;
-  let wrongCount = 0;
-  correct.forEach((ca, i) => {
-    const s = sel[i];
-    if (!isAnswered(s)) return;
-    const frac = answerScore(ca, s, exam.partialCredit);
-    earnedPoints += (points[i] || 0) * frac;
-    if (frac >= 1) {
-      if (counts[ca.type] !== undefined) counts[ca.type]++;
-    } else if (frac <= 0 && i < until) {
-      // Wrong only penalizes inside the negative-marking range; blanks never do.
-      wrongCount += 1;
-    }
-  });
-
-  if (exam.negativeMarking && (exam.wrongPerPenalty || 0) > 0) {
-    // "One correct's worth" = the average points of a question in the penalized
-    // range (the closed section for Blok; all questions for legacy 100-pt exams).
-    let rangeSum = 0;
-    for (let i = 0; i < until; i++) rangeSum += points[i] || 0;
-    const avgPerQuestion = until > 0 ? rangeSum / until : 0;
-    const units = Math.floor(wrongCount / exam.wrongPerPenalty);
-    const cancelledCorrects = units * (exam.correctPerPenalty || 1);
-    earnedPoints = Math.max(0, earnedPoints - cancelledCorrects * avgPerQuestion);
-  }
-  earnedPoints = Math.round(earnedPoints * 100) / 100;
+  let { earnedPoints, counts } = gradeSelections(exam, sel);
 
   const isTerminated =
     !!attempt.terminated || terminated === true || terminated === "true";
@@ -3193,8 +3214,293 @@ const serverTime = asyncHandler(async (req, res) => {
   res.status(200).json({ now: Date.now() });
 });
 
+// ---- Paper exams ------------------------------------------------------------
+// exam.mode "paper": written on answer cards in class. The teacher enters the
+// answer key, photographs each student's sheet, reviews/corrects what the AI
+// read (aiController.readAnswerSheet), and saves a normal Result (source
+// "paper") scored by the same gradeSelections as online exams.
+
+const PAPER_PHOTO_HOST = /(^|\.)res\.cloudinary\.com$/i;
+const CORRECT_TYPES = ["Cm", "Cs", "Co", "Cd", "Cma", "Cmu"];
+
+// Only Cloudinary HTTPS images (what the browser uploads) are stored.
+const cleanSheetPhotos = (arr) =>
+  (Array.isArray(arr) ? arr : [])
+    .filter((u) => {
+      try {
+        const x = new URL(String(u));
+        return x.protocol === "https:" && PAPER_PHOTO_HOST.test(x.hostname);
+      } catch {
+        return false;
+      }
+    })
+    .slice(0, 10);
+
+// Coerce teacher-edited selections to the KEY's shape — one per question, type
+// taken from the key, answer normalized per type — so a malformed payload can
+// never skew scoring or the stored review.
+function normalizePaperSelections(key, answers) {
+  const src = Array.isArray(answers) ? answers : [];
+  return key.map((ca, i) => {
+    const a = src[i]?.answer;
+    if (ca.type === "Cmu") {
+      const n = Number(ca.leftCount) || 0;
+      const m = Number(ca.rightCount) || 0;
+      const out = {};
+      if (a && typeof a === "object" && !Array.isArray(a)) {
+        for (let k = 0; k < n; k++) {
+          const row = Array.isArray(a[k]) ? a[k] : [];
+          const v = [...new Set(row.map(Number).filter((x) => Number.isInteger(x) && x >= 0 && x < m))].sort(
+            (x, y) => x - y
+          );
+          if (v.length) out[k] = v;
+        }
+      }
+      return { type: ca.type, answer: out };
+    }
+    if (ca.type === "Cm") {
+      // Store the letter in the KEY's own casing (the scorer compares exactly), so
+      // "b" still matches a key written as "B".
+      const letter = typeof a === "string" ? a.trim().toLowerCase().slice(0, 3) : "";
+      const pool = [ca.answer, ...(Array.isArray(ca.options) ? ca.options : [])].map((o) => String(o ?? ""));
+      const hit = letter ? pool.find((o) => o.trim().toLowerCase() === letter) : undefined;
+      return { type: ca.type, answer: hit !== undefined ? hit.trim() : letter };
+    }
+    // Open answers: spacing in handwriting is meaningless ("2 + x" vs "2+x"), but
+    // the shared scorer only collapses whitespace. When the answer equals an
+    // accepted variant once spaces are ignored, store that variant so it scores —
+    // online (typed) scoring is left untouched.
+    const text = typeof a === "string" || typeof a === "number" ? String(a).trim().slice(0, 300) : "";
+    const compact = (v) => String(v ?? "").toLowerCase().replace(/\s+/g, "");
+    const accepted = (Array.isArray(ca.answers) && ca.answers.length ? ca.answers : [ca.answer]).filter(
+      (v) => String(v ?? "").trim() !== ""
+    );
+    const hit = text ? accepted.find((v) => compact(v) === compact(text)) : undefined;
+    return { type: ca.type, answer: hit !== undefined ? String(hit).trim() : text };
+  });
+}
+
+const paperResultView = (r) => ({
+  _id: r._id,
+  userId: r.userId && r.userId._id ? r.userId._id : r.userId,
+  student:
+    r.userId && r.userId._id
+      ? { _id: r.userId._id, name: r.userId.name, email: r.userId.email, photo: r.userId.photo }
+      : null,
+  earnPoints: r.earnPoints,
+  selectedAnswers: r.selectedAnswers || [],
+  sheetPhotos: r.sheetPhotos || [],
+  aiAnswers: r.aiAnswers || null,
+  updatedAt: r.updatedAt,
+});
+
+// GET /exam/:examId/paper — everything the grading workspace needs: the key (with
+// accepted answers, owner-only), the class roster, and existing paper results.
+const getPaperSheet = asyncHandler(async (req, res) => {
+  const exam = await Exam.findById(req.params.examId).populate("questions").populate("class", "name");
+  if (!exam) {
+    res.status(404);
+    throw new Error("İmtahan tapılmadı");
+  }
+  if (!ownsOrAdmin(req.user, exam)) {
+    res.status(403);
+    throw new Error("Bu imtahan sizə aid deyil");
+  }
+  if (exam.mode !== "paper") {
+    res.status(400);
+    throw new Error("Bu imtahan kağız imtahanı deyil");
+  }
+  const key = exam.questions?.correctAnswers || [];
+  const classId = exam.class?._id || exam.class;
+  const [rows, results] = await Promise.all([
+    Enrollment.find({ class: classId, status: "approved" })
+      .populate("student", "name email photo")
+      .sort({ createdAt: -1 })
+      .lean(),
+    Result.find({ examId: exam._id, source: "paper" })
+      .populate("userId", "name email photo")
+      .sort({ updatedAt: -1 })
+      .lean(),
+  ]);
+
+  res.status(200).json({
+    exam: {
+      _id: exam._id,
+      name: exam.name,
+      className: exam.class?.name || "",
+      classId,
+      totalMarks: exam.totalMarks,
+      passingMarks: exam.passingMarks,
+      preset: exam.preset || "",
+    },
+    key: key.map((ca) => ({
+      type: ca.type,
+      options: ca.options,
+      answer: ca.answer,
+      answers: ca.answers,
+      leftCount: ca.leftCount,
+      rightCount: ca.rightCount,
+      key: ca.key,
+    })),
+    students: rows
+      .filter((r) => r.student)
+      .map((r) => ({
+        _id: r.student._id,
+        name: r.student.name,
+        email: r.student.email,
+        photo: r.student.photo,
+      })),
+    results: results.map(paperResultView),
+  });
+});
+
+// POST /exam/:examId/paper/result
+//   { studentId, answers: [{answer}], photos: [url], aiAnswers, preview }
+// preview:true → score only (no student needed, nothing saved), for the live
+// score while the teacher corrects the sheet. Otherwise creates the student's
+// paper Result, or updates it when they were already graded.
+const savePaperResult = asyncHandler(async (req, res) => {
+  const { studentId, answers, photos, aiAnswers, preview } = req.body || {};
+  const exam = await Exam.findById(req.params.examId).populate("questions");
+  if (!exam) {
+    res.status(404);
+    throw new Error("İmtahan tapılmadı");
+  }
+  if (!ownsOrAdmin(req.user, exam)) {
+    res.status(403);
+    throw new Error("Bu imtahan sizə aid deyil");
+  }
+  if (exam.mode !== "paper") {
+    res.status(400);
+    throw new Error("Bu imtahan kağız imtahanı deyil");
+  }
+  const key = exam.questions?.correctAnswers || [];
+  if (!key.length) {
+    res.status(400);
+    throw new Error("Əvvəlcə cavab açarını daxil edin");
+  }
+
+  const sel = normalizePaperSelections(key, answers);
+  const { earnedPoints, counts } = gradeSelections(exam, sel);
+  const correctCount = sel.filter((s, i) => answerScore(key[i], s, exam.partialCredit) >= 1).length;
+  const answeredCount = sel.filter(isAnswered).length;
+
+  if (preview === true || preview === "true") {
+    return res
+      .status(200)
+      .json({ earnPoints: earnedPoints, correctCount, answeredCount, total: key.length });
+  }
+
+  if (!studentId || !mongoose.isValidObjectId(studentId)) {
+    res.status(400);
+    throw new Error("Şagird seçin");
+  }
+  const student = await User.findById(studentId).select("name email photo");
+  if (!student) {
+    res.status(404);
+    throw new Error("Şagird tapılmadı");
+  }
+  const enrolled = await Enrollment.exists({
+    student: student._id,
+    class: exam.class,
+    status: "approved",
+  });
+  if (!enrolled) {
+    res.status(400);
+    throw new Error("Bu şagird imtahanın sinfində deyil");
+  }
+
+  const fields = {
+    earnPoints: earnedPoints,
+    attempts: answeredCount,
+    selectedAnswers: sel.map((a) => ({ type: a.type, answer: storableAnswer(a.answer) })),
+    correctAnswers: key.map((a) => ({ type: a.type, answer: renderableCorrect(a) })),
+    correctAnswersByType: CORRECT_TYPES.map((t) => ({ type: t, count: counts[t] || 0 })),
+    source: "paper",
+    sheetPhotos: cleanSheetPhotos(photos),
+    gradedBy: req.user._id,
+    ...(Array.isArray(aiAnswers)
+      ? {
+          aiAnswers: aiAnswers.slice(0, key.length).map((x) => ({
+            answer: x && x.answer !== undefined ? x.answer : "",
+            confidence: ["high", "medium", "low"].includes(x?.confidence) ? x.confidence : "high",
+          })),
+        }
+      : {}),
+  };
+
+  let result = await Result.findOne({ examId: exam._id, userId: student._id, source: "paper" });
+  if (result) {
+    Object.assign(result, fields);
+    result.markModified("selectedAnswers");
+    result.markModified("aiAnswers");
+    await result.save();
+  } else {
+    // Every Result is keyed by an attempt. A paper sheet has no online attempt,
+    // so a closed (already-submitted) one is recorded alongside it — result-first,
+    // so a failure can never leave an attempt without its Result.
+    const attemptId = new mongoose.Types.ObjectId();
+    const now = new Date();
+    result = await Result.create({
+      userId: student._id,
+      examId: exam._id,
+      attemptId,
+      violations: 0,
+      terminated: false,
+      ...fields,
+    });
+    await Attempt.create({
+      _id: attemptId,
+      userId: student._id,
+      examId: exam._id,
+      startedAt: now,
+      expiresAt: now,
+      submitted: true,
+    });
+    await linkResult(exam._id, student._id, result._id);
+  }
+
+  res.status(200).json({
+    success: true,
+    correctCount,
+    result: paperResultView({ ...result.toObject(), userId: student.toObject() }),
+  });
+});
+
+// DELETE /exam/:examId/paper/result/:resultId — remove a graded paper sheet.
+const deletePaperResult = asyncHandler(async (req, res) => {
+  const exam = await Exam.findById(req.params.examId).select("owner mode");
+  if (!exam) {
+    res.status(404);
+    throw new Error("İmtahan tapılmadı");
+  }
+  if (!ownsOrAdmin(req.user, exam)) {
+    res.status(403);
+    throw new Error("Bu imtahan sizə aid deyil");
+  }
+  if (!mongoose.isValidObjectId(req.params.resultId)) {
+    res.status(400);
+    throw new Error("Nəticə tapılmadı");
+  }
+  const result = await Result.findOne({ _id: req.params.resultId, examId: exam._id, source: "paper" });
+  if (!result) {
+    res.status(404);
+    throw new Error("Nəticə tapılmadı");
+  }
+  await Result.deleteOne({ _id: result._id });
+  await Promise.all([
+    result.attemptId ? Attempt.deleteOne({ _id: result.attemptId }) : null,
+    Exam.updateOne({ _id: exam._id }, { $pull: { results: result._id } }),
+    User.updateOne({ _id: result.userId }, { $pull: { results: result._id } }),
+  ]);
+  res.status(200).json({ success: true });
+});
+
 module.exports = {
   serverTime,
+  getPaperSheet,
+  savePaperResult,
+  deletePaperResult,
   addExam,
   getExamsByClass,
   addTag,

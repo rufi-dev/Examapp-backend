@@ -7,6 +7,9 @@ const {
 } = require("../middleware/authMiddleware");
 const {
   serverTime,
+  getPaperSheet,
+  savePaperResult,
+  deletePaperResult,
   addExam,
   getExamsByClass,
   getPdfByExam,
@@ -55,7 +58,12 @@ const {
   getExamTagandClass,
   getResultsByExam
 } = require("../controllers/quizController");
-const { extractQuestions, extractQuestionsStream, getAiUsage } = require("../controllers/aiController");
+const {
+  extractQuestions,
+  extractQuestionsStream,
+  getAiUsage,
+  readAnswerSheet,
+} = require("../controllers/aiController");
 const {
   joinClass,
   myEnrollments,
@@ -175,6 +183,12 @@ router.get("/exam/:examId/attemptStatus", protect, attemptStatus);
 router.get("/exam/:examId/live", protect, getLiveAttempts);
 // "Canlı imtahan" hub — every exam this teacher/admin owns with students taking it now.
 router.get("/live-exams", protect, getLiveExams);
+// Paper exams: grading workspace data, AI read of a photographed answer sheet,
+// save/update a student's graded sheet (or preview its score), remove one.
+router.get("/exam/:examId/paper", protect, teacherOnly, getPaperSheet);
+router.post("/exam/:examId/paper/read", protect, teacherOnly, readAnswerSheet);
+router.post("/exam/:examId/paper/result", protect, teacherOnly, savePaperResult);
+router.delete("/exam/:examId/paper/result/:resultId", protect, teacherOnly, deletePaperResult);
 router.post("/exam/:examId/violation", protect, reportViolation);
 router.get("/exam/:examId/rank", protect, getExamRank);
 router.post("/addResult/:examId", protect, verifiedOnly, addResult);

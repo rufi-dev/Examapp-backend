@@ -4,6 +4,7 @@ const AnthropicPkg = require("@anthropic-ai/sdk");
 const Anthropic = AnthropicPkg.default || AnthropicPkg;
 const AiUsage = require("../models/aiUsageModel");
 const User = require("../models/userModel");
+const Exam = require("../models/examModel");
 
 // Lazy client so the server still boots without the key (the feature just
 // returns a clear error until ANTHROPIC_API_KEY is set in the env).
@@ -807,4 +808,278 @@ const getAiUsage = asyncHandler(async (req, res) => {
   res.status(200).json({ rows, totals, recent });
 });
 
-module.exports = { extractQuestions, extractQuestionsStream, getAiUsage };
+// ---- Paper exams: read a photographed answer sheet --------------------------
+// The teacher photographs a student's paper answer card. Claude transcribes ONLY
+// what the student marked/wrote per question — it never grades or solves; the
+// server scores the (teacher-reviewed) selections against the key. The key's
+// layout (types, option letters, correspondence grid size) is sent so the model
+// knows what each question number looks like on the sheet.
+
+const PAPER_READ_MODEL = process.env.PAPER_READ_MODEL || "claude-opus-4-8";
+const PAPER_READ_EFFORT = process.env.PAPER_READ_EFFORT || "medium";
+const PAPER_MAX_IMAGES = 6;
+const SHEET_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+// Sheets are uploaded to Cloudinary by the browser first; only those URLs are
+// fetched, so this endpoint can't be used to make the server request arbitrary
+// hosts (SSRF).
+const SHEET_IMAGE_HOST = /(^|\.)res\.cloudinary\.com$/i;
+
+const SHEET_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    studentName: { type: "string" },
+    answers: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          number: { type: "integer" },
+          answer: { type: "string" },
+          confidence: { type: "string", enum: ["high", "medium", "low"] },
+          note: { type: "string" },
+        },
+        required: ["number", "answer", "confidence", "note"],
+      },
+    },
+  },
+  required: ["studentName", "answers"],
+};
+
+const SHEET_PROMPT = `You transcribe a student's PAPER answer sheet (answer card) for a math exam platform in Azerbaijan. The images are photos — possibly several pages, taken at an angle, with shadows or glare — of ONE student's sheet. You do NOT grade and you do NOT solve anything: you only report what the student marked or wrote.
+
+The exam layout lists every question number with its type:
+- "closed" (single choice): the student fills, circles or crosses ONE option letter. Return that letter in lowercase (e.g. "c"). Blank → "". If two or more options are marked, or a mark was corrected and the final choice is unclear, return your best reading with confidence "low".
+- "open" (short written answer): return the final answer exactly as written, as plain keyboard text with no LaTeX (e.g. 12, -3/4, x=5, 0.25). Blank → "".
+- "matching" (numbers → letters grid): return every number in order with its marked letters, lowercase, comma-separated: "1:a,c;2:b;3:". Leave the part after the colon empty when a number has no mark.
+
+Rules:
+- Return exactly one item per question number in the layout, in order. Never skip a number and never invent extra ones.
+- Ignore crossed-out or erased answers when a clear corrected answer exists.
+- confidence: "high" = one clearly readable mark/answer; "medium" = readable but faint or partly hidden; "low" = ambiguous, several marks, unreadable, or not visible in the images.
+- note: an empty string when confidence is "high"; otherwise a very short reason in Azerbaijani (e.g. "iki variant işarələnib", "oxunmur", "şəkildə görünmür").
+- studentName: the student's name as written on the sheet, or "" if there is none.`;
+
+const sheetLetter = (i) => String.fromCharCode(97 + i);
+
+// The exam's answer-key shape → the numbered layout the model reads against.
+function sheetLayout(key) {
+  return key
+    .map((q, i) => {
+      const n = i + 1;
+      if (q.type === "Cm") {
+        const opts = Array.isArray(q.options) && q.options.length ? q.options : ["a", "b", "c", "d", "e"];
+        return `${n}: closed, options ${opts.map((o) => String(o).toLowerCase()).join("/")}`;
+      }
+      if (q.type === "Cmu") {
+        const n2 = Number(q.leftCount) || 0;
+        const m = Number(q.rightCount) || 0;
+        return `${n}: matching, numbers 1-${n2}, letters a-${sheetLetter(Math.max(0, m - 1))}`;
+      }
+      return `${n}: open`;
+    })
+    .join("\n");
+}
+
+// Fetch one uploaded sheet image as base64 (Cloudinary-hosted HTTPS only).
+async function fetchSheetImage(url) {
+  let u;
+  try {
+    u = new URL(String(url));
+  } catch {
+    throw aiError(400, "Şəkil ünvanı yanlışdır");
+  }
+  if (u.protocol !== "https:" || !SHEET_IMAGE_HOST.test(u.hostname)) {
+    throw aiError(400, "Yalnız platformaya yüklənmiş şəkillər qəbul olunur");
+  }
+  let r;
+  try {
+    r = await fetch(u.toString());
+  } catch {
+    throw aiError(502, "Şəkil yüklənmədi. Yenidən cəhd edin.");
+  }
+  if (!r.ok) throw aiError(400, "Şəkil tapılmadı");
+  const media = String(r.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  if (!SHEET_IMAGE_TYPES.includes(media)) throw aiError(400, "Dəstəklənməyən şəkil formatı");
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (buf.length > 8 * 1024 * 1024) throw aiError(400, "Şəkil çox böyükdür (maks. 8MB)");
+  return { media, data: buf.toString("base64") };
+}
+
+// Model items → one selection per key question, in the scorer's answer shapes
+// (Cm letter string, open text, Cmu {numberIdx: [letterIdx]} map), plus the
+// confidence/note the teacher's review screen highlights.
+function sheetSelections(key, items) {
+  const byNum = new Map();
+  for (const it of Array.isArray(items) ? items : []) {
+    if (it && Number.isInteger(it.number) && !byNum.has(it.number)) byNum.set(it.number, it);
+  }
+  return key.map((q, i) => {
+    const it = byNum.get(i + 1);
+    const raw = String(it?.answer ?? "").trim();
+    const out = {
+      type: q.type,
+      confidence: it ? it.confidence : "low",
+      note: it ? String(it.note || "") : "şəkildə tapılmadı",
+    };
+    if (q.type === "Cm") {
+      const opts = (Array.isArray(q.options) && q.options.length ? q.options : ["a", "b", "c", "d", "e"]).map(
+        (o) => String(o).toLowerCase()
+      );
+      const letter = raw.toLowerCase().replace(/[^a-z]/g, "");
+      if (letter && !opts.includes(letter)) {
+        return { ...out, answer: "", confidence: "low", note: out.note || `oxunan: ${raw}` };
+      }
+      return { ...out, answer: letter };
+    }
+    if (q.type === "Cmu") {
+      const nCount = Number(q.leftCount) || 0;
+      const mCount = Number(q.rightCount) || 0;
+      const map = {};
+      raw.split(";").forEach((part) => {
+        const m = part.match(/^\s*(\d+)\s*:\s*(.*)$/);
+        if (!m) return;
+        const k = Number(m[1]) - 1;
+        if (k < 0 || k >= nCount) return;
+        const idx = m[2]
+          .toLowerCase()
+          .split(/[,\s]+/)
+          .map((s) => s.replace(/[^a-z]/g, ""))
+          .filter(Boolean)
+          .map((s) => s.charCodeAt(0) - 97)
+          .filter((v) => v >= 0 && v < mCount);
+        if (idx.length) map[k] = [...new Set(idx)].sort((a, b) => a - b);
+      });
+      return { ...out, answer: map };
+    }
+    return { ...out, answer: raw };
+  });
+}
+
+// May this user grade this exam? Admin, the owner, or any teacher for a legacy
+// ownerless exam (same rule as quizController.ownsOrAdmin).
+const canGradeExam = (user, exam) =>
+  !!user &&
+  (user.role === "admin" || !exam.owner || String(exam.owner) === String(user._id));
+
+// POST /exam/:examId/paper/read  { images: [cloudinaryUrl, …] }
+// → { answers: [{ type, answer, confidence, note }], studentName, cost }
+const readAnswerSheet = asyncHandler(async (req, res) => {
+  const images = (Array.isArray(req.body?.images) ? req.body.images : [])
+    .filter((s) => typeof s === "string" && s)
+    .slice(0, PAPER_MAX_IMAGES);
+  if (!images.length) {
+    res.status(400);
+    throw new Error("Ən azı bir şəkil lazımdır");
+  }
+
+  const exam = await Exam.findById(req.params.examId).populate("questions");
+  if (!exam) {
+    res.status(404);
+    throw new Error("İmtahan tapılmadı");
+  }
+  if (!canGradeExam(req.user, exam)) {
+    res.status(403);
+    throw new Error("Bu imtahan sizə aid deyil");
+  }
+  if (exam.mode !== "paper") {
+    res.status(400);
+    throw new Error("Bu imtahan kağız imtahanı deyil");
+  }
+  const key = exam.questions?.correctAnswers || [];
+  if (!key.length) {
+    res.status(400);
+    throw new Error("Əvvəlcə cavab açarını daxil edin");
+  }
+
+  const client = getClient();
+  if (!client) {
+    res.status(503);
+    throw new Error("AI funksiyası konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)");
+  }
+
+  let fetched;
+  try {
+    fetched = await Promise.all(images.map(fetchSheetImage));
+  } catch (e) {
+    res.status(e.aiStatus || 400);
+    throw new Error(e.userMessage || "Şəkil yüklənmədi");
+  }
+
+  let message;
+  try {
+    message = await client.messages
+      .stream({
+        model: PAPER_READ_MODEL,
+        max_tokens: 16000,
+        thinking: { type: "adaptive" },
+        system: [{ type: "text", text: SHEET_PROMPT, cache_control: { type: "ephemeral" } }],
+        output_config: {
+          effort: PAPER_READ_EFFORT,
+          format: { type: "json_schema", schema: SHEET_SCHEMA },
+        },
+        messages: [
+          {
+            role: "user",
+            content: [
+              ...fetched.map((im) => ({
+                type: "image",
+                source: { type: "base64", media_type: im.media, data: im.data },
+              })),
+              {
+                type: "text",
+                text: `İmtahanın strukturu (${key.length} sual):\n${sheetLayout(key)}\n\nBu cavab vərəqində şagirdin hər suala verdiyi cavabı oxu.`,
+              },
+            ],
+          },
+        ],
+      })
+      .finalMessage();
+  } catch (e) {
+    console.error("Paper sheet read error:", e?.status, e?.message);
+    res.status(502);
+    throw new Error("AI vərəqi oxuya bilmədi. Yenidən cəhd edin.");
+  }
+  if (message.stop_reason === "refusal") {
+    res.status(422);
+    throw new Error("AI bu şəkli emal edə bilmədi.");
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(message.content.find((b) => b.type === "text")?.text || "{}");
+  } catch {
+    res.status(502);
+    throw new Error("AI cavabı oxunmadı. Yenidən cəhd edin.");
+  }
+
+  const cost = computeCost(message.usage);
+  if (cost) cost.model = PAPER_READ_MODEL;
+  if (cost && req.user?._id) {
+    try {
+      await AiUsage.create({
+        user: req.user._id,
+        exam: exam._id,
+        model: cost.model,
+        inputTokens: cost.inputTokens,
+        outputTokens: cost.outputTokens,
+        cacheWriteTokens: cost.cacheWriteTokens,
+        cacheReadTokens: cost.cacheReadTokens,
+        totalTokens: cost.totalTokens,
+        usd: cost.usd,
+        questions: key.length,
+      });
+    } catch (e) {
+      console.error("AiUsage log failed:", e?.message);
+    }
+  }
+
+  res.status(200).json({
+    answers: sheetSelections(key, parsed.answers),
+    studentName: String(parsed.studentName || "").trim(),
+    cost,
+  });
+});
+
+module.exports = { extractQuestions, extractQuestionsStream, getAiUsage, readAnswerSheet };

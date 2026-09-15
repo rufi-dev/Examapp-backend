@@ -102,6 +102,22 @@ const resultSchema = Schema(
       type: Boolean,
       default: false,
     },
+    // "online" = submitted through the exam runner. "paper" = the teacher graded a
+    // photographed paper answer card (exam.mode "paper"); one per student/exam,
+    // re-grading updates it in place.
+    source: {
+      type: String,
+      enum: ["online", "paper"],
+      default: "online",
+    },
+    // Paper exams: the photographed answer-sheet page(s) the grade was read from.
+    // Shown to the student and teacher next to the answer sheet.
+    sheetPhotos: [{ type: String }],
+    // Paper exams: what the AI originally read per question (answer + confidence),
+    // kept so a teacher's manual corrections stay auditable.
+    aiAnswers: { type: Schema.Types.Mixed, default: undefined },
+    // Paper exams: the teacher/admin who saved the grade.
+    gradedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
     // Set once a termination-upgrade notification has been confirmed-delivered, so
     // a retry (or a crash-recovered pass) never double-sends the staff alert. This
     // is ONLY the termination marker, not a general "finished notified" gate.
