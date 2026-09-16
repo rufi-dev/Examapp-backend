@@ -29,14 +29,32 @@ const mine = async (req, id) => {
  * worked solutions, and shipping all of that to render "6 tapşırıq" would send
  * hundreds of kilobytes to draw one number.
  */
+/*
+ * An admin sees EVERY teacher's plans, not just their own.
+ *
+ * `mine()` below has always let an admin open any plan, but the list only ever
+ * showed the admin's own, so there was no way to reach anyone else's. Each row
+ * now says whose plan it is (`mine`, `ownerName`) so the page can label it. A
+ * teacher's list is unchanged: their own plans only.
+ */
 const listPlans = asyncHandler(async (req, res) => {
+  const isAdmin = req.user.role === "admin";
   const plans = await LessonPlan.aggregate([
-    { $match: { owner: req.user._id } },
+    { $match: isAdmin ? {} : { owner: req.user._id } },
     { $sort: { updatedAt: -1 } },
+    // The author's current name — `ownerName` is stamped at creation and can be
+    // empty on old plans or stale after a rename.
+    ...(isAdmin
+      ? [{ $lookup: { from: "users", localField: "owner", foreignField: "_id", as: "author", pipeline: [{ $project: { name: 1 } }] } }]
+      : []),
     {
       $project: {
         title: 1, topic: 1, grade: 1, subject: 1, status: 1, revision: 1,
         activeVersionNumber: 1, archivedAt: 1, updatedAt: 1, lessonMinutes: 1,
+        mine: { $eq: ["$owner", req.user._id] },
+        ownerName: isAdmin
+          ? { $ifNull: [{ $arrayElemAt: ["$author.name", 0] }, "$ownerName"] }
+          : "$ownerName",
         taskCount: { $size: { $ifNull: ["$tasks", []] } },
         stageCount: { $size: { $ifNull: ["$stages", []] } },
         // The minutes per stage — enough to draw the lesson's SHAPE on the card.
@@ -66,7 +84,7 @@ const listPlans = asyncHandler(async (req, res) => {
       },
     },
   ]);
-  res.json({ plans });
+  res.json({ plans, admin: isAdmin });
 });
 
 /*
@@ -117,11 +135,22 @@ const getPlan = asyncHandler(async (req, res) => {
     .select("versionNumber contentHash publishedAt")
     .sort({ versionNumber: -1 })
     .lean();
-  res.json({ plan, versions });
+  res.json({ plan, versions, mine: String(plan.owner) === String(req.user._id) });
 });
 
+/*
+ * The owner a write must be filed under — the PLAN's owner, not the caller.
+ *
+ * The service fences every write with `{ _id, owner }`. `mine()` lets an admin
+ * act on any plan, but these handlers passed `req.user._id`, so an admin opening
+ * another teacher's plan could read it and then every save, publish, archive or
+ * delete missed the document and came back "not found". Deleting still records
+ * the admin as the actor.
+ */
+const ownerOf = async (req, id) => (await mine(req, id)).owner;
+
 const updatePlan = asyncHandler(async (req, res) => {
-  await mine(req, req.params.id);
+  const owner = await ownerOf(req, req.params.id);
   const body = req.body || {};
   const patch = {};
   for (const f of svc.CONTENT_FIELDS) {
@@ -135,34 +164,34 @@ const updatePlan = asyncHandler(async (req, res) => {
   // Releasing solutions is a STATE change, not a content edit, but it rides the
   // same revision CAS so it cannot silently overwrite a concurrent edit.
   if (body.solutionsReleased !== undefined) patch.solutionsReleased = body.solutionsReleased === true;
-  const plan = await svc.updateDraft(req.params.id, req.user._id, patch, body.revision);
+  const plan = await svc.updateDraft(req.params.id, owner, patch, body.revision);
   res.json({ plan, duration: content.validateDuration(plan) });
 });
 
 const setSources = asyncHandler(async (req, res) => {
-  await mine(req, req.params.id);
+  const owner = await ownerOf(req, req.params.id);
   const ids = Array.isArray(req.body.sourceVersions) ? req.body.sourceVersions : [];
-  const plan = await svc.setSources(req.params.id, req.user._id, ids);
+  const plan = await svc.setSources(req.params.id, owner, ids);
   res.json({ plan });
 });
 
 const publishPlan = asyncHandler(async (req, res) => {
-  await mine(req, req.params.id);
-  const version = await svc.publish(req.params.id, req.user._id);
+  const owner = await ownerOf(req, req.params.id);
+  const version = await svc.publish(req.params.id, owner);
   res.json({ version: { _id: version._id, versionNumber: version.versionNumber, contentHash: version.contentHash } });
 });
 
 const archivePlan = asyncHandler(async (req, res) => {
-  await mine(req, req.params.id);
-  const plan = await svc.archive(req.params.id, req.user._id, req.body.archived !== false);
+  const owner = await ownerOf(req, req.params.id);
+  const plan = await svc.archive(req.params.id, owner, req.body.archived !== false);
   res.json({ plan });
 });
 
 const deletePlan = asyncHandler(async (req, res) => {
-  await mine(req, req.params.id);
+  const owner = await ownerOf(req, req.params.id);
   // Destroying a PUBLISHED plan takes an explicit force flag, so nothing can wipe
   // published content by accident. Unpublished drafts delete without ceremony.
-  const out = await svc.deleteDraft(req.params.id, req.user._id, {
+  const out = await svc.deleteDraft(req.params.id, owner, {
     actor: req.user.email || String(req.user._id),
     force: req.query.force === "published",
   });
@@ -170,8 +199,8 @@ const deletePlan = asyncHandler(async (req, res) => {
 });
 
 const acceptProposal = asyncHandler(async (req, res) => {
-  await mine(req, req.params.id);
-  const plan = await svc.acceptProposal(req.params.id, req.user._id, req.body.revision);
+  const owner = await ownerOf(req, req.params.id);
+  const plan = await svc.acceptProposal(req.params.id, owner, req.body.revision);
   res.json({ plan });
 });
 
@@ -390,7 +419,7 @@ const runPlanGeneration = async (req, res, buildPrompt) => {
    */
   const patch = { ...checked.plan };
   delete patch.proposal;
-  const saved = await svc.updateDraft(plan._id, req.user._id, patch, plan.revision, ["proposal"]);
+  const saved = await svc.updateDraft(plan._id, plan.owner, patch, plan.revision, ["proposal"]);
   res.json({ plan: saved, issues: checked.issues, provider: out.provider, hasSource });
 };
 
