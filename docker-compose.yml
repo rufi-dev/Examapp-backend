@@ -102,6 +102,10 @@ services:
       - --keyFile=/etc/mongo/keyfile
       - --wiredTigerCacheSizeGB=0.5
     mem_limit: 1g
+    # Loopback ONLY (127.0.0.1), never 0.0.0.0: reachable from the server itself —
+    # an SSH tunnel for MongoDB Compass — and still invisible from the internet.
+    ports:
+      - "127.0.0.1:27017:27017"
     volumes:
       - mongo_data:/data/db
       - ./mongo-keyfile:/etc/mongo/keyfile:ro
