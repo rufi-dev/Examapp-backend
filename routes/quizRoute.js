@@ -12,6 +12,7 @@ const {
   readPaperSheetAiForTeacher,
   getPaperExams,
   createPaperExam,
+  moveExamToClass,
   savePaperResult,
   deletePaperResult,
   getMyPaper,
@@ -184,6 +185,8 @@ router.delete("/deleteTag/:tagId", protect, teacherOnly, deleteTag);
 router.patch("/editTag/:tagId", protect, teacherOnly, editTag);
 router.patch("/editClass/:classId", protect, teacherOnly, editClass);
 router.patch("/setExamHidden/:examId", protect, teacherOnly, setExamHidden);
+// Move an exam to another class the teacher owns.
+router.patch("/exam/:examId/class", protect, teacherOnly, moveExamToClass);
 router.post("/exam/:examId/start", protect, startAttempt);
 router.post("/exam/:examId/autosave", protect, autosaveAttempt);
 router.get("/exam/:examId/attemptStatus", protect, attemptStatus);

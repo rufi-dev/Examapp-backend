@@ -693,6 +693,49 @@ const getExamsByClass = asyncHandler(async (req, res) => {
   res.status(200).json(visible);
 });
 
+// PATCH /exam/:examId/class { classId } — move an exam to another class the
+// teacher owns. Both classes' `exams` arrays stay in sync, and access follows the
+// new class: students of the old class stop seeing it, the new class's see it.
+// Results/attempts are keyed by exam, so grades are untouched.
+const moveExamToClass = asyncHandler(async (req, res) => {
+  const { examId } = req.params;
+  const { classId } = req.body || {};
+  const exam = await Exam.findById(examId);
+  if (!exam) {
+    res.status(404);
+    throw new Error("İmtahan tapılmadı");
+  }
+  if (!ownsOrAdmin(req.user, exam)) {
+    res.status(403);
+    throw new Error("Bu imtahan sizə aid deyil");
+  }
+  if (blockIfArchived(res, exam)) return;
+  if (!mongoose.isValidObjectId(classId)) {
+    res.status(400);
+    throw new Error("Sinif seçin");
+  }
+  const target = await Class.findById(classId);
+  if (!target) {
+    res.status(404);
+    throw new Error("Sinif tapılmadı");
+  }
+  if (!isAdminUser(req.user) && String(target.owner) !== String(req.user._id)) {
+    res.status(403);
+    throw new Error("Bu sinif sizə aid deyil");
+  }
+  const from = exam.class ? String(exam.class) : "";
+  if (from === String(target._id)) {
+    return res.status(200).json({ success: true, unchanged: true, class: { _id: target._id, name: target.name } });
+  }
+  exam.class = target._id;
+  await exam.save();
+  await Promise.all([
+    from ? Class.updateOne({ _id: from }, { $pull: { exams: exam._id } }) : null,
+    Class.updateOne({ _id: target._id }, { $addToSet: { exams: exam._id } }),
+  ]);
+  res.status(200).json({ success: true, class: { _id: target._id, name: target.name } });
+});
+
 // Quick publish/hide toggle for an exam (no other fields touched).
 const setExamHidden = asyncHandler(async (req, res) => {
   const { examId } = req.params;
@@ -4198,6 +4241,7 @@ module.exports = {
   readPaperSheetAiForTeacher,
   getPaperExams,
   createPaperExam,
+  moveExamToClass,
   savePaperResult,
   deletePaperResult,
   getMyPaper,
