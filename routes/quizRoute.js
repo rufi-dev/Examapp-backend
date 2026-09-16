@@ -10,6 +10,8 @@ const {
   getPaperSheet,
   readPaperSheetForTeacher,
   readPaperSheetAiForTeacher,
+  getPaperExams,
+  createPaperExam,
   savePaperResult,
   deletePaperResult,
   getMyPaper,
@@ -191,6 +193,10 @@ router.get("/exam/:examId/live", protect, getLiveAttempts);
 router.get("/live-exams", protect, getLiveExams);
 // Paper exams: grading workspace data, AI read of a photographed answer sheet,
 // save/update a student's graded sheet (or preview its score), remove one.
+// The dedicated "Kağız imtahanları" page: its own list + one-step creation.
+router.get("/paperExams", protect, getPaperExams);
+router.post("/paperExam", protect, teacherOnly, createPaperExam);
+
 router.get("/exam/:examId/paper", protect, teacherOnly, getPaperSheet);
 router.post("/exam/:examId/paper/read", protect, teacherOnly, readPaperSheetForTeacher);
 router.post("/exam/:examId/paper/read/ai", protect, teacherOnly, readPaperSheetAiForTeacher);

@@ -658,7 +658,8 @@ const getExamsByClass = asyncHandler(async (req, res) => {
   // No questions populate: the exam-card listing doesn't render any question
   // data, so sending populated question/option arrays per card is wasted payload.
   // Class IS populated (name/level) so the card can show the category chip.
-  const exams = await Exam.find({ class: exists._id, deletedAt: null }).populate(
+  // Paper exams live on their own "Kağız imtahanları" page, never in class lists.
+  const exams = await Exam.find({ class: exists._id, deletedAt: null, mode: { $ne: "paper" } }).populate(
     "class",
     "name level"
   );
@@ -3106,7 +3107,8 @@ const getExamsByUser = asyncHandler(async (req, res) => {
     throw new Error("User not found!");
   }
 
-  const exams = (user.exams || []).filter((e) => !e.deletedAt); // hide archived
+  // Archived hidden; paper exams live on their own page, not in exam lists.
+  const exams = (user.exams || []).filter((e) => !e.deletedAt && e.mode !== "paper");
   // Question count per exam for the card stats — a cheap $size aggregation that
   // does NOT load the (heavy) answer arrays.
   const qIds = exams.map((e) => e.questions).filter(Boolean);
@@ -3138,7 +3140,12 @@ const getExamsByUser = asyncHandler(async (req, res) => {
 const getPublicExams = asyncHandler(async (req, res) => {
   const publicIds = await Class.find({ requireCode: false }).distinct("_id");
   if (!publicIds.length) return res.status(200).json([]);
-  const exams = await Exam.find({ class: { $in: publicIds }, hidden: { $ne: true }, deletedAt: null })
+  const exams = await Exam.find({
+    class: { $in: publicIds },
+    hidden: { $ne: true },
+    deletedAt: null,
+    mode: { $ne: "paper" }, // paper exams have their own page
+  })
     .sort({ createdAt: -1 })
     .limit(8)
     .populate("class", "name level")
@@ -3187,6 +3194,7 @@ const getLatestExams = asyncHandler(async (req, res) => {
   // Students never see drafts (hidden exams).
   if (!isStaffUser(user)) filter.hidden = { $ne: true };
   filter.deletedAt = null; // never surface archived (trashed) exams
+  filter.mode = { $ne: "paper" }; // paper exams live on the "Kağız imtahanları" page
 
   // Dashboard shows ALL created/accessible exams (newest first) — no cap.
   const exams = await Exam.find(filter)
@@ -3717,6 +3725,123 @@ const deletePaperResult = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true });
 });
 
+// ---- the "Kağız imtahanları" page ----
+
+// GET /paperExams — every paper exam the viewer deals with, with its own stats.
+// Teacher/admin: the exams they own, with grading progress. Student: paper exams
+// in classes they can open, with their own upload status (never a score).
+const getPaperExams = asyncHandler(async (req, res) => {
+  const staff = isStaffUser(req.user);
+  const filter = { mode: "paper", deletedAt: null };
+  if (staff) {
+    if (!isAdminUser(req.user)) filter.owner = req.user._id;
+  } else {
+    const [enrolled, open] = await Promise.all([approvedClassIds(req.user._id), publicClassIds()]);
+    filter.class = { $in: [...new Set([...enrolled, ...open].map(String))] };
+    filter.hidden = { $ne: true };
+  }
+  const exams = await Exam.find(filter).sort({ createdAt: -1 }).populate("class", "name").lean();
+  if (!exams.length) return res.status(200).json([]);
+
+  const qIds = exams.map((e) => e.questions).filter(Boolean);
+  const sizeMap = {};
+  if (qIds.length) {
+    const sizes = await Question.aggregate([
+      { $match: { _id: { $in: qIds } } },
+      { $project: { n: { $size: { $ifNull: ["$correctAnswers", []] } } } },
+    ]);
+    sizes.forEach((s) => (sizeMap[String(s._id)] = s.n));
+  }
+  const examIds = exams.map((e) => e._id);
+  const [results, drafts] = await Promise.all([
+    Result.find({ examId: { $in: examIds }, source: "paper" })
+      .select("examId userId submittedBy teacherReviewedAt")
+      .lean(),
+    staff ? [] : PaperDraft.find({ exam: { $in: examIds }, student: req.user._id }).select("exam photos").lean(),
+  ]);
+  const stats = new Map();
+  results.forEach((r) => {
+    const k = String(r.examId);
+    const s = stats.get(k) || { sheets: 0, needsReview: 0, mine: null };
+    s.sheets += 1;
+    if (r.submittedBy === "student" && !r.teacherReviewedAt) s.needsReview += 1;
+    if (String(r.userId) === String(req.user._id)) s.mine = r;
+    stats.set(k, s);
+  });
+  const draftBy = new Map((drafts || []).map((d) => [String(d.exam), d]));
+
+  res.status(200).json(
+    exams.map((e) => {
+      const s = stats.get(String(e._id)) || { sheets: 0, needsReview: 0, mine: null };
+      const draft = draftBy.get(String(e._id));
+      return {
+        _id: e._id,
+        name: e.name,
+        className: e.class?.name || "",
+        classId: e.class?._id || e.class,
+        totalMarks: e.totalMarks || 0,
+        questionCount: e.questions ? sizeMap[String(e.questions)] || 0 : 0,
+        startDate: e.startDate || null,
+        endDate: e.endDate || null,
+        hidden: !!e.hidden,
+        paperSelfUpload: e.paperSelfUpload !== false,
+        createdAt: e.createdAt,
+        sheets: s.sheets,
+        needsReview: s.needsReview,
+        // Student view only: status, never a score (the result page owns reveal).
+        ...(staff
+          ? {}
+          : {
+              window: paperUploadWindow(e),
+              submitted: !!s.mine,
+              resultId: s.mine?._id || null,
+              startedUpload: !!draft?.photos?.length,
+            }),
+      };
+    })
+  );
+});
+
+// POST /paperExam { name, classId, totalMarks, passingMarks, startDate, endDate,
+// paperSelfUpload } — one-step creation from the paper page (no PDF, no timer).
+const createPaperExam = asyncHandler(async (req, res) => {
+  const { name, classId, totalMarks, passingMarks, startDate, endDate, paperSelfUpload } = req.body || {};
+  if (!String(name || "").trim()) {
+    res.status(400);
+    throw new Error("İmtahan adını yazın");
+  }
+  const cls = await Class.findById(classId);
+  if (!cls) {
+    res.status(404);
+    throw new Error("Sinif tapılmadı");
+  }
+  if (!isAdminUser(req.user) && String(cls.owner) !== String(req.user._id)) {
+    res.status(403);
+    throw new Error("Bu sinif sizə aid deyil");
+  }
+  const total = Math.max(1, Number(totalMarks) || 100);
+  const exam = await Exam.create({
+    name: String(name).trim().slice(0, 200),
+    class: cls._id,
+    owner: req.user._id,
+    mode: "paper",
+    duration: 3600, // unused on paper, but the schema requires one
+    price: 0,
+    totalMarks: total,
+    passingMarks: Math.min(total, Math.max(1, Number(passingMarks) || Math.round(total / 2))),
+    ...(startDate ? { startDate } : {}),
+    ...(endDate ? { endDate } : {}),
+    // Paper results are graded after class, so the answers show right away.
+    showScore: true,
+    showCorrectAnswers: true,
+    revealAfterEnd: false,
+    paperSelfUpload: paperSelfUpload !== false,
+  });
+  cls.exams.push(exam._id);
+  await cls.save();
+  res.status(201).json({ success: true, exam: { _id: exam._id, name: exam.name } });
+});
+
 // ---- student self-upload ----
 
 // A paper exam the requesting student may upload a sheet for: not archived or
@@ -4071,6 +4196,8 @@ module.exports = {
   getPaperSheet,
   readPaperSheetForTeacher,
   readPaperSheetAiForTeacher,
+  getPaperExams,
+  createPaperExam,
   savePaperResult,
   deletePaperResult,
   getMyPaper,
