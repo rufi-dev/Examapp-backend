@@ -8,6 +8,8 @@ node_modules
 # names without values.
 .env.*
 !.env.example
+# The self-hosted MongoDB replica-set keyfile: a secret that lives on the server only.
+mongo-keyfile
 *.log
 # Runtime data — never commit (uploaded PDFs, study materials, WhatsApp sessions)
 uploads/

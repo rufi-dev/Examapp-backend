@@ -2,6 +2,7 @@ node_modules
 npm-debug.log
 .env
 .env.*
+mongo-keyfile
 *.log
 .wwebjs_auth
 .wwebjs_cache

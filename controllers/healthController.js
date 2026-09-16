@@ -825,20 +825,20 @@ const buildAlertsAndScore = (d) => {
   const dbUp = d.database?.ping?.up;
   const dbMs = d.database?.ping?.ms;
   if (!dbUp) {
-    add("down", "Verilənlər bazası", "MongoDB-yə qoşulmaq mümkün olmadı", "Atlas statusunu və MONGO_URI-ni yoxlayın");
+    add("down", "Verilənlər bazası", "MongoDB-yə qoşulmaq mümkün olmadı", "Serverdə mongo konteynerini (docker compose ps mongo) və MONGO_URI-ni yoxlayın");
     dock(15);
   } else if (dbMs >= T.dbPingCrit) {
-    add("critical", "Verilənlər bazası", `DB cavabı ${dbMs}ms`, "Atlas metriklərinə baxın; yavaş sorğuları yoxlayın", `${dbMs}ms`, `${T.dbPingCrit}ms`);
+    add("critical", "Verilənlər bazası", `DB cavabı ${dbMs}ms`, "Serverin CPU/RAM yükünə və yavaş sorğulara baxın", `${dbMs}ms`, `${T.dbPingCrit}ms`);
     dock(8);
   } else if (dbMs >= T.dbPingWarn) {
-    add("warning", "Verilənlər bazası", `DB cavabı ${dbMs}ms`, "Davam edərsə Atlas tier-ini yoxlayın", `${dbMs}ms`, `${T.dbPingWarn}ms`);
+    add("warning", "Verilənlər bazası", `DB cavabı ${dbMs}ms`, "Davam edərsə serverin yükünü yoxlayın", `${dbMs}ms`, `${T.dbPingWarn}ms`);
     dock(4);
   }
   // Write test: a hard failure surfaces as ok===false OR an {error} shape
   // (cached() fallback). Both must alert — this is a data-durability signal.
   const wt = d.database?.writeTest;
   if (dbUp && wt && (wt.ok === false || wt.error != null)) {
-    add("critical", "Verilənlər bazası", "Yazma testi alınmadı", "Atlas disk kvotasını / icazələri yoxlayın");
+    add("critical", "Verilənlər bazası", "Yazma testi alınmadı", "Serverin disk yerini və mongo konteynerini yoxlayın");
     dock(5);
   }
 
@@ -1053,9 +1053,19 @@ const getHealth = asyncHandler(async (req, res) => {
       jobs,
       errors,
       ssl: sslArr,
+      /*
+       * Where the data actually lives, since 2026-09-16: MongoDB runs on this server
+       * (it moved off Atlas, whose shared tier throttled the database), and files have
+       * always been on the server's own disk volumes — never Cloudinary, whatever this
+       * note used to say. Both copies are on the same machine until an off-server
+       * destination is set up, and the page says so rather than implying otherwise.
+       */
       backups: {
-        provider: "MongoDB Atlas",
-        note: "Ehtiyat nüsxələr Atlas tərəfindən avtomatik idarə olunur (cloud.mongodb.com → Backup). Fayllar Cloudinary-də saxlanılır.",
+        provider: "MongoDB (öz serverimizdə)",
+        note:
+          "Verilənlər bazası hər gecə serverdə yedəklənir (/root/backups/mongo/nightly, 14 gün). " +
+          "Fayllar (videolar, tapşırıqlar, materiallar) serverin disk həcmlərindədir. " +
+          "Diqqət: hələ hər ikisi eyni serverdədir — serverdən kənara surət qurulmayıb.",
       },
     };
   });

@@ -26,6 +26,9 @@ services:
     init: true
     # Chromium (whatsapp-web.js) needs more shared memory than the 64MB default.
     shm_size: "512mb"
+    depends_on:
+      mongo:
+        condition: service_healthy
     expose:
       - "5000" # internal only; Caddy is the public entrypoint
     volumes:
@@ -55,6 +58,9 @@ services:
       RUN_BACKGROUND_JOBS: "false"
       WHATSAPP_WEB_ENABLED: "false"
     init: true
+    depends_on:
+      mongo:
+        condition: service_healthy
     volumes:
       - uploads:/app/uploads
       - exampdfs:/app/examPdfs
@@ -62,6 +68,51 @@ services:
       - assignments:/app/assignments
       - videos:/app/videos
       - curriculum:/app/lessonAssets
+    networks:
+      - web
+
+  # Self-hosted MongoDB, moved off Atlas on 2026-09-16: the Atlas shared tier
+  # throttled server<->database traffic to ~97 KB/s, which made every page that
+  # moved real data slow.
+  #
+  # MongoDB 7.0, NOT 8.x, on purpose. This host runs Linux kernel 7.0, and MongoDB
+  # 8.0+ is broken on kernels >= 6.19 (SERVER-121912: its TCMalloc violates the
+  # rseq ABI). Measured here: 8.0 refuses to start, 8.2 starts and then segfaults
+  # after 26 s of load. 7.0 ran a 3-minute parallel write/transaction stress test
+  # clean. It is also the server version the app's driver (bundled with Mongoose
+  # 7.8) officially supports. Move to 8.x only once a build passes that test.
+  #
+  # INTERNAL ONLY: no published port, so only the backend and worker on the `web`
+  # network can reach it — never the internet.
+  #
+  # A one-node REPLICA SET, not a plain server: the app uses transactions
+  # (services/mongoUnitOfWork, 17 call sites) and MongoDB refuses a transaction
+  # on a standalone. Auth is on; with a replica set that needs the keyfile, which
+  # lives only on the server (./mongo-keyfile, 400, owned by uid 999) and is kept
+  # out of git and out of the image by .gitignore / .dockerignore.
+  #
+  # Memory is capped: the box has 3.7 GB and WhatsApp's Chromium sessions share
+  # it. 0.5 GB of cache is far more than the ~64 MB of data needs.
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    command:
+      - --replSet=rs0
+      - --bind_ip_all
+      - --keyFile=/etc/mongo/keyfile
+      - --wiredTigerCacheSizeGB=0.5
+    mem_limit: 1g
+    volumes:
+      - mongo_data:/data/db
+      - ./mongo-keyfile:/etc/mongo/keyfile:ro
+      # Nightly dumps land here, on the host, for the off-server copy to pick up.
+      - /root/backups/mongo:/backups
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     networks:
       - web
 
@@ -99,3 +150,4 @@ volumes:
   curriculum:
   caddy_data:
   caddy_config:
+  mongo_data: # the database itself — never `docker volume rm` this
