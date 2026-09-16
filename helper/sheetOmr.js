@@ -681,6 +681,81 @@ function analyzeGlyphsImage(cv, img, { flipped = false, rows = [], debug = false
   }
 }
 
+/*
+ * How much handwriting sits inside given boxes (upright coordinates).
+ *
+ * OCR returning no words does not prove a box is empty: faint pencil, glare,
+ * cursive or a bad crop all read as nothing. This measures the box's own ink
+ * after erasing the printed border lines, so "blank" can be evidence-based.
+ *   boxes: [{ x0, y0, x1, y1 } | null]  →  [{ ink, pixels } | null]
+ */
+function analyzeBoxInkImage(cv, img, { flipped = false, boxes = [] } = {}) {
+  const mats = [];
+  const keep = (m) => {
+    mats.push(m);
+    return m;
+  };
+  try {
+    const rgba = keep(cv.matFromImageData(img));
+    const gray = keep(new cv.Mat());
+    cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
+    const W = gray.cols;
+    const H = gray.rows;
+    const ink = inkMap(cv, gray, keep);
+
+    return boxes.map((b) => {
+      if (!b || !(b.x1 > b.x0) || !(b.y1 > b.y0)) return null;
+      const px0 = Math.max(0, Math.floor(flipped ? W - 1 - b.x1 : b.x0));
+      const px1 = Math.min(W - 1, Math.ceil(flipped ? W - 1 - b.x0 : b.x1));
+      const py0 = Math.max(0, Math.floor(flipped ? H - 1 - b.y1 : b.y0));
+      const py1 = Math.min(H - 1, Math.ceil(flipped ? H - 1 - b.y0 : b.y1));
+      const cw = px1 - px0 + 1;
+      const chh = py1 - py0 + 1;
+      if (cw < 4 || chh < 4) return null;
+
+      const bin = keep(new cv.Mat(chh, cw, cv.CV_8UC1));
+      const bd = bin.data;
+      for (let y = 0; y < chh; y++) {
+        for (let x = 0; x < cw; x++) bd[y * cw + x] = ink[(py0 + y) * W + px0 + x] > GLYPH_INK ? 255 : 0;
+      }
+      // Erase the printed box rules; only handwriting should remain.
+      const runs = (len, lines, along, at) => {
+        for (let a = 0; a < lines; a++) {
+          let start = -1;
+          for (let c = 0; c <= along; c++) {
+            const on = c < along && bd[at(a, c)];
+            if (on && start < 0) start = c;
+            if (!on && start >= 0) {
+              if (c - start >= len) for (let k = start; k < c; k++) bd[at(a, k)] = 0;
+              start = -1;
+            }
+          }
+        }
+      };
+      runs(Math.max(12, Math.round(cw * 0.5)), chh, cw, (y, x) => y * cw + x);
+      runs(Math.max(12, Math.round(chh * 0.6)), cw, chh, (x, y) => y * cw + x);
+
+      let dark = 0;
+      for (let i = 0; i < bd.length; i++) if (bd[i]) dark++;
+      return { ink: dark / (cw * chh), pixels: dark };
+    });
+  } finally {
+    mats.forEach((m) => {
+      try {
+        m.delete();
+      } catch {
+        /* already freed */
+      }
+    });
+  }
+}
+
+async function analyzeBoxInkJpeg(buffer, opts) {
+  const { cv } = await loadCv();
+  const img = jpeg.decode(buffer, { useTArray: true, formatAsRGBA: true, maxMemoryUsageInMB: 1024, maxResolutionInMP: 80 });
+  return analyzeBoxInkImage(cv, img, opts);
+}
+
 async function analyzeGlyphsJpeg(buffer, opts) {
   const { cv } = await loadCv();
   const img = jpeg.decode(buffer, { useTArray: true, formatAsRGBA: true, maxMemoryUsageInMB: 1024, maxResolutionInMP: 80 });
@@ -746,13 +821,18 @@ function runInWorker(kind, buffer, opts, timeoutMs) {
 const runOmr = (buffer, opts = {}, timeoutMs = 45000) => runInWorker("omr", buffer, opts, timeoutMs);
 // Punctuation check of OCR'd answers on one JPEG photo → analyzeGlyphsImage result.
 const runGlyphs = (buffer, opts = {}, timeoutMs = 30000) => runInWorker("glyphs", buffer, opts, timeoutMs);
+// Ink inside answer boxes → analyzeBoxInkImage result (evidence for "blank").
+const runBoxInk = (buffer, opts = {}, timeoutMs = 30000) => runInWorker("boxink", buffer, opts, timeoutMs);
 
 module.exports = {
   runOmr,
   runGlyphs,
+  runBoxInk,
   analyzeJpeg,
   analyzeImage,
   analyzeGlyphsJpeg,
+  analyzeBoxInkJpeg,
+  analyzeBoxInkImage,
   loadCv,
   _internals: { inkMap, detectCircles, locateGrid },
 };

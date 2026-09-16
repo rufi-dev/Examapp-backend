@@ -6,7 +6,7 @@
  *  - anything not read with confidence is returned in `unresolved`, for the
  *    caller to send to the AI fallback (aiController.readSheetImages).
  */
-const { runOmr, runGlyphs } = require("./sheetOmr");
+const { runOmr, runGlyphs, runBoxInk } = require("./sheetOmr");
 const { visionConfigured, visionWords, parseCardText } = require("./sheetOcr");
 const { alignSection, parseSheetAnswer } = require("../controllers/aiController");
 
@@ -16,6 +16,10 @@ const CARD_OPTIONS = 5; // A–E bubbles on the card
 const LETTERS = "abcdefghij";
 // Characters a typed-out math answer may contain; anything else → AI.
 const ALLOWED_TEXT = /^[\p{L}\p{N}\s+\-−–=/\\.,:;()[\]{}√π^*×·<>≤≥%'"|!°]+$/u;
+// Share of an answer box that must be ink before "OCR read nothing" is allowed to
+// mean "the student wrote nothing". Printed rules are erased before measuring, so
+// a genuinely empty box sits near 0; even a faint digit clears this.
+const BLANK_INK_MAX = 0.004;
 
 const readError = (status, message) => {
   const e = new Error(message);
@@ -191,6 +195,25 @@ async function platformReadSheet(key, images, { wantName = false } = {}) {
             console.error("Glyph check failed:", e?.message);
           }
         }
+        /*
+         * A box OCR read nothing in is only blank if its own ink says so. Vision
+         * returns no words for faint pencil, glare, cursive and bad crops too, and
+         * scoring those as unanswered is the worst failure this pipeline has.
+         */
+        const emptyRows = parsed.open.filter((o) => o.empty && o.box);
+        if (emptyRows.length) {
+          try {
+            const inks = await runBoxInk(bufs[i], {
+              flipped: onGrid ? omr.flipped : false,
+              boxes: emptyRows.map((o) => o.box),
+            });
+            emptyRows.forEach((o, k) => {
+              o.inkScore = inks?.[k]?.ink ?? null;
+            });
+          } catch (e) {
+            console.error("Box ink check failed:", e?.message);
+          }
+        }
         const aligned = alignSection(
           openQ,
           parsed.open.map((o) => ({ printed: o.printed, answer: o.answer, confidence: "high", note: "", o }))
@@ -203,7 +226,13 @@ async function platformReadSheet(key, images, { wantName = false } = {}) {
             return;
           }
           const { o } = hit.item;
-          if (o.empty) settle(it.index, "", "high", "ocr");
+          a.evidence = { ocrConf: o.conf, ink: o.inkScore ?? null, raw: o.raw || "" };
+          if (o.empty) {
+            // Unmeasured (no box / worker failure) counts as unproven, not blank.
+            if (o.inkScore === null || o.inkScore === undefined) a.note = "boş olduğu yoxlanılmadı";
+            else if (o.inkScore > BLANK_INK_MAX) a.note = "qutuda yazı var, oxunmadı";
+            else settle(it.index, "", "high", "ocr");
+          }
           else if (o.multiline) a.note = "cavab bir neçə sətirdə yazılıb";
           // Handwritten digits often read at 0.6–0.8; accept them flagged for a look.
           else if (o.conf < 0.6) a.note = "yazı aydın oxunmadı";

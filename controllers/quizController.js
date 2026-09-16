@@ -3318,13 +3318,19 @@ const isPlainMap = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 // question, shaped per type — using only non-secret layout (option letters, grid
 // size). Everything a student sees BEFORE submitting goes through this, never the
 // key-aware normalizePaperSelections (which would leak which answers match).
+// Matching types are read off a card the same way (a grid of numbers × letters),
+// even though they SCORE differently: Cmu compares letter sets, Cma compares the
+// right-hand value of each pair (mapped from the grid server-side at scoring).
+const isMatchType = (t) => t === "Cmu" || t === "Cma";
+
 function coerceSheetAnswers(key, answers) {
   const src = Array.isArray(answers) ? answers : [];
   return key.map((ca, i) => {
     const a = isPlainMap(src[i]) && "answer" in src[i] ? src[i].answer : undefined;
-    if (ca.type === "Cmu") {
-      const n = Number(ca.leftCount) || 0;
-      const m = Number(ca.rightCount) || 0;
+    if (isMatchType(ca.type)) {
+      const pairs = Array.isArray(ca.pairs) ? ca.pairs.length : 0;
+      const n = Number(ca.leftCount) || pairs || 0;
+      const m = Number(ca.rightCount) || pairs || 0;
       const out = {};
       if (isPlainMap(a)) {
         for (let k = 0; k < n; k++) {
@@ -3362,6 +3368,20 @@ function normalizePaperSelections(key, answers) {
       const hit = pool.find((o) => o.toLowerCase() === v);
       return { type: ca.type, answer: hit !== undefined ? hit : v };
     }
+    // Cma is read as a grid but scored against the pair's right-hand value, so the
+    // mapping happens HERE, server-side, where the key already lives (no leak).
+    if (ca.type === "Cma") {
+      const pairs = Array.isArray(ca.pairs) ? ca.pairs : [];
+      const out = {};
+      if (isPlainMap(v)) {
+        Object.keys(v).forEach((k) => {
+          const picks = Array.isArray(v[k]) ? v[k] : [];
+          const right = pairs[Number(picks[0])]?.right;
+          if (picks.length === 1 && right !== undefined) out[Number(k)] = right;
+        });
+      }
+      return { type: ca.type, answer: out };
+    }
     if ((ca.type === "Co" || ca.type === "Cd") && v) {
       const accepted = (Array.isArray(ca.answers) && ca.answers.length ? ca.answers : [ca.answer]).filter(
         (x) => String(x ?? "").trim() !== ""
@@ -3375,7 +3395,7 @@ function normalizePaperSelections(key, answers) {
 
 // Did the student's value change from what the AI read? (spacing/case-insensitive)
 function sameSheetAnswer(q, a, b) {
-  if (q.type === "Cmu") {
+  if (isMatchType(q.type)) {
     const canon = (m) =>
       JSON.stringify(
         Object.keys(isPlainMap(m) ? m : {})
@@ -3561,6 +3581,7 @@ const getPaperSheet = asyncHandler(async (req, res) => {
       leftCount: ca.leftCount,
       rightCount: ca.rightCount,
       key: ca.key,
+      pairs: ca.pairs, // Cma: the teacher UI needs these to mark ✓/✗
     })),
     students: roster.students.map((s) => ({ _id: s._id, name: s.name, email: s.email, photo: s.photo })),
     results: results.map(paperResultView),
@@ -4103,10 +4124,14 @@ const readMyPaperAi = asyncHandler(async (req, res) => {
     isPlainMap(draft.aiAnswers?.[i]) ? { ...draft.aiAnswers[i] } : { answer: "", confidence: "low", note: "", source: null }
   );
   const current = key.map((q, i) => (Array.isArray(draft.answers) ? draft.answers[i] : machine[i].answer));
+  // What the AI could not settle STAYS unresolved: a low-confidence or empty
+  // model answer is a proposal, not a reading.
+  const stillUnresolved = [];
   questions.forEach((i) => {
     const got = read.answers[i];
     if (sameSheetAnswer(key[i], current[i], machine[i].answer)) current[i] = got.answer;
     machine[i] = { answer: got.answer, confidence: got.confidence, note: got.note, source: "ai" };
+    if (got.confidence === "low") stillUnresolved.push(i);
   });
   const answers = coerceSheetAnswers(
     key,
@@ -4114,12 +4139,16 @@ const readMyPaperAi = asyncHandler(async (req, res) => {
   );
   const known = draft.sheetStudent && (draft.sheetStudent.firstName || draft.sheetStudent.lastName);
   const sheetStudent = known ? draft.sheetStudent : read.student;
-  await PaperDraft.updateOne({ _id: reserved._id }, { $set: { answers, aiAnswers: machine, unresolved: [], sheetStudent } });
+  await PaperDraft.updateOne(
+    { _id: reserved._id },
+    { $set: { answers, aiAnswers: machine, unresolved: stillUnresolved, sheetStudent } }
+  );
 
   res.status(200).json({
     answers,
     machine,
     aiQuestions: questions,
+    unresolved: stillUnresolved,
     student: sheetStudent,
     nameCheck: sheetNameCheck(req.user.name, sheetStudent),
     readsLeft: Math.max(0, PAPER_STUDENT_READS - reserved.readCount),
@@ -4242,6 +4271,10 @@ module.exports = {
   getPaperExams,
   createPaperExam,
   moveExamToClass,
+  // Paper-sheet answer shaping — exported for tests/paper-read.test.js.
+  coerceSheetAnswers,
+  normalizePaperSelections,
+  sameSheetAnswer,
   savePaperResult,
   deletePaperResult,
   getMyPaper,

@@ -116,8 +116,10 @@ function parseCardText(rawWords, { width, height, flipped = false, grid = null, 
   const gun = sinif && top.find((w) => /^g[üu]n$/.test(w.key) && sameLine(sinif, w) && w.x0 > sinif.x1);
   const ders = sinif && top.find((w) => /^d[əe]rs/.test(w.key) && sameLine(sinif, w) && w.x0 > sinif.x1);
   const labels = new Set([ad, soyad, ata, adi, sinif, gun, ders].filter(Boolean));
+  // No words after a label means nothing was READ, not that the box is empty:
+  // confidence 0, so the caller never treats it as a confident value.
   const valueAfter = (label, next) => {
-    if (!label) return { text: "", conf: 1 };
+    if (!label) return { text: "", conf: 0 };
     const ws = top
       .filter(
         (w) =>
@@ -128,7 +130,7 @@ function parseCardText(rawWords, { width, height, flipped = false, grid = null, 
           (!next || (sameLine(label, next) && w.x1 <= next.x0 + 4))
       )
       .sort((a, b) => a.x0 - b.x0);
-    return { text: ws.map((w) => w.text).join(" "), conf: ws.length ? Math.min(...ws.map((w) => w.conf)) : 1 };
+    return { text: ws.map((w) => w.text).join(" "), conf: ws.length ? Math.min(...ws.map((w) => w.conf)) : 0 };
   };
   const first = valueAfter(ad, soyad);
   const last = valueAfter(soyad, ata);
@@ -141,7 +143,15 @@ function parseCardText(rawWords, { width, height, flipped = false, grid = null, 
     fatherName: father.text.slice(0, 80),
     className: cls.text.slice(0, 80),
   };
-  const nameResolved = nameFound && first.conf >= 0.7 && last.conf >= 0.7;
+  // A name counts as READ only when both parts actually carry letters. Printed
+  // labels над empty boxes used to satisfy this and skip the AI/name fallback.
+  const named = (v) => v.replace(/[^\p{L}\p{N}]/gu, "").length >= 2;
+  const nameResolved =
+    nameFound &&
+    first.conf >= 0.7 &&
+    last.conf >= 0.7 &&
+    named(student.firstName) &&
+    named(student.lastName);
 
   // ---- open answers: printed numbers right of the bubble grid ----
   const open = [];
@@ -205,7 +215,12 @@ function parseCardText(rawWords, { width, height, flipped = false, grid = null, 
           printed: row.printed,
           // One answer = one value: gaps in handwriting are not spaces ("72 47" → "7247").
           answer: inRow.map((w) => w.text).join(""),
-          conf: inRow.length ? Math.min(...inRow.map((w) => w.conf)) : 1,
+          // Kept verbatim: `answer` may later gain marks OCR skipped (a slash, a dot).
+          raw: inRow.map((w) => w.text).join(" "),
+          // The answer box itself, so the caller can measure ink when OCR read
+          // nothing — "no words" must never be mistaken for "nothing written".
+          box: { x0: labelX1 + 0.5 * lh, x1: boxRight, y0: yTop, y1: yBot },
+          conf: inRow.length ? Math.min(...inRow.map((w) => w.conf)) : 0,
           multiline: inRow.length > 1 && Math.max(...ys) - Math.min(...ys) > 0.8 * hs,
           empty: !inRow.length,
           symbols: inRow
