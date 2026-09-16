@@ -110,31 +110,38 @@ async function platformReadSheet(key, images, { wantName = false } = {}) {
     unresolved.delete(i);
   };
 
-  // ---- bubbles (first photo where the grid is found) ----
-  let omr = null;
-  let omrAt = -1;
+  // ---- bubbles: EVERY page, merged in upload order ----
   const sizes = bufs.map(jpegSize);
+  const grids = [];
   for (let i = 0; i < bufs.length; i++) {
     try {
       const r = await runOmr(bufs[i], { options: CARD_OPTIONS });
-      if (r.ok) {
-        omr = r;
-        omrAt = i;
-        break;
-      }
+      if (r.ok) grids.push({ page: i, ...r });
     } catch (e) {
       console.error("OMR failed:", e?.message);
     }
   }
+  const omr = grids[0] || null; // first grid also provides geometry for the OCR pass
+  const omrAt = omr ? omr.page : -1;
+  const omrRows = grids.flatMap((g) => g.rows);
   if (closedQ.length) {
-    if (!omr) {
+    if (!grids.length) {
       closedQ.forEach((it) => (answers[it.index].note = "platforma işarələri tapa bilmədi"));
-    } else if (omr.rows.length < closedQ.length) {
-      // A row may be cut off the photo — positions can't be trusted.
-      closedQ.forEach((it) => (answers[it.index].note = "vərəqdə bütün sətirlər görünmür"));
+    } else if (omrRows.length !== closedQ.length) {
+      /*
+       * Exact coverage or nothing. Rows are matched to questions by POSITION, so
+       * one missing row (cut off the photo) or one extra (a stray circle, a second
+       * page read twice) shifts every answer after it — silently, and with high
+       * confidence. Better to hand the whole section to review.
+       */
+      const note =
+        omrRows.length < closedQ.length
+          ? `vərəqdə ${omrRows.length}/${closedQ.length} sətir göründü`
+          : `vərəqdə gözləniləndən çox sətir tapıldı (${omrRows.length}/${closedQ.length})`;
+      closedQ.forEach((it) => (answers[it.index].note = note));
     } else {
       closedQ.forEach((it, k) => {
-        const row = omr.rows[k];
+        const row = omrRows[k];
         if (row.status === "blank") return settle(it.index, "", "high", "omr");
         if (row.status === "marked") {
           const { answer, invalid } = parseSheetAnswer(it.q, LETTERS[row.col]);
@@ -155,8 +162,14 @@ async function platformReadSheet(key, images, { wantName = false } = {}) {
   let nameResolved = false;
   if (needText && visionConfigured()) {
     const order = omrAt >= 0 ? [omrAt, ...bufs.map((_, i) => i).filter((i) => i !== omrAt)] : bufs.map((_, i) => i);
-    let openDone = !openQ.length;
-    for (const i of order.slice(0, 2)) {
+    /*
+     * Read EVERY page until the open questions are covered (one Vision call per
+     * page). Stopping at the first page with any rows left later pages unread on a
+     * multi-page card; rows are merged by their printed number so upload order
+     * doesn't matter, and un-numbered rows keep page order.
+     */
+    const merged = new Map(); // key → { row, page }
+    for (const i of order) {
       let words;
       try {
         words = await visionWords(bufs[i]);
@@ -176,42 +189,55 @@ async function platformReadSheet(key, images, { wantName = false } = {}) {
         student = parsed.student;
         nameResolved = parsed.nameResolved;
       }
-      if (!openDone && parsed.open.length) {
-        openDone = true;
-        // Restore marks OCR skipped between characters (fraction slash, dot, minus).
-        if (parsed.open.some((o) => !o.empty)) {
-          try {
-            const fixes = await runGlyphs(bufs[i], {
-              flipped: onGrid ? omr.flipped : false,
-              rows: parsed.open.map((o) => ({ symbols: o.empty || o.multiline ? [] : o.symbols })),
-            });
-            fixes.forEach((f, k) => {
-              if (f?.added?.length) {
-                parsed.open[k].answer = f.text;
-                parsed.open[k].added = f.added;
-              }
-            });
-          } catch (e) {
-            console.error("Glyph check failed:", e?.message);
+      parsed.open.forEach((o, idx) => {
+        const k = o.printed ? `n${o.printed}` : `p${i}:${idx}`;
+        if (!merged.has(k)) merged.set(k, { o, page: i });
+      });
+      if (parsed.nameFound || parsed.open.length) textStatus = "ok";
+      if (merged.size >= openQ.length && (nameResolved || !wantName)) break;
+    }
+
+    const openDone = merged.size > 0;
+    if (openDone) {
+      {
+        // Per page: measure ink in boxes OCR read nothing in, and restore marks it
+        // skipped between characters. Both need that page's own pixels.
+        const byPage = new Map();
+        merged.forEach(({ o, page }) => {
+          if (!byPage.has(page)) byPage.set(page, []);
+          byPage.get(page).push(o);
+        });
+        const parsed = { open: [...merged.values()].map((m) => m.o) };
+        for (const [page, rowsOnPage] of byPage) {
+          const onGrid = page === omrAt;
+          const flipped = onGrid ? omr.flipped : false;
+          const empties = rowsOnPage.filter((o) => o.empty && o.box);
+          if (empties.length) {
+            try {
+              const inks = await runBoxInk(bufs[page], { flipped, boxes: empties.map((o) => o.box) });
+              empties.forEach((o, k) => {
+                o.inkScore = inks?.[k]?.ink ?? null;
+              });
+            } catch (e) {
+              console.error("Box ink check failed:", e?.message);
+            }
           }
-        }
-        /*
-         * A box OCR read nothing in is only blank if its own ink says so. Vision
-         * returns no words for faint pencil, glare, cursive and bad crops too, and
-         * scoring those as unanswered is the worst failure this pipeline has.
-         */
-        const emptyRows = parsed.open.filter((o) => o.empty && o.box);
-        if (emptyRows.length) {
-          try {
-            const inks = await runBoxInk(bufs[i], {
-              flipped: onGrid ? omr.flipped : false,
-              boxes: emptyRows.map((o) => o.box),
-            });
-            emptyRows.forEach((o, k) => {
-              o.inkScore = inks?.[k]?.ink ?? null;
-            });
-          } catch (e) {
-            console.error("Box ink check failed:", e?.message);
+          const written = rowsOnPage.filter((o) => !o.empty && !o.multiline);
+          if (written.length) {
+            try {
+              const fixes = await runGlyphs(bufs[page], {
+                flipped,
+                rows: written.map((o) => ({ symbols: o.symbols })),
+              });
+              written.forEach((o, k) => {
+                if (fixes?.[k]?.added?.length) {
+                  o.answer = fixes[k].text;
+                  o.added = fixes[k].added;
+                }
+              });
+            } catch (e) {
+              console.error("Glyph check failed:", e?.message);
+            }
           }
         }
         const aligned = alignSection(
@@ -243,8 +269,6 @@ async function platformReadSheet(key, images, { wantName = false } = {}) {
           }
         });
       }
-      if (parsed.nameFound || parsed.open.length) textStatus = "ok";
-      if (openDone && (nameResolved || !wantName)) break;
     }
     if (!openDone) openQ.forEach((it) => (answers[it.index].note = answers[it.index].note || "açıq cavablar tapılmadı"));
   } else if (openQ.length) {
