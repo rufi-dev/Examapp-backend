@@ -808,6 +808,9 @@ const getAiUsage = asyncHandler(async (req, res) => {
 });
 
 // ---- Paper exams: read a photographed answer card ---------------------------
+// Standalone module on purpose: requiring it from helper/paperReader would close
+// a require cycle (paperReader already imports this controller).
+const { readCapped } = require("../helper/fetchLimit");
 // Claude transcribes ONLY what the student marked or wrote — it never grades or
 // solves; the server scores the reviewed selections against the key. Used by the
 // teacher grading workspace and by student self-upload (quizController).
@@ -934,8 +937,10 @@ async function fetchSheetImage(url) {
   if (!r.ok) throw aiError(400, "Şəkil tapılmadı");
   const media = String(r.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
   if (!SHEET_IMAGE_TYPES.includes(media)) throw aiError(400, "Dəstəklənməyən şəkil formatı");
-  const buf = Buffer.from(await r.arrayBuffer());
-  if (buf.length > 8 * 1024 * 1024) throw aiError(400, "Şəkil çox böyükdür (maks. 8MB)");
+  // Capped while streaming: buffering first and measuring after would let an
+  // oversized response occupy memory before it is rejected.
+  const buf = await readCapped(r, 8 * 1024 * 1024);
+  if (!buf) throw aiError(400, "Şəkil çox böyükdür (maks. 8MB)");
   return { media, data: buf.toString("base64") };
 }
 

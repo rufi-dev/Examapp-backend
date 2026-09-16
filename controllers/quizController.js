@@ -3713,6 +3713,8 @@ const savePaperResult = asyncHandler(async (req, res) => {
             answer: x && x.answer !== undefined ? x.answer : "",
             confidence: ["high", "medium", "low"].includes(x?.confidence) ? x.confidence : "high",
             source: ["omr", "ocr", "ai"].includes(x?.source) ? x.source : null,
+            // Audit trail for a disputed read (OCR confidence, ink, raw text).
+            ...(isPlainMap(x?.evidence) ? { evidence: x.evidence } : {}),
           })),
         }
       : {}),
@@ -4072,7 +4074,15 @@ const readMyPaper = asyncHandler(async (req, res) => {
       $set: {
         photos: cleanSheetPhotos(req.body?.images),
         answers: coerceSheetAnswers(key, read.answers),
-        aiAnswers: read.answers.map((a) => ({ answer: a.answer, confidence: a.confidence, note: a.note, source: a.source })),
+        // `evidence` (OCR confidence, measured ink, raw transcription) is kept so a
+        // disputed read can be audited against the stored photo later.
+        aiAnswers: read.answers.map((a) => ({
+          answer: a.answer,
+          confidence: a.confidence,
+          note: a.note,
+          source: a.source,
+          ...(a.evidence ? { evidence: a.evidence } : {}),
+        })),
         unresolved: read.unresolved,
         sheetStudent: student || undefined,
       },
@@ -4131,7 +4141,11 @@ const readMyPaperAi = asyncHandler(async (req, res) => {
     const got = read.answers[i];
     if (sameSheetAnswer(key[i], current[i], machine[i].answer)) current[i] = got.answer;
     machine[i] = { answer: got.answer, confidence: got.confidence, note: got.note, source: "ai" };
-    if (got.confidence === "low") stillUnresolved.push(i);
+    // Low confidence OR nothing read: both mean the AI did not settle this answer.
+    const blank = isPlainMap(got.answer)
+      ? !Object.keys(got.answer).length
+      : String(got.answer ?? "").trim() === "";
+    if (got.confidence === "low" || blank) stillUnresolved.push(i);
   });
   const answers = coerceSheetAnswers(
     key,

@@ -15,6 +15,8 @@ const path = require("path");
 
 const { parseCardText } = require("../helper/sheetOcr");
 const { analyzeJpeg, analyzeBoxInkJpeg } = require("../helper/sheetOmr");
+const { platformReadSheet } = require("../helper/paperReader");
+const { readCapped } = require("../helper/fetchLimit");
 const {
   coerceSheetAnswers,
   normalizePaperSelections,
@@ -130,6 +132,60 @@ async function main() {
   const [inked, blank] = await analyzeBoxInkJpeg(fixture("card-a4.jpg"), { boxes: [heading, emptyBox] });
   ok(`printed text measures as ink (${inked?.ink.toFixed(4)})`, inked && inked.ink > 0.004);
   ok(`an empty answer box measures ~no ink (${blank?.ink.toFixed(4)})`, blank && blank.ink <= 0.004);
+
+  console.log("\nMulti-page safety (a swapped page must never re-label answers)");
+
+  // Two pages that BOTH carry a bubble grid cannot be ordered: nothing on the
+  // card tells the detector which page is which, and upload order is not proof.
+  // The reading must refuse rather than map page 2's rows onto page 1's questions.
+  const photo = fixture("card-a4.jpg");
+  const realFetch = global.fetch;
+  global.fetch = async (url) =>
+    String(url).includes("res.cloudinary.com")
+      ? { ok: true, headers: new Map([["content-length", String(photo.length)]]), arrayBuffer: async () => photo }
+      : realFetch(url);
+  delete process.env.GOOGLE_VISION_API_KEY; // keep this test to the OMR path
+  const closedKey = Array.from({ length: 13 }, () => ({ type: "Cm", answer: "a", options: ["a", "b", "c", "d", "e"] }));
+  const urls = ["https://res.cloudinary.com/x/image/upload/v1/p1.jpg", "https://res.cloudinary.com/x/image/upload/v1/p2.jpg"];
+
+  const one = await platformReadSheet(closedKey, [urls[0]]);
+  eq("single page: all 13 closed answers settle", one.unresolved.length, 0);
+
+  const two = await platformReadSheet(closedKey, urls);
+  eq("two grids: nothing is settled from a guessed page order", two.unresolved.length, 13);
+  ok(
+    "  → and the reason says so",
+    /səhifə/i.test(two.answers[0].note || "")
+  );
+  global.fetch = realFetch;
+
+  console.log("\nDownload size guard (refused before buffering)");
+
+  const oversize = {
+    headers: new Map([["content-length", String(50 * 1024 * 1024)]]),
+    body: { cancel: async () => {} },
+    arrayBuffer: async () => {
+      throw new Error("must not buffer an oversized body");
+    },
+  };
+  ok("Content-Length over the cap is refused without reading", (await readCapped(oversize, 12 * 1024 * 1024)) === null);
+
+  // A body that lies about its length is stopped mid-stream.
+  let cancelled = false;
+  const chunk = new Uint8Array(1024 * 1024);
+  const lying = {
+    headers: new Map(),
+    body: {
+      getReader: () => ({
+        read: async () => ({ done: false, value: chunk }),
+        cancel: async () => {
+          cancelled = true;
+        },
+      }),
+    },
+  };
+  ok("an over-long stream is cut off", (await readCapped(lying, 4 * 1024 * 1024)) === null);
+  ok("  → and the stream is cancelled", cancelled === true);
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

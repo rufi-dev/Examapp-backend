@@ -7,6 +7,7 @@
  *    caller to send to the AI fallback (aiController.readSheetImages).
  */
 const { runOmr, runGlyphs, runBoxInk } = require("./sheetOmr");
+const { readCapped } = require("./fetchLimit");
 const { visionConfigured, visionWords, parseCardText } = require("./sheetOcr");
 const { alignSection, parseSheetAnswer } = require("../controllers/aiController");
 
@@ -20,6 +21,8 @@ const ALLOWED_TEXT = /^[\p{L}\p{N}\s+\-−–=/\\.,:;()[\]{}√π^*×·<>≤≥%
 // mean "the student wrote nothing". Printed rules are erased before measuring, so
 // a genuinely empty box sits near 0; even a faint digit clears this.
 const BLANK_INK_MAX = 0.004;
+
+const MAX_SHEET_BYTES = 12 * 1024 * 1024;
 
 const readError = (status, message) => {
   const e = new Error(message);
@@ -54,8 +57,8 @@ async function fetchSheetJpeg(raw) {
       continue;
     }
     if (!r.ok) continue;
-    const buf = Buffer.from(await r.arrayBuffer());
-    if (buf.length > 12 * 1024 * 1024) throw readError(400, "Şəkil çox böyükdür");
+    const buf = await readCapped(r, MAX_SHEET_BYTES);
+    if (!buf) throw readError(400, "Şəkil çox böyükdür");
     if (buf[0] === 0xff && buf[1] === 0xd8) return buf;
   }
   throw readError(400, "Şəkil yüklənmədi və ya formatı dəstəklənmir");
@@ -127,6 +130,18 @@ async function platformReadSheet(key, images, { wantName = false } = {}) {
   if (closedQ.length) {
     if (!grids.length) {
       closedQ.forEach((it) => (answers[it.index].note = "platforma işarələri tapa bilmədi"));
+    } else if (grids.length > 1) {
+      /*
+       * Two or more pages carry a bubble grid, and NOTHING on the card says which
+       * page is which: the grid itself has no page number the detector can read.
+       * Concatenating them in upload order looks right (the row total can match
+       * exactly) while silently assigning page two's answers to page one's
+       * questions if the photos were uploaded the other way round. Fail closed.
+       */
+      closedQ.forEach(
+        (it) =>
+          (answers[it.index].note = `${grids.length} səhifədə cavab cədvəli var — sıra müəyyən edilmədi, yoxlayın`)
+      );
     } else if (omrRows.length !== closedQ.length) {
       /*
        * Exact coverage or nothing. Rows are matched to questions by POSITION, so
@@ -174,8 +189,9 @@ async function platformReadSheet(key, images, { wantName = false } = {}) {
       try {
         words = await visionWords(bufs[i]);
       } catch (e) {
-        console.error("Vision OCR failed:", e?.message);
-        break;
+        // One bad page (timeout, provider hiccup) must not blind the rest.
+        console.error("Vision OCR failed on page", i, e?.message);
+        continue;
       }
       const onGrid = i === omrAt;
       const parsed = parseCardText(words, {
