@@ -1051,15 +1051,15 @@ const getExamTagandClass = asyncHandler(async (req, res) => {
     return;
   }
 
-  const _class = await Class.findById(exam.class);
-  if (!_class) {
-    res.status(404).json({ message: "Sinif tapilmadi" });
-    return;
-  }
+  // A missing class is NOT an error: paper exams have none at all (they belong to
+  // their teacher), and an exam whose class was deleted should still open. Return
+  // null — same reasoning as the tag below — so callers render without a class
+  // instead of showing "Sinif tapılmadı" every time the page loads.
+  const _class = exam.class ? await Class.findById(exam.class) : null;
 
   // Categories removed — a class may have no tag. Return it as null instead of
   // failing, so review/builders that fetch this context still work.
-  const tag = _class.tag ? await Tag.findById(_class.tag) : null;
+  const tag = _class?.tag ? await Tag.findById(_class.tag) : null;
   res.status(200).json({ tag, _class });
 });
 
