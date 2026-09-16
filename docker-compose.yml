@@ -42,6 +42,9 @@ services:
       - wa_auth:/app/.wwebjs_auth # persist the linked WhatsApp session
       - live_journal:/app/live-journal # durable write-ahead journal for live whiteboard sessions
       - curriculum:/app/lessonAssets # persist textbook sources + page crops across rebuilds
+      # Read-only view of the nightly database backups, so the Health page can say
+      # when the last one actually ran (BACKUP_LOG_DIR in controllers/healthController).
+      - /root/backups/mongo:/app/backups-mongo:ro
     networks:
       - web
 

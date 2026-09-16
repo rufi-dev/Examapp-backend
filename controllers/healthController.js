@@ -987,6 +987,39 @@ const sampleHealth = async () => {
   });
 };
 
+// --------------------------------- backups --------------------------------
+
+/*
+ * When the nightly database backup last ran, read from its own log.
+ *
+ * /root/mongo-backup.sh appends one line per run to backup.log —
+ *   "2026-09-16 17:18:51 ok examopia-20260916-1718.archive.gz 20M"
+ *   "2026-09-17 02:30:04 FAILED: empty dump"
+ * — and the host folder is mounted read-only into this container (compose:
+ * BACKUP_LOG_DIR). A static "backups run nightly" note cannot tell anyone the
+ * night it stopped; the last line can. Null when the log is not reachable, so the
+ * page says "no data" rather than implying a backup exists.
+ */
+const BACKUP_LOG = path.join(process.env.BACKUP_LOG_DIR || "/app/backups-mongo", "nightly", "backup.log");
+function lastNightlyBackup() {
+  try {
+    const lines = fs.readFileSync(BACKUP_LOG, "utf8").trim().split("\n").filter(Boolean);
+    const last = lines[lines.length - 1] || "";
+    const m = last.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) (\S+)(?: (\S+))?(?: (\S+))?/);
+    if (!m) return null;
+    const ok = m[3] === "ok";
+    return {
+      at: new Date(`${m[1]}T${m[2]}Z`).toISOString(),
+      ok,
+      file: ok ? m[4] || null : null,
+      size: ok ? m[5] || null : null,
+      runs: lines.length,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // --------------------------------- handlers -------------------------------
 
 const getHealth = asyncHandler(async (req, res) => {
@@ -1063,9 +1096,11 @@ const getHealth = asyncHandler(async (req, res) => {
       backups: {
         provider: "MongoDB (öz serverimizdə)",
         note:
-          "Verilənlər bazası hər gecə serverdə yedəklənir (/root/backups/mongo/nightly, 14 gün). " +
-          "Fayllar (videolar, tapşırıqlar, materiallar) serverin disk həcmlərindədir. " +
+          "Verilənlər bazası hər gecə serverdə yedəklənir (14 gün saxlanılır). " +
+          "Fayllar (videolar, tapşırıqlar, materiallar) serverin diskindədir. " +
           "Diqqət: hələ hər ikisi eyni serverdədir — serverdən kənara surət qurulmayıb.",
+        last: lastNightlyBackup(),
+        offServer: false,
       },
     };
   });
@@ -1091,4 +1126,4 @@ const getHealthHistory = asyncHandler(async (req, res) => {
 });
 
 // buildAlertsAndScore / withTimeout are exported for unit testing (pure helpers).
-module.exports = { getHealth, getHealthHistory, sampleHealth, buildAlertsAndScore, withTimeout };
+module.exports = { getHealth, getHealthHistory, sampleHealth, buildAlertsAndScore, withTimeout, lastNightlyBackup };
