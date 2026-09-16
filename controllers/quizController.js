@@ -710,6 +710,12 @@ const moveExamToClass = asyncHandler(async (req, res) => {
     throw new Error("Bu imtahan sizə aid deyil");
   }
   if (blockIfArchived(res, exam)) return;
+  if (exam.mode === "paper") {
+    // Paper exams have no class: they belong to their teacher and appear only on
+    // the paper page. Attaching one to a class would put it back in class lists.
+    res.status(400);
+    throw new Error("Kağız imtahanı sinfə bağlanmır");
+  }
   if (!mongoose.isValidObjectId(classId)) {
     res.status(400);
     throw new Error("Sinif seçin");
@@ -2959,7 +2965,11 @@ const restoreExam = asyncHandler(async (req, res) => {
   // Does the exam still have a valid parent class?
   const parentOk = exam.class ? !!(await Class.findById(exam.class).select("_id")) : false;
 
-  if (parentOk) {
+  if (exam.mode === "paper") {
+    // A paper exam belongs to its teacher and lives only on the "Kağız
+    // imtahanları" page — there is no class to reattach it to, and asking for one
+    // would put it back inside a class it is deliberately kept out of.
+  } else if (parentOk) {
     // Parent still exists — make sure it references the exam again.
     await Class.updateOne({ _id: exam.class }, { $addToSet: { exams: exam._id } });
   } else {
@@ -2984,7 +2994,7 @@ const restoreExam = asyncHandler(async (req, res) => {
   exam.deletedAt = null;
   exam.deletedBy = null;
   await exam.save();
-  res.status(200).json({ message: "Exam restored", classId: String(exam.class) });
+  res.status(200).json({ message: "Exam restored", classId: exam.class ? String(exam.class) : null });
 });
 
 // Permanently purge an archived exam (the "delete forever" action in the Trash).
@@ -3505,10 +3515,35 @@ const paperResultView = (r) => ({
 
 // ---- teacher ----
 
+// Classes a teacher owns — the basis for "this teacher's students" now that paper
+// exams have no class of their own.
+async function ownedClassIds(ownerId) {
+  return Class.find({ owner: ownerId }).distinct("_id");
+}
+
+// May this student open a CLASSLESS paper exam? Yes when its teacher teaches them:
+// they're approved in a class that teacher owns, or that teacher runs an open class.
+async function studentOfTeacher(userId, ownerId) {
+  if (!userId || !ownerId) return false;
+  const owned = await ownedClassIds(ownerId);
+  if (!owned.length) return false;
+  const ids = owned.map(String);
+  const [enrolled, open] = await Promise.all([
+    Enrollment.exists({ student: userId, class: { $in: owned }, status: "approved" }),
+    Class.exists({ _id: { $in: owned }, requireCode: false }),
+  ]);
+  return !!enrolled || (!!open && ids.length > 0);
+}
+
 // Students a paper sheet can belong to: approved members of the exam's class; for
-// an OPEN class (no join needed) every student account, members listed first.
+// an OPEN class (no join needed) — or a CLASSLESS paper exam — every student
+// account, class members listed first.
 async function paperRoster(exam, fields = "name email photo") {
   const classId = exam.class?._id || exam.class;
+  if (!classId) {
+    const all = await User.find({ role: "student" }).select(fields).sort({ name: 1 }).limit(5000).lean();
+    return { students: all, openClass: true };
+  }
   const cls =
     exam.class && exam.class.requireCode !== undefined
       ? exam.class
@@ -3688,9 +3723,10 @@ const savePaperResult = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("Şagird tapılmadı");
   }
-  const enrolled =
-    (await Enrollment.exists({ student: student._id, class: exam.class, status: "approved" })) ||
-    classIsPublic(await Class.findById(exam.class).select("requireCode").lean());
+  const enrolled = !exam.class
+    ? true // classless paper exam: any student of this teacher may be assigned
+    : (await Enrollment.exists({ student: student._id, class: exam.class, status: "approved" })) ||
+      classIsPublic(await Class.findById(exam.class).select("requireCode").lean());
   if (!enrolled) {
     res.status(400);
     throw new Error("Bu şagird imtahanın sinfində deyil");
@@ -3802,9 +3838,16 @@ const getPaperExams = asyncHandler(async (req, res) => {
   if (staff) {
     if (!isAdminUser(req.user)) filter.owner = req.user._id;
   } else {
+    /*
+     * A student sees paper exams from the teachers who teach them: the owners of
+     * the classes they're in (or of any open class). Classless paper exams are
+     * matched by owner; older ones that still carry a class by class.
+     */
     const [enrolled, open] = await Promise.all([approvedClassIds(req.user._id), publicClassIds()]);
-    filter.class = { $in: [...new Set([...enrolled, ...open].map(String))] };
+    const classIds = [...new Set([...enrolled, ...open].map(String))];
+    const owners = await Class.find({ _id: { $in: classIds } }).distinct("owner");
     filter.hidden = { $ne: true };
+    filter.$or = [{ class: { $in: classIds } }, { class: null, owner: { $in: owners } }];
   }
   const exams = await Exam.find(filter).sort({ createdAt: -1 }).populate("class", "name").lean();
   if (!exams.length) return res.status(200).json([]);
@@ -3868,27 +3911,19 @@ const getPaperExams = asyncHandler(async (req, res) => {
   );
 });
 
-// POST /paperExam { name, classId, totalMarks, passingMarks, startDate, endDate,
-// paperSelfUpload } — one-step creation from the paper page (no PDF, no timer).
+// POST /paperExam { name, totalMarks, passingMarks, startDate, endDate,
+// paperSelfUpload } — one-step creation from the paper page (no PDF, no timer,
+// and no class: a paper exam belongs to its teacher, and their students see it).
 const createPaperExam = asyncHandler(async (req, res) => {
-  const { name, classId, totalMarks, passingMarks, startDate, endDate, paperSelfUpload } = req.body || {};
+  const { name, totalMarks, passingMarks, startDate, endDate, paperSelfUpload } = req.body || {};
   if (!String(name || "").trim()) {
     res.status(400);
     throw new Error("İmtahan adını yazın");
   }
-  const cls = await Class.findById(classId);
-  if (!cls) {
-    res.status(404);
-    throw new Error("Sinif tapılmadı");
-  }
-  if (!isAdminUser(req.user) && String(cls.owner) !== String(req.user._id)) {
-    res.status(403);
-    throw new Error("Bu sinif sizə aid deyil");
-  }
   const total = Math.max(1, Number(totalMarks) || 100);
   const exam = await Exam.create({
     name: String(name).trim().slice(0, 200),
-    class: cls._id,
+    class: null,
     owner: req.user._id,
     mode: "paper",
     duration: 3600, // unused on paper, but the schema requires one
@@ -3903,8 +3938,6 @@ const createPaperExam = asyncHandler(async (req, res) => {
     revealAfterEnd: false,
     paperSelfUpload: paperSelfUpload !== false,
   });
-  cls.exams.push(exam._id);
-  await cls.save();
   res.status(201).json({ success: true, exam: { _id: exam._id, name: exam.name } });
 });
 
@@ -3925,7 +3958,10 @@ async function loadPaperExamForStudent(req, res) {
     throw new Error("Bu imtahan kağız imtahanı deyil");
   }
   const classId = exam.class?._id || exam.class;
-  const allowed = (await studentApprovedInClass(req.user._id, classId)) || classIsPublic(exam.class);
+  // Classless paper exams belong to the teacher, so access follows the teacher.
+  const allowed = classId
+    ? (await studentApprovedInClass(req.user._id, classId)) || classIsPublic(exam.class)
+    : await studentOfTeacher(req.user._id, exam.owner);
   if (!allowed) {
     res.status(403);
     throw new Error("Bu imtahana giriş yoxdur");

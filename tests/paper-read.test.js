@@ -159,6 +159,36 @@ async function main() {
   );
   global.fetch = realFetch;
 
+  console.log("\nA paper exam belongs to its teacher, not to a class");
+
+  const Exam = require("../models/examModel");
+  // Paper exams are created classless on purpose (they never appear in a class).
+  const paper = new Exam({
+    name: "Kağız sınaq",
+    mode: "paper",
+    owner: new (require("mongoose").Types.ObjectId)(),
+    duration: 3600,
+    price: 0,
+    totalMarks: 100,
+    passingMarks: 50,
+  });
+  const paperErr = paper.validateSync();
+  ok("a paper exam validates without a class", !paperErr);
+  eq("  → and its class is null", paper.class, null);
+
+  // Every other mode must still require one: the rule was narrowed, not dropped.
+  const pdf = new Exam({
+    name: "PDF sınaq",
+    mode: "pdf",
+    owner: paper.owner,
+    duration: 3600,
+    price: 0,
+    totalMarks: 100,
+    passingMarks: 50,
+  });
+  const pdfErr = pdf.validateSync();
+  ok("a pdf exam without a class is still rejected", !!pdfErr?.errors?.class);
+
   console.log("\nDownload size guard (refused before buffering)");
 
   const oversize = {

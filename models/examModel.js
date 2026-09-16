@@ -136,10 +136,19 @@ const examSchema = Schema({
     // Every exam MUST belong to a class — there is no "unassigned" exam. Enforced
     // at creation (addExam) and on restore (a target class is required when the
     // original class was deleted); this schema rule is the final backstop.
+    // Every exam belongs to a class — EXCEPT paper exams, which live on their own
+    // "Kağız imtahanları" page and are never listed inside a class. Those belong to
+    // their teacher (`owner`) instead, and their students are the teacher's students.
     class: {
         type: Schema.Types.ObjectId,
         ref: 'Class',
-        required: [true, 'İmtahan mütləq bir sinfə aid olmalıdır'],
+        required: [
+            function () {
+                return this.mode !== "paper";
+            },
+            'İmtahan mütləq bir sinfə aid olmalıdır',
+        ],
+        default: null,
     },
     users: [{
         type: Schema.Types.ObjectId,
