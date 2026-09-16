@@ -94,5 +94,19 @@ ok("there are two creation paths and no more", births === 2, `found ${births}`);
 ok("the twin strips the flag rather than trusting it", /"provisional", "provisionalSince",/.test(ctl));
 ok("and it is removed if its questions fail", /await Exam\.deleteOne\(\{ _id: twin\._id \}\);/.test(ctl));
 
+console.log("\n7. The teacher is told an exam exists only when it does:");
+/*
+ * The details form used to toast "Exam added successfully" for an exam that was
+ * listed nowhere, so the teacher went looking for it. The only announcement now is
+ * the save that makes it real, and the reply says which save that was.
+ */
+const slice = fs.readFileSync(path.join(__dirname, "../../Frontend/redux/features/quiz/quizSlice.js"), "utf8");
+const assistant = fs.readFileSync(path.join(__dirname, "../../Frontend/src/components/AiAssistant.jsx"), "utf8");
+ok("the save reply says when it created the exam",
+  /createdExam = becomesReal;/.test(ctl) && /\n\s*createdExam,\n\s*\}\);/.test(ctl));
+ok("the details form no longer announces an exam", !/Exam added successfully/.test(slice));
+ok("the first save does", /p\.createdExam\)[\s\S]{0,40}toast\.success\("İmtahan yaradıldı/.test(slice));
+ok("the assistant does not claim one before a question exists", !/✅ İmtahan yaradıldı/.test(assistant));
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

@@ -1777,6 +1777,8 @@ const addQuestion = asyncHandler(async (req, res) => {
   // AUD-009: save the answer key, draft settings, and Exam→Question pointer as a
   // single transaction. A fault can no longer expose a partially saved draft.
   const wasUpdate = Boolean(exam.questions);
+  // Set inside the transaction (a retried attempt overwrites it), read in the reply.
+  let createdExam = false;
   const newQuestion = await withMongoTransaction(async (session) => {
     const writeOpts = session ? { session } : {};
     // runValidators: the update path is the builder's ONLY save path once an exam
@@ -1804,6 +1806,7 @@ const addQuestion = asyncHandler(async (req, res) => {
      * the teacher actually came to do, and what everyone else can see.
      */
     const becomesReal = exam.provisional === true && correctAnswers.length > 0;
+    createdExam = becomesReal;
     const update = {
       $set: { ...draftSet, questions: question._id, ...(becomesReal ? { provisional: false } : {}) },
     };
@@ -1847,6 +1850,9 @@ const addQuestion = asyncHandler(async (req, res) => {
       : "Answers added successfully",
     newQuestion,
     publishState: pub.ok ? "published" : "draft_saved_publish_failed",
+    // True only on the save that turned a provisional exam into a real one — the
+    // moment the teacher is told the exam now exists.
+    createdExam,
   });
 });
 
