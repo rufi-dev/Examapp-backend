@@ -76,6 +76,24 @@ function uploadFile(server, path, token, buf, fileId) {
   });
 }
 
+// Multipart PATCH of a board save: the "pages" file (plain or gzip) + text fields.
+function saveRequest(server, id, token, pagesBuf, fields = {}) {
+  return new Promise((resolve, reject) => {
+    const { port } = server.address();
+    const B = "----exqSave" + Math.random().toString(16).slice(2);
+    const parts = Object.entries(fields).map(([k, v]) =>
+      Buffer.from(`--${B}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`)
+    );
+    const head = Buffer.from(`--${B}\r\nContent-Disposition: form-data; name="pages"; filename="pages.json"\r\nContent-Type: application/octet-stream\r\n\r\n`);
+    const body = Buffer.concat([...parts, head, pagesBuf, Buffer.from(`\r\n--${B}--\r\n`)]);
+    const req = http.request(
+      { host: "127.0.0.1", port, method: "PATCH", path: `/api/boards/${id}`, headers: { Authorization: `Bearer ${token}`, "Content-Type": `multipart/form-data; boundary=${B}`, "Content-Length": body.length } },
+      (res) => { const c = []; res.on("data", (d) => c.push(d)); res.on("end", () => resolve({ status: res.statusCode, body: (() => { try { return JSON.parse(Buffer.concat(c).toString()); } catch { return {}; } })() })); }
+    );
+    req.on("error", reject); req.write(body); req.end();
+  });
+}
+
 // Binary GET → { status, contentType, bytes }.
 function getBinary(server, path, token) {
   return new Promise((resolve, reject) => {
@@ -363,6 +381,67 @@ async function main() {
   ok("the image is fetchable by that same fileId (the id viewers use)", dlById.status === 200 && dlById.bytes === PNG_1X1.length);
   const dlForbidden = await getBinary(server, `/api/boards/${boardB._id}/files/${up.body.fileId}`, tok(unrelated));
   ok("a non-audience user cannot fetch the image → 403", dlForbidden.status === 403);
+
+  /*
+   * ── what a save costs (2026-09-16) ─────────────────────────────────────────
+   * An 8-page board took 16.5 s per save: every page as plain JSON after every
+   * stroke, pasted images inside as base64, and the whole document read back from
+   * the database just to answer with five fields.
+   */
+  console.log("\nboard save — compressed, images out of the document, no read-back");
+  const zlib = require("zlib");
+  const fsx = require("fs");
+  const pathx = require("path");
+  const boardS = await Board.create({ owner: owner._id, ownerName: owner.name, title: "Save", classes: [], pages: [{ name: "Səhifə 1", scene: null }] });
+  const strokes = Array.from({ length: 400 }, (_, i) => ({ id: `s${i}`, type: "freedraw", version: 1, points: Array.from({ length: 30 }, (_, j) => [j * 1.37, i * 2.11]) }));
+  const pagesOf1 = (files = {}) => [{ name: "Səhifə 1", scene: { elements: strokes, appState: {}, files } }];
+  let rev = 0;
+
+  const plainJson = Buffer.from(JSON.stringify(pagesOf1()));
+  const plain = await saveRequest(server, boardS._id, tok(owner), plainJson, { expectedRevision: rev });
+  ok("a plain JSON save still works (older tabs keep saving)", plain.status === 200 && plain.body.revision === 1);
+  rev = plain.body.revision;
+  ok("the reply carries no pages — the document is not read back", plain.status === 200 && !("pages" in plain.body) && !("scene" in plain.body));
+
+  const gz = zlib.gzipSync(plainJson);
+  const packed = await saveRequest(server, boardS._id, tok(owner), gz, { expectedRevision: rev });
+  ok("a gzip save is accepted", packed.status === 200 && packed.body.revision === rev + 1);
+  rev = packed.body.revision;
+  ok("and really is smaller on the wire", gz.length * 3 < plainJson.length);
+  const afterGz = await Board.findById(boardS._id).lean();
+  ok("the gzip save stored the same strokes", afterGz.pages[0].scene.elements.length === 400 && afterGz.pages[0].scene.elements[7].points[3][0] === 3 * 1.37);
+  ok("sizeBytes stays the size of the board as JSON, not of the upload", packed.body.sizeBytes === plainJson.length);
+
+  const broken = await saveRequest(server, boardS._id, tok(owner), Buffer.concat([gz.subarray(0, 40), Buffer.from("garbage")]), { expectedRevision: rev });
+  ok("a corrupt gzip is a 400, not a crash", broken.status === 400);
+
+  // Images: moved into the private store, the scene keeps only the reference.
+  const pngUrl = `data:image/png;base64,${PNG_1X1.toString("base64")}`;
+  const textUrl = `data:image/png;base64,${Buffer.from("not really a png at all").toString("base64")}`;
+  const withImages = pagesOf1({
+    imgGood1: { id: "imgGood1", mimeType: "image/png", dataURL: pngUrl, created: 1 },
+    notAnImage: { id: "notAnImage", mimeType: "image/png", dataURL: textUrl, created: 1 },
+    "bad/key": { id: "bad/key", mimeType: "image/png", dataURL: pngUrl, created: 1 },
+  });
+  const imgSave = await saveRequest(server, boardS._id, tok(owner), zlib.gzipSync(Buffer.from(JSON.stringify(withImages))), { expectedRevision: rev });
+  ok("a save with images succeeds", imgSave.status === 200);
+  rev = imgSave.body.revision;
+  const stored = (await Board.findById(boardS._id).lean()).pages[0].scene.files;
+  ok("a real image is stored as a reference, not base64", stored.imgGood1 && !stored.imgGood1.dataURL && stored.imgGood1.mime === "image/png" && stored.imgGood1.size === PNG_1X1.length && stored.imgGood1.fileId === "imgGood1");
+  ok("its bytes are on disk under the id the element uses", fsx.readFileSync(pathx.join(process.env.BOARD_FILES_DIR, String(boardS._id), "imgGood1")).equals(PNG_1X1));
+  ok("and the audience fetches it by that id", (await getBinary(server, `/api/boards/${boardS._id}/files/imgGood1`, tok(student))).bytes === PNG_1X1.length);
+  ok("the reply tells the editor which images it now holds", imgSave.body.files && imgSave.body.files.imgGood1 && !imgSave.body.files.notAnImage);
+  ok("NEVER loses an image: bytes that are not a real image stay inline", stored.notAnImage && stored.notAnImage.dataURL === textUrl);
+  ok("NEVER loses an image: a key unsafe as a file name stays inline", stored["bad/key"] && stored["bad/key"].dataURL === pngUrl);
+
+  // The next save sends the reference; nothing is lost and nothing is re-written.
+  const refOnly = pagesOf1({ imgGood1: imgSave.body.files.imgGood1 });
+  const again = await saveRequest(server, boardS._id, tok(owner), Buffer.from(JSON.stringify(refOnly)), { expectedRevision: rev });
+  const kept = (await Board.findById(boardS._id).lean()).pages[0].scene.files.imgGood1;
+  ok("a save that sends only the reference keeps it intact", again.status === 200 && kept && kept.size === PNG_1X1.length && !kept.dataURL);
+
+  const stale = await saveRequest(server, boardS._id, tok(owner), plainJson, { expectedRevision: 0 });
+  ok("the revision fence still refuses a stale save", stale.status === 409 && stale.body.code === "board_conflict");
 
   await new Promise((r) => server.close(r));
   await mongoose.disconnect();

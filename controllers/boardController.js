@@ -30,6 +30,128 @@ const MAX_BOARD_FILES_BYTES = 80 * 1024 * 1024; // total per board
 const safeSeg = (s) => String(s || "").replace(/[^a-fA-F0-9]/g, "").slice(0, 40);
 const safeFileId = (s) => String(s || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
 
+/*
+ * ---- what a save costs, and why these helpers exist ------------------------
+ *
+ * Measured on 2026-09-16, on the live server: an ordinary save of an 8-page
+ * handwriting board took 16.5 seconds on average (372 saves in 7 hours, worst
+ * 107 s), and opening a board 27.8 s. Two causes, both in how a board travels:
+ *
+ *   - every save uploaded EVERY page as plain JSON — 5.2 MB for that board —
+ *     after every stroke. Stroke coordinates compress ~3.4x, but a browser never
+ *     compresses a request body on its own;
+ *   - pasted images rode along INSIDE the document as base64 (one board was
+ *     7.2 MB of nothing but seven pictures), which does not compress at all and
+ *     was re-sent and re-written on every save.
+ *
+ * And the server did synchronous work proportional to that size on its only
+ * thread — parse, BSON-encode, then read the whole document BACK just to answer
+ * with five fields: ~0.5 s per save on that board, during which no other
+ * teacher's or student's request could run. That is how one heavy board made
+ * the whole platform slow.
+ */
+const zlib = require("zlib");
+const { promisify } = require("util");
+const gunzip = promisify(zlib.gunzip);
+
+// Decompressed ceiling: a gzip bomb must not be able to allocate without bound.
+const MAX_PAGES_JSON_BYTES = 64 * 1024 * 1024;
+
+/*
+ * The uploaded pages, compressed or not.
+ *
+ * The editor gzips the JSON when the browser can (CompressionStream); an older
+ * browser, or an older tab still open from before this shipped, sends it plain.
+ * Both are accepted, told apart by the gzip magic bytes rather than a header a
+ * client could forget. Decompression runs on libuv's thread pool, not on the
+ * request thread.
+ */
+async function readPagesUpload(buffer) {
+  let raw = buffer;
+  if (buffer.length > 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+    raw = await gunzip(buffer, { maxOutputLength: MAX_PAGES_JSON_BYTES });
+  }
+  return { pages: JSON.parse(raw.toString("utf8")), bytes: raw.length };
+}
+
+// Bytes already stored for one board's images — read at most once per save.
+async function boardFilesBytes(dir) {
+  let total = 0;
+  try {
+    for (const name of await fsp.readdir(dir)) {
+      total += await fsp.stat(path.join(dir, name)).then((s) => s.size, () => 0);
+    }
+  } catch {
+    /* no images yet */
+  }
+  return total;
+}
+
+/*
+ * Move base64 images out of the scene and into the private image store.
+ *
+ * This is the rule the store was built for (see the header above: "never base64
+ * in Mongo"), which the solo autosave never followed — only live sessions did.
+ * Enforced here, on the server, so it holds for every client version and so an
+ * old board sheds its inline images the first time it is saved.
+ *
+ * The stored entry is exactly what a live session already writes —
+ * `{ fileId, hash, mime, size }` — and the editor already opens that shape: an
+ * image with no bytes in the scene is fetched from the store by its fileId.
+ *
+ * NEVER loses an image. Every failure — an unrecognised format, a file over the
+ * size cap, the board's image quota, a key that would not survive being used as
+ * a file name, a disk error — leaves that image inline, exactly as it arrived.
+ * Returns the references it wrote, so the editor can stop re-sending those bytes.
+ */
+async function storeInlineImages(boardId, pages) {
+  const dir = path.join(BOARD_FILES_DIR, safeSeg(String(boardId)));
+  const stored = {};
+  let used = null;
+  for (const page of pages) {
+    const files = page && page.scene && page.scene.files;
+    if (!files || typeof files !== "object") continue;
+    for (const [key, entry] of Object.entries(files)) {
+      const dataURL = entry && typeof entry.dataURL === "string" ? entry.dataURL : "";
+      const head = /^data:image\/[a-z0-9.+-]+;base64,/i.exec(dataURL);
+      if (!head) continue;
+      // The element points at the KEY. A name the file system would rewrite would
+      // leave the element pointing at nothing, so such an image stays inline.
+      if (safeFileId(key) !== key) continue;
+      try {
+        const bytes = Buffer.from(dataURL.slice(head[0].length), "base64");
+        if (!bytes.length || bytes.length > MAX_IMG_BYTES) continue;
+        const det = detectHead(bytes.subarray(0, 64));
+        const mime = det && IMG_MIME[det.type];
+        if (!mime) continue;
+        const target = path.join(dir, key);
+        const exists = await fsp.stat(target).then((s) => s.size > 0, () => false);
+        if (!exists) {
+          if (used === null) used = await boardFilesBytes(dir);
+          if (used + bytes.length > MAX_BOARD_FILES_BYTES) continue;
+          await fsp.mkdir(dir, { recursive: true });
+          // Atomic, like every other write to this store: temp, then rename.
+          const tmp = `${target}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+          await fsp.writeFile(tmp, bytes);
+          await fsp.rename(tmp, target);
+          used += bytes.length;
+        }
+        const ref = {
+          fileId: key,
+          hash: crypto.createHash("sha256").update(bytes).digest("hex"),
+          mime,
+          size: bytes.length,
+        };
+        files[key] = ref;
+        stored[key] = ref;
+      } catch {
+        /* keep the inline copy — a failed move must never cost the teacher an image */
+      }
+    }
+  }
+  return stored;
+}
+
 // ---- list boards ------------------------------------------------------------
 // GET /api/boards — teacher: their own boards; ADMIN: EVERY teacher's boards (with
 // ownerName); STUDENT: boards shared to any class they are approved-enrolled in
@@ -196,8 +318,11 @@ const saveBoard = asyncHandler(async (req, res) => {
   }
   if (req.file && req.file.buffer) {
     let pages;
+    let jsonBytes = req.file.buffer.length;
     try {
-      pages = JSON.parse(req.file.buffer.toString("utf8"));
+      const read = await readPagesUpload(req.file.buffer);
+      pages = read.pages;
+      jsonBytes = read.bytes;
     } catch {
       return res.status(400).json({ message: "Lövhə məlumatı yanlışdır" });
     }
@@ -210,7 +335,8 @@ const saveBoard = asyncHandler(async (req, res) => {
       }));
       set.scene = null; // legacy field retired once saved in the new shape
     }
-    set.sizeBytes = req.file.buffer.length;
+    // The size of the board as JSON, as before — not of the compressed upload.
+    set.sizeBytes = jsonBytes;
   }
 
   // ATOMIC optimistic-concurrency: bump revision only if the DB still holds the
@@ -231,15 +357,35 @@ const saveBoard = asyncHandler(async (req, res) => {
   }
   const expected = revProvided ? Number(rawRev) : cur.revision || 0;
   const revMatch = expected === 0 ? { $in: [0, null] } : expected;
+  // After every validation, so a request that is refused writes nothing to the
+  // store. A save that then loses the revision race leaves its images stored
+  // under the same ids the retry will reference — harmless, and idempotent.
+  const storedFiles = set.pages ? await storeInlineImages(req.params.id, set.pages) : {};
   const updated = await Board.findOneAndUpdate(
     { _id: req.params.id, deletedAt: null, ...scope, revision: revMatch },
     { $set: set, $inc: { revision: 1 } },
-    { new: true }
+    /*
+     * Only the five fields the reply carries.
+     *
+     * `new: true` alone returns the WHOLE document — every page, every stroke,
+     * every inline image — read back from Atlas and decoded on the request
+     * thread, to answer with a title and a revision number. On the 8-page board
+     * that read-back was 213 ms of a 493 ms save.
+     */
+    { new: true, projection: { title: 1, sizeBytes: 1, revision: 1, updatedAt: 1 } }
   ).lean();
   if (!updated) {
     return res.status(409).json({ message: "Lövhə başqa yerdə dəyişdirilib", code: "board_conflict" });
   }
-  res.json({ _id: updated._id, title: updated.title, sizeBytes: updated.sizeBytes, revision: updated.revision, updatedAt: updated.updatedAt });
+  res.json({
+    _id: updated._id,
+    title: updated.title,
+    sizeBytes: updated.sizeBytes,
+    revision: updated.revision,
+    updatedAt: updated.updatedAt,
+    // The images this save moved into the store, so the editor stops sending them.
+    ...(Object.keys(storedFiles).length ? { files: storedFiles } : {}),
+  });
 });
 
 // DELETE /api/boards/:id — soft delete (owner).

@@ -371,6 +371,9 @@ function lifecycleShutdown(reason, code = 0) {
 process.once("SIGTERM", () => lifecycleShutdown("SIGTERM", 0))
 process.once("SIGINT", () => lifecycleShutdown("SIGINT", 0))
 
+// A WhatsApp browser failure must not take the API down — see helper/processGuards.
+process.on("unhandledRejection", require("./helper/processGuards").onUnhandledRejection)
+
 mongoose
     .connect(process.env.MONGO_URI)
     .then(async () => {
