@@ -361,19 +361,21 @@ const saveBoard = asyncHandler(async (req, res) => {
   // store. A save that then loses the revision race leaves its images stored
   // under the same ids the retry will reference — harmless, and idempotent.
   const storedFiles = set.pages ? await storeInlineImages(req.params.id, set.pages) : {};
-  const updated = await Board.findOneAndUpdate(
-    { _id: req.params.id, deletedAt: null, ...scope, revision: revMatch },
+  // Through the driver: Mongoose froze the whole server 1.3–2 s per save of a large
+  // handwriting board (see Board.writeScene).
+  const updated = await Board.writeScene(
+    { _id: cur._id, deletedAt: null, ...scope, revision: revMatch },
     { $set: set, $inc: { revision: 1 } },
     /*
-     * Only the five fields the reply carries.
+     * Only the fields the reply carries.
      *
-     * `new: true` alone returns the WHOLE document — every page, every stroke,
-     * every inline image — read back from Atlas and decoded on the request
-     * thread, to answer with a title and a revision number. On the 8-page board
-     * that read-back was 213 ms of a 493 ms save.
+     * Without a projection the WHOLE document comes back — every page, every
+     * stroke, every inline image — decoded on the request thread, to answer with
+     * a title and a revision number. On the 8-page board that read-back was
+     * 213 ms of a 493 ms save.
      */
-    { new: true, projection: { title: 1, sizeBytes: 1, revision: 1, updatedAt: 1 } }
-  ).lean();
+    { title: 1, sizeBytes: 1, revision: 1, updatedAt: 1 }
+  );
   if (!updated) {
     return res.status(409).json({ message: "Lövhə başqa yerdə dəyişdirilib", code: "board_conflict" });
   }

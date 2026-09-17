@@ -58,7 +58,12 @@ const origFOU = Board.findOneAndUpdate;
 const origFBI = Board.findById;
 const origFO = Board.findOne;
 const leanOf = (v) => ({ lean: () => (typeof v === "function" ? v() : Promise.resolve(v)) });
-const stubWrite = (fn) => { Board.findOneAndUpdate = () => leanOf(fn); };
+const origWS = Board.writeScene;
+// Checkpoints write through Board.writeScene (the driver); replay still uses Mongoose.
+const stubWrite = (fn) => {
+  Board.findOneAndUpdate = () => leanOf(fn);
+  Board.writeScene = () => (typeof fn === "function" ? fn() : Promise.resolve(fn));
+};
 Board.findById = () => ({ select: () => leanOf({ revision: 0 }) });
 const fakeWs = () => ({ readyState: 1, OPEN: 1, bufferedAmount: 0, send() {}, close() {} });
 
@@ -511,6 +516,7 @@ const at = async (name, fn) => {
   });
 
   Board.findOneAndUpdate = origFOU;
+  Board.writeScene = origWS;
   Board.findById = origFBI;
   Board.findOne = origFO;
   console.log(`\n${pass} passed, ${fail} failed`);

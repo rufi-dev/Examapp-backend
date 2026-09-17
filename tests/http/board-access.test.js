@@ -443,6 +443,31 @@ async function main() {
   const stale = await saveRequest(server, boardS._id, tok(owner), plainJson, { expectedRevision: 0 });
   ok("the revision fence still refuses a stale save", stale.status === 409 && stale.body.code === "board_conflict");
 
+  /*
+   * ── the save must not freeze the server (2026-09-17) ──────────────────────
+   * Mongoose's findOneAndUpdate held the event loop 1.3–2 s per save of a real
+   * 5.3 MB handwriting board, so every request and live board on the server
+   * waited. Saves write through the driver (Board.writeScene), which casts by
+   * hand what Mongoose used to — so check exactly those.
+   */
+  console.log("\nboard save — through the driver, typed as Mongoose would store it");
+  const before = (await Board.findById(boardS._id).select("updatedAt revision").lean());
+  let mongooseWrites = 0;
+  const realFOU = Board.findOneAndUpdate;
+  Board.findOneAndUpdate = function (...a) { mongooseWrites++; return realFOU.apply(this, a); };
+  await new Promise((r) => setTimeout(r, 15));
+  const typed = await saveRequest(server, boardS._id, tok(owner), plainJson, { expectedRevision: before.revision, classIds: JSON.stringify([String(cls._id)]), title: "  Typed  " });
+  Board.findOneAndUpdate = realFOU;
+  ok("the save succeeds", typed.status === 200 && typed.body.revision === before.revision + 1 && typed.body.title === "Typed");
+  ok("without Mongoose's findOneAndUpdate", mongooseWrites === 0, `called ${mongooseWrites}x`);
+  const raw = await Board.collection.findOne({ _id: boardS._id });
+  ok("class links are stored as ObjectIds, not strings", raw.classes.length === 1 && raw.classes[0] instanceof mongoose.Types.ObjectId && raw.classes[0].equals(cls._id));
+  ok("page ids are ObjectIds (the live hub targets pages by them)", raw.pages[0]._id instanceof mongoose.Types.ObjectId);
+  ok("updatedAt still moves (the board list sorts by it)", raw.updatedAt instanceof Date && raw.updatedAt > before.updatedAt);
+  ok("the audience filter still finds the board by class", (await Board.countDocuments({ classes: cls._id, _id: boardS._id })) === 1);
+  const staleTyped = await saveRequest(server, boardS._id, tok(owner), plainJson, { expectedRevision: before.revision });
+  ok("and the revision fence holds on the driver path", staleTyped.status === 409 && staleTyped.body.code === "board_conflict");
+
   await new Promise((r) => server.close(r));
   await mongoose.disconnect();
   await mem.stop();

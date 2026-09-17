@@ -294,7 +294,10 @@ async function writeCheckpoint(room) {
   // Persist ONLY the page background from appState (allow-list), never arbitrary UI.
   const pageScene = { elements, appState: { viewBackgroundColor: "transparent" }, files };
   try {
-    const res = await Board.findOneAndUpdate(
+    // Through the driver, reading back only the revision: this ran with `new: true`
+    // and no projection, so every checkpoint of a live lesson decoded the WHOLE
+    // board, on top of Mongoose's own 1.3–2 s walk of a large scene (Board.writeScene).
+    const res = await Board.writeScene(
       { _id: room.boardId, deletedAt: null, "pages._id": room.pageId, revision: { $in: [room.boardRevision, null] } },
       {
         // Persist the scene AND the applied-journal marker atomically, so boot
@@ -302,8 +305,8 @@ async function writeCheckpoint(room) {
         $set: { "pages.$.scene": pageScene, elementCount: elements.length, lastLiveJournalId: room.journalId || null },
         $inc: { revision: 1 },
       },
-      { new: true }
-    ).lean();
+      { revision: 1 }
+    );
     if (!res) {
       const fresh = await Board.findById(room.boardId).select("revision").lean();
       room.boardRevision = fresh ? fresh.revision || 0 : room.boardRevision;

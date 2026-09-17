@@ -76,4 +76,35 @@ const boardSchema = Schema(
 
 boardSchema.index({ owner: 1, deletedAt: 1, updatedAt: -1 });
 
+/*
+ * Write a board's scene through the MongoDB driver, not Mongoose.
+ *
+ * A handwriting board is thousands of freedraw strokes in a Mixed field. Measured
+ * on a real one (5.3 MB, 4,220 strokes on one page): Mongoose's findOneAndUpdate
+ * held the event loop for 1.3–2.0 s per save, the driver for 0.16–0.25 s. The
+ * server is single-threaded, so for those seconds EVERY request and every live
+ * board waited — and the editor saves every few seconds while a teacher writes.
+ * A teacher's board "froze" mid-lesson (2026-09-16).
+ *
+ * The scene is opaque to the schema anyway, so Mongoose's walk bought nothing.
+ * What it did do is done here: ids are cast, and `updatedAt` is stamped (the
+ * schema's timestamps). Returns the updated document limited to `projection`,
+ * or null when the filter (the revision CAS) did not match.
+ */
+const asId = (v) =>
+  typeof v === "string" && mongoose.Types.ObjectId.isValid(v) && /^[0-9a-f]{24}$/i.test(v) ? new mongoose.Types.ObjectId(v) : v;
+
+boardSchema.statics.writeScene = async function writeScene(filter, update, projection) {
+  const f = { ...filter };
+  for (const k of ["_id", "owner", "pages._id"]) if (k in f) f[k] = asId(f[k]);
+  const $set = { ...(update.$set || {}), updatedAt: new Date() };
+  if (Array.isArray($set.classes)) $set.classes = $set.classes.map(asId);
+  const r = await this.collection.findOneAndUpdate(
+    f,
+    { ...update, $set },
+    { returnDocument: "after", projection, includeResultMetadata: true }
+  );
+  return (r && r.value) || null;
+};
+
 module.exports = mongoose.model("Board", boardSchema);
