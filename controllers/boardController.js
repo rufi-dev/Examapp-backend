@@ -17,6 +17,7 @@ const ASSIGNMENTS_DIR = path.join(process.cwd(), "assignments"); // where submis
 // Extracted to services/boardAccessService so the realtime hub enforces the SAME
 // open/edit/host rules as these HTTP handlers.
 const { ownedClassIds, accessLevel, pagesOf } = require("../services/boardAccessService");
+const boardSize = require("../helper/boardSize"); // one size policy, shared with the live hub
 const boardHub = require("../realtime/boardHub"); // live-session registry (isLive)
 
 // ---- private board image storage (CR-BOARD image sync) ----------------------
@@ -73,13 +74,6 @@ async function readPagesUpload(buffer) {
   }
   return { pages: JSON.parse(raw.toString("utf8")), bytes: raw.length };
 }
-
-/*
- * The largest board document we will write, under MongoDB's hard 16 MB cap with
- * room for the fields around the pages. Read per call so a test can narrow it
- * without building a 15 MB payload.
- */
-const MAX_BOARD_DOC_BYTES = () => Number(process.env.BOARD_MAX_DOC_BYTES) || 15 * 1024 * 1024;
 
 // Bytes already stored for one board's images — read at most once per save.
 async function boardFilesBytes(dir) {
@@ -304,7 +298,13 @@ const saveBoard = asyncHandler(async (req, res) => {
   // Owner edits; an admin may edit any board.
   const scope = req.user.role === "admin" ? {} : { owner: req.user._id };
 
-  const cur = await Board.findOne({ _id: req.params.id, deletedAt: null, ...scope }).select("revision liveSession").lean();
+  /*
+   * Everything EXCEPT the pages, so the size check can weigh the complete
+   * candidate document rather than the pages alone. `classes`, the live-session
+   * block, titles and the legacy `scene` are not strictly bounded, so reserving a
+   * guessed megabyte for them would have been an assumption, not a guarantee.
+   */
+  const cur = await Board.findOne({ _id: req.params.id, deletedAt: null, ...scope }).select("-pages").lean();
   if (!cur) return res.status(404).json({ message: "Lövhə tapılmadı" });
 
   // While a live session owns the board (in memory OR a durable session that
@@ -343,23 +343,22 @@ const saveBoard = asyncHandler(async (req, res) => {
       }));
       set.scene = null; // legacy field retired once saved in the new shape
       /*
-       * A board is ONE MongoDB document, and a document cannot exceed 16 MB.
-       * A handwriting board grows ~4 MB per lesson, and past the cap the driver
-       * throws a RangeError — a 500 with no explanation, the board unchanged,
-       * and a teacher who keeps drawing into a board that can no longer save.
-       * Measured: 13.9 MB stored fine, 17.5 MB threw. So the wall is real and
-       * near, and it is refused HERE, before anything is written, with a
-       * message that says what to do. `bytes`/`nearLimit` let the editor warn
-       * long before it.
+       * The candidate document, measured whole: the board as it stands minus its
+       * pages, plus everything this save sets. Past MongoDB's 16 MB cap the driver
+       * throws a RangeError — a 500 with no explanation, the board unchanged, and a
+       * teacher who keeps drawing into a board that can no longer save. Measured:
+       * 13.9 MB stored fine, 17.5 MB threw. So it is refused HERE, before anything
+       * is written, with a message that says what to do. `bytes`/`nearLimit` let
+       * the editor warn long before it.
        */
-      docBytes = mongoose.mongo.BSON.calculateObjectSize({ pages: set.pages });
-      if (docBytes > MAX_BOARD_DOC_BYTES()) {
+      docBytes = boardSize.sizeOf({ ...cur, ...set });
+      if (!boardSize.fits(docBytes)) {
         return res.status(413).json({
           message:
             "Lövhə maksimum həcmə çatıb. Bu lövhəyə daha yazmaq olmur — şəkil kimi yadda saxlayın (PNG) və yeni lövhə açın.",
-          code: "board_too_large",
+          code: boardSize.CODE,
           bytes: docBytes,
-          limit: MAX_BOARD_DOC_BYTES(),
+          limit: boardSize.maxDocBytes(),
         });
       }
     }
@@ -416,7 +415,7 @@ const saveBoard = asyncHandler(async (req, res) => {
     // The images this save moved into the store, so the editor stops sending them.
     ...(Object.keys(storedFiles).length ? { files: storedFiles } : {}),
     // How full the document is, so the editor can warn before the board is stuck.
-    ...(docBytes ? { bytes: docBytes, nearLimit: docBytes > MAX_BOARD_DOC_BYTES() * 0.75 } : {}),
+    ...(docBytes ? { bytes: docBytes, sizeState: boardSize.stateOf(docBytes), nearLimit: boardSize.stateOf(docBytes) !== "ok" } : {}),
   });
 });
 

@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { isOversizeError, tooLargeError } = require("../helper/boardSize");
 const { Schema } = mongoose;
 
 // One page of a board — its own Excalidraw scene. A board holds an ordered list
@@ -99,11 +100,20 @@ boardSchema.statics.writeScene = async function writeScene(filter, update, proje
   for (const k of ["_id", "owner", "pages._id"]) if (k in f) f[k] = asId(f[k]);
   const $set = { ...(update.$set || {}), updatedAt: new Date() };
   if (Array.isArray($set.classes)) $set.classes = $set.classes.map(asId);
-  const r = await this.collection.findOneAndUpdate(
-    f,
-    { ...update, $set },
-    { returnDocument: "after", projection, includeResultMetadata: true }
-  );
+  let r;
+  try {
+    r = await this.collection.findOneAndUpdate(
+      f,
+      { ...update, $set },
+      { returnDocument: "after", projection, includeResultMetadata: true }
+    );
+  } catch (e) {
+    // Last safety net: callers measure the candidate document first, so a size
+    // rejection HERE means something was not accounted for. It must still surface
+    // as the one typed failure every caller handles — never a raw RangeError 500.
+    if (isOversizeError(e)) throw tooLargeError(0);
+    throw e;
+  }
   return (r && r.value) || null;
 };
 

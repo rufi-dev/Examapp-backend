@@ -10,6 +10,7 @@
 const { WebSocketServer } = require("ws");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
+const boardSize = require("../helper/boardSize"); // the same size policy the HTTP save uses
 const Board = require("../models/boardModel");
 const { resolveSessionUser } = require("../middleware/authMiddleware");
 const { accessLevel, canHostLive } = require("../services/boardAccessService");
@@ -207,6 +208,71 @@ function broadcastSaveState(room) {
   broadcast(room, { v: 1, type: "save-state", state: saveStateOf(room), acceptedRevision: room.acceptedRevision, persistedRevision: room.persistedRevision });
 }
 
+/*
+ * ---- board size, live ------------------------------------------------------
+ *
+ * A live lesson is the heaviest writer on a board and it never touches the HTTP
+ * save, so the size wall has to be enforced HERE too — otherwise a teacher can
+ * draw a board past MongoDB's 16 MB document cap during a lesson and only find
+ * out as a generic "save failed" (that gap is what this closes).
+ *
+ * Measuring the whole document on every stroke would be far too slow, so a room
+ * carries the arithmetic instead: the document WITHOUT this page's scene, plus
+ * the per-element sizes of the scene it holds. Both are exact BSON sizes; only
+ * the few bytes of framing around them are approximated, and the limit already
+ * sits a megabyte under Mongo's cap.
+ */
+function baseBytesOf(board, pageId) {
+  const doc = {
+    ...board,
+    pages: (board.pages || []).map((p) => (String(p._id) === String(pageId) ? { ...p, scene: null } : p)),
+  };
+  return boardSize.sizeOf(doc);
+}
+
+// (Re)measure a room's scene from scratch — on build and on every page switch.
+function initRoomSize(room, board) {
+  room.elBytes = null; // force a fresh measure of the scene now in the room
+  ensureSize(room);
+  room.baseBytes = baseBytesOf(board, room.pageId);
+  room.sizeState = boardSize.stateOf(roomBytes(room));
+}
+
+/*
+ * A room always has its size arithmetic, even one built before this existed (a
+ * rehydrated session, a room a test hands us): measure it from the scene it
+ * holds rather than trusting the fields to be there.
+ */
+function ensureSize(room) {
+  if (room.elBytes instanceof Map) return room;
+  room.elBytes = new Map();
+  let total = 0;
+  for (const [id, el] of room.scene.elements) {
+    const b = boardSize.sizeOf(el);
+    room.elBytes.set(id, b);
+    total += b;
+  }
+  room.elementsBytes = total;
+  room.filesBytes = boardSize.sizeOf(mapToObj(room.scene.files));
+  if (typeof room.baseBytes !== "number") room.baseBytes = 0; // unknown document → scene only
+  return room;
+}
+
+const roomBytes = (room) => (ensureSize(room).baseBytes || 0) + (room.elementsBytes || 0) + (room.filesBytes || 0);
+
+/*
+ * Tell EVERY client in the room where the board stands, authoritatively. The
+ * editor shows the same warning banner it shows for a solo save, so a teacher
+ * mid-lesson is warned while there is still room — and told plainly when there
+ * is not, instead of watching an unexplained "failed".
+ */
+function broadcastBoardSize(room, force = false) {
+  const state = boardSize.stateOf(roomBytes(room));
+  if (!force && state === room.sizeState) return;
+  room.sizeState = state;
+  broadcast(room, { v: 1, type: "board-size", state, bytes: roomBytes(room), limit: boardSize.maxDocBytes() });
+}
+
 // ---- persistence (server-authoritative, revision CAS) -----------------------
 function scheduleCheckpoint(room, delay = LIMITS.CHECKPOINT_DEBOUNCE_MS) {
   if (room.status === "ending" || room.checkpointTimer) return; // finalizeRoom drives ending
@@ -293,6 +359,18 @@ async function writeCheckpoint(room) {
   const files = mapToObj(room.scene.files);
   // Persist ONLY the page background from appState (allow-list), never arbitrary UI.
   const pageScene = { elements, appState: { viewBackgroundColor: "transparent" }, files };
+  /*
+   * The same wall as the HTTP save. The accept path already refuses growth past
+   * the limit, so reaching this means the board was ALREADY over (a legacy board
+   * opened live, or a page switch onto a heavy page). Report it as the typed
+   * failure and keep the scene in memory — an erase shrinks it and the next
+   * checkpoint goes through.
+   */
+  if (!boardSize.fits(roomBytes(room))) {
+    room.lastPersistError = boardSize.CODE;
+    broadcastBoardSize(room, true);
+    return false;
+  }
   try {
     // Through the driver, reading back only the revision: this ran with `new: true`
     // and no projection, so every checkpoint of a live lesson decoded the WHOLE
@@ -314,9 +392,13 @@ async function writeCheckpoint(room) {
       return false;
     }
     room.boardRevision = res.revision;
+    broadcastBoardSize(room);
     return true;
-  } catch {
-    room.lastPersistError = "error";
+  } catch (e) {
+    // The driver/server refused the document for size: same typed failure, so the
+    // room reports "board is full" instead of an anonymous error.
+    room.lastPersistError = boardSize.isOversizeError(e) ? boardSize.CODE : "error";
+    if (room.lastPersistError === boardSize.CODE) broadcastBoardSize(room, true);
     return false;
   }
 }
@@ -582,6 +664,18 @@ async function replayJournals() {
           appState: { viewBackgroundColor: "transparent" },
           files: entry.scene.files,
         };
+        /*
+         * Recovery obeys the same wall. A journal whose scene cannot fit is NOT
+         * written and NOT deleted: the board is locked for review with its journal
+         * retained, exactly as any other unprovable recovery — losing a lesson's
+         * drawing to a size limit silently would be the worst outcome here.
+         */
+        const candidate = boardSize.sizeOf({ ...board, pages: (board.pages || []).map((p) => (String(p._id) === String(entry.pageId) ? { ...p, scene: pageScene } : p)) });
+        if (!boardSize.fits(candidate)) {
+          console.error("[LIVE][SIZE] journal for board " + bid + " exceeds the document limit (" + candidate + " > " + boardSize.maxDocBytes() + ") — retained, board LOCKED for review");
+          unresolvedRecovery.add(bid);
+          continue;
+        }
         const res = await Board.findOneAndUpdate(
           { _id: entry.boardId, deletedAt: null, "pages._id": entry.pageId, revision: { $in: cur === 0 ? [0, null] : [cur] } },
           { $set: { "pages.$.scene": pageScene, elementCount: entry.scene.elements.length, lastLiveJournalId: entry.journalId }, $inc: { revision: 1 } },
@@ -866,6 +960,7 @@ function buildRoom(board, sessionId, startedAt) {
     capTimer: null,
   };
   rooms.set(key, room);
+  initRoomSize(room, board);
   scheduleSessionCap(room);
   return room;
 }
@@ -975,6 +1070,9 @@ function seatIntoRoom(ws, user, room, isHost) {
     // Authoritative initial/reconnect save state so the client never guesses — an
     // untouched room reports "saved", not "saving" (CR-BOARD-008).
     saveState: saveStateOf(room),
+    // Authoritative from the first frame: a teacher joining a board that is already
+    // near the limit sees the warning immediately, not after the first refusal.
+    boardSize: { state: boardSize.stateOf(roomBytes(room)), bytes: roomBytes(room), limit: boardSize.maxDocBytes() },
     self: { socketId: seat.socketId, canWrite: seat.canWrite, isHost: seat.isHost, isLeader: seat.connId === room.leaderSocketId },
     scene: { elements: [...room.scene.elements.values()], files: mapToObj(room.scene.files) },
     members: publicMembers(room),
@@ -1001,6 +1099,7 @@ function switchRoomToPage(room, board, page) {
   // + journaled and drop any journal left for the previous page.
   room.persistedRevision = room.acceptedRevision;
   room.journaledRevision = room.acceptedRevision;
+  initRoomSize(room, board);
   maybeDropJournal(room);
   broadcast(room, {
     v: 1,
@@ -1066,6 +1165,7 @@ async function handleInRoom(room, seat, msg) {
       }
       const incoming = Array.isArray(msg.elements) ? msg.elements : [];
       if (incoming.length > LIMITS.MAX_ELEMENTS_PER_MSG) return;
+      ensureSize(room);
       const accepted = [];
       const rejected = []; // { id, reason } — reported so a drop is NEVER silent
       for (const el of incoming) {
@@ -1084,12 +1184,42 @@ async function handleInRoom(room, seat, msg) {
           continue;
         }
         const cur = room.scene.elements.get(el.id);
-        if (shouldAcceptElement(el, cur)) {
-          room.scene.elements.set(el.id, el);
-          accepted.push(el);
+        if (!shouldAcceptElement(el, cur)) continue;
+        /*
+         * NEVER accept what cannot be persisted. An accepted element is acked as
+         * durable once journaled, so taking one that will not fit in the document
+         * would promise the teacher work we know Mongo will refuse. Growth past
+         * the limit is rejected element by element; anything that SHRINKS the
+         * board (an erase — Excalidraw sends the tombstone, which is far smaller
+         * than the stroke it replaces) is always allowed, so a full board can be
+         * brought back under the limit and saved again.
+         */
+        const nextBytes = boardSize.sizeOf(el);
+        const prevBytes = room.elBytes.get(el.id) || 0;
+        const delta = nextBytes - prevBytes;
+        if (delta > 0 && !boardSize.fits(roomBytes(room) + delta)) {
+          rejected.push({ id: el.id, reason: boardSize.CODE });
+          continue;
         }
+        room.scene.elements.set(el.id, el);
+        room.elBytes.set(el.id, nextBytes);
+        room.elementsBytes += delta;
+        accepted.push(el);
       }
       if (room.scene.elements.size > LIMITS.MAX_ELEMENTS) return dropSeat(room, seat, "protocol_error");
+      // Typed, not generic: the client shows the "board is full" banner from this,
+      // and knows the drawing was refused rather than lost in transit.
+      if (rejected.some((r) => r.reason === boardSize.CODE)) {
+        send(seat.ws, {
+          v: 1,
+          type: "board-too-large",
+          code: boardSize.CODE,
+          bytes: roomBytes(room),
+          limit: boardSize.maxDocBytes(),
+          clientSeq: typeof msg.clientSeq === "number" ? msg.clientSeq : null,
+        });
+        broadcastBoardSize(room, true);
+      }
       // Tell the sender exactly which elements were NOT accepted, so the host and
       // viewers can never silently diverge (CR-BOARD-010 item 4).
       if (rejected.length) send(seat.ws, { v: 1, type: "scene-rejected", elements: rejected });
@@ -1101,6 +1231,7 @@ async function handleInRoom(room, seat, msg) {
       // the UI can never keep showing "Saxlanıldı" during the checkpoint window.
       // The persist path emits the authoritative "saved"/"failed" when it finishes.
       broadcastSaveState(room);
+      broadcastBoardSize(room); // only speaks when the state actually changes
       scheduleCheckpoint(room);
       broadcast(room, { v: 1, type: "scene-update", elements: accepted, from: seat.socketId }, seat.connId);
       // The ack is DEFERRED until the change is durably journaled (survives a hard
@@ -1118,7 +1249,16 @@ async function handleInRoom(room, seat, msg) {
       if (!seat.isHost) return; // MVP: only host adds files
       const f = msg.file;
       if (!f || typeof f.fileId !== "string" || typeof f.hash !== "string") return;
-      room.scene.files.set(f.fileId, { fileId: f.fileId, hash: f.hash, mime: f.mime, size: f.size });
+      const entry = { fileId: f.fileId, hash: f.hash, mime: f.mime, size: f.size };
+      // An image reference is small, but it is still growth — refuse it at the wall
+      // rather than let it be the byte that breaks the document.
+      if (!room.scene.files.has(f.fileId) && !boardSize.fits(roomBytes(room) + boardSize.sizeOf(entry))) {
+        send(seat.ws, { v: 1, type: "board-too-large", code: boardSize.CODE, bytes: roomBytes(room), limit: boardSize.maxDocBytes(), fileId: f.fileId });
+        broadcastBoardSize(room, true);
+        return;
+      }
+      room.scene.files.set(f.fileId, entry);
+      room.filesBytes = boardSize.sizeOf(mapToObj(room.scene.files));
       broadcast(room, { v: 1, type: "files-add", file: room.scene.files.get(f.fileId), from: seat.socketId }, seat.connId);
       return;
     }
@@ -1298,5 +1438,5 @@ module.exports = {
   validateInRoom,
   LIMITS,
   // test-only hooks for the persistence/finalization/journal coordination
-  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals, unresolvedRecovery, handleHandshake, seatIntoRoom, makeSeat, saveStateOf, dropSeat, reapEmptyRoom, activateSession, endSession, isReady: () => replayDone },
+  __test: { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, roomBytes, ensureSize, journalFlush, replayJournals, unresolvedRecovery, handleHandshake, seatIntoRoom, makeSeat, saveStateOf, dropSeat, reapEmptyRoom, activateSession, endSession, isReady: () => replayDone },
 };

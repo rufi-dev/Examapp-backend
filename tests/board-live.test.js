@@ -67,7 +67,7 @@ const stubWrite = (fn) => {
 Board.findById = () => ({ select: () => leanOf({ revision: 0 }) });
 const fakeWs = () => ({ readyState: 1, OPEN: 1, bufferedAmount: 0, send() {}, close() {} });
 
-const { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals, unresolvedRecovery } = hub.__test;
+const { rooms, endRoom, finalizeRoom, persistThrough, handleInRoom, journalFlush, replayJournals, unresolvedRecovery, roomBytes: roomBytesOf } = hub.__test;
 const tick = () => new Promise((r) => setTimeout(r, 5));
 const fakeRoom = (id, over = {}) => ({
   boardId: id, generation: 0, status: "ending", pageId: "p1",
@@ -513,6 +513,130 @@ const at = async (name, fn) => {
     clearTimeout(room.journalTimer);
     clearTimeout(room.capTimer);
     rooms.delete(room.boardId);
+  });
+
+  /*
+   * ---- the board-size wall, LIVE ------------------------------------------
+   *
+   * A board is one MongoDB document capped at 16 MB. The editor does NOT
+   * HTTP-save during a live lesson — the hub is the single writer — so a limit
+   * enforced only on the HTTP route left the heaviest path in the product
+   * unprotected: a teacher could draw past the cap mid-lesson and see nothing
+   * but a generic "failed". Growth is refused element by element, erasing is
+   * always allowed so the board can come back under the limit, and the whole
+   * room is told where it stands.
+   */
+  console.log("\nboard-live hub — the size wall");
+
+  const bigStroke = (id, points) => ({
+    id, type: "freedraw", version: 1, versionNonce: 7, x: 0, y: 0, width: 10, height: 10,
+    points: Array.from({ length: points }, (_, i) => [i, i]),
+  });
+  const sizeMsg = (clientSeq, elements) => ({ v: 1, type: "scene-update", liveSessionId: "S", pageEpoch: 0, clientSeq, elements });
+  const sizeRoom = (id, sent) => {
+    const room = fakeRoom(id, { status: "ready", liveSessionId: "S", pageEpoch: 0, pageId: "p1", leaderSocketId: "H" });
+    rooms.set(id, room);
+    const seat = saveSeat(sent);
+    room.members.set("H", seat);
+    return { room, seat };
+  };
+  const cleanupRoom = async (room) => {
+    clearTimeout(room.checkpointTimer);
+    clearTimeout(room.journalTimer);
+    rooms.delete(room.boardId);
+    await jrnl.deleteEntry(room.boardId);
+  };
+
+  await at("a drawing that would not fit is REFUSED — never accepted, never acked", async () => {
+    stubWrite(() => Promise.resolve({ revision: 1 }));
+    const sent = [];
+    const { room, seat } = sizeRoom("111111111111111111111111", sent);
+    await handleInRoom(room, seat, sizeMsg(1, [bigStroke("a", 200)]));
+    const acceptedAfterFirst = room.acceptedRevision;
+    process.env.BOARD_MAX_DOC_BYTES = String(roomBytesOf(room) + 50);
+    await handleInRoom(room, seat, sizeMsg(2, [bigStroke("b", 200)]));
+    assert.strictEqual(room.acceptedRevision, acceptedAfterFirst, "the revision does not advance on a refused element");
+    assert.ok(!room.scene.elements.has("b"), "the element is not in the room scene");
+    assert.ok(!seat.pendingAcks.some((a) => a.clientSeq === 2), "nothing is queued to be acked as durable");
+    const typed = sent.filter((m) => m.type === "board-too-large");
+    assert.strictEqual(typed.length, 1, "the client is told, with a typed message");
+    assert.strictEqual(typed[0].code, "board_too_large");
+    assert.ok(typed[0].limit > 0 && typed[0].bytes > 0, "it carries the numbers");
+    const rejected = sent.filter((m) => m.type === "scene-rejected").pop();
+    assert.strictEqual(rejected.elements[0].reason, "board_too_large", "the per-element reason is typed too");
+    delete process.env.BOARD_MAX_DOC_BYTES;
+    await cleanupRoom(room);
+  });
+
+  await at("ERASING is accepted even when the board is over the limit, so it can recover", async () => {
+    stubWrite(() => Promise.resolve({ revision: 1 }));
+    const sent = [];
+    const { room, seat } = sizeRoom("222222222222222222222222", sent);
+    await handleInRoom(room, seat, sizeMsg(1, [bigStroke("a", 400)]));
+    process.env.BOARD_MAX_DOC_BYTES = "1";
+    const before = roomBytesOf(room);
+    await handleInRoom(room, seat, sizeMsg(2, [{ id: "a", type: "freedraw", version: 2, versionNonce: 9, x: 0, y: 0, width: 10, height: 10, points: [], isDeleted: true }]));
+    assert.ok(room.scene.elements.get("a").isDeleted, "the erase was applied");
+    assert.ok(roomBytesOf(room) < before, "the board is smaller than it was");
+    assert.strictEqual(room.acceptedRevision, 2, "the erase advanced the revision like any accepted change");
+    assert.ok(!sent.some((m) => m.type === "board-too-large" && m.clientSeq === 2), "an erase is never refused for size");
+    delete process.env.BOARD_MAX_DOC_BYTES;
+    await cleanupRoom(room);
+  });
+
+  await at("the whole room is told when the board turns near-full, and when it is full", async () => {
+    stubWrite(() => Promise.resolve({ revision: 1 }));
+    const sent = [];
+    const { room, seat } = sizeRoom("333333333333333333333333", sent);
+    await handleInRoom(room, seat, sizeMsg(1, [bigStroke("a", 100)]));
+    process.env.BOARD_MAX_DOC_BYTES = String(Math.round(roomBytesOf(room) / 0.8));
+    await handleInRoom(room, seat, sizeMsg(2, [bigStroke("b", 5)]));
+    const states = sent.filter((m) => m.type === "board-size").map((m) => m.state);
+    assert.ok(states.includes("near"), "expected a near broadcast, got " + JSON.stringify(states));
+    process.env.BOARD_MAX_DOC_BYTES = "1";
+    await handleInRoom(room, seat, sizeMsg(3, [bigStroke("c", 100)]));
+    const after = sent.filter((m) => m.type === "board-size").map((m) => m.state);
+    assert.ok(after.includes("full"), "a refusal tells the room the board is full");
+    delete process.env.BOARD_MAX_DOC_BYTES;
+    await cleanupRoom(room);
+  });
+
+  await at("a checkpoint of an over-limit board fails as board_too_large, and the scene is KEPT for an erase", async () => {
+    let wrote = false;
+    stubWrite(() => { wrote = true; return Promise.resolve({ revision: 1 }); });
+    const sent = [];
+    const { room, seat } = sizeRoom("555555555555555555555555", sent);
+    await handleInRoom(room, seat, sizeMsg(1, [bigStroke("a", 300)]));
+    clearTimeout(room.checkpointTimer);
+    wrote = false;
+    process.env.BOARD_MAX_DOC_BYTES = "1";
+    const okPersist = await persistThrough(room, room.acceptedRevision);
+    assert.strictEqual(okPersist, false, "the checkpoint reports failure");
+    assert.strictEqual(wrote, false, "nothing was written to the database");
+    assert.strictEqual(room.lastPersistError, "board_too_large", "typed, not a generic error");
+    assert.ok(room.scene.elements.has("a"), "the drawing stays in memory so an erase can rescue it");
+    assert.ok(sent.some((m) => m.type === "board-size" && m.state === "full"), "the room is told why");
+    delete process.env.BOARD_MAX_DOC_BYTES;
+    await cleanupRoom(room);
+  });
+
+  await at("a journal whose scene cannot fit is RETAINED and the board locked — never dropped", async () => {
+    const id = "777777777777777777777777";
+    unresolvedRecovery.delete(id);
+    await jrnl.writeEntry({ boardId: id, pageId: "p1", liveSessionId: "S", acceptedRevision: 2, boardRevision: 0, scene: { elements: [{ id: "x", type: "rectangle" }], files: {} } });
+    let wrote = false;
+    Board.findOne = () => ({ select: () => ({ lean: async () => ({ _id: id, revision: 0, pages: [{ _id: "p1" }] }) }) });
+    Board.findOneAndUpdate = () => ({ lean: async () => { wrote = true; return { revision: 1 }; } });
+    process.env.BOARD_MAX_DOC_BYTES = "1";
+    await replayJournals();
+    delete process.env.BOARD_MAX_DOC_BYTES;
+    Board.findOne = origFO;
+    Board.findOneAndUpdate = origFOU;
+    assert.strictEqual(wrote, false, "an over-size journal is not written");
+    assert.ok(unresolvedRecovery.has(id), "the board is locked for review");
+    assert.ok((await jrnl.listEntries()).some((x) => x.entry && x.entry.boardId === id), "the journal is kept — a lesson is never dropped for size");
+    unresolvedRecovery.delete(id);
+    await jrnl.deleteEntry(id);
   });
 
   Board.findOneAndUpdate = origFOU;
