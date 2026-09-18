@@ -564,6 +564,10 @@ const at = async (name, fn) => {
     assert.ok(typed[0].limit > 0 && typed[0].bytes > 0, "it carries the numbers");
     const rejected = sent.filter((m) => m.type === "scene-rejected").pop();
     assert.strictEqual(rejected.elements[0].reason, "board_too_large", "the per-element reason is typed too");
+    // The stored board is a hair UNDER the limit here — but the teacher's drawing
+    // was refused, so what the room is told is "full", not "near".
+    const sizes = sent.filter((m) => m.type === "board-size");
+    assert.strictEqual(sizes[sizes.length - 1].state, "full", "a refusal reads as full to everyone in the room");
     delete process.env.BOARD_MAX_DOC_BYTES;
     await cleanupRoom(room);
   });

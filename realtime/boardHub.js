@@ -266,9 +266,15 @@ const roomBytes = (room) => (ensureSize(room).baseBytes || 0) + (room.elementsBy
  * mid-lesson is warned while there is still room — and told plainly when there
  * is not, instead of watching an unexplained "failed".
  */
-function broadcastBoardSize(room, force = false) {
-  const state = boardSize.stateOf(roomBytes(room));
-  if (!force && state === room.sizeState) return;
+function broadcastBoardSize(room, forceState = null) {
+  /*
+   * A REFUSAL says "full" even when the stored board is a hair under the limit:
+   * what the teacher needs to know is that their drawing was not taken, not the
+   * arithmetic. Otherwise the state is simply where the board stands, and it is
+   * only announced when it changes.
+   */
+  const state = forceState || boardSize.stateOf(roomBytes(room));
+  if (!forceState && state === room.sizeState) return;
   room.sizeState = state;
   broadcast(room, { v: 1, type: "board-size", state, bytes: roomBytes(room), limit: boardSize.maxDocBytes() });
 }
@@ -368,7 +374,7 @@ async function writeCheckpoint(room) {
    */
   if (!boardSize.fits(roomBytes(room))) {
     room.lastPersistError = boardSize.CODE;
-    broadcastBoardSize(room, true);
+    broadcastBoardSize(room, "full");
     return false;
   }
   try {
@@ -398,7 +404,7 @@ async function writeCheckpoint(room) {
     // The driver/server refused the document for size: same typed failure, so the
     // room reports "board is full" instead of an anonymous error.
     room.lastPersistError = boardSize.isOversizeError(e) ? boardSize.CODE : "error";
-    if (room.lastPersistError === boardSize.CODE) broadcastBoardSize(room, true);
+    if (room.lastPersistError === boardSize.CODE) broadcastBoardSize(room, "full");
     return false;
   }
 }
@@ -1218,7 +1224,7 @@ async function handleInRoom(room, seat, msg) {
           limit: boardSize.maxDocBytes(),
           clientSeq: typeof msg.clientSeq === "number" ? msg.clientSeq : null,
         });
-        broadcastBoardSize(room, true);
+        broadcastBoardSize(room, "full"); // a refused drawing IS full, to the teacher
       }
       // Tell the sender exactly which elements were NOT accepted, so the host and
       // viewers can never silently diverge (CR-BOARD-010 item 4).
@@ -1254,7 +1260,7 @@ async function handleInRoom(room, seat, msg) {
       // rather than let it be the byte that breaks the document.
       if (!room.scene.files.has(f.fileId) && !boardSize.fits(roomBytes(room) + boardSize.sizeOf(entry))) {
         send(seat.ws, { v: 1, type: "board-too-large", code: boardSize.CODE, bytes: roomBytes(room), limit: boardSize.maxDocBytes(), fileId: f.fileId });
-        broadcastBoardSize(room, true);
+        broadcastBoardSize(room, "full");
         return;
       }
       room.scene.files.set(f.fileId, entry);
