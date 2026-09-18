@@ -1176,17 +1176,17 @@ async function handleInRoom(room, seat, msg) {
       const rejected = []; // { id, reason } — reported so a drop is NEVER silent
       for (const el of incoming) {
         if (!isValidElement(el)) {
-          if (el && typeof el.id === "string") rejected.push({ id: el.id, reason: "invalid" });
+          if (el && typeof el.id === "string") rejected.push({ id: el.id, version: el.version || 0, reason: "invalid" });
           continue;
         }
         if (!seat.isHost && (HOST_ONLY_TYPES.has(el.type) || el.link != null)) {
-          rejected.push({ id: el.id, reason: "host-only" });
+          rejected.push({ id: el.id, version: el.version || 0, reason: "host-only" });
           continue;
         }
         // A live image needs its file registered first — but a DELETED element (a
         // tombstone) references no bytes, so never reject a deletion for that.
         if (el.fileId && !el.isDeleted && !room.scene.files.has(el.fileId)) {
-          rejected.push({ id: el.id, reason: "unknown-file" });
+          rejected.push({ id: el.id, version: el.version || 0, reason: "unknown-file" });
           continue;
         }
         const cur = room.scene.elements.get(el.id);
@@ -1204,7 +1204,7 @@ async function handleInRoom(room, seat, msg) {
         const prevBytes = room.elBytes.get(el.id) || 0;
         const delta = nextBytes - prevBytes;
         if (delta > 0 && !boardSize.fits(roomBytes(room) + delta)) {
-          rejected.push({ id: el.id, reason: boardSize.CODE });
+          rejected.push({ id: el.id, version: el.version || 0, reason: boardSize.CODE });
           continue;
         }
         room.scene.elements.set(el.id, el);
@@ -1226,9 +1226,24 @@ async function handleInRoom(room, seat, msg) {
         });
         broadcastBoardSize(room, "full"); // a refused drawing IS full, to the teacher
       }
-      // Tell the sender exactly which elements were NOT accepted, so the host and
-      // viewers can never silently diverge (CR-BOARD-010 item 4).
-      if (rejected.length) send(seat.ws, { v: 1, type: "scene-rejected", elements: rejected });
+      /*
+       * Tell the sender exactly which elements were NOT accepted, so the host and
+       * viewers can never silently diverge (CR-BOARD-010 item 4).
+       *
+       * CR-BOARD-013: a message can be PART accepted. The reply names the message
+       * (clientSeq) and the exact version refused per element, so the client can
+       * drop those elements from that send and still wait for the ack that covers
+       * the ones which were taken — instead of discarding the whole message and
+       * leaving accepted work untracked, or rejected work looking delivered.
+       */
+      if (rejected.length) {
+        send(seat.ws, {
+          v: 1,
+          type: "scene-rejected",
+          clientSeq: typeof msg.clientSeq === "number" ? msg.clientSeq : null,
+          elements: rejected,
+        });
+      }
       if (!accepted.length) return;
       room.acceptedRevision += 1;
       room.dirty = true;

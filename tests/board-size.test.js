@@ -36,13 +36,35 @@ const boardSize = require("../helper/boardSize");
 async function main() {
   console.log("board size — the shared policy");
   ok("the limit sits under MongoDB's hard 16 MB cap", boardSize.maxDocBytes() < boardSize.HARD_CAP);
-  ok("a test may narrow it, never widen it past the cap", (() => {
-    process.env.BOARD_MAX_DOC_BYTES = String(64 * 1024 * 1024);
-    const wide = boardSize.maxDocBytes();
+  /*
+   * Configuration may only NARROW the wall. The live path's size arithmetic is
+   * incremental (a document base plus per-element sizes), and the margin under
+   * Mongo's cap is what absorbs that approximation — so a config value must not
+   * be able to spend it, even by asking for the cap exactly.
+   */
+  ok("a config value may narrow the limit", (() => {
     process.env.BOARD_MAX_DOC_BYTES = "1000";
     const narrow = boardSize.maxDocBytes();
     delete process.env.BOARD_MAX_DOC_BYTES;
-    return wide === boardSize.HARD_CAP && narrow === 1000;
+    return narrow === 1000;
+  })());
+  ok("but can never widen it — the safety margin survives any configuration", (() => {
+    const results = [];
+    for (const v of [String(64 * 1024 * 1024), String(boardSize.HARD_CAP), String(boardSize.HARD_CAP - 1)]) {
+      process.env.BOARD_MAX_DOC_BYTES = v;
+      results.push(boardSize.maxDocBytes());
+    }
+    delete process.env.BOARD_MAX_DOC_BYTES;
+    return results.every((r) => r === 15 * 1024 * 1024) && boardSize.HARD_CAP - 15 * 1024 * 1024 === 1024 * 1024;
+  })());
+  ok("a nonsense value falls back to the safe default", (() => {
+    const out = [];
+    for (const v of ["0", "-5", "abc", ""]) {
+      process.env.BOARD_MAX_DOC_BYTES = v;
+      out.push(boardSize.maxDocBytes());
+    }
+    delete process.env.BOARD_MAX_DOC_BYTES;
+    return out.every((r) => r === 15 * 1024 * 1024);
   })());
   ok("it measures BSON, not JavaScript object identity", boardSize.sizeOf({ a: "x".repeat(1000) }) > 1000);
   ok("a scene of many elements measures larger than one", boardSize.sizeOf([{ id: "a" }, { id: "b" }]) > boardSize.sizeOf([{ id: "a" }]));

@@ -23,10 +23,15 @@ const HARD_CAP = 16 * 1024 * 1024; // MongoDB's limit on one document
 const DEFAULT_LIMIT = 15 * 1024 * 1024; // ours, with a megabyte of headroom
 const NEAR_RATIO = 0.75; // warn the teacher here, while there is still room
 
-// Read per call so a test can narrow the wall without building a 15 MB payload.
+/*
+ * Read per call so a test can NARROW the wall without building a 15 MB payload.
+ * It can never widen it: the live path's arithmetic is incremental (a document
+ * base plus per-element sizes) and the margin under Mongo's cap is what absorbs
+ * that approximation, so configuration must not be able to spend it.
+ */
 function maxDocBytes() {
   const raw = Number(process.env.BOARD_MAX_DOC_BYTES);
-  return Number.isFinite(raw) && raw > 0 ? Math.min(raw, HARD_CAP) : DEFAULT_LIMIT;
+  return Number.isFinite(raw) && raw > 0 ? Math.min(raw, DEFAULT_LIMIT) : DEFAULT_LIMIT;
 }
 
 // BSON size of any value, as it would be stored inside a document.

@@ -643,6 +643,41 @@ const at = async (name, fn) => {
     await jrnl.deleteEntry(id);
   });
 
+  await at("a PART-accepted message: the kept element is acked, the refused one is named with its version", async () => {
+    stubWrite(() => Promise.resolve({ revision: 1 }));
+    const sent = [];
+    const { room, seat } = sizeRoom("444444444444444444444444", sent);
+    await handleInRoom(room, seat, sizeMsg(1, [bigStroke("base", 200)]));
+    // Room for a small element, but not for a large one — in the SAME message.
+    process.env.BOARD_MAX_DOC_BYTES = String(roomBytesOf(room) + 260);
+    await handleInRoom(room, seat, sizeMsg(2, [bigStroke("small", 2), bigStroke("huge", 400)]));
+    assert.ok(room.scene.elements.has("small"), "the element that fits IS accepted");
+    assert.ok(!room.scene.elements.has("huge"), "the one that does not fit is refused");
+    assert.strictEqual(room.acceptedRevision, 2, "the message advanced the revision once, for what it took");
+    assert.ok(seat.pendingAcks.some((a) => a.clientSeq === 2), "the accepted part is still awaiting its durable ack");
+    const rej = sent.filter((m) => m.type === "scene-rejected").pop();
+    assert.strictEqual(rej.clientSeq, 2, "the rejection names the message it belongs to");
+    assert.deepStrictEqual(
+      rej.elements.map((r) => ({ id: r.id, version: r.version, reason: r.reason })),
+      [{ id: "huge", version: 1, reason: "board_too_large" }],
+      "and names the exact element+version refused, so the client can drop just that one"
+    );
+    delete process.env.BOARD_MAX_DOC_BYTES;
+    await cleanupRoom(room);
+  });
+
+  await at("every rejection reason carries the version it refused", async () => {
+    stubWrite(() => Promise.resolve({ revision: 1 }));
+    const sent = [];
+    const { room, seat } = sizeRoom("666666666666666666666666", sent);
+    await handleInRoom(room, seat, sizeMsg(1, [{ id: "bad", type: "not-a-real-type", version: 4 }]));
+    const rej = sent.filter((m) => m.type === "scene-rejected").pop();
+    assert.strictEqual(rej.elements[0].reason, "invalid");
+    assert.strictEqual(rej.elements[0].version, 4, "the version is reported for every reason, not only for size");
+    assert.strictEqual(rej.clientSeq, 1);
+    await cleanupRoom(room);
+  });
+
   Board.findOneAndUpdate = origFOU;
   Board.writeScene = origWS;
   Board.findById = origFBI;
