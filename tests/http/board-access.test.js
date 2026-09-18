@@ -468,6 +468,33 @@ async function main() {
   const staleTyped = await saveRequest(server, boardS._id, tok(owner), plainJson, { expectedRevision: before.revision });
   ok("and the revision fence holds on the driver path", staleTyped.status === 409 && staleTyped.body.code === "board_conflict");
 
+  /*
+   * ── the 16 MB wall (2026-09-19) ───────────────────────────────────────────
+   * A board is ONE document, and a handwriting board grows ~4 MB per lesson.
+   * Measured against the real database: 13.9 MB stored, 17.5 MB threw a
+   * RangeError from the driver — a 500, nothing written, and a teacher still
+   * drawing into a board that can no longer save. The save must refuse itself
+   * first, and say so. BOARD_MAX_DOC_BYTES narrows the wall for this test.
+   */
+  console.log("\nboard save — the size wall is refused, not crashed into");
+  const roomy = await Board.findById(boardS._id).select("revision pages").lean();
+  process.env.BOARD_MAX_DOC_BYTES = "1024"; // every real save is now "too large"
+  const tooBig = await saveRequest(server, boardS._id, tok(owner), plainJson, { expectedRevision: roomy.revision });
+  ok("an over-size save is a 413 with a code, not a 500", tooBig.status === 413 && tooBig.body.code === "board_too_large");
+  ok("it tells the teacher what to do", /PNG/.test(tooBig.body.message || "") && /yeni lövhə/i.test(tooBig.body.message || ""));
+  ok("it reports the size and the limit", tooBig.body.bytes > tooBig.body.limit && tooBig.body.limit === 1024);
+  const untouched = await Board.findById(boardS._id).lean();
+  ok("and NOTHING was written — the board keeps its last good scene", untouched.revision === roomy.revision && untouched.pages.length === roomy.pages.length);
+  delete process.env.BOARD_MAX_DOC_BYTES;
+
+  process.env.BOARD_MAX_DOC_BYTES = String(Math.round(typed.body.bytes / 0.8)); // this save is 80% of the limit
+  const warned = await saveRequest(server, boardS._id, tok(owner), plainJson, { expectedRevision: roomy.revision });
+  ok("a save that fits still succeeds", warned.status === 200);
+  ok("and warns while there is still room (the editor shows a banner)", warned.body.nearLimit === true && warned.body.bytes > 0 && warned.body.bytes < Number(process.env.BOARD_MAX_DOC_BYTES));
+  delete process.env.BOARD_MAX_DOC_BYTES;
+  const roomyAgain = await saveRequest(server, boardS._id, tok(owner), plainJson, { expectedRevision: warned.body.revision });
+  ok("with the real 15 MB limit a normal board is not warned about", roomyAgain.status === 200 && roomyAgain.body.nearLimit === false);
+
   await new Promise((r) => server.close(r));
   await mongoose.disconnect();
   await mem.stop();

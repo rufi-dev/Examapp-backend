@@ -74,6 +74,13 @@ async function readPagesUpload(buffer) {
   return { pages: JSON.parse(raw.toString("utf8")), bytes: raw.length };
 }
 
+/*
+ * The largest board document we will write, under MongoDB's hard 16 MB cap with
+ * room for the fields around the pages. Read per call so a test can narrow it
+ * without building a 15 MB payload.
+ */
+const MAX_BOARD_DOC_BYTES = () => Number(process.env.BOARD_MAX_DOC_BYTES) || 15 * 1024 * 1024;
+
 // Bytes already stored for one board's images — read at most once per save.
 async function boardFilesBytes(dir) {
   let total = 0;
@@ -316,6 +323,7 @@ const saveBoard = asyncHandler(async (req, res) => {
     const c = req.body.bgColor.trim();
     if (c === "" || /^[#a-zA-Z0-9(),.%\s]{1,32}$/.test(c)) set.bgColor = c;
   }
+  let docBytes = 0;
   if (req.file && req.file.buffer) {
     let pages;
     let jsonBytes = req.file.buffer.length;
@@ -334,6 +342,26 @@ const saveBoard = asyncHandler(async (req, res) => {
         scene: p?.scene || null,
       }));
       set.scene = null; // legacy field retired once saved in the new shape
+      /*
+       * A board is ONE MongoDB document, and a document cannot exceed 16 MB.
+       * A handwriting board grows ~4 MB per lesson, and past the cap the driver
+       * throws a RangeError — a 500 with no explanation, the board unchanged,
+       * and a teacher who keeps drawing into a board that can no longer save.
+       * Measured: 13.9 MB stored fine, 17.5 MB threw. So the wall is real and
+       * near, and it is refused HERE, before anything is written, with a
+       * message that says what to do. `bytes`/`nearLimit` let the editor warn
+       * long before it.
+       */
+      docBytes = mongoose.mongo.BSON.calculateObjectSize({ pages: set.pages });
+      if (docBytes > MAX_BOARD_DOC_BYTES()) {
+        return res.status(413).json({
+          message:
+            "Lövhə maksimum həcmə çatıb. Bu lövhəyə daha yazmaq olmur — şəkil kimi yadda saxlayın (PNG) və yeni lövhə açın.",
+          code: "board_too_large",
+          bytes: docBytes,
+          limit: MAX_BOARD_DOC_BYTES(),
+        });
+      }
     }
     // The size of the board as JSON, as before — not of the compressed upload.
     set.sizeBytes = jsonBytes;
@@ -387,6 +415,8 @@ const saveBoard = asyncHandler(async (req, res) => {
     updatedAt: updated.updatedAt,
     // The images this save moved into the store, so the editor stops sending them.
     ...(Object.keys(storedFiles).length ? { files: storedFiles } : {}),
+    // How full the document is, so the editor can warn before the board is stuck.
+    ...(docBytes ? { bytes: docBytes, nearLimit: docBytes > MAX_BOARD_DOC_BYTES() * 0.75 } : {}),
   });
 });
 
