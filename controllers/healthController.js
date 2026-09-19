@@ -904,6 +904,27 @@ const buildAlertsAndScore = (d) => {
     dock(2);
   }
 
+  /*
+   * ---- the off-server backup ------------------------------------------------
+   * A backup that quietly stopped running is the failure nobody notices until the
+   * day they need it, so a failed or missing night is said out loud here. While no
+   * destination exists yet this stays silent on purpose — "not set up" is a plan,
+   * not a fault, and a page that cries wolf gets ignored.
+   */
+  const off = d.backups?.offsite;
+  if (off && off.configured) {
+    if (off.state === "failed" || off.state === "degraded") {
+      add("critical", "Yedəkləmə", `Serverdən kənar yedəkləmə uğursuz oldu: ${off.detail || ""}`.slice(0, 180), "Serverdə /root/backups/mongo/offsite.log faylına baxın");
+      dock(8);
+    } else if (off.state === "skipped") {
+      add("warning", "Yedəkləmə", "Serverdən kənar yedəkləmə buraxıldı", "Storage Box konfiqurasiyasını yoxlayın");
+      dock(4);
+    } else if (off.ageHours != null && off.ageHours > 36) {
+      add("warning", "Yedəkləmə", `Serverdən kənar son uğurlu yedəkləmə ${off.ageHours} saat əvvəl olub`, "Gecəlik işin işlədiyini yoxlayın", `${off.ageHours} saat`, "36 saat");
+      dock(4);
+    }
+  }
+
   // Overall status: worst active severity wins.
   let status = "healthy";
   if (alerts.some((a) => a.severity === "down")) status = "down";
@@ -1020,6 +1041,49 @@ function lastNightlyBackup() {
   }
 }
 
+/*
+ * When the OFF-SERVER backup last ran, and how it went.
+ *
+ * `/root/offsite-backup.sh` appends one line per run to offsite.log inside the
+ * same folder (mounted read-only here) —
+ *   "2026-09-20 03:15:41 ok examopia-20260920-0315 verified, measured upload 24.1 MB, repository 9.8 GB"
+ *   "2026-09-20 03:15:02 FAILED: newest dump ... is 27h old — stale"
+ *   "2026-09-19 03:15:01 SKIPPED: Storage Box not configured yet (...)"
+ * — and this turns the last line into something the Health page can show and
+ * alert on. A backup that silently stopped running is the failure worth catching:
+ * nobody notices until the day they need it.
+ */
+const OFFSITE_LOG = path.join(process.env.BACKUP_LOG_DIR || "/app/backups-mongo", "offsite.log");
+function lastOffsiteBackup() {
+  try {
+    const lines = fs.readFileSync(OFFSITE_LOG, "utf8").trim().split("\n").filter(Boolean);
+    // Progress lines ("start ...", borg's own output) are not outcomes.
+    const outcome = [...lines].reverse().find((l) => /\d{2}:\d{2}:\d{2} (ok|FAILED|SKIPPED|DEGRADED)\b/.test(l));
+    if (!outcome) return null;
+    const m = outcome.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) (ok|FAILED|SKIPPED|DEGRADED)\b:?\s*(.*)$/);
+    if (!m) return null;
+    const at = new Date(`${m[1]}T${m[2]}Z`);
+    const state = m[3] === "ok" ? "ok" : m[3].toLowerCase();
+    const detail = (m[4] || "").slice(0, 200);
+    const lastOk = [...lines].reverse().find((l) => /\d{2}:\d{2}:\d{2} ok\b/.test(l));
+    const okAt = lastOk ? new Date(`${lastOk.slice(0, 10)}T${lastOk.slice(11, 19)}Z`) : null;
+    return {
+      at: at.toISOString(),
+      state,
+      detail,
+      // "Not configured yet" is a plan, not a fault: it is reported without raising
+      // an alarm, so the page does not cry wolf before the destination exists.
+      configured: !/not configured/i.test(detail),
+      lastOkAt: okAt && !Number.isNaN(okAt.getTime()) ? okAt.toISOString() : null,
+      ageHours: okAt && !Number.isNaN(okAt.getTime()) ? Math.round((Date.now() - okAt.getTime()) / 36e5) : null,
+      upload: (detail.match(/measured upload ([\d.]+ \w+)/) || [])[1] || null,
+      repository: (detail.match(/repository ([\d.]+ \w+)/) || [])[1] || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // --------------------------------- handlers -------------------------------
 
 const getHealth = asyncHandler(async (req, res) => {
@@ -1048,7 +1112,9 @@ const getHealth = asyncHandler(async (req, res) => {
     const errors = { groups: performance.errorGroups, debug };
     const sslArr = Array.isArray(ssl) ? ssl : [];
 
-    const d = { server, database, site, api, ssl: sslArr, business, storage, performance, jobs, errors, integrations };
+    // Read once: the alerts need it, and so does the backups section below.
+    const offsite = lastOffsiteBackup();
+    const d = { server, database, site, api, ssl: sslArr, business, storage, performance, jobs, errors, integrations, backups: { offsite } };
     const { alerts, score, status } = buildAlertsAndScore(d);
 
     return {
@@ -1100,7 +1166,8 @@ const getHealth = asyncHandler(async (req, res) => {
           "Fayllar (videolar, tapşırıqlar, materiallar) serverin diskindədir. " +
           "Diqqət: hələ hər ikisi eyni serverdədir — serverdən kənara surət qurulmayıb.",
         last: lastNightlyBackup(),
-        offServer: false,
+        offServer: !!(offsite && offsite.state === "ok"),
+        offsite,
       },
     };
   });
@@ -1126,4 +1193,4 @@ const getHealthHistory = asyncHandler(async (req, res) => {
 });
 
 // buildAlertsAndScore / withTimeout are exported for unit testing (pure helpers).
-module.exports = { getHealth, getHealthHistory, sampleHealth, buildAlertsAndScore, withTimeout, lastNightlyBackup };
+module.exports = { getHealth, getHealthHistory, sampleHealth, buildAlertsAndScore, withTimeout, lastNightlyBackup, lastOffsiteBackup };

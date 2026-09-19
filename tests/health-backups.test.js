@@ -9,7 +9,7 @@ const path = require("path");
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "exq-backup-log-"));
 process.env.BACKUP_LOG_DIR = dir;
-const { lastNightlyBackup } = require("../controllers/healthController");
+const { lastNightlyBackup, lastOffsiteBackup, buildAlertsAndScore } = require("../controllers/healthController");
 
 let passed = 0;
 let failed = 0;
@@ -37,6 +37,55 @@ ok("with no file or size claimed", bad.file === null && bad.size === null);
 
 write("garbage that is not a log line\n");
 ok("an unreadable line -> null", lastNightlyBackup() === null);
+
+/*
+ * ---- the OFF-SERVER backup ------------------------------------------------
+ * The database and ~10 GB of teacher and student files live on one machine. The
+ * nightly copy off it is the difference between a bad day and the end of the
+ * platform — and a backup that quietly stopped running is the failure nobody
+ * notices until they need it. So the Health page reads that job's own log, and
+ * says so out loud when a night did not happen.
+ */
+const writeOffsite = (text) => fs.writeFileSync(path.join(dir, "offsite.log"), text);
+const alertsFor = (offsite) => buildAlertsAndScore({ backups: { offsite } }).alerts.filter((a) => a.service === "Yedəkləmə");
+
+console.log("\nOff-server backup status:");
+fs.rmSync(path.join(dir, "offsite.log"), { force: true });
+ok("no log -> null, never a fake 'copied off the server'", lastOffsiteBackup() === null);
+
+writeOffsite(
+  "2026-09-20 03:15:01 start 20260920-0315\n" +
+  "2026-09-20 03:15:41 ok examopia-20260920-0315 verified, measured upload 24.1 MB, repository 9.8 GB\n"
+);
+const okRun = lastOffsiteBackup();
+ok("reads the last OUTCOME, not the progress line", okRun && okRun.state === "ok" && okRun.at === "2026-09-20T03:15:41.000Z");
+ok("and reports the MEASURED upload, not an estimate", okRun.upload === "24.1 MB" && okRun.repository === "9.8 GB");
+ok("a healthy off-server backup raises no alert", alertsFor(okRun).length === 0);
+
+writeOffsite("2026-09-20 03:15:02 FAILED: newest dump examopia-20260919-0230.archive.gz is 27h old — stale, not treating this as a backup\n");
+const failedRun = lastOffsiteBackup();
+ok("a failed run is reported as failed, with its reason", failedRun.state === "failed" && /stale/.test(failedRun.detail));
+ok("and is CRITICAL on the page — the data is unprotected", alertsFor(failedRun).some((a) => a.severity === "critical"));
+
+writeOffsite("2026-09-20 03:15:01 DEGRADED: continuing with FILES ONLY — the database dump did not pass its checks\n");
+ok("a files-only night is not passed off as a backup", alertsFor(lastOffsiteBackup()).some((a) => a.severity === "critical"));
+
+writeOffsite("2026-09-20 03:15:01 SKIPPED: Storage Box not configured yet (STORAGEBOX_HOST/USER empty)\n");
+const notSetUp = lastOffsiteBackup();
+ok("before a destination exists it is reported...", notSetUp.state === "skipped" && notSetUp.configured === false);
+ok("...but does not cry wolf — a plan is not a fault", alertsFor(notSetUp).length === 0);
+
+writeOffsite("2026-09-20 03:15:01 SKIPPED: could not reach the Storage Box\n");
+ok("a skip AFTER it is set up IS an alert", alertsFor(lastOffsiteBackup()).some((a) => a.severity === "warning"));
+
+const old = new Date(Date.now() - 50 * 3600 * 1000).toISOString().replace("T", " ").slice(0, 19);
+const recent = new Date(Date.now() - 60 * 1000).toISOString().replace("T", " ").slice(0, 19);
+writeOffsite(`${old} ok examopia-old verified, measured upload 1.0 MB, repository 9.8 GB\n${recent} start now\n`);
+const stale = lastOffsiteBackup();
+ok("a run that has not SUCCEEDED in over 36h is stale", stale.ageHours >= 36 && alertsFor(stale).some((a) => a.severity === "warning"));
+
+writeOffsite("nothing here looks like a log line\n");
+ok("an unreadable log -> null", lastOffsiteBackup() === null);
 
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failed} failed`);
