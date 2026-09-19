@@ -436,6 +436,9 @@ mongoose
         _server.once("listening", () => {
             const bound = (_server.address() && _server.address().port) || PORT
             console.log("Connected to DB and listening on port:", bound)
+            // A limit that can change without a deploy has to announce itself, or
+            // the day it is wrong nobody can tell it from a bug.
+            console.log(require("./helper/boardSize").describeLimit())
         })
         // A bind failure (e.g. EADDRINUSE) must be LOUD and take the shared cleanup
         // path — never an unhandled 'error' that kills the process with no diagnosis.

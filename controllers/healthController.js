@@ -1125,6 +1125,12 @@ const getHealth = asyncHandler(async (req, res) => {
       meta: {
         env: process.env.NODE_ENV || "production",
         version: pkg.version,
+        // Tunable downward without a deploy, so the effective value is reported
+        // (and says when a configured value was clamped or ignored).
+        boardLimit: (() => {
+          const c = require("../helper/boardSize").limitConfig();
+          return { mb: +(c.value / (1024 * 1024)).toFixed(1), source: c.source };
+        })(),
         commit: process.env.GIT_COMMIT || null,
         node: process.version,
         serverTime: new Date().toISOString(),

@@ -48,6 +48,37 @@ async function main() {
     delete process.env.BOARD_MAX_DOC_BYTES;
     return narrow === 1000;
   })());
+
+  /*
+   * The limit is a SUPPORTED setting (tunable downward without a deploy), so it
+   * must say which value is in force and why — a configured value that was
+   * silently ignored is indistinguishable from a bug on the day it matters.
+   */
+  const withEnv = (v, fn) => {
+    if (v === null) delete process.env.BOARD_MAX_DOC_BYTES;
+    else process.env.BOARD_MAX_DOC_BYTES = v;
+    const out = fn();
+    delete process.env.BOARD_MAX_DOC_BYTES;
+    return out;
+  };
+  ok("unset -> the default, reported as the default", withEnv(null, () => {
+    const c = boardSize.limitConfig();
+    return c.source === "default" && c.value === boardSize.DEFAULT_LIMIT && c.raw === null;
+  }));
+  ok("a lower value -> accepted, reported as configured", withEnv("1048576", () => {
+    const c = boardSize.limitConfig();
+    return c.source === "configured" && c.value === 1048576;
+  }));
+  ok("a higher value -> clamped, and SAYS it was clamped", withEnv("99999999", () => {
+    const c = boardSize.limitConfig();
+    return c.source === "clamped" && c.value === boardSize.DEFAULT_LIMIT && /can be lowered, never raised/.test(boardSize.describeLimit());
+  }));
+  ok("nonsense -> the default, and SAYS it was ignored", withEnv("abc", () => {
+    const c = boardSize.limitConfig();
+    return c.source === "invalid" && c.value === boardSize.DEFAULT_LIMIT && /not a positive number/.test(boardSize.describeLimit());
+  }));
+  ok("an empty value is not a configuration at all", withEnv("", () => boardSize.limitConfig().source === "default"));
+  ok("the boot line names the megabytes actually in force", withEnv("2097152", () => /2\.0 MB/.test(boardSize.describeLimit())));
   ok("but can never widen it — the safety margin survives any configuration", (() => {
     const results = [];
     for (const v of [String(64 * 1024 * 1024), String(boardSize.HARD_CAP), String(boardSize.HARD_CAP - 1)]) {
