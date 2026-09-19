@@ -44,7 +44,7 @@ const ALLOWED_EXT = new Set([
 
 const upload = multer({
   storage,
-  limits: { fileSize: 200 * 1024 * 1024 }, // 200MB — full scanned textbooks fit
+  limits: { fileSize: 400 * 1024 * 1024 }, // 400MB — full scanned textbooks, at scan quality
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname || "").toLowerCase();
     if (!ALLOWED_EXT.has(ext)) {
@@ -63,7 +63,7 @@ const uploadSingle = (req, res, next) =>
     if (!err) return next();
     const message =
       err.code === "LIMIT_FILE_SIZE"
-        ? "Fayl çox böyükdür (maksimum 200MB)"
+        ? "Fayl çox böyükdür (maksimum 400MB)"
         : err.message || "Fayl yüklənmədi";
     res.status(400).json({ message });
   });
@@ -83,7 +83,7 @@ router.post("/share/:token/join", protect, joinFromShare);
 router.get("/", protect, getMaterials);
 router.get("/:id/file", protect, viewMaterial);
 router.get("/:id/download", protect, downloadMaterial);
-// Rate limit BEFORE multer so a flood is refused without writing 200MB to
+// Rate limit BEFORE multer so a flood is refused without writing 400MB to
 // disk first; the quota check needs the file size, so it comes after.
 router.post("/", protect, teacherOnly, uploadRateLimit, uploadSingle, verifyUploadSignature, storageQuota, addMaterial);
 router.patch("/:id", protect, teacherOnly, updateMaterial);
