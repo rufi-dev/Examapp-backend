@@ -48,6 +48,14 @@ const attemptSchema = new Schema(
     // The client can't lower these by editing storage/JS or by reloading.
     violations: { type: Number, default: 0 },
     terminated: { type: Boolean, default: false },
+    /*
+     * This attempt ran WITHOUT the fullscreen lock, because the student's device
+     * could not enter fullscreen (2026-09-20: a student lost a whole exam to that
+     * gate). The exam still reports leaving the page, so this is a weaker session,
+     * not an unwatched one — and the teacher is told which sessions were weaker
+     * instead of it passing silently as a locked one. Set once, never cleared.
+     */
+    fsUnavailable: { type: Boolean, default: false },
     // Terminal exception to the "every submitted attempt has a Result" invariant:
     // an attempt that can never be scored (its exam/user was deleted, or it was a
     // retired duplicate / a legacy ghost). Excluded from ALL counts. NOTE: only

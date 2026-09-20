@@ -3337,7 +3337,7 @@ const autosaveAttempt = asyncHandler(async (req, res) => {
   const { examId } = req.params;
   // AUD-004: clientRevision is a per-attempt monotonic counter the client bumps on
   // every answer change; requestId identifies a single autosave POST (for retries).
-  const { selectedAnswers, attemptId, currentQuestion, answeredCount, clientRevision, requestId } = req.body;
+  const { selectedAnswers, attemptId, currentQuestion, answeredCount, clientRevision, requestId, fsUnavailable } = req.body;
   const serverTime = new Date();
   if (!Array.isArray(selectedAnswers)) {
     return res.status(200).json({ ok: false, outcome: "invalid_payload", serverTime });
@@ -3406,6 +3406,9 @@ const autosaveAttempt = asyncHandler(async (req, res) => {
     lastSeenAt: new Date(),
     answeredCount: answers.filter(hasAns).length,
   };
+  // The client could not use fullscreen on this device. Recorded, never unset:
+  // a session that ran without the lock must not later look like one that had it.
+  if (fsUnavailable === true || fsUnavailable === "true") set.fsUnavailable = true;
   if (Number.isFinite(currentQuestion) && currentQuestion > 0) {
     // Newer client reports the exact page being viewed.
     set.currentQuestion = Math.floor(currentQuestion);
@@ -3661,6 +3664,7 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
       answeredCount: a.answeredCount || 0,
       total,
       violations: a.violations || 0,
+      fsUnavailable: !!a.fsUnavailable, // ran without the fullscreen lock
       terminated: !!a.terminated,
       startedAt: a.startedAt,
       expiresAt: a.expiresAt,
