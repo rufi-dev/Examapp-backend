@@ -21,7 +21,25 @@ async function resolveSessionUser(token) {
   try {
     verified = jwt.verify(token, process.env.JWT_SECRET);
   } catch (e) {
-    return { error: { status: 401, kind: "auth_invalid_token", message: "Not authorized, please login", detail: e.message } };
+    /*
+     * Tell APART the two things jwt.verify refuses (EX-01).
+     *
+     * An access token that simply aged out is the normal first leg of the
+     * refresh cycle: the client refreshes once and replays the request, and the
+     * student never notices. A malformed or forged token is a real signal.
+     * Recording both as "invalid token" made routine expiry look like an
+     * authentication failure — 53 of them on exam heartbeats read as a
+     * persistence incident on the Health page when nothing had gone wrong.
+     */
+    const expired = e && e.name === "TokenExpiredError";
+    return {
+      error: {
+        status: 401,
+        kind: expired ? "auth_token_expired" : "auth_invalid_token",
+        message: expired ? "Session expired, please login again" : "Not authorized, please login",
+        detail: e.message,
+      },
+    };
   }
   // Gate 2 legacy sunset. Phase 1 counts no-`exp` presentations; Phase 2
   // (REQUIRE_EXP_TOKENS) rejects them outright — closing CR-003 for legacy and

@@ -1,5 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const User = require("../models/userModel");
+const MaintenanceAudit = require("../models/maintenanceAuditModel");
 const { usedBytes, quotaFor } = require("../middleware/uploadLimit");
 const Enrollment = require("../models/enrollmentModel");
 const Class = require("../models/classModel");
@@ -1774,25 +1775,78 @@ const setUserPlan = asyncHandler(async (req, res) => {
   });
 });
 
-// PATCH /api/users/:id/credits — admin adjusts a user's AI credit balance.
-// Body: { delta } (add/subtract) or { set } (absolute). Never goes below 0.
+/*
+ * PATCH /api/users/:id/credits — admin adjusts a user's AI credit balance.
+ * Body: { delta } (add/subtract) or { set } (absolute), plus a `reason`.
+ *
+ * A review on 2026-09-22 found one teacher holding 11,001,724 credits with NOT
+ * ONE ledger row behind it, while every other Premium account held about 2,000.
+ * This endpoint is how: it accepted any finite number, wrote it straight onto the
+ * user, and recorded nothing — no actor, no reason, no before/after. A mistyped
+ * amount in the admin prompt was indistinguishable from a deliberate grant, and
+ * afterwards nobody could tell which it had been.
+ *
+ * So an adjustment is now BOUNDED and AUDITED. The bound is deliberately far
+ * above any real use (the largest sold top-up is 300 credits and Premium grants
+ * 2,000 a month) and far below a fat-fingered one. The audit row is written
+ * BEFORE the balance moves, so an authorized change always leaves a trail and an
+ * unexplainable balance cannot happen twice.
+ */
+const MAX_CREDIT_ADJUST = 100000; // a single adjustment
+const MAX_CREDIT_BALANCE = 1000000; // the resulting balance
+
 const setUserCredits = asyncHandler(async (req, res) => {
   const user = await User.findById(req.params.id).select("name aiCredits");
   if (!user) {
     res.status(404);
     throw new Error("İstifadəçi tapılmadı");
   }
-  const { delta, set } = req.body || {};
-  let next = user.aiCredits || 0;
-  if (set !== undefined && Number.isFinite(Number(set))) next = Math.round(Number(set));
-  else if (Number.isFinite(Number(delta))) next += Math.round(Number(delta));
-  else {
+  const { delta, set, reason } = req.body || {};
+  const why = typeof reason === "string" ? reason.trim().slice(0, 500) : "";
+  if (!why) {
     res.status(400);
-    throw new Error("Kredit dəyəri yanlışdır");
+    throw new Error("Səbəb yazılmalıdır");
   }
-  user.aiCredits = Math.max(0, next);
+
+  const before = user.aiCredits || 0;
+  let next;
+  if (set !== undefined) {
+    const n = Number(set);
+    if (!Number.isFinite(n) || !Number.isSafeInteger(Math.round(n)) || n < 0) {
+      res.status(400);
+      throw new Error("Kredit dəyəri yanlışdır");
+    }
+    next = Math.round(n);
+  } else {
+    const n = Number(delta);
+    if (!Number.isFinite(n) || n === 0) {
+      res.status(400);
+      throw new Error("Kredit dəyəri yanlışdır");
+    }
+    if (Math.abs(n) > MAX_CREDIT_ADJUST) {
+      res.status(400);
+      throw new Error(`Bir dəfəyə ən çox ${MAX_CREDIT_ADJUST.toLocaleString("az-AZ")} kredit dəyişdirilə bilər`);
+    }
+    next = before + Math.round(n);
+  }
+  next = Math.max(0, next);
+  if (next > MAX_CREDIT_BALANCE) {
+    res.status(400);
+    throw new Error(`Balans ${MAX_CREDIT_BALANCE.toLocaleString("az-AZ")} krediti keçə bilməz`);
+  }
+
+  // Written FIRST: a balance that moved must always be explainable afterwards.
+  await MaintenanceAudit.create({
+    action: "user_credits_adjust",
+    actor: String(req.user?._id || "unknown"),
+    reason: why,
+    target: { userId: String(user._id), name: user.name, from: before, to: next },
+    at: new Date(),
+  });
+
+  user.aiCredits = next;
   await user.save();
-  res.json({ _id: user._id, name: user.name, aiCredits: user.aiCredits });
+  res.json({ _id: user._id, name: user.name, aiCredits: user.aiCredits, from: before });
 });
 
 // POST /api/users/app-installed — the frontend calls this the first time the

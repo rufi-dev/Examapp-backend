@@ -113,7 +113,10 @@ const leaveClass = asyncHandler(async (req, res) => {
 
 // Pending join requests across all of the teacher's classes.
 const teacherRequests = asyncHandler(async (req, res) => {
-  const filter = isAdmin(req.user) ? {} : { owner: req.user._id };
+  // Archived classes are excluded: a request to join a class that no longer
+  // exists is not something a teacher can act on, and counting it made the
+  // dashboard tile (21) and this banner (22) disagree on the same screen.
+  const filter = isAdmin(req.user) ? { deletedAt: null } : { owner: req.user._id, deletedAt: null };
   const classIds = await Class.find(filter).distinct("_id");
   const rows = await Enrollment.find({ class: { $in: classIds }, status: "pending" })
     .populate("student", "name email photo")
