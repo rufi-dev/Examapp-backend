@@ -825,7 +825,7 @@ async function purgeAbandonedExams(now = Date.now(), opts = {}) {
       exam.questions
         ? Question.countDocuments({ _id: exam.questions, "correctAnswers.0": { $exists: true } })
         : 0,
-      Attempt.countDocuments({ exam: exam._id }),
+      Attempt.countDocuments({ examId: exam._id }),
     ]);
     if (qCount || attempts) {
       // eslint-disable-next-line no-await-in-loop
@@ -838,6 +838,54 @@ async function purgeAbandonedExams(now = Date.now(), opts = {}) {
     removed += 1;
   }
   if (removed) console.log(`[EXAM] removed ${removed} abandoned exam(s) that never had a question`);
+  // The same daily sweep also repairs pre-provisional rows that have no question
+  // and no student history. New provisional drafts remain protected by the age
+  // cutoff above; only legacy empty rows are eligible for the immediate repair.
+  await purgeLegacyEmptyExams();
+  return removed;
+}
+
+/*
+ * One-time repair for exams created before the provisional flag existed.
+ *
+ * Those legacy rows have no `provisionalSince`, so the normal abandoned-draft
+ * sweep deliberately cannot see them. They are the empty cards teachers are
+ * seeing today. Remove only a row with no real question and no attempt/result;
+ * anything that has student history is retained for audit. `purgeExam` performs
+ * the same reference cleanup and class-count decrement as a manual delete.
+ */
+async function purgeLegacyEmptyExams() {
+  const candidates = await Exam.find({
+    deletedAt: null,
+    $or: [
+      { provisional: { $exists: false } },
+      { provisional: null },
+      { provisional: false },
+      { provisional: true, $or: [{ provisionalSince: { $exists: false } }, { provisionalSince: null }] },
+    ],
+  })
+    .select("_id questions")
+    .lean();
+  let removed = 0;
+  for (const exam of candidates) {
+    // eslint-disable-next-line no-await-in-loop
+    const [question, attempts, results] = await Promise.all([
+      exam.questions
+        ? Question.exists({ _id: exam.questions, exam: exam._id, "correctAnswers.0": { $exists: true } })
+        : null,
+      Attempt.exists({ examId: exam._id }),
+      Result.exists({ examId: exam._id }),
+    ]);
+    if (question || attempts || results) continue;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await purgeExam(exam._id);
+      removed += 1;
+    } catch (err) {
+      console.error("[EXAM] legacy empty cleanup failed for", String(exam._id), err.message);
+    }
+  }
+  if (removed) console.log(`[EXAM] removed ${removed} legacy empty exam(s)`);
   return removed;
 }
 
@@ -1359,16 +1407,22 @@ const getExamsByClass = asyncHandler(async (req, res) => {
     questionCount: exam.questions ? sizeMap[String(exam.questions)] || 0 : 0,
   });
 
-  // Only the OWNER (or admin) sees drafts + full data. A participant — student
-  // OR a teacher who joined this class — gets the sanitized student view.
+  // Only the OWNER (or admin) sees full data. A participant — student OR a
+  // teacher who joined this class — gets the sanitized student view.
   const isOwnerOrAdmin =
     isAdminUser(req.user) || (exists.owner && String(exists.owner) === String(req.user._id));
   if (isOwnerOrAdmin) {
-    return res.status(200).json(exams.map((e) => withCount(e.toObject(), e)));
+    // Owners used to receive legacy empty papers here, which is why the class
+    // page could show a grid of "Adsız imtahan" cards even though none was
+    // publishable. An exam is a list item only after its question document has
+    // at least one answer entry.
+    return res
+      .status(200)
+      .json(exams.map((e) => withCount(e.toObject(), e)).filter((e) => e.questionCount > 0));
   }
-  // Hide drafts AND exams whose author never added questions: a student who
-  // opens one only finds out at the start screen, and it makes the class look
-  // full of broken exams. It reappears by itself once questions are saved.
+  // Hide exams whose author never added questions: a student who opens one only
+  // finds out at the start screen, and it makes the class look full of broken
+  // exams. It reappears by itself once questions are saved.
   const visible = (exams || [])
     .filter((e) => !e.hidden)
     .map((e) => withCount(sanitizeExamForStudent(e), e))
@@ -1562,7 +1616,9 @@ const getAllClasses = asyncHandler(async (req, res) => {
     examCounts.forEach((r) => (map[String(r._id)] = r));
     classes.forEach((c) => {
       const row = map[String(c._id)];
-      c.exams = canManage(c) ? row?.total || 0 : row?.ready || 0;
+      // Empty/provisional papers are builder drafts, not exams. Keep the class
+      // count aligned with the cards and with what a student can actually open.
+      c.exams = row?.ready || 0;
       // Exams a student can actually sit (visible, and with questions in them).
       // The owner sees both numbers: "3 exams, 1 ready" is the difference
       // between a class that works and one that only looks set up.
@@ -1590,7 +1646,23 @@ const getExams = asyncHandler(async (req, res) => {
     .limit(limit + 1)
     .lean();
   const page = pageResult(rows, limit);
-  const exams = page.items;
+  // The results surface is another exam listing. Legacy records can have an
+  // `Exam` row without a populated question pointer, so exclude those drafts
+  // before computing summaries.
+  const candidateQuestionIds = page.items.map((e) => e.questions).filter(Boolean);
+  const readyQuestionIds = candidateQuestionIds.length
+    ? new Set(
+        (
+          await Question.find({
+            _id: { $in: candidateQuestionIds },
+            "correctAnswers.0": { $exists: true },
+          })
+            .select("_id")
+            .lean()
+        ).map((q) => String(q._id))
+      )
+    : new Set();
+  const exams = page.items.filter((e) => e.questions && readyQuestionIds.has(String(e.questions)));
 
   // Attach a lightweight result summary per exam so the results listing can show
   // the actual OUTCOME of each exam (score spread, average, pass rate), not just
@@ -1682,7 +1754,7 @@ const getExam = asyncHandler(async (req, res) => {
 
 const addQuestion = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const { correctAnswers, questionsPerPage, forwardOnly, typePoints, listeningAudio, aiPrompt } =
+  const { correctAnswers, questionsPerPage, forwardOnly, typePoints, listeningAudio, aiPrompt, deferPublish } =
     req.body;
 
   if (!correctAnswers || !examId) {
@@ -1805,12 +1877,16 @@ const addQuestion = asyncHandler(async (req, res) => {
      * sitting invisible since the details were typed; a question in it is what
      * the teacher actually came to do, and what everyone else can see.
      */
+    // Guided creation saves questions before the teacher has entered the final
+    // details. Keep that paper private until the explicit publish edit.
     const becomesReal = exam.provisional === true && correctAnswers.length > 0;
     createdExam = becomesReal;
+    const shouldPromote = becomesReal && !deferPublish;
+    if (deferPublish) createdExam = false;
     const update = {
-      $set: { ...draftSet, questions: question._id, ...(becomesReal ? { provisional: false } : {}) },
+      $set: { ...draftSet, questions: question._id, ...(shouldPromote ? { provisional: false } : {}) },
     };
-    const unset = { ...draftUnset, ...(becomesReal ? { provisionalSince: "" } : {}) };
+    const unset = { ...draftUnset, ...(shouldPromote ? { provisionalSince: "" } : {}) };
     if (Object.keys(unset).length) update.$unset = unset;
     const linked = await Exam.updateOne(
       { _id: exam._id, deletedAt: null },
@@ -1829,18 +1905,21 @@ const addQuestion = asyncHandler(async (req, res) => {
      * already written.
      */
     if (becomesReal) {
-      try {
-        await consumeExamCreate(req.user, session);
-      } catch (e) {
-        console.error("[EXAM] allowance exhausted at first save:", exam._id, e?.message);
-        await Exam.updateOne({ _id: exam._id }, { $set: { blockedByPlan: true } }, writeOpts);
+      if (shouldPromote) {
+        try {
+          await consumeExamCreate(req.user, session);
+        } catch (e) {
+          console.error("[EXAM] allowance exhausted at first save:", exam._id, e?.message);
+          await Exam.updateOne({ _id: exam._id }, { $set: { blockedByPlan: true } }, writeOpts);
+        }
       }
     }
     return question;
   });
 
-  // CR-034: first complete save — publish v1 as the active version.
-  const pub = await republishExam(examId);
+  // Guided creation publishes only from the details form. Legacy saves keep
+  // their existing immediate-publish behaviour.
+  const pub = deferPublish ? { ok: false, reason: "deferred" } : await republishExam(examId);
   // Only announce when the publish succeeded (CR-034).
   if (pub.ok) notifyStudentsNewExam(examId).catch(() => {});
 
@@ -1849,7 +1928,7 @@ const addQuestion = asyncHandler(async (req, res) => {
       ? "Answers updated successfully"
       : "Answers added successfully",
     newQuestion,
-    publishState: pub.ok ? "published" : "draft_saved_publish_failed",
+    publishState: pub.ok ? "published" : (pub.reason === "deferred" ? "deferred" : "draft_saved_publish_failed"),
     // True only on the save that turned a provisional exam into a real one — the
     // moment the teacher is told the exam now exists.
     createdExam,
@@ -4658,7 +4737,9 @@ const editExam = asyncHandler(async (req, res) => {
     shuffleQuestions,
     studentSolutionPhotos,
     coverImage,
+    preset,
     pdfPath,
+    publish,
   } = req.body;
   const examExists = await Exam.findById(examId);
   if (examExists && !ownsOrAdmin(req.user, examExists)) {
@@ -4698,6 +4779,13 @@ const editExam = asyncHandler(async (req, res) => {
     if (Array.isArray(solutionPhotos)) update.solutionPhotos = solutionPhotos;
     // Cover image: a string (incl. "") sets it; undefined leaves it unchanged.
     if (typeof coverImage === "string") update.coverImage = coverImage;
+    /*
+     * The scoring blueprint is now chosen in the builder's composer rather than
+     * on a form before the exam exists, so publishing has to be able to save it.
+     * Only a KNOWN preset is accepted, and only when one is sent — an edit that
+     * does not mention it leaves the exam's own preset alone.
+     */
+    if (typeof preset === "string" && (preset === "" || PRESETS[preset])) update.preset = preset;
     // Empty string disables the password; undefined leaves it unchanged.
     if (typeof password === "string") update.password = password;
 
@@ -4744,13 +4832,28 @@ const editExam = asyncHandler(async (req, res) => {
       }
     }
 
-    // CR-034: scoring/reveal/date fields changed — publish a new active version so
-    // subsequent starts grade under the updated (complete) rules.
-    const pub = await republishExam(examId);
+    // The guided flow keeps its provisional draft private while questions are
+    // being composed. The details form is the explicit publish commit.
+    let pub = { ok: false, reason: "deferred" };
+    const explicitPublish = publish === true || publish === "true";
+    if (explicitPublish || (publish === undefined && !examExists.provisional)) {
+      const question = await Question.findById(examExists.questions).lean();
+      if (!question || !Array.isArray(question.correctAnswers) || question.correctAnswers.length === 0) {
+        res.status(400);
+        throw new Error("Ən azı bir sual əlavə edin");
+      }
+      if (examExists.provisional) {
+        await Exam.updateOne({ _id: examId }, { $set: { provisional: false }, $unset: { provisionalSince: "" } });
+        try { await consumeExamCreate(req.user); } catch (e) {
+          await Exam.updateOne({ _id: examId }, { $set: { blockedByPlan: true } });
+        }
+      }
+      pub = await republishExam(examId);
+    }
 
     res.status(200).json({
       message: "İmtahan uğurla yeniləndi!",
-      publishState: pub.ok ? "published" : "draft_saved_publish_failed",
+      publishState: pub.ok ? "published" : (pub.reason === "deferred" ? "deferred" : "draft_saved_publish_failed"),
     });
   } else {
     res.status(404);
@@ -5191,7 +5294,9 @@ const getExamsByUser = asyncHandler(async (req, res) => {
     throw new Error("User not found!");
   }
 
-  const exams = (user.exams || []).filter((e) => !e.deletedAt); // hide archived
+  const exams = (user.exams || []).filter(
+    (e) => !e.deletedAt && e.provisional !== true
+  ); // hide archived and builder drafts
 
   // Question count per exam for the card stats — the SAME cheap $size aggregation
   // the other listings use. Without it every card here showed "Sual: —" even
@@ -5211,7 +5316,9 @@ const getExamsByUser = asyncHandler(async (req, res) => {
   });
 
   // The "my exams" list must not carry the access password or pdf location.
-  res.status(200).json(exams.map((e) => withCount(sanitizeExamForStudent(e), e)));
+  res
+    .status(200)
+    .json(exams.map((e) => withCount(sanitizeExamForStudent(e), e)).filter((e) => e.questionCount > 0));
 });
 
 // The most recently CREATED exams the user can access — a dashboard shortcut so
@@ -5224,9 +5331,9 @@ const getExamsByUser = asyncHandler(async (req, res) => {
 const getPublicExams = asyncHandler(async (req, res) => {
   const publicIds = await Class.find({ requireCode: false }).distinct("_id");
   if (!publicIds.length) return res.status(200).json([]);
-  const exams = await Exam.find({ class: { $in: publicIds }, hidden: { $ne: true }, deletedAt: null })
+  const exams = await Exam.find({ class: { $in: publicIds }, hidden: { $ne: true }, deletedAt: null, provisional: { $ne: true } })
     .sort({ createdAt: -1 })
-    .limit(8)
+    .limit(24)
     .populate("class", "name level")
     .lean();
   const qIds = exams.map((e) => e.questions).filter(Boolean);
@@ -5251,7 +5358,7 @@ const getPublicExams = asyncHandler(async (req, res) => {
     coverImage: e.coverImage || "",
     createdAt: e.createdAt,
   }));
-  res.status(200).json(out);
+  res.status(200).json(out.filter((e) => e.questionCount > 0).slice(0, 8));
 });
 
 const getLatestExams = asyncHandler(async (req, res) => {
@@ -5276,10 +5383,11 @@ const getLatestExams = asyncHandler(async (req, res) => {
   // Students never see drafts (hidden exams).
   if (!isStaffUser(user)) filter.hidden = { $ne: true };
   filter.deletedAt = null; // never surface archived (trashed) exams
+  filter.provisional = { $ne: true }; // builder drafts are not exams
 
   const exams = await Exam.find(filter)
     .sort({ createdAt: -1 })
-    .limit(8)
+    .limit(24)
     .populate("class", "name level");
 
   // Cheap question-count aggregation for the cards (no heavy answer arrays).
@@ -5300,9 +5408,12 @@ const getLatestExams = asyncHandler(async (req, res) => {
   });
 
   res.status(200).json(
-    exams.map((e) =>
-      ownerOrAdmin(e) ? withCount(e.toObject(), e) : withCount(sanitizeExamForStudent(e), e)
-    )
+    exams
+      .map((e) =>
+        ownerOrAdmin(e) ? withCount(e.toObject(), e) : withCount(sanitizeExamForStudent(e), e)
+      )
+      .filter((e) => e.questionCount > 0)
+      .slice(0, 8)
   );
 });
 
@@ -5526,6 +5637,7 @@ module.exports = {
   purgeOrphanPdfs,
   purgeStagedUploads,
   purgeAbandonedExams,
+  purgeLegacyEmptyExams,
   claimStagedPdf,
   beginAttach,
   attachPdf,

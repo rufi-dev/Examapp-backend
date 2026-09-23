@@ -53,12 +53,26 @@ console.log("\nOff-server backup status:");
 fs.rmSync(path.join(dir, "offsite.log"), { force: true });
 ok("no log -> null, never a fake 'copied off the server'", lastOffsiteBackup() === null);
 
+/*
+ * Dated from LAST NIGHT, not from a fixed day.
+ *
+ * "Healthy" here means recent — the staleness alert below is the whole point of
+ * the row — so a hard-coded date stops describing a healthy run the moment the
+ * calendar moves past it, and the suite starts failing on a day nobody changed
+ * anything. The log line is built from a real timestamp instead.
+ */
+const logStamp = (d) => d.toISOString().replace("T", " ").slice(0, 19);
+const lastNight = new Date(Date.now() - 6 * 3600 * 1000);
+const started = new Date(lastNight.getTime() - 40 * 1000);
 writeOffsite(
-  "2026-09-20 03:15:01 start 20260920-0315\n" +
-  "2026-09-20 03:15:41 ok examopia-20260920-0315 verified, measured upload 24.1 MB, repository 9.8 GB\n"
+  `${logStamp(started)} start 20260920-0315\n` +
+  `${logStamp(lastNight)} ok examopia-20260920-0315 verified, measured upload 24.1 MB, repository 9.8 GB\n`
 );
 const okRun = lastOffsiteBackup();
-ok("reads the last OUTCOME, not the progress line", okRun && okRun.state === "ok" && okRun.at === "2026-09-20T03:15:41.000Z");
+ok(
+  "reads the last OUTCOME, not the progress line",
+  okRun && okRun.state === "ok" && okRun.at === lastNight.toISOString().replace(/\.\d+Z$/, ".000Z")
+);
 ok("and reports the MEASURED upload, not an estimate", okRun.upload === "24.1 MB" && okRun.repository === "9.8 GB");
 ok("a healthy off-server backup raises no alert", alertsFor(okRun).length === 0);
 
