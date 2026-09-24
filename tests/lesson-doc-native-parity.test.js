@@ -120,10 +120,26 @@ const doc = { html, blocks: [] };
       exports: { pdfPageCount: async () => 12, pdfPageText: async () => pageText },
     };
   };
+  /*
+   * Real files on disk, because completeness now also asks whether the PDF holds
+   * an image — and a file that cannot be read answers "yes, keep it", which is
+   * the safe default but not what these cases are about.
+   */
+  const fsMod = require("fs");
+  const osMod = require("os");
+  const prevDocDir = process.env.LESSON_DOC_DIR;
+  const scanDir = fsMod.mkdtempSync(path.join(osMod.tmpdir(), "lessondoc-scan-"));
+  process.env.LESSON_DOC_DIR = scanDir;
+  fsMod.mkdirSync(path.join(scanDir, "docfiles"), { recursive: true });
+  delete require.cache[require.resolve("../helper/lessonDocFiles")];
   const { nativeSourceText } = require("../helper/lessonDocFiles");
   // A key is a content hash, so each scenario needs its own: the extraction
   // cache would otherwise hand the second stub the first stub's answer.
-  const fileFor = (c) => [{ mime: "application/pdf", key: c.repeat(64), ext: "pdf", name: c + ".pdf" }];
+  const fileFor = (c) => {
+    const key = c.repeat(64);
+    fsMod.writeFileSync(path.join(scanDir, "docfiles", `${key}.pdf`), "%PDF-1.4 typeset, no pictures");
+    return [{ mime: "application/pdf", key, ext: "pdf", name: c + ".pdf" }];
+  };
 
   stub("");
   const scanned = await nativeSourceText(fileFor("a"));
@@ -145,6 +161,10 @@ const doc = { html, blocks: [] };
 
   if (realEvidence) require.cache[evidencePath] = realEvidence;
   else delete require.cache[evidencePath];
+  fsMod.rmSync(scanDir, { recursive: true, force: true });
+  if (prevDocDir === undefined) delete process.env.LESSON_DOC_DIR;
+  else process.env.LESSON_DOC_DIR = prevDocDir;
+  delete require.cache[require.resolve("../helper/lessonDocFiles")];
 
   console.log("\nThe cost saving actually happens:");
   /*
@@ -221,6 +241,82 @@ const doc = { html, blocks: [] };
   ok("a body of <div> is somebody's work, not a blank page", !nativeCanHandle({ html: "<div>Existing lesson</div>" }, () => 0));
   ok("so is a drawing with no text at all", !nativeCanHandle({ html: "<svg><rect/></svg>" }, () => 0));
   ok("a genuinely empty document may still be written", nativeCanHandle({ html: "", blocks: [] }, () => 0));
+
+  console.log("\nA PDF is only replaced when the text can stand in for it:");
+  {
+    const os = require("os");
+    const fs = require("fs");
+    const prevDir = process.env.LESSON_DOC_DIR;
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lessondoc-mixed-"));
+    process.env.LESSON_DOC_DIR = tmp;
+    fs.mkdirSync(path.join(tmp, "docfiles"), { recursive: true });
+    delete require.cache[require.resolve("../helper/lessonDocFiles")];
+    const freshFiles = require("../helper/lessonDocFiles");
+    const evPath = require.resolve("../helper/curriculumEvidence");
+    const realEv = require.cache[evPath];
+
+    const write = (key, body) => fs.writeFileSync(path.join(tmp, "docfiles", `${key}.pdf`), body);
+    const stubPages = (texts) => {
+      require.cache[evPath] = {
+        id: evPath, filename: evPath, loaded: true,
+        exports: { pdfPageCount: async () => texts.length, pdfPageText: async (_s, i) => texts[i] || "" },
+      };
+    };
+    const prose = "Faiz bir kəmiyyətin yüzdə bir hissəsidir və məktəb riyaziyyatında geniş istifadə olunur. ".repeat(3);
+
+    // Every page typeset, nothing visual: the text genuinely replaces the file.
+    const plain = "1".repeat(64);
+    write(plain, "%PDF-1.4 plain text only");
+    stubPages([prose, prose]);
+    const r1 = await freshFiles.nativeSourceText([{ key: plain, ext: "pdf", mime: "application/pdf", name: "a.pdf" }]);
+    ok("an all-text PDF is complete, so it can be dropped", r1[0] && r1[0].complete === true);
+
+    /*
+     * The fidelity hole this closes: text on one page, a scan or a full-page
+     * figure on another. Every page number was visited, so it used to count as
+     * complete — the file was dropped and the model never saw the picture.
+     */
+    const mixed = "2".repeat(64);
+    write(mixed, "%PDF-1.4 mixed");
+    stubPages([prose, ""]);
+    const r2 = await freshFiles.nativeSourceText([{ key: mixed, ext: "pdf", mime: "application/pdf", name: "b.pdf" }]);
+    ok("a PDF with a page that gave no text is NOT complete", r2[0] && r2[0].complete === false);
+    ok("...and its text still travels as context", r2[0].text.length > 0);
+
+    // Text on every page, but a diagram embedded in the bytes.
+    const withFigure = "3".repeat(64);
+    write(withFigure, "%PDF-1.4 /Subtype /Image stream ...");
+    stubPages([prose, prose]);
+    const r3 = await freshFiles.nativeSourceText([{ key: withFigure, ext: "pdf", mime: "application/pdf", name: "c.pdf" }]);
+    ok("an embedded image keeps the file in the request", r3[0] && r3[0].complete === false);
+    ok("...and it is reported as such", r3[0].hasImages === true);
+
+    if (realEv) require.cache[evPath] = realEv; else delete require.cache[evPath];
+    fs.rmSync(tmp, { recursive: true, force: true });
+    if (prevDir === undefined) delete process.env.LESSON_DOC_DIR; else process.env.LESSON_DOC_DIR = prevDir;
+    delete require.cache[require.resolve("../helper/lessonDocFiles")];
+  }
+
+  console.log("\nThe parser refuses what it cannot represent:");
+  ok("a negation it cannot attribute goes to the engine", nativePrintOptions("səhifə nömrələrini əlavə etmə") === null);
+  ok("a two-letter filler no longer swallows a verb", nativePrintOptions("səhifə nömrələrini dəyiş") === null);
+  ok("a colour asked for NEGATIVELY is not set positively", nativePrintOptions("səhifə nömrəsi qırmızı olmasın") === null);
+
+  console.log("\nThe answer can carry a print setting:");
+  {
+    const withPrint = normalizeNative({
+      title: "T", audience: "A", reply: "R",
+      printOptions: { pageNumbers: true, accent: "green" },
+      blocks: [{ kind: "heading", text: "H" }, { kind: "text", text: "B" }],
+    });
+    eq("what the model set survives", withPrint.printOptions, { pageNumbers: true, accent: "green" });
+    const bogus = normalizeNative({
+      title: "T", audience: "A", reply: "R",
+      printOptions: { pageNumbers: "yes", accent: "neon" },
+      blocks: [{ kind: "text", text: "B" }],
+    });
+    eq("a value the renderer does not know is dropped, not written", bogus.printOptions, {});
+  }
 
   console.log(`\n${passed} passed, ${failed} failed`);
   assert.strictEqual(failed, 0, `${failed} parity assertions failed`);

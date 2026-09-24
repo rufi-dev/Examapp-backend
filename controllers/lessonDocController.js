@@ -641,7 +641,13 @@ async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abor
    * someone made on purpose, and the label stays true.
    */
   const chosen = S.DOC_MODELS.find((entry) => entry.id === model);
-  const nativeModel = String(process.env.LESSON_NATIVE_MODEL || chosen?.id || S.DEFAULT_DOC_MODEL);
+  /*
+   * The picker wins. LESSON_NATIVE_MODEL is a fallback for when no known model
+   * was chosen, never an override: as an override it could run something other
+   * than the name on screen, which is the exact divergence docModelParity warns
+   * about — the teacher reads one model and the usage row records another.
+   */
+  const nativeModel = String(chosen?.id || process.env.LESSON_NATIVE_MODEL || S.DEFAULT_DOC_MODEL);
   const nativeProvider = /^claude/i.test(nativeModel)
     ? "claude"
     : /^gemini/i.test(nativeModel)
@@ -789,6 +795,13 @@ async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abor
       html,
       blocks: [],
       partCount: sum.blocks,
+      /*
+       * A print setting the ANSWER asked for. "Add page numbers and shorten the
+       * text" reaches the engine whenever the local shortcut declines it, and
+       * the text would be shortened while the page numbers were ignored — the
+       * schema had nowhere to put them. Now it does, and it lands here.
+       */
+      ...(content.printOptions ? printOptions(content.printOptions) : {}),
       ...(content.title ? { title: content.title } : {}),
       ...(!doc.topic && content.title ? { topic: content.title } : {}),
       ...(content.audience && !doc.audience ? { audience: content.audience } : {}),

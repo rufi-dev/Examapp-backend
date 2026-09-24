@@ -56,8 +56,31 @@ const NATIVE_SCHEMA = {
         required: ["kind", "text", "term", "items", "ordered", "solution", "columns", "rows", "tone", "diagram"],
       },
     },
+    /*
+     * Print settings the ANSWER may change.
+     *
+     * Without this the model had no way to say it. A request like "add page
+     * numbers and shorten the text" reaches the engine whenever the local
+     * shortcut declines it — and the text would be shortened while the page
+     * numbers were quietly ignored, because the schema had nowhere to put them.
+     * Half a request done, nothing said.
+     */
+    printOptions: {
+      anyOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            pageNumbers: { type: "boolean" },
+            accent: { type: "string", enum: ["red", "orange", "green", "teal", "purple", "slate"] },
+          },
+          required: ["pageNumbers", "accent"],
+        },
+        { type: "null" },
+      ],
+    },
   },
-  required: ["title", "audience", "reply", "blocks"],
+  required: ["title", "audience", "reply", "blocks", "printOptions"],
 };
 
 const NATIVE_SYSTEM = `
@@ -69,6 +92,8 @@ hazırlayacaq. Mövzunu uydurma: əlavə fayl verilirsə, onun məzmununa söyk�
 Hər materialda ən azı bir heading və bir text olsun. Nümunənin həlli example.solution
 field-də, tapşırığın cavabı isə solution-da olsun; platforma tələbəyə cavabı göstərmir.
 Diagram yalnız məna üçün seçilsin: flow, cycle, compare, timeline, bars və ya concept.
+Müəllim çap parametrini istəyirsə (səhifə nömrəsi, rəng), onu printOptions-da qaytar;
+istəməyibsə printOptions null olsun. Parametri mətnin içinə yazma.
 Diagramda ən çox 8 qısa label və 8 rəqəm ver. Bir diagram kifayətdir.
 `.trim();
 
@@ -92,7 +117,16 @@ const cleanRow = (value, width) => {
 
 function normalizeNative(raw = {}) {
   const blocks = Array.isArray(raw.blocks) ? raw.blocks.slice(0, MAX_BLOCKS) : [];
+  const ACCENTS = ["red", "orange", "green", "teal", "purple", "slate"];
+  const print = raw.printOptions && typeof raw.printOptions === "object" ? raw.printOptions : null;
   return {
+    // Only what the model actually set, and only values the renderer knows.
+    printOptions: print
+      ? {
+          ...(typeof print.pageNumbers === "boolean" ? { pageNumbers: print.pageNumbers } : {}),
+          ...(ACCENTS.includes(print.accent) ? { accent: print.accent } : {}),
+        }
+      : null,
     title: clamp(raw.title, 160),
     audience: clamp(raw.audience, 180),
     reply: clamp(raw.reply, 500),
@@ -258,18 +292,28 @@ function nativePrompt({ request, current, sourceNotes, sourceText }) {
 const PAGE_STEMS = ["səhifə", "sehife", "nömrə", "nomre", "nomer"];
 const COLOR_STEMS = ["rəng", "reng", "accent"];
 const PRINT_STEMS = ["çap", "cap", "print"];
-// Stems that mean "turn it off" on their own.
-const OFF_STEMS = ["olmasın", "olmasin", "sil", "çıxar", "cixar", "gizlət", "gizlet", "istəmirəm", "istemirem", "istəmir", "istemir", "lazımsız", "lazimsiz"];
-// Stems that mean "turn it on" on their own. Deliberately NOT here: "yaz"
-// (write) and "qoy" (put), which are how people ask for content — "material
-// yaz" is a request for a lesson, not for a setting.
+// Stems that mean "off" on their own.
+const OFF_STEMS = ["olmasın", "olmasin", "sil", "çıxar", "cixar", "gizlət", "gizlet", "istəmirəm", "istemirem", "istəmir", "istemir"];
+// Stems that mean "on" on their own. Deliberately absent: "yaz" (write) and
+// "qoy" (put), which is how people ask for content — "material yaz" is a
+// request for a lesson, not for a setting.
 const ON_STEMS = ["olmalı", "olmali", "olsun", "əlavə", "elave", "göstər", "goster", "lazımdır", "lazimdir"];
-const FILLER_STEMS = [
-  "və", "ve", "ile", "ilə", "et", "elə", "ele", "edin", "edək", "edek", "bu", "o",
-  "material", "materialın", "materialin", "sənəd", "sened", "sənədin", "senedin",
-  "pdf", "faylın", "faylin", "fayl", "zəhmət", "zehmet", "olmasa", "lütfən", "lutfen",
-  "hər", "her", "bütün", "butun", "ancaq", "yalnız", "yalniz", "da", "də", "de",
-];
+/*
+ * Words with no instruction in them — matched WHOLE, never as a prefix.
+ *
+ * Prefix-matching these was a quiet disaster: "də" is filler, so "dəyiş"
+ * (change it) matched as filler and "səhifə nömrələrini dəyiş" was answered
+ * locally with page numbers switched on. A two-letter particle must not swallow
+ * a verb that happens to start with it.
+ */
+const FILLER_WORDS = new Set([
+  "və", "ve", "ilə", "ile", "et", "edin", "elə", "ele", "edək", "edek", "bu", "o",
+  "material", "materialı", "materiali", "materialın", "materialin",
+  "sənəd", "sened", "sənədi", "senedi", "sənədin", "senedin",
+  "pdf", "fayl", "faylı", "fayli", "faylın", "faylin",
+  "zəhmət", "zehmet", "olmasa", "lütfən", "lutfen",
+  "hər", "her", "bütün", "butun", "yalnız", "yalniz", "da", "də", "de",
+]);
 const COLOR_WORDS = [
   ["qırmızı", "red"], ["qirmizi", "red"], ["narıncı", "orange"], ["narinci", "orange"],
   ["yaşıl", "green"], ["yasil", "green"], ["mavi", "teal"], ["göy", "teal"], ["goy", "teal"],
@@ -279,86 +323,103 @@ const COLOR_WORDS = [
 const stemHit = (word, stems) => stems.some((stem) => word.startsWith(stem));
 
 /*
- * Azerbaijani negates a verb with -ma / -mə, and that inverts the instruction.
+ * Azerbaijani negates a verb with -ma / -mə, and that inverts the instruction:
+ * "göstər" is show, "göstərmə" is DON'T show. Reading the second as the first
+ * turned page numbers ON for someone asking to turn them off.
  *
- * "göstər" is show; "göstərmə" is DON'T show — and reading the second as the
- * first turned page numbers on for someone asking to turn them off. The same
- * suffix flips the other direction too: "sil" is delete, "silmə" is don't
- * delete, which means keep them.
- *
- * Guarded against the words that merely happen to contain those letters:
- * "olmalıdır" (must be) is not a negation, and neither is "nömrə".
+ * Guarded against words that merely end in those letters — "olmalıdır" (must
+ * be) is not a negation, nor is "nömrə".
  */
 const NEGATION = /(ma|mə)(dan|dən|yın|yin|yun|yün)?$/;
-const isNegated = (word) =>
+const looksNegated = (word) =>
   NEGATION.test(word) && !/^(olmalı|olmali|nömrə|nomre|əlavə|elave|rəngi|rengi)/.test(word);
 
+/*
+ * Is this turn ONLY about how the material prints?
+ *
+ * Every word has to be one this shortcut knows, and every negation has to
+ * attach to a word whose meaning it can actually invert. Anything else — an
+ * unknown verb, a negation on a filler word, a quantity, a colour it is being
+ * asked NOT to use — is handed to the engine, which can read the sentence.
+ *
+ * The asymmetry is deliberate. A settings request that reaches the model costs
+ * a couple of cents; a content request answered locally silently throws away
+ * the teacher's work. Every doubt resolves toward the model.
+ */
 function nativePrintOptions(request) {
   const raw = String(request || "").trim();
   // A settings instruction is short. Anything longer is a request about the
-  // material with a setting mentioned along the way, and belongs to the engine.
+  // material with a setting mentioned along the way.
   if (!raw || raw.length > 60) return null;
   const words = raw.toLocaleLowerCase("az").split(/[^\p{L}\p{N}]+/u).filter(Boolean);
   if (!words.length) return null;
 
   /*
-   * A digit means a quantity, and a quantity is about content: "2 səhifə
-   * material yaz" is two pages of lesson, not a page-number setting. Page-number
-   * and colour requests never need a number, so any digit hands the turn over.
+   * A digit is a quantity, and a quantity is about content: "2 səhifə material
+   * yaz" is two pages of lesson. Page-number and colour requests never need a
+   * number, so any digit hands the turn over.
    */
   if (words.some((w) => /\d/.test(w))) return null;
 
   let page = false;
   let colour = null;
   let polarity = null; // null = unstated, true = on, false = off
-  let negatedSomething = false;
 
   for (const word of words) {
-    const negated = isNegated(word);
-    // The stem to classify is the word without its negation suffix.
+    const negated = looksNegated(word);
     const base = negated ? word.replace(NEGATION, "") : word;
 
-    if (stemHit(base, PAGE_STEMS)) { page = true; continue; }
+    if (stemHit(base, PAGE_STEMS)) {
+      if (negated) return null; // "nömrələmə"? not a shape this can read safely
+      page = true;
+      continue;
+    }
     const named = COLOR_WORDS.find(([w]) => base.startsWith(w));
-    if (named) { colour = named[1]; continue; }
-    if (stemHit(base, COLOR_STEMS) || stemHit(base, PRINT_STEMS)) continue;
+    if (named) {
+      if (negated) return null; // "yaşıl olmasın" — a single accent cannot say NOT green
+      colour = named[1];
+      continue;
+    }
+    if (stemHit(base, COLOR_STEMS) || stemHit(base, PRINT_STEMS)) {
+      if (negated) return null;
+      continue;
+    }
 
-    if (stemHit(base, OFF_STEMS)) { polarity = negated ? true : false; negatedSomething ||= negated; continue; }
+    if (stemHit(base, OFF_STEMS)) { polarity = negated ? true : false; continue; }
     if (stemHit(base, ON_STEMS)) {
-      if (negated) { polarity = false; negatedSomething = true; }
+      if (negated) polarity = false;
       else if (polarity === null) polarity = true;
       continue;
     }
-    if (stemHit(base, FILLER_STEMS)) { negatedSomething ||= negated; continue; }
-    // A word this shortcut does not know. Not a settings-only request.
+
+    if (FILLER_WORDS.has(base)) {
+      /*
+       * A negation on a word carrying no instruction cannot be attributed:
+       * "əlavə etmə" is don't ADD, but the -mə sits on "et", and guessing which
+       * verb it belongs to is how "don't add page numbers" became "add page
+       * numbers". The engine gets it.
+       */
+      if (negated) return null;
+      continue;
+    }
+    // A word this shortcut does not know.
     return null;
   }
 
   const patch = {};
   if (page) patch.pageNumbers = polarity !== false;
-  /*
-   * A negated colour cannot be expressed. "rəngi yaşıl etmə" asks for NOT green,
-   * and the setting only holds one colour — so rather than guess at green, the
-   * turn goes to the engine, which can read the sentence properly.
-   */
   if (colour) {
-    if (negatedSomething) return null;
+    /*
+     * "səhifə nömrəsi qırmızı olmasın" names a colour AND asks for something
+     * off. The accent is one colour for the whole document, so there is no way
+     * to express "not red" — and setting red would be the opposite of the ask.
+     */
+    if (polarity === false) return null;
     patch.accent = colour;
   }
   return Object.keys(patch).length ? patch : null;
 }
 
-/*
- * May the platform engine take this turn?
- *
- * Only for a material it can rebuild: one it wrote itself, or one with nothing
- * in it yet. Anything else is an older material whose content this engine
- * cannot read, and running it would replace the teacher's work with a freshly
- * written document.
- *
- * `countParts` is passed in rather than imported: lessonDocSchema pulls in
- * Mongoose, and this module is required by a test that has no database.
- */
 function nativeCanHandle(doc = {}, countParts) {
   /*
    * A native source means blocks this engine actually wrote. An empty object

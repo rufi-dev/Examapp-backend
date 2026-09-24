@@ -554,6 +554,28 @@ const NATIVE_MAX_CHARS = 12000;
 // so the file was dropped from the request and the model was handed nothing but
 // page numbers.
 const NATIVE_MIN_TEXT = 200;
+// Below this, a page gave no usable text of its own: a scan, or a page that is
+// one large figure. Either way the file still has to travel.
+const MIN_PAGE_TEXT = 40;
+
+/*
+ * Does the file contain an embedded image?
+ *
+ * Read as bytes and looked for by marker rather than parsed: a real PDF parser
+ * is a dependency and a decompression pass for a question that only needs a
+ * conservative yes. A false yes costs tokens; a false no costs a diagram the
+ * teacher can see and the model never received, so the only acceptable error is
+ * the first one — and an unreadable file answers yes.
+ */
+async function pdfHasImages(src) {
+  try {
+    const buf = await fsp.readFile(src);
+    const head = buf.toString("latin1");
+    return /\/Subtype\s*\/Image|\/Image\b|\/DCTDecode|\/JPXDecode|\/CCITTFaxDecode/.test(head);
+  } catch {
+    return true;
+  }
+}
 
 /*
  * Extracted text, remembered.
@@ -594,15 +616,42 @@ async function nativeSourceText(files = []) {
       const read = Math.min(NATIVE_MAX_PAGES, pages);
       const chunks = [];
       let extracted = 0; // characters of ACTUAL page text, labels excluded
+      let thinPages = 0; // pages that gave little or nothing: scans, or figures
       for (let page = 0; page < read && extracted < NATIVE_MAX_CHARS; page += 1) {
         // eslint-disable-next-line no-await-in-loop
         const body = String((await evidence.pdfPageText(src, page)) || "").replace(/\s+/g, " ").trim();
+        if (body.length < MIN_PAGE_TEXT) thinPages += 1;
         if (!body) continue;
         extracted += body.length;
         chunks.push(`[Səhifə ${page + 1}] ${body}`);
       }
+      /*
+       * Does this PDF hold anything a reader can SEE but the extractor cannot
+       * read? A worksheet is usually text with a diagram on it, and a textbook
+       * chapter often has one scanned page among typeset ones — in both cases
+       * the words come out and the picture does not.
+       *
+       * Two signals, either of which keeps the file in the request:
+       *   a page that gave little or no text — a scan, or a full-page figure;
+       *   an embedded image anywhere in the bytes.
+       *
+       * The byte scan is deliberately crude. It can miss an image hidden inside
+       * a compressed object stream, which is why the per-page check stands
+       * beside it, and the two together fail in the safe direction: a doubtful
+       * PDF travels, costing tokens, instead of a diagram silently not reaching
+       * the model while the answer claims to be based on it.
+       */
+      // eslint-disable-next-line no-await-in-loop
+      const hasImages = await pdfHasImages(src);
+
       if (extracted < NATIVE_MIN_TEXT) {
-        cacheExtraction(f.key, null); // a scan stays a scan; do not re-read it
+        /*
+         * Not cached. A read can come back empty for reasons that are not about
+         * the file — Ghostscript missing, a busy box, a transient failure — and
+         * remembering "unreadable" would keep a perfectly good textbook out of
+         * the prompt for the rest of the process's life. Re-reading a scan costs
+         * a few subprocesses; getting it permanently wrong costs the lesson.
+         */
         continue;
       }
       out.push(cacheExtraction(f.key, {
@@ -610,10 +659,21 @@ async function nativeSourceText(files = []) {
         name: f.name || "PDF",
         text: chunks.join("\n").slice(0, NATIVE_MAX_CHARS),
         pages,
-        // Whether the local read covered the WHOLE document. A 40-page textbook
-        // read to page 12 must not let the caller drop the file: the answer to
-        // "explain the exercise on page 30" is in the part that was not read.
-        complete: read >= pages && extracted < NATIVE_MAX_CHARS,
+        pagesRead: read,
+        thinPages,
+        hasImages,
+        /*
+         * `complete` means one thing only: the extracted text can STAND IN for
+         * the file, so the file itself need not be sent. That requires every
+         * page to have been read (a 40-page textbook stopped at page 12 leaves
+         * the exercise on page 30 in the part nobody sent), every page to have
+         * actually given text, and nothing visual to be left behind.
+         */
+        complete:
+          read >= pages &&
+          extracted < NATIVE_MAX_CHARS &&
+          thinPages === 0 &&
+          !hasImages,
       }));
     } catch {
       // No local extractor, or an unreadable file: the original PDF part stands.
