@@ -627,45 +627,77 @@ function decodeAsciiHex(text) {
   return Buffer.from(body.length % 2 ? body + "0" : body, "hex");
 }
 
-// The decoded stream, or null when this one could not be read at all.
+/*
+ * Decompress one stream, refusing to blow up over it.
+ *
+ * `maxOutputLength` bounds the work inside zlib rather than after it. The size
+ * check used to happen on the finished string, which fails closed for
+ * correctness but only once the memory had already been allocated — a
+ * decompression bomb was still decompressed in full before anyone objected.
+ *
+ * Returns the text, OVERSIZE when it refused on size, or null when nothing
+ * could read it. Those three are different answers and the caller treats them
+ * differently: only null is a maybe.
+ */
+const OVERSIZE = Symbol("oversize");
+
 function readStream(bytes) {
   const zlib = require("zlib");
+  const limit = { maxOutputLength: MAX_STREAM_CHARS };
   const attempts = [
-    () => zlib.inflateSync(bytes),
-    () => zlib.inflateRawSync(bytes),
-    () => zlib.unzipSync(bytes),
-    () => zlib.inflateSync(decodeAscii85(bytes.toString("latin1"))),
-    () => zlib.inflateSync(decodeAsciiHex(bytes.toString("latin1"))),
+    () => zlib.inflateSync(bytes, limit),
+    () => zlib.inflateRawSync(bytes, limit),
+    () => zlib.unzipSync(bytes, limit),
+    () => zlib.inflateSync(decodeAscii85(bytes.toString("latin1")), limit),
+    () => zlib.inflateSync(decodeAsciiHex(bytes.toString("latin1")), limit),
   ];
   for (const attempt of attempts) {
     try {
       const out = attempt();
       if (out && out.length) return out.toString("latin1");
-    } catch {
-      /* try the next wrapping */
+    } catch (e) {
+      // Refused on size: the stream is real and readable, just too big to look
+      // at. That is a verdict, not a failure to try the next wrapping.
+      if (e && (e.code === "ERR_BUFFER_TOO_LARGE" || /maxOutputLength/i.test(e.message || ""))) {
+        return OVERSIZE;
+      }
+      /* wrong wrapping: try the next */
     }
   }
   // An uncompressed content stream is legal and needs no decoding at all.
   const plain = bytes.toString("latin1");
+  if (plain.length > MAX_STREAM_CHARS) return OVERSIZE;
   if (/\bBT\b|\bET\b|\bTj\b|\bre\b|\bcm\b/.test(plain)) return plain;
   return null;
 }
 
 /*
- * Does one decoded content stream put marks on the page?
+ * A content stream with its comments removed.
  *
- * Split out so each stream is judged on its own as it is read. The scan used to
- * concatenate every stream into one buffer and test it at the end, which meant
- * a budget — and a budget meant a long document could exhaust it before the
- * page with the diagram on it was ever looked at, returning "no drawings" for a
- * file that has one.
+ * `%` runs to the end of the line, and a comment may sit between an operand and
+ * its operator — "10 10 100 100\n% the box\nre S" is legal and draws a box. The
+ * operators were matched by looking for a digit immediately before them, so a
+ * comment in that gap hid the drawing completely.
+ *
+ * Replaced with a space rather than deleted, so removing one can never fuse two
+ * tokens into a third.
+ */
+const stripComments = (text) => text.replace(/%[^\r\n]*/g, " ");
+
+/*
+ * Does this much content stream put marks on the page?
+ *
+ * Operators are matched as whole tokens, not as "a digit, then the letter".
+ * PDF only requires operands and operators to be separated by whitespace or a
+ * delimiter, so anything that assumes a digit sits immediately in front of the
+ * operator can be stepped around by ordinary, legal syntax.
  */
 function streamDraws(text) {
   // Curves are charts, circles and arrows. Body text never emits one.
-  if (/\d\s+(c|v|y)[\s\r\n]/.test(text)) return true;
+  if (/(?:^|[\s\]>)])(c|v|y)(?=[\s[<(/]|$)/.test(text)) return true;
   // Nor does it emit a lineto. One is enough: an underline is drawn as a
   // rectangle, so a line here is somebody drawing something.
-  if (/\d\s+l[\s\r\n]/.test(text)) return true;
+  if (/(?:^|[\s\]>)])l(?=[\s[<(/]|$)/.test(text)) return true;
 
   /*
    * Rectangles are judged by what happens to them, not by how many there are.
@@ -676,7 +708,7 @@ function streamDraws(text) {
    * a second appears as "… re S". So the paint operator decides — W/W* clips
    * and n paints nothing, while f, S, B and their variants leave marks.
    */
-  for (const m of text.matchAll(/\d\s+re\s+([^\s]+)/g)) {
+  for (const m of text.matchAll(/(?:^|[\s\]>)])re\s+([^\s]+)/g)) {
     const op = m[1];
     if (/^W\*?$/.test(op) || op === "n") continue;
     if (/^(f\*?|F|B\*?|b\*?|S|s)$/.test(op)) return true;
@@ -685,11 +717,32 @@ function streamDraws(text) {
 }
 
 /*
+ * The object dictionary that introduces THIS stream, and nothing else.
+ *
+ * A fixed lookback of several hundred bytes reached into whatever object
+ * happened to sit before it, so a drawing stream that would not decode could be
+ * waved through because a font object nearby mentioned /FontFile2. The
+ * dictionary starts at this object's own "N G obj", so that is where to look
+ * from.
+ */
+function ownDictionary(raw, streamAt) {
+  const window = raw.slice(Math.max(0, streamAt - 4096), streamAt);
+  const marks = [...window.matchAll(/\d+\s+\d+\s+obj\b/g)];
+  const from = marks.length ? marks[marks.length - 1].index : 0;
+  return window.slice(from);
+}
+
+/*
  * Does this PDF draw anything the text extractor cannot hand over?
  *
  * Raster content leaves markers in the object dictionaries that survive in the
  * raw bytes. Vector content is drawing operators inside a compressed content
- * stream, so the streams are decoded and each is read as it comes.
+ * stream, so the streams are decoded and read as they come.
+ *
+ * Streams are read in order and carry a short tail into the next one, because a
+ * page's content may legally be SPLIT across several streams — one ending
+ * "10 10 100 100" and the next beginning "l S" is one drawing written in two
+ * objects, and judging each alone finds nothing in either.
  *
  * Every uncertainty answers YES and keeps the PDF in the request: an unreadable
  * file, a stream that would not decode, one too large to examine, an unfamiliar
@@ -711,6 +764,7 @@ async function pdfHasDrawings(src) {
 
   let seen = 0;
   let read = 0;
+  let carry = ""; // the tail of the previous stream, for operators split across two
   /*
    * CR alone is a legal separator in the wild. Ordered longest-first so that
    * "\r\n" is never matched as "\r" with the newline left behind.
@@ -724,9 +778,7 @@ async function pdfHasDrawings(src) {
     /*
      * A real stream is introduced by its dictionary, so the bytes before the
      * keyword end in ">>". Without this the scan also matched the letters
-     * "stream" occurring INSIDE another stream's compressed payload, inventing
-     * streams that could not be decoded either — which then read as "something
-     * unreadable is in here" and marked every typeset document as drawing.
+     * "stream" occurring INSIDE another stream's compressed payload.
      */
     const before = raw.slice(Math.max(0, m.index - 600), m.index);
     if (!/>>\s*$/.test(before)) continue;
@@ -734,21 +786,22 @@ async function pdfHasDrawings(src) {
     seen += 1;
     /*
      * The bytes, without the end-of-line that separates them from `endstream`.
-     * zlib tolerates that trailing byte; gunzip does not, so a gzip-wrapped
-     * text PDF failed every decoding and was kept in the paid request forever.
+     * zlib tolerates that trailing byte; gunzip does not.
      */
     const body = raw.slice(from, to).replace(/[\r\n]+$/, "");
     const text = readStream(Buffer.from(body, "latin1"));
 
+    if (text === OVERSIZE) return true; // real, readable, too big to examine
     if (text === null) {
       // A stream nobody could read might be the one with the picture in it —
-      // unless its dictionary says it is a font, a profile or metadata.
-      if (!BENIGN_STREAM.test(before)) return true;
+      // unless ITS OWN dictionary says it is a font, a profile or metadata.
+      if (!BENIGN_STREAM.test(ownDictionary(raw, m.index))) return true;
       continue;
     }
-    // Too big to examine is not the same as examined and found empty.
-    if (text.length > MAX_STREAM_CHARS) return true;
-    if (streamDraws(text)) return true;
+
+    const clean = stripComments(text);
+    if (streamDraws(carry + " " + clean)) return true;
+    carry = clean.slice(-256);
     read += 1;
   }
 

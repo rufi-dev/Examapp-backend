@@ -572,6 +572,82 @@ const doc = { html, blocks: [] };
     fs.rmSync(dir, { recursive: true, force: true });
   }
 
+  console.log("\nLegal PDF syntax cannot step around the detector:");
+  {
+    const fs = require("fs");
+    const os = require("os");
+    const zlib = require("zlib");
+    const { pdfHasDrawings } = require("../helper/lessonDocFiles");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lessondoc-syntax-"));
+    const TEXT = "BT /F1 12 Tf 72 700 Td (Faiz bir kemiyyetin yuzde bir hissesidir) Tj ET\n";
+
+    const mk = (streams, dicts) => {
+      let out = "%PDF-1.4\n";
+      streams.forEach((c, i) => {
+        const body = zlib.deflateSync(Buffer.from(c, "latin1")).toString("latin1");
+        out += `${i + 1} 0 obj\n<< /Length ${body.length} /Filter /FlateDecode ${(dicts && dicts[i]) || ""}>>\nstream\n${body}\nendstream\nendobj\n`;
+      });
+      return Buffer.from(`${out}trailer<</Root 1 0 R>>\n%%EOF`, "latin1");
+    };
+    const check = async (name, bytes) => {
+      const f = path.join(dir, `${name}.pdf`);
+      fs.writeFileSync(f, bytes);
+      return pdfHasDrawings(f);
+    };
+
+    /*
+     * A page's content may legally be SPLIT across several streams. One ending
+     * "10 10 100 100" and the next beginning "l S" is one drawing written in
+     * two objects, and judging each stream alone finds nothing in either — the
+     * cost of the per-stream scan introduced to fix the memory bound.
+     */
+    ok("a drawing split across two streams is found", (await check("split", mk([`${TEXT}10 10 100 100`, "l S\n"]))) === true);
+    ok("...and a split with no drawing is still replaceable", (await check("split-none", mk([`${TEXT}10 10 100 100x`, "text\n"]))) === false);
+
+    /*
+     * A comment may sit between the operands and their operator. The operators
+     * were matched by looking for a digit immediately in front of them, so a
+     * comment in that gap hid the drawing completely.
+     */
+    ok("a comment between operands and 'l' does not hide it", (await check("cmt-l", mk([`${TEXT}10 10 100 100\n% the diagonal\nl S\n`]))) === true);
+    ok("nor between operands and 're S'", (await check("cmt-re", mk([`${TEXT}10 10 100 100\n% the box\nre S\n`]))) === true);
+    ok("...while a comment ABOUT drawing is not a drawing", (await check("cmt-only", mk([`${TEXT}% we could draw a line here\n`]))) === false);
+
+    /*
+     * The benign-stream check reads THIS object's dictionary. A fixed lookback
+     * reached into whatever object sat before it, so an unreadable drawing
+     * stream could be waved through because a font object nearby said
+     * /FontFile2.
+     */
+    const junk = "\u0000\u0001\u0002 not a stream at all ÿþ";
+    const mixed = Buffer.from(
+      "%PDF-1.4\n" +
+        `1 0 obj\n<< /Length 40 /FontFile2 99 0 R >>\nstream\n${zlib.deflateSync(Buffer.from(TEXT, "latin1")).toString("latin1")}\nendstream\nendobj\n` +
+        `2 0 obj\n<< /Length ${junk.length} /Filter /FlateDecode >>\nstream\n${junk}\nendstream\nendobj\n` +
+        "trailer<</Root 1 0 R>>\n%%EOF",
+      "latin1"
+    );
+    ok("an unreadable stream is not excused by a NEIGHBOUR's font marker", (await check("neighbour", mixed)) === true);
+
+    /*
+     * The size ceiling belongs inside zlib, not after it. Checking the finished
+     * string fails closed for correctness but only once the memory has already
+     * been allocated — a compression bomb was decompressed in full before
+     * anyone objected.
+     */
+    const bombBody = zlib.deflateSync(Buffer.alloc(40 * 1024 * 1024, 0x41)).toString("latin1");
+    const bomb = Buffer.from(
+      `%PDF-1.4\n1 0 obj\n<< /Length ${bombBody.length} /Filter /FlateDecode >>\nstream\n${bombBody}\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF`,
+      "latin1"
+    );
+    const before = process.memoryUsage().heapUsed;
+    ok("a 40MiB expansion is refused, and keeps the file", (await check("bomb", bomb)) === true);
+    const grew = (process.memoryUsage().heapUsed - before) / 1024 / 1024;
+    ok(`...without decompressing it first (heap grew ${grew.toFixed(1)}MiB, not 40)`, grew < 20);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   assert.strictEqual(failed, 0, `${failed} parity assertions failed`);
 })();
