@@ -1670,8 +1670,14 @@ const onboardingReport = asyncHandler(async (req, res) => {
 // GET /api/users/storage (teacher) — how much of the allowance is used.
 // PATCH /api/users/:id/storage (admin) — raise or reset one teacher's quota.
 const getMyStorage = asyncHandler(async (req, res) => {
-  const used = await usedBytes(req.user._id);
-  res.json({ used, limit: quotaFor(req.user), isDefault: !req.user.storageQuotaBytes });
+  /*
+   * The same object the library's meter reads, so "how full am I" has one
+   * answer whichever door it is asked at. `isDefault` is kept for the admin
+   * view that predates the meter.
+   */
+  const { storageStatus } = require("../middleware/uploadLimit");
+  const status = await storageStatus(req.user);
+  res.json({ ...status, isDefault: !req.user.storageQuotaBytes });
 });
 
 const setUserStorage = asyncHandler(async (req, res) => {
@@ -1701,6 +1707,61 @@ const setUserStorage = asyncHandler(async (req, res) => {
     used,
     limit: quotaFor(user),
     isDefault: !user.storageQuotaBytes,
+  });
+});
+
+/*
+ * PATCH /api/users/:id/storage — admin grants extra storage (manual flow: the
+ * teacher pays offline, the admin applies it here). Body: { gb, months? }.
+ *
+ * Separate from the plan on purpose: a teacher who has run out of room should be
+ * able to buy room, not be pushed into a whole tier for it.
+ *
+ * `months` sets the term, because storage is RENTED — the disk it occupies costs
+ * us every month it sits there. gb:0 removes the add-on. When the term ends the
+ * account simply returns to its plan's allowance, which usually leaves it over
+ * quota — and over quota is a safe state here: every file is kept and still
+ * downloadable, only new uploads stop. Nothing is deleted for non-payment.
+ */
+const setUserStorageAddon = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.params.id).select(
+    "name email role plan storageAddonGb storageAddonExpiresAt storageQuotaBytes"
+  );
+  if (!user) {
+    res.status(404);
+    throw new Error("İstifadəçi tapılmadı");
+  }
+  const gb = Math.round(Number(req.body?.gb));
+  if (!Number.isFinite(gb) || gb < 0 || gb > 2000) {
+    res.status(400);
+    throw new Error("Yanlış yaddaş həcmi");
+  }
+  const months = Math.round(Number(req.body?.months));
+  user.storageAddonGb = gb;
+  if (gb === 0) {
+    user.storageAddonExpiresAt = null;
+  } else {
+    /*
+     * Extended from whatever is left rather than from today, so renewing early
+     * does not throw away the days already paid for.
+     */
+    const now = Date.now();
+    const from = user.storageAddonExpiresAt && new Date(user.storageAddonExpiresAt).getTime() > now
+      ? new Date(user.storageAddonExpiresAt).getTime()
+      : now;
+    user.storageAddonExpiresAt =
+      Number.isFinite(months) && months > 0
+        ? new Date(from + months * 30 * 24 * 60 * 60 * 1000)
+        : null; // open-ended until a term is set
+  }
+  await user.save();
+
+  const { storageStatus } = require("../middleware/uploadLimit");
+  res.json({
+    id: String(user._id),
+    storageAddonGb: user.storageAddonGb,
+    storageAddonExpiresAt: user.storageAddonExpiresAt,
+    storage: await storageStatus(user),
   });
 });
 
@@ -2078,6 +2139,7 @@ module.exports = {
   getSetupFunnel,
   getMyStorage,
   setUserStorage,
+  setUserStorageAddon,
   markOnboardingStep,
   onboardingReport,
   registerUser,
@@ -2095,6 +2157,7 @@ module.exports = {
   deleteUser,
   setUserPhone,
   setUserPlan,
+  setUserStorageAddon,
   setUserCredits,
   impersonateUser,
   loginStatus,

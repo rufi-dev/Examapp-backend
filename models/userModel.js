@@ -193,6 +193,23 @@ const userSchema = Schema(
             type: Number,
         },
         /*
+         * Extra storage bought on its own, without changing plan.
+         *
+         * MONTHLY, not one-time, because the cost it covers is monthly: a file
+         * sitting on our disk is billed to us every month it sits there, and
+         * selling that once would be taking payment once for a cost that never
+         * stops. Every product that sells storage — Google One, Dropbox, iCloud
+         * — is recurring for exactly this reason.
+         *
+         * `storageAddonExpiresAt` null means open-ended (an admin grant with no
+         * term). When it lapses the account simply returns to its plan's
+         * allowance, which usually leaves it OVER quota — and over quota is
+         * already a safe state here: every file is kept and still downloadable,
+         * only new uploads stop. Nothing is ever deleted for non-payment.
+         */
+        storageAddonGb: { type: Number, default: 0 },
+        storageAddonExpiresAt: { type: Date, default: null },
+        /*
          * Bytes this account currently holds, as a RESERVABLE counter.
          *
          * The truth is the sum of their material and video rows, and that is

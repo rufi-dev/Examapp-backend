@@ -6,6 +6,7 @@ const {
   getPaymentInfo,
   requestUpgrade,
   requestCredit,
+  requestStorage,
   listSubscribers,
   listDowngraded,
   listCredited,
@@ -20,6 +21,8 @@ router.get("/catalog", getCatalog);
 router.get("/payment-info", protect, teacherOnly, getPaymentInfo);
 router.post("/upgrade-request", protect, teacherOnly, requestUpgrade);
 router.post("/credit-request", protect, teacherOnly, requestCredit);
+// Extra storage without changing plan. Records a demand; grants nothing.
+router.post("/storage-request", protect, teacherOnly, requestStorage);
 
 // Admin package control + inbox + decision.
 router.get("/subscribers", protect, adminOnly, listSubscribers);

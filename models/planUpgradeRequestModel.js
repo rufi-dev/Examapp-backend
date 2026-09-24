@@ -11,10 +11,14 @@ const { Schema } = mongoose;
 const planUpgradeRequestSchema = new Schema(
   {
     teacher: { type: Schema.Types.ObjectId, ref: "User", required: true },
-    // A plan upgrade OR a credit top-up purchase (same manual-payment queue).
-    kind: { type: String, enum: ["plan", "credit"], default: "plan" },
+    // A plan upgrade, a credit top-up, or extra storage — one manual-payment queue.
+    kind: { type: String, enum: ["plan", "credit", "storage"], default: "plan" },
     targetPlan: { type: String, enum: ["pro", "premium"] }, // for kind: "plan"
     credits: { type: Number, default: 0 }, // for kind: "credit"
+    // for kind: "storage" — how much, and for how long. Months, because storage
+    // is rented: see STORAGE_PACKS in config/plans.js.
+    storageGb: { type: Number, default: 0 },
+    months: { type: Number, default: 1 },
     status: { type: String, enum: ["open", "done", "rejected"], default: "open" },
     // The teacher tapped "Ödədim" after transferring to the card — a claim the
     // admin verifies before promoting. Just a signal; never auto-activates.
@@ -27,9 +31,22 @@ const planUpgradeRequestSchema = new Schema(
   { timestamps: true, collection: "plan_upgrade_request" }
 );
 
+/*
+ * One open PLAN request per teacher per target plan, so repeated taps are
+ * idempotent.
+ *
+ * `kind` is in the filter now. Without it the index also covered credit and
+ * storage requests — neither of which has a targetPlan, so both indexed as null
+ * and a teacher with an open credit top-up could not ask for storage at all, or
+ * for a second credit pack. The constraint was only ever meant for plans.
+ */
 planUpgradeRequestSchema.index(
   { teacher: 1, targetPlan: 1 },
-  { name: "uniq_open_plan_request", unique: true, partialFilterExpression: { status: "open" } }
+  {
+    name: "uniq_open_plan_request_v2",
+    unique: true,
+    partialFilterExpression: { status: "open", kind: "plan" },
+  }
 );
 planUpgradeRequestSchema.index({ status: 1, createdAt: -1 }, { name: "plan_request_status" });
 

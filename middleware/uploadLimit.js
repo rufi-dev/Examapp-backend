@@ -76,7 +76,24 @@ function uploadRateLimit(req, res, next) {
  * change. Otherwise the tier decides, which is the point of this change: a count
  * limit never bounded disk, and disk is what costs us money.
  */
+/*
+ * Extra storage bought separately, if it is still paid for.
+ *
+ * A null expiry is an open-ended admin grant. A past expiry is worth nothing:
+ * the add-on is rent, not a purchase, and the month it covers has ended.
+ */
+const addonBytes = (user) => {
+  const gb = Number(user?.storageAddonGb) || 0;
+  if (gb <= 0) return 0;
+  const until = user?.storageAddonExpiresAt;
+  if (until && new Date(until).getTime() < Date.now()) return 0;
+  return gb * 1024 * 1024 * 1024;
+};
+
 const quotaFor = (user) => {
+  // The permanent per-teacher override is absolute: it exists for the handful of
+  // accounts an admin has decided are a special case, and stacking a plan on top
+  // of it would make that decision mean something different every month.
   if (Number(user?.storageQuotaBytes) > 0) return Number(user.storageQuotaBytes);
   /*
    * The EFFECTIVE plan, so a lapsed subscription loses its allowance the way it
@@ -85,7 +102,10 @@ const quotaFor = (user) => {
    * that a payment stopping did not touch.
    */
   const mb = limitsFor(effectivePlan(user)).storageMb;
-  return Number.isFinite(mb) && mb > 0 ? mb * 1024 * 1024 : DEFAULT_QUOTA;
+  const base = Number.isFinite(mb) && mb > 0 ? mb * 1024 * 1024 : DEFAULT_QUOTA;
+  // Added to the plan rather than replacing it: someone who buys 10GB on Pro
+  // expects 10GB MORE, and would be furious to find they had bought a downgrade.
+  return base + addonBytes(user);
 };
 
 // Bytes this user already has stored — study materials AND uploaded videos both
@@ -124,6 +144,7 @@ async function storageStatus(user) {
   const limit = quotaFor(user);
   const unlimited = user?.role === "admin";
   const used = await usedBytes(user._id);
+  const extra = addonBytes(user);
   return {
     used,
     limit: unlimited ? null : limit,
@@ -134,6 +155,21 @@ async function storageStatus(user) {
     // What is in force, not what was bought — a lapsed plan shows as free here
     // because that is the allowance being applied.
     plan: effectivePlan(user),
+    /*
+     * The add-on is reported separately so the teacher can see WHICH part of
+     * their allowance is rented and when it runs out. A single number would let
+     * the allowance shrink one morning with no warning and no explanation.
+     */
+    addon: extra > 0
+      ? {
+          gb: Number(user?.storageAddonGb) || 0,
+          label: human(extra),
+          expiresAt: user?.storageAddonExpiresAt || null,
+          daysLeft: user?.storageAddonExpiresAt
+            ? Math.max(0, Math.ceil((new Date(user.storageAddonExpiresAt).getTime() - Date.now()) / 86400000))
+            : null,
+        }
+      : null,
     usedLabel: human(used),
     limitLabel: unlimited ? "limitsiz" : human(limit),
     // Formatted here rather than in the browser so the page and the refusal
@@ -283,6 +319,7 @@ module.exports = {
   recountStorage,
   usedBytes,
   quotaFor,
+  addonBytes,
   human,
   DEFAULT_QUOTA,
 };

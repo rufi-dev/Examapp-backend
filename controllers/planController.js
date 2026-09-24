@@ -1,7 +1,7 @@
 const asyncHandler = require("express-async-handler");
 const PlanUpgradeRequest = require("../models/planUpgradeRequestModel");
 const User = require("../models/userModel");
-const { PLANS, PLAN_IDS, CREDIT_TOPUPS, AI_ACTION_COSTS, paymentInfo } = require("../config/plans");
+const { PLANS, PLAN_IDS, CREDIT_TOPUPS, STORAGE_PACKS, AI_ACTION_COSTS, paymentInfo } = require("../config/plans");
 const { sendTelegram, esc } = require("../helper/telegram");
 
 // GET /api/plan/catalog — public plan/pricing catalog for the pricing page.
@@ -22,6 +22,8 @@ const getCatalog = asyncHandler(async (req, res) => {
       features: PLANS[id].features,
     })),
     topups: CREDIT_TOPUPS,
+    // Storage sold on its own, for a teacher who needs room rather than a tier.
+    storagePacks: STORAGE_PACKS,
     aiActionCosts: AI_ACTION_COSTS,
     // The receiving card is meant to be shown to anyone upgrading, so it rides
     // along on the public catalog — the payment page reads it here without an
@@ -93,6 +95,70 @@ const requestUpgrade = asyncHandler(async (req, res) => {
   res.status(201).json({
     ok: true,
     request: { _id: request._id, targetPlan, status: request.status, paidClaimed: request.paidClaimed },
+  });
+});
+
+/*
+ * POST /api/plan/storage-request — a teacher rents extra storage without
+ * changing plan.
+ *
+ * Same manual queue as everything else here: this NEVER grants anything. It
+ * records a demand, pings the admins, and an admin verifies the transfer and
+ * applies it with PATCH /api/users/:id/storage.
+ */
+const requestStorage = asyncHandler(async (req, res) => {
+  const gb = Math.round(Number(req.body?.gb) || 0);
+  const pack = STORAGE_PACKS.find((t) => t.gb === gb);
+  if (!pack) {
+    res.status(400);
+    throw new Error("Yanlış yaddaş paketi");
+  }
+  const months = Math.min(12, Math.max(1, Math.round(Number(req.body?.months) || 1)));
+  const paid = req.body?.paid === true || req.body?.paid === "true";
+
+  let request = await PlanUpgradeRequest.findOne({
+    teacher: req.user._id,
+    kind: "storage",
+    storageGb: gb,
+    months,
+    status: "open",
+  });
+  if (!request) {
+    request = await PlanUpgradeRequest.create({
+      teacher: req.user._id,
+      kind: "storage",
+      storageGb: gb,
+      months,
+      paidClaimed: paid,
+      paidClaimedAt: paid ? new Date() : null,
+    });
+  } else if (paid && !request.paidClaimed) {
+    request.paidClaimed = true;
+    request.paidClaimedAt = new Date();
+    await request.save();
+  }
+
+  try {
+    const admins = await User.find({ role: "admin", telegramChatId: { $nin: [null, ""] } })
+      .select("telegramChatId")
+      .lean();
+    if (admins.length) {
+      const text = [
+        paid ? "✅ <b>Yaddaş ödənişi</b>" : "💾 <b>Yaddaş alma istəyi</b>",
+        `👤 ${esc(req.user.name || "Müəllim")}`,
+        `💾 +${gb} GB × ${months} ay (${pack.priceAzn * months} ₼)`,
+        paid ? "💰 Ödədim düyməsini basdı — yoxla və yaddaşı əlavə et" : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      await Promise.allSettled(admins.map((a) => sendTelegram(a.telegramChatId, text)));
+    }
+  } catch {
+    /* the request stands whether or not the ping lands */
+  }
+
+  res.status(201).json({
+    request: { _id: request._id, kind: "storage", storageGb: gb, months, status: request.status, paidClaimed: request.paidClaimed },
   });
 });
 
@@ -248,6 +314,7 @@ module.exports = {
   getPaymentInfo,
   requestUpgrade,
   requestCredit,
+  requestStorage,
   listSubscribers,
   listDowngraded,
   listCredited,

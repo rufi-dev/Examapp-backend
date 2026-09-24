@@ -101,6 +101,22 @@ const CREDIT_TOPUPS = [
   { credits: 300, priceAzn: num("PLAN_TOPUP_300_AZN", 12) },
 ];
 
+/*
+ * Extra storage, sold on its own so a teacher who only needs room is not pushed
+ * into a whole tier for it.
+ *
+ * MONTHLY, because the cost is monthly. A file on our disk is billed to us every
+ * month it sits there, so selling that once would be taking payment once for a
+ * cost that never stops — which is why every product that sells storage (Google
+ * One, Dropbox, iCloud) rents it rather than selling it. The per-GB price falls
+ * with size because our own cost does.
+ */
+const STORAGE_PACKS = [
+  { gb: num("PLAN_STORAGE_5GB", 5), priceAzn: num("PLAN_STORAGE_5GB_AZN", 3) },
+  { gb: num("PLAN_STORAGE_25GB", 25), priceAzn: num("PLAN_STORAGE_25GB_AZN", 10) },
+  { gb: num("PLAN_STORAGE_100GB", 100), priceAzn: num("PLAN_STORAGE_100GB_AZN", 30) },
+];
+
 // Per-action AI credit costs shown on the pricing page. DERIVED from the one
 // canonical registry (config/aiOperations.js) so the published number is always
 // the number actually charged. aiOperations requires nothing, so importing it
@@ -131,6 +147,7 @@ module.exports = {
   PLAN_IDS,
   PLANS,
   CREDIT_TOPUPS,
+  STORAGE_PACKS,
   AI_ACTION_COSTS,
   normalizePlan,
   planDef,

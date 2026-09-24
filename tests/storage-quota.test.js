@@ -167,6 +167,66 @@ const eq = (name, actual, expected) =>
     ok("a counter below the truth is repaired before it is trusted", claim.ok === false);
   }
 
+  /*
+   * Extra storage bought on its own — monthly, because the cost is monthly.
+   *
+   * The questions these answer are the ones a teacher will actually ask: does it
+   * ADD to my plan or replace it, what happens on the day it runs out, and does
+   * renewing early cost me the days I already paid for.
+   */
+  console.log("\n— rented extra storage —");
+  {
+    const DAY = 86400000;
+    const base = quotaFor({ plan: "free" });
+    eq("an add-on ADDS to the plan", quotaFor({ plan: "free", storageAddonGb: 10 }) - base, 10 * 1024 * MB);
+    eq("...on any tier", quotaFor({ plan: "pro", storageAddonGb: 10 }) / MB, 2048 + 10 * 1024);
+    // Rent, not a purchase: the month it covered has ended.
+    eq("a lapsed add-on is worth nothing", quotaFor({ plan: "free", storageAddonGb: 10, storageAddonExpiresAt: new Date(Date.now() - DAY) }), base);
+    ok("...while one still paid for counts", quotaFor({ plan: "free", storageAddonGb: 10, storageAddonExpiresAt: new Date(Date.now() + DAY) }) > base);
+    // An admin grant with no term is open-ended rather than instantly expired.
+    ok("an open-ended grant counts", quotaFor({ plan: "free", storageAddonGb: 10, storageAddonExpiresAt: null }) > base);
+    // The permanent per-teacher override is a decision, not a component.
+    eq("a permanent override is absolute", quotaFor({ plan: "pro", storageQuotaBytes: 5 * MB, storageAddonGb: 10 }) / MB, 5);
+
+    /*
+     * The whole point of the feature: a full free account becomes usable by
+     * renting room, without being pushed into a tier it does not need.
+     */
+    const u = await makeUser("free");
+    await addMaterial(u._id, 48 * MB);
+    ok("a full free account cannot upload", (await reserveStorage(u, 5 * MB)).ok === false);
+    u.storageAddonGb = 5;
+    u.storageAddonExpiresAt = new Date(Date.now() + 30 * DAY);
+    await u.save();
+    const withRoom = await User.findById(u._id);
+    ok("...and can once it rents room", (await reserveStorage(withRoom, 5 * MB)).ok === true);
+    // And actually uses it, which is what makes the lapse below realistic: the
+    // files that put them over the plan limit are the ones the rent paid for.
+    await addMaterial(u._id, 5 * MB);
+
+    /*
+     * The day it runs out: NOTHING is deleted. The account returns to its plan's
+     * allowance, is over quota, and goes read-only for new uploads — the same
+     * safe state a plan downgrade produces, which is why non-payment needs no
+     * destructive path of its own.
+     */
+    await User.updateOne({ _id: u._id }, { $set: { storageAddonExpiresAt: new Date(Date.now() - DAY) } });
+    const lapsed = await User.findById(u._id);
+    const s = await storageStatus(lapsed);
+    ok("a lapsed add-on leaves the account full", s.full === true);
+    ok("...and refusing new uploads", (await reserveStorage(lapsed, 1 * MB)).ok === false);
+    eq("...with every file still there", await Material.countDocuments({ owner: u._id }), 2);
+    eq("...and still downloadable, because nothing is deleted for non-payment",
+      (await usedBytes(u._id)) / MB, 53);
+
+    // What the teacher is shown: which part is rented, and when it ends.
+    await User.updateOne({ _id: u._id }, { $set: { storageAddonExpiresAt: new Date(Date.now() + 10 * DAY) } });
+    const live = await storageStatus(await User.findById(u._id));
+    ok("the rented part is reported separately", live.addon && live.addon.gb === 5);
+    ok("...with the days left, so it cannot lapse as a surprise", live.addon.daysLeft >= 9 && live.addon.daysLeft <= 11);
+    ok("an account with no add-on reports none", (await storageStatus(await makeUser("free"))).addon === null);
+  }
+
   // An admin has no ceiling, and is not shown a meter at all.
   {
     const admin = { _id: new mongoose.Types.ObjectId(), role: "admin", plan: "free" };

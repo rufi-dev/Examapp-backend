@@ -1,5 +1,5 @@
 const express = require('express')
-const { registerUser, loginUser, deviceLogin, forgetDevice, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush, getOutreachStatus, toggleOutreach, getSetupFunnel, getParentCode } = require('../controllers/userController')
+const { registerUser, loginUser, deviceLogin, forgetDevice, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserStorageAddon, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush, getOutreachStatus, toggleOutreach, getSetupFunnel, getParentCode } = require('../controllers/userController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
 const { refreshHandler, logoutAllHandler, requireSessionFlag } = require('../controllers/authSessionController')
 const { csrfProtect } = require('../middleware/csrf')
@@ -64,6 +64,9 @@ router.get('/onboardingReport', protect, adminOnly, onboardingReport)
 // Storage allowance: a teacher sees their own, an admin raises anyone's.
 router.get('/storage', protect, teacherOnly, getMyStorage)
 router.patch('/:id/storage', protect, adminOnly, setUserStorage)
+// Rented extra storage, separate from the permanent override above: this one has
+// a term, because the disk it occupies costs us every month it is occupied.
+router.patch('/:id/storage-addon', protect, adminOnly, setUserStorageAddon)
 router.patch('/:id/plan', protect, adminOnly, setUserPlan)
 router.patch('/:id/credits', protect, adminOnly, setUserCredits)
 
