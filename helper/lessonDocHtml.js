@@ -185,6 +185,10 @@ blockquote p{margin:0}
 .doc-image img{max-width:100%;max-height:118mm;height:auto;object-fit:contain;
   border:0.5pt solid var(--accent-tint);border-radius:3pt}
 .doc-image figcaption{margin-top:5pt;color:var(--muted);font-size:9pt;font-style:italic}
+/* A picture the teacher asked for that could not be placed. Visible on purpose:
+   a silent gap is one they would only find by comparing the sheet with memory. */
+.doc-image-missing{border:0.75pt dashed #C9A227;border-radius:4pt;padding:10pt 8pt;background:#FDF8E7}
+.doc-image-missing .doc-image-note{color:#8A6D1F;font-style:normal;font-weight:700}
 
 @page{size:A4;margin:16mm 16mm 18mm}
 `;
@@ -251,6 +255,8 @@ blockquote p{margin:0}
 .doc-image{margin:0 0 12pt;text-align:center}
 .doc-image img{max-width:100%;height:auto}
 .doc-image figcaption{margin-top:4pt;color:#676C78;font-size:9.5pt;font-style:italic}
+.doc-image-missing{border:0.75pt dashed #C9A227;padding:8pt;background:#FDF8E7}
+.doc-image-missing .doc-image-note{color:#8A6D1F;font-weight:700}
 `;
 
 /* ------------------------------------------------------------ the content --- */

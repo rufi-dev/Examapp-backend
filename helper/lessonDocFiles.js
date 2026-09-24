@@ -1176,7 +1176,7 @@ const docImages = (doc) => (doc?.files || []).filter((f) => IMAGE_MIME.test(f?.m
 // A whole document's pictures, inlined. Generous for a handout, and far below
 // what Chromium or Word will choke on.
 const MAX_INLINE_BYTES = 12 * 1024 * 1024;
-const FIGURE = /<figure\b[^>]*?\sdata-image="(\d{1,2})"[^>]*>([\s\S]*?)<\/figure>/g;
+const FIGURE = /<figure\b[^>]*?\sdata-image="([a-f0-9]{16})"[^>]*>([\s\S]*?)<\/figure>/g;
 
 /*
  * Put the pictures INTO the document, as bytes.
@@ -1196,6 +1196,10 @@ const FIGURE = /<figure\b[^>]*?\sdata-image="(\d{1,2})"[^>]*>([\s\S]*?)<\/figure
  * A reference that names no attachment resolves to nothing and the figure is
  * removed — a caption under a blank frame is worse than no figure.
  */
+// A figure that could not be filled, kept visible and labelled.
+const marked = (inner, why) =>
+  `<figure class="doc-image doc-image-missing">${inner || ""}<figcaption class="doc-image-note">${why}</figcaption></figure>`;
+
 async function embedDocImages(html, doc) {
   const src = String(html || "");
   if (!src.includes("data-image=")) return src;
@@ -1209,7 +1213,7 @@ async function embedDocImages(html, doc) {
   let m;
   FIGURE.lastIndex = 0;
   while ((m = FIGURE.exec(src))) {
-    parts.push({ start: m.index, end: m.index + m[0].length, ref: Number(m[1]), inner: m[2] });
+    parts.push({ start: m.index, end: m.index + m[0].length, ref: String(m[1]), inner: m[2] });
   }
   if (!parts.length) return src;
 
@@ -1217,8 +1221,9 @@ async function embedDocImages(html, doc) {
   for (const part of parts) {
     out += src.slice(last, part.start);
     last = part.end;
-    const file = images[part.ref - 1];
-    if (!file) continue; // names nothing: the figure goes with it
+    // By identity, so deleting one attachment cannot re-point another's figure.
+    const file = images.find((f) => String(f.key || "").slice(0, 16) === part.ref);
+    if (!file) { out += marked(part.inner, "Şəkil tapılmadı"); continue; }
     let uri = cache.get(file.key);
     if (uri === undefined) {
       uri = null;
@@ -1233,7 +1238,12 @@ async function embedDocImages(html, doc) {
       }
       cache.set(file.key, uri);
     }
-    if (!uri) continue;
+    /*
+     * Read but not embedded — gone from disk, or past the budget. Said out loud
+     * rather than dropped: the teacher asked for this picture, and a material
+     * that quietly omits it gives them nothing to act on.
+     */
+    if (!uri) { out += marked(part.inner, spent >= MAX_INLINE_BYTES ? "Şəkil çox böyükdür" : "Şəkil açılmadı"); continue; }
     const alt = String(file.name || "").replace(/[<>"&]/g, "");
     out += `<figure class="doc-image"><img src="${uri}" alt="${alt}" />${part.inner}</figure>`;
   }

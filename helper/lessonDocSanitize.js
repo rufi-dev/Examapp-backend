@@ -60,10 +60,11 @@ const ATTRS = {
 };
 
 /*
- * A `data-image` may be a small positive integer and nothing else — never a
- * path, never a key, never anything a resolver could be talked into fetching.
+ * A `data-image` may be sixteen lowercase hex characters and nothing else — the
+ * front of a content hash. Never a path, never a name, never anything a resolver
+ * could be talked into fetching or into reading outside the attachment store.
  */
-const ATTR_VALUES = { "data-image": /^[1-9][0-9]?$/ };
+const ATTR_VALUES = { "data-image": /^[a-f0-9]{16}$/ };
 
 /*
  * The CSS properties a document may set on itself.

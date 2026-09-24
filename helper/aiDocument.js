@@ -413,7 +413,19 @@ async function documentWithClaude({
     console.error("AI document (claude) error:", e?.status, e?.message);
     throw docError(502, "AI sənədi hazırlaya bilmədi. Bir az sonra yenidən cəhd edin.", true);
   }
-  if (message.stop_reason === "refusal") throw docError(422, "AI bu sorğunu emal edə bilmədi.");
+  if (message.stop_reason === "refusal") {
+    /*
+     * A refusal is a completed, billed request. Thrown bare, its cost died with
+     * it and the turn looked free — the one class of spend that is both real and
+     * invisible. The error carries the meter reading outward so the controller
+     * can record it like any other paid turn.
+     */
+    const e = docError(422, "AI bu sorğunu emal edə bilmədi.");
+    e.cost = computeCost(message.usage, usedModel);
+    e.usage = message.usage;
+    e.provider = "claude";
+    throw e;
+  }
   const textBlock = message.content.find((b) => b.type === "text");
   /*
    * Note: `stop_reason === "max_tokens"` is NOT treated as truncation on its own —

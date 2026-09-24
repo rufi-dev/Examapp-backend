@@ -1092,6 +1092,24 @@ const streamMessage = asyncHandler(async (req, res) => {
    * fail the turn that succeeded, so it degrades to sending nothing.
    */
   const sendDone = async (data) => {
+    /*
+     * The pictures go in before the finished material is streamed back.
+     *
+     * The stored html only NAMES them, and the client replaces its state with
+     * whatever this frame carries — so without this the material appeared with
+     * its figures missing and only grew them on a reload, which reads as the
+     * attachment having been ignored.
+     */
+    if (data?.doc?.html && data.doc.html.includes("data-image=")) {
+      try {
+        const F = require("../helper/lessonDocFiles");
+        const doc0 = typeof data.doc.toObject === "function" ? data.doc.toObject() : { ...data.doc };
+        doc0.html = await F.embedDocImages(doc0.html, data.doc);
+        data = { ...data, doc: doc0 };
+      } catch {
+        /* the material is finished; a picture that will not load is not a failure */
+      }
+    }
     if (req.user.role !== "admin") return send("done", data);
     let cost = null;
     try {
@@ -1862,6 +1880,19 @@ ${S.SOURCE_RULES}`;
     await sendDone({ doc: saved, summary: sum, provider: out.provider });
     return;
   } catch (e) {
+    /*
+     * Whatever went wrong, if the provider had already been paid the meter hears
+     * about it. A refusal, a validation failure, a commit that lost a race — the
+     * money left either way, and spend with no row reads as a turn that never
+     * happened.
+     */
+    if (e?.cost) {
+      await logStudioUsage(req, {
+        doc,
+        hadBlocks,
+        out: { provider: e.provider || null, cost: e.cost, usage: e.usage, timing: { rounds: 1, failed: true } },
+      }).catch(() => {});
+    }
     // A deliberate stop is not a failure — it must not read like "Alınmadı" in
     // the transcript, and there is no client left to send an SSE frame to.
     if (ac.signal.aborted || e?.aiStatus === 499) {

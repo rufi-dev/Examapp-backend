@@ -17,6 +17,13 @@ const { GEOMETRY_TYPES, geometrySvg, geometryUsable } = require("./lessonDocGeom
  */
 const SEMANTIC_TYPES = ["flow", "cycle", "compare", "timeline", "bars", "concept"];
 const DIAGRAM_TYPES = [...SEMANTIC_TYPES, ...GEOMETRY_TYPES];
+/*
+ * The kinds a lesson block may be — ONE list, used by the schema the model is
+ * held to and by the normaliser that reads its answer. Two lists drift, and when
+ * they drift the model is forbidden from sending something we are ready to
+ * accept, which fails silently and looks like the model ignoring instructions.
+ */
+const BLOCK_KINDS = ["heading", "text", "list", "definition", "example", "task", "note", "table", "diagram", "image"];
 const MAX_BLOCKS = 36;
 const MAX_ITEMS = 12;
 const MAX_TEXT = 1200;
@@ -39,7 +46,14 @@ const NATIVE_SCHEMA = {
         type: "object",
         additionalProperties: false,
         properties: {
-          kind: { type: "string", enum: ["heading", "text", "list", "definition", "example", "task", "note", "table", "diagram"] },
+          /*
+           * MUST match BLOCK_KINDS below. The normaliser accepted "image" while
+           * this enum did not list it, so the strict schema forbade the very
+           * block the prompt asked for: the feature shipped unable to happen,
+           * and every test passed because they all went through the normaliser
+           * rather than through the contract the model is bound by.
+           */
+          kind: { type: "string", enum: BLOCK_KINDS },
           text: { type: "string" },
           term: { type: "string" },
           items: { type: "array", maxItems: MAX_ITEMS, items: { type: "string" } },
@@ -190,7 +204,7 @@ function normalizeNative(raw = {}) {
     reply: clamp(raw.reply, 500),
     blocks: blocks
       .map((b) => ({
-        kind: ["heading", "text", "list", "definition", "example", "task", "note", "table", "diagram", "image"].includes(b?.kind) ? b.kind : "text",
+        kind: BLOCK_KINDS.includes(b?.kind) ? b.kind : "text",
         text: clamp(b?.text),
         term: clamp(b?.term, 180),
         items: cleanArray(b?.items),
@@ -344,7 +358,14 @@ function diagramSvg(d) {
   return `${base}<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#5369D6"/></marker></defs>${art}</g></svg>`;
 }
 
-function nativeBlocksToHtml(native) {
+/*
+ * A picture's identity in a stored document: the first 16 characters of its
+ * content hash. Short enough to read in the markup, long enough that it cannot
+ * collide, and stable across every change to the attachment list.
+ */
+const stableImageId = (file) => String(file?.key || "").slice(0, 16);
+
+function nativeBlocksToHtml(native, { images = [] } = {}) {
   const blocks = native.blocks.map((b) => {
     if (b.kind === "diagram") return { kind: "figure", text: b.diagram.title, svg: diagramSvg(b.diagram) };
     return b;
@@ -356,8 +377,26 @@ function nativeBlocksToHtml(native) {
    * to live in Mongo however many photographs it shows, and the same markup
    * serves the screen and the PDF.
    */
-  const imageHtml = (b) =>
-    `<figure class="doc-image" data-image="${b.imageRef}">${b.text ? `<figcaption>${esc(b.text)}</figcaption>` : ""}</figure>`;
+  /*
+   * The picture is named by a STABLE id, not by its position.
+   *
+   * The model counts — "the teacher's first picture" — because a number is what
+   * it can get right. What gets STORED must not be a number: delete the first
+   * attachment and every later one shifts down, so a material saved last week
+   * would quietly start showing a different photograph. The count is therefore
+   * translated to the file's own identity here, once, at the moment the document
+   * is written, and never resolved by position again.
+   *
+   * A reference to a picture that is not attached is kept as a marked figure
+   * rather than dropped: the teacher asked for it, and silence is how a missing
+   * illustration becomes a mystery instead of a fixable mistake.
+   */
+  const imageHtml = (b) => {
+    const file = images[b.imageRef - 1];
+    const caption = b.text ? `<figcaption>${esc(b.text)}</figcaption>` : "";
+    if (!file) return `<figure class="doc-image doc-image-missing">${caption || "<figcaption>Şəkil tapılmadı</figcaption>"}</figure>`;
+    return `<figure class="doc-image" data-image="${esc(stableImageId(file))}">${caption}</figure>`;
+  };
   const title = native.title ? `<h1>${esc(native.title)}</h1>` : "";
   const meta = native.audience ? `<p class="meta">${esc(native.audience)}</p>` : "";
   return `${title}${meta}${blocks.map((b) => (b.kind === "image" ? imageHtml(b) : renderBlock(b, false))).join("\n")}`;
@@ -603,4 +642,4 @@ function nativeCanHandle(doc = {}, countParts) {
   return !parts;
 }
 
-module.exports = { salvageNative, NATIVE_SCHEMA, NATIVE_SYSTEM, MAX_BLOCKS, normalizeNative, nativeBlocksToHtml, nativePrompt, nativePrintOptions, diagramSvg, nativeCanHandle };
+module.exports = { salvageNative, BLOCK_KINDS, stableImageId, NATIVE_SCHEMA, NATIVE_SYSTEM, MAX_BLOCKS, normalizeNative, nativeBlocksToHtml, nativePrompt, nativePrintOptions, diagramSvg, nativeCanHandle };

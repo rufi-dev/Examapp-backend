@@ -22,6 +22,9 @@ const {
   salvageNative,
   MAX_BLOCKS,
   NATIVE_SYSTEM,
+  BLOCK_KINDS,
+  stableImageId,
+  NATIVE_SCHEMA,
 } = require("../helper/lessonDocNative");
 const { geometrySvg, GEOMETRY_TYPES } = require("../helper/lessonDocGeometry");
 const { sanitizeDocHtml } = require("../helper/lessonDocSanitize");
@@ -1164,6 +1167,34 @@ const doc = { html, blocks: [] };
    * asks for it in the material was getting a material without it and no word
    * said about why.
    */
+  /*
+   * Round 18 — the contract the MODEL is bound by, not the one we are.
+   *
+   * The image feature shipped unable to happen: the normaliser accepted
+   * kind:"image" while the strict schema's enum did not list it, so the provider
+   * was forbidden from sending the one block the prompt asked for. Every test
+   * passed, because every test went through the normaliser. Nothing checked the
+   * two halves against each other, so nothing could catch a silent divergence.
+   */
+  console.log("\n— schema and normaliser agree —");
+  {
+    const schemaKinds = NATIVE_SCHEMA.properties.blocks.items.properties.kind.enum;
+    eq("the schema offers exactly the kinds the normaliser keeps", [...schemaKinds].sort(), [...BLOCK_KINDS].sort());
+    ok("...including image, which the prompt asks for", schemaKinds.includes("image"));
+    // Every kind the schema permits must survive normalisation as itself, or the
+    // model is being invited to send something that is silently rewritten.
+    for (const kind of schemaKinds) {
+      const probe = { kind, text: "x", imageRef: kind === "image" ? 1 : null,
+        diagram: kind === "diagram" ? { type: "circle", title: "t", labels: [], values: [4] } : null };
+      const kept = normalizeNative({ title: "T", blocks: [probe] }).blocks[0];
+      eq(`a ${kind} block stays a ${kind}`, kept && kept.kind, kind);
+    }
+    const req = NATIVE_SCHEMA.properties.blocks.items.required;
+    const props = Object.keys(NATIVE_SCHEMA.properties.blocks.items.properties);
+    // Strict structured output demands that required and properties match exactly.
+    eq("every property is required, as strict mode demands", [...req].sort(), [...props].sort());
+  }
+
   console.log("\n— the teacher's own pictures —");
   {
     const fs = require("fs");
@@ -1182,8 +1213,26 @@ const doc = { html, blocks: [] };
     });
     eq("an image block survives normalisation", doc.blocks.length, 2);
     eq("...keeping the number it was given", doc.blocks[1].imageRef, 1);
-    const html = nativeBlocksToHtml(doc);
-    ok("...and renders as a figure that NAMES a picture", /<figure class="doc-image" data-image="1">/.test(html));
+    const photos = [
+      { key: "b".repeat(64), name: "bir.png", mime: "image/png", ext: "png" },
+      { key: "c".repeat(64), name: "iki.png", mime: "image/png", ext: "png" },
+    ];
+    const html = nativeBlocksToHtml(doc, { images: photos });
+    /*
+     * The model counts; the DOCUMENT remembers identity. Storing the count would
+     * mean that deleting the first attachment silently re-points every figure
+     * after it at the wrong photograph — a material changing its pictures on its
+     * own, weeks later, with nothing to show what happened.
+     */
+    ok("...and renders as a figure naming a stable id", new RegExp(`data-image="${"b".repeat(16)}"`).test(html));
+    ok("...never the position it was counted by", !/data-image="1"/.test(html));
+    eq("the id is the front of the content hash", stableImageId(photos[1]), "c".repeat(16));
+    // Delete the first attachment: the second figure must still mean the second file.
+    const htmlAfter = nativeBlocksToHtml(
+      normalizeNative({ title: "T", blocks: [{ kind: "image", imageRef: 2, text: "ikinci" }] }),
+      { images: photos }
+    );
+    ok("a figure survives its neighbour being deleted", new RegExp(`data-image="${"c".repeat(16)}"`).test(htmlAfter));
     ok("...carrying its caption", /Müəllimin şəkli/.test(html));
     ok("...and no bytes at all, so the document stays small", !/base64/.test(html));
 
@@ -1204,7 +1253,25 @@ const doc = { html, blocks: [] };
     ok("...and so is an inline one", sanitizeDocHtml('<img src="data:image/png;base64,AAAA">') === "");
     ok("a path in data-image is refused", !/data-image/.test(sanitizeDocHtml('<figure data-image="../../etc/passwd">x</figure>')));
     ok("...and so is a zero", !/data-image/.test(sanitizeDocHtml('<figure data-image="0">x</figure>')));
-    ok("a real reference survives sanitisation", /data-image="2"/.test(sanitizeDocHtml('<figure data-image="2">x</figure>')));
+    ok("a real reference survives sanitisation", /data-image="abcdef0123456789"/.test(sanitizeDocHtml('<figure data-image="abcdef0123456789">x</figure>')));
+    ok("a bare number is no longer a reference", !/data-image/.test(sanitizeDocHtml('<figure data-image="2">x</figure>')));
+
+    /*
+     * The halo must survive the sanitizer, which strips `paint-order`. With it
+     * gone a stroked text paints its stroke OVER the glyphs, and every label in
+     * every figure printed as a pale smudge — the exact bug this was added to
+     * fix, reintroduced by the stage that runs after the renderer. So the halo
+     * is a separate element underneath, using nothing the sanitizer removes.
+     */
+    const { geometrySvg: g2 } = require("../helper/lessonDocGeometry");
+    const drawn = sanitizeDocHtml(g2({ type: "pythagoras", title: "", labels: ["a", "b", "c"], values: [3, 4] }));
+    ok("no label depends on paint-order", !/paint-order/.test(drawn));
+    ok("...the halo is its own element beneath the glyphs", /fill="none" stroke="#F4F6FF"/.test(drawn));
+    ok("...and the readable copy is still there", /fill="#2B3350">a = 3<\/text>/.test(drawn));
+    // Crowded labels stand off on a leader rather than being deleted.
+    const tight = g2({ type: "pythagoras", title: "", labels: ["Katet a", "Katet b", "Hipotenuz c"], values: [5, 12] });
+    ok("a crowded figure still names all three sides", ["Katet a", "Katet b", "Hipotenuz c"].every((l) => tight.includes(l)));
+    ok("...by standing one off on a leader line", /stroke-opacity="0.55"/.test(tight));
 
     // Numbering: the prompt and the resolver must agree, or a material shows the
     // wrong photograph with complete confidence.
@@ -1226,7 +1293,7 @@ const doc = { html, blocks: [] };
     const onDisk = F.pathForKey(key, "png");
     fs.writeFileSync(onDisk, png);
     const withPhoto = { files: [{ key, name: "lövhə.png", mime: "image/png", ext: "png" }] };
-    const named = '<figure class="doc-image" data-image="1"><figcaption>Lövhə</figcaption></figure>';
+    const named = `<figure class="doc-image" data-image="${key.slice(0, 16)}"><figcaption>Lövhə</figcaption></figure>`;
     const filled = await F.embedDocImages(named, withPhoto);
     ok("the named picture becomes real bytes on the page", filled.includes(`data:image/png;base64,${png.toString("base64")}`));
     ok("...keeping its caption", /Lövhə<\/figcaption>/.test(filled));
@@ -1234,12 +1301,18 @@ const doc = { html, blocks: [] };
     // The same call serves the screen and the file, which is the whole promise.
     eq("preview and export resolve identically", await F.embedDocImages(named, withPhoto), filled);
     fs.rmSync(onDisk, { force: true });
-    // A picture the document names but disk has lost must not leave a blank frame.
-    eq("a picture missing from disk leaves no empty frame", (await F.embedDocImages(named, withPhoto)).trim(), "");
+    // A picture the document names but disk has lost is announced too.
+    ok("a picture lost from disk is announced", /Şəkil açılmadı/.test(await F.embedDocImages(named, withPhoto)));
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "docimg-"));
-    const missing = await F.embedDocImages('<figure class="doc-image" data-image="9"><figcaption>yox</figcaption></figure>', { files });
-    eq("a reference naming no attachment leaves no empty frame", missing.trim(), "");
+    /*
+     * A picture the teacher asked for and did not get is SAID, not swallowed.
+     * Dropping it silently leaves them comparing the material against their own
+     * memory to notice anything is missing.
+     */
+    const missing = await F.embedDocImages(`<figure class="doc-image" data-image="${"9".repeat(16)}"><figcaption>yox</figcaption></figure>`, { files });
+    ok("a reference naming no attachment says so", /Şəkil tapılmadı/.test(missing));
+    ok("...and is marked for the stylesheet", /doc-image-missing/.test(missing));
     const untouched = await F.embedDocImages("<p>şəkilsiz material</p>", { files });
     eq("a document with no pictures is returned unchanged", untouched, "<p>şəkilsiz material</p>");
 

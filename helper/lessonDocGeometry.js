@@ -71,20 +71,29 @@ const textWidth = (value, size) => {
 };
 
 /*
- * `halo` paints the label's own outline in the ground colour BEHIND the glyphs,
- * so a measurement stays readable wherever it lands — on a line, on a fill, on
- * another figure's edge.
+ * A label, and under it the outline that separates it from whatever it lands on.
  *
- * The width is PROPORTIONAL to the type size, and small. At a flat 4.5px it was
- * wider than the strokes of 12px Arial: the halo of one glyph met the halo of
- * the next, the letters filled in, and every measurement in the figure printed
- * as a pale smudge. A halo has to be thinner than the thing it separates.
+ * Drawn as TWO elements rather than one with `paint-order: stroke`, because the
+ * document sanitizer strips `paint-order` — and a stroked text without it paints
+ * the stroke OVER the glyphs, which turned every measurement in every figure
+ * into a pale smudge. The sanitizer is right to be strict and this is not worth
+ * widening it for: two elements in the right order need no attribute at all, and
+ * they behave identically in Chromium, in LibreOffice and in anything else that
+ * has ever rendered SVG.
+ *
+ * The outline is thinner than the strokes of the type it surrounds. At 4.5px on
+ * 12px Arial the halo of one glyph met the next and the letters filled in.
  */
-const text = (x, y, value, { size = 13, anchor = "middle", fill = INK, weight = "normal", italic = false, halo = false } = {}) =>
-  `<text x="${n2(x)}" y="${n2(y)}" text-anchor="${anchor}" font-family="Arial,sans-serif" font-size="${size}"` +
-  ` font-weight="${weight}"${italic ? ' font-style="italic"' : ""}` +
-  `${halo ? ` paint-order="stroke" stroke="${GROUND}" stroke-width="${n2(Math.max(1.6, size * 0.2))}" stroke-linejoin="round" stroke-opacity="0.9"` : ""}` +
-  ` fill="${fill}">${esc(String(value).slice(0, 40))}</text>`;
+const text = (x, y, value, { size = 13, anchor = "middle", fill = INK, weight = "normal", italic = false, halo = false } = {}) => {
+  const attrs = `x="${n2(x)}" y="${n2(y)}" text-anchor="${anchor}" font-family="Arial,sans-serif"` +
+    ` font-size="${size}" font-weight="${weight}"${italic ? ' font-style="italic"' : ""}`;
+  const body = esc(String(value).slice(0, 40));
+  const ring = halo
+    ? `<text ${attrs} fill="none" stroke="${GROUND}" stroke-width="${n2(Math.max(1.6, size * 0.22))}"` +
+      ` stroke-linejoin="round" stroke-linecap="round">${body}</text>`
+    : "";
+  return `${ring}<text ${attrs} fill="${fill}">${body}</text>`;
+};
 
 /*
  * Keep a label inside the drawing. A measurement that runs off the edge of the
@@ -176,20 +185,44 @@ function placeLabels(candidates, occupied = []) {
   const taken = occupied.slice();
   const hits = (b) => taken.some((o) =>
     b.x1 < o.x2 && b.x2 > o.x1 && b.y1 < o.y2 && b.y2 > o.y1);
+  const boxAt = (x, y, form, size) => {
+    const w = textWidth(form, size);
+    const h = size * 1.25;
+    return { x1: x - w / 2 - 2, x2: x + w / 2 + 2, y1: y - h * 0.8 - 1, y2: y + h * 0.3 + 1 };
+  };
   let out = "";
   for (const c of candidates) {
-    for (const form of c.forms) {
-      if (!form) continue;
-      const w = textWidth(form, c.size);
-      const h = c.size * 1.25;
-      const box = {
-        x1: c.x - w / 2 - 2, x2: c.x + w / 2 + 2,
-        y1: c.y - h * 0.8 - 1, y2: c.y + h * 0.3 + 1,
-      };
-      if (hits(box)) continue;
-      taken.push(box);
-      out += text(inBounds(c.x, form, c.size, "middle"), c.y, form, c.opts);
-      break;
+    /*
+     * Where a label may sit: on its edge, or further out along the same
+     * direction with a line drawn back to what it names.
+     *
+     * Dropping the ones that collided was wrong. On a 5-12-13 the triangle is
+     * long and shallow, so all three side labels converge — and the figure then
+     * printed with two of its three sides unnamed, which is a worse diagram than
+     * one whose labels stand off a little. A leader line is what a draughtsman
+     * does here, and it costs nothing but a stroke.
+     */
+    const stops = [0, c.size * 1.9, c.size * 3.4];
+    let placed = false;
+    for (const away of stops) {
+      const x = c.x + (c.dx || 0) * away;
+      const y = c.y + (c.dy || 0) * away;
+      for (const form of c.forms) {
+        if (!form) continue;
+        const box = boxAt(x, y, form, c.size);
+        if (box.x1 < 4 || box.x2 > W - 4 || hits(box)) continue;
+        taken.push(box);
+        if (away > 0 && c.from) {
+          // From the edge to the label's own edge, stopping short of the glyphs.
+          const back = c.size * 0.9;
+          out += `<line x1="${n2(c.from[0])}" y1="${n2(c.from[1])}" x2="${n2(x - (c.dx || 0) * back)}"` +
+            ` y2="${n2(y - (c.dy || 0) * back - c.size * 0.3)}" stroke="${LINE}" stroke-width="1" stroke-opacity="0.55"/>`;
+        }
+        out += text(x, y, form, c.opts);
+        placed = true;
+        break;
+      }
+      if (placed) break;
     }
   }
   return out;
@@ -255,6 +288,8 @@ function triangle(labels, values, h) {
     return {
       x: mx + (dx / len) * off,
       y: my + (dy / len) * off + 13 * 0.34,
+      dx: dx / len, dy: dy / len,
+      from: [mx, my],
       size: 13,
       forms: [`${label} = ${num(value)}`, label, `${num(value)}`],
       opts: { size: 13, weight: "bold", halo: true },
@@ -340,12 +375,21 @@ function pythagoras(labels, values, h) {
     // The name of the square matters more than its number: if only one line
     // fits, it is the one that says which square this is.
     const two = s1 && s2 && side > 46;
-    return (s1 ? text(q[0], q[1] + (two ? -2 : 5), label, { size: s1, weight: "bold", fill: ACCENT, halo: true }) : "") +
+    const svg = (s1 ? text(q[0], q[1] + (two ? -2 : 5), label, { size: s1, weight: "bold", fill: ACCENT, halo: true }) : "") +
       (two ? text(q[0], q[1] + 16, `= ${num(value)}`, { size: s2, halo: true }) : "");
+    /*
+     * The room this label occupies, handed to the side-label placer below. The
+     * squares are lettered before the triangle is, and a collision map that only
+     * knows about labels drawn after it starts is no map at all — "Katet a = 5"
+     * came to rest on top of "Katet a²" because nothing had told it the square
+     * was already spoken for.
+     */
+    const w = Math.max(s1 ? textWidth(label, s1) : 0, two ? textWidth(`= ${num(value)}`, s2) : 0);
+    const box = { x1: q[0] - w / 2 - 2, x2: q[0] + w / 2 + 2, y1: q[1] - 14, y2: q[1] + (two ? 20 : 8) };
+    return { svg, box };
   };
-  art += areaText(sqA, `${la}²`, a * a);
-  art += areaText(sqB, `${lb}²`, b * b);
-  art += areaText(hyp, `${lc}²`, c * c);
+  const areas = [areaText(sqA, `${la}²`, a * a), areaText(sqB, `${lb}²`, b * b), areaText(hyp, `${lc}²`, c * c)];
+  art += areas.map((x) => x.svg).join("");
 
   /*
    * The side lengths go INSIDE the white triangle, not outside it.
@@ -374,13 +418,15 @@ function pythagoras(labels, values, h) {
     const dy = centre[1] - my;
     const len = Math.hypot(dx, dy) || 1;
     const push = Math.min(len, SIDE * 1.1 + 5);
-    const room = Math.hypot(q[0] - p[0], q[1] - p[1]) - 16;
-    // Longest first, and only forms that fit along the edge at all.
-    const forms = [`${label} = ${num(value)}`, label, `${num(value)}`]
-      .filter((f) => textWidth(f, SIDE) <= room);
+    // Longest first. Nothing is filtered out by edge length any more: a label
+    // too long for its edge can stand off it on a leader instead.
+    const forms = [`${label} = ${num(value)}`, label, `${num(value)}`];
     return {
       x: mx + (dx / len) * push,
       y: my + (dy / len) * push + SIDE * 0.34,
+      // Outward from the triangle, which is where the room is.
+      dx: -dx / len, dy: -dy / len,
+      from: [mx, my],
       size: SIDE, forms,
       opts: { size: SIDE, weight: "bold", halo: true },
     };
@@ -389,7 +435,7 @@ function pythagoras(labels, values, h) {
   const markBox = { x1: pP[0] - 18, x2: pP[0] + 18, y1: pP[1] - 18, y2: pP[1] + 18 };
   art += placeLabels(
     [candidate(pP, pA, la, a), candidate(pP, pB, lb, b), candidate(pA, pB, lc, c)],
-    [markBox]
+    [markBox, ...areas.map((x) => x.box)]
   );
   return art;
 }
