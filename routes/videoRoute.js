@@ -62,10 +62,17 @@ router.get("/:id/token", protect, getStreamToken);
 // the quota needs the written size, so it runs after.
 // Gated before multer on the declared length, then again on the real size.
 router.post("/", protect, teacherOnly, uploadRateLimit, storageGate, uploadVideo, storageQuota, addVideo);
-// Edit: multipart (title/audience + optional new thumbnail base64 + optional new
-// video file). uploadVideo parses text fields and any file; storageQuota bounds a
-// replacement file. A JSON edit passes straight through (multer no-ops).
-router.patch("/:id", protect, teacherOnly, uploadVideo, storageQuota, updateVideo);
+/*
+ * Edit: multipart (title/audience + optional new thumbnail + optional new video
+ * file). A JSON edit passes straight through — multer no-ops and storageGate
+ * sees no meaningful length.
+ *
+ * Rate-limited and pre-gated like the create route. It was neither, so replacing
+ * a video was the one way to write half a gigabyte to disk with nothing checked
+ * beforehand and no bound on how often — the quota was enforced only after the
+ * bytes had already landed.
+ */
+router.patch("/:id", protect, teacherOnly, uploadRateLimit, storageGate, uploadVideo, storageQuota, updateVideo);
 router.delete("/:id", protect, teacherOnly, deleteVideo);
 
 module.exports = router;

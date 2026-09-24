@@ -230,8 +230,6 @@ const addVideo = asyncHandler(async (req, res) => {
     const storedName = path.basename(file.path); // vid-<rand>.ext
     // Store the client-captured poster frame (best-effort) named after the video.
     const posterName = writePoster(req.body.posterData, storedName.replace(/\.[^.]+$/, ""));
-    // The reserved bytes are backed by a row from here on, so the claim stands.
-    req.storageCommitted = true;
     const video = await Video.create({
       title,
       source: "file",

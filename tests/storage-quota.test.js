@@ -227,6 +227,68 @@ const eq = (name, actual, expected) =>
     ok("an account with no add-on reports none", (await storageStatus(await makeUser("free"))).addon === null);
   }
 
+  /*
+   * A deletion must not erase an upload that is still arriving.
+   *
+   * Both used to live in one counter, so recomputing it after a delete wiped the
+   * claim of any upload in flight at that moment — and the account could then be
+   * pushed past its limit by the very next request. Committed bytes and in-flight
+   * claims are separate fields now, and a delete touches only the first.
+   */
+  console.log("\n— a delete racing an upload —");
+  {
+    const u = await makeUser("free");
+    const keep = await addMaterial(u._id, 20 * MB);
+    const drop = await addMaterial(u._id, 20 * MB);
+
+    const claim = await reserveStorage(u, 9 * MB);
+    ok("an upload claims its room", claim.ok === true);
+
+    // A delete lands while those 9MB are still on the wire.
+    await Material.deleteOne({ _id: drop._id });
+    await recountStorage(u._id);
+
+    const after = await User.findById(u._id).select("storageBytes storageReserved").lean();
+    eq("the delete recomputes only what is committed", after.storageBytes / MB, 20);
+    eq("...and leaves the in-flight claim standing", after.storageReserved / MB, 9);
+
+    // 20 committed + 9 claimed = 29 of 50; a 25MB file must still not fit.
+    const tooBig = await reserveStorage(await User.findById(u._id), 25 * MB);
+    ok("the claim still counts against the limit", tooBig.ok === false);
+    const fits = await reserveStorage(await User.findById(u._id), 15 * MB);
+    ok("...while what genuinely fits is allowed", fits.ok === true);
+    void keep;
+  }
+
+  /*
+   * The claim ends with the response either way.
+   *
+   * There is no "committed" flag to forget: a successful upload's bytes are in
+   * the rows by then, and the rows are what the next reservation reads. The
+   * video replacement path stored a file and never set that flag, so a teacher's
+   * quota was handed back under a file that existed.
+   */
+  console.log("\n— a settled claim —");
+  {
+    const u = await makeUser("free");
+    const claim = await reserveStorage(u, 10 * MB);
+    ok("room is claimed", claim.ok === true);
+    // The upload succeeds: the row appears, then the response ends.
+    await addMaterial(u._id, 10 * MB);
+    await claim.release();
+    const after = await User.findById(u._id).select("storageReserved").lean();
+    eq("nothing is left claimed", after.storageReserved, 0);
+    // And the bytes are still counted, because they are in the rows now.
+    eq("...but the bytes are still counted", (await usedBytes(u._id)) / MB, 10);
+    const s2 = await reserveStorage(await User.findById(u._id), 45 * MB);
+    ok("so the next upload sees them", s2.ok === false);
+
+    // Releasing twice must not invent free space.
+    await claim.release();
+    const twice = await User.findById(u._id).select("storageReserved").lean();
+    ok("a double release cannot go negative", twice.storageReserved >= 0);
+  }
+
   // An admin has no ceiling, and is not shown a meter at all.
   {
     const admin = { _id: new mongoose.Types.ObjectId(), role: "admin", plan: "free" };

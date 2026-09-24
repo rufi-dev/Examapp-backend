@@ -349,14 +349,6 @@ const addMaterial = asyncHandler(async (req, res) => {
     ownerName: req.user.name || "",
   });
 
-  /*
-   * The reserved bytes are now backed by a row, so the claim is kept rather than
-   * released when the response ends. Set immediately after the create and before
-   * anything that can throw — a claim released under a material that exists would
-   * let the account over its limit on the next upload.
-   */
-  req.storageCommitted = true;
-
   // Teacher Journey (flag-gated, best-effort): a valid uploaded material (already passed
   // secure upload validation above) awards the teacher XP once.
   try { Promise.resolve(require("../services/teacherJourneyEvents").onMaterialUploaded(req.user._id, material._id)).catch(() => {}); } catch (_) { /* ignore */ }

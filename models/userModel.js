@@ -187,8 +187,10 @@ const userSchema = Schema(
             default: null,
         },
         // Per-teacher storage allowance for uploaded materials, in bytes.
-        // Unset means the platform default (UPLOAD_QUOTA_BYTES, 4GB); an admin
-        // raises it for the accounts that genuinely need more.
+        // Unset means the tier's own allowance (config/plans.js: 50MB free,
+        // 2GB pro, 15GB premium); an admin sets this for the handful of accounts
+        // that genuinely need a figure of their own, and it then WINS over the
+        // plan so a tier change cannot quietly undo that decision.
         storageQuotaBytes: {
             type: Number,
         },
@@ -221,9 +223,31 @@ const userSchema = Schema(
          * Repaired UPWARD from the truth before every reservation and never
          * downward, so a counter that drifts can only ever be stricter than
          * reality — the safe direction for a limit.
+         *
+         * It holds COMMITTED bytes only. In-flight claims live in
+         * storageReserved below, which is what lets a deletion recompute this
+         * one without erasing an upload that is still arriving.
          */
         storageBytes: {
             type: Number,
+        },
+        /*
+         * Bytes claimed by uploads that are still in progress.
+         *
+         * Kept apart from storageBytes because the two have opposite lifetimes:
+         * committed bytes are recomputed from the rows whenever a file is
+         * deleted, and doing that to a single combined counter would wipe the
+         * claim of any upload arriving at that moment — a race that lets an
+         * account past its limit. Separated, a deletion touches one field and a
+         * reservation the other, and neither can clobber the other.
+         *
+         * Always transient: the claim is released when the response ends,
+         * whether the upload became a file or not, because by then the bytes are
+         * either in the rows or nowhere.
+         */
+        storageReserved: {
+            type: Number,
+            default: 0,
         },
         // Setup walkthrough. Every step except the last is read from real data
         // (does a class exist, an exam, questions in it) so it cannot drift out

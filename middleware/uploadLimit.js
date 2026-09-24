@@ -34,6 +34,10 @@ const MAX_PER_WINDOW = Number(process.env.UPLOAD_RATE_MAX || 20);
  * smallest one: an unreadable plan must not resolve to the most generous tier.
  */
 const DEFAULT_QUOTA = Number(process.env.UPLOAD_QUOTA_BYTES || 50 * 1024 * 1024);
+// Field names, boundaries and the form's own text. Generous, because this gate
+// only exists to spare the disk — being wrong here costs one write, and being
+// wrong the other way refuses a file that fits.
+const MULTIPART_SLACK = 64 * 1024;
 
 const hits = new Map(); // userId -> { count, resetAt }
 
@@ -198,17 +202,30 @@ async function reserveStorage(user, incoming) {
   const bytes = Math.max(0, Number(incoming) || 0);
   const used = await usedBytes(user._id);
 
-  // Never below the truth. `$lt` leaves a larger counter alone, which is what
-  // protects an in-flight reservation from being erased by a concurrent repair.
+  // Committed bytes are never allowed below the truth. `$lt` leaves a larger
+  // value alone; it holds no reservations, so this cannot erase one.
   await User.updateOne(
     { _id: user._id, $or: [{ storageBytes: { $lt: used } }, { storageBytes: { $exists: false } }] },
     { $set: { storageBytes: used } }
   );
 
+  /*
+   * Committed + already-claimed + this file must fit. `$expr` lets the sum be
+   * computed inside the filter, so the decision and the increment are one
+   * operation and two simultaneous uploads cannot both pass it.
+   */
   const won = await User.findOneAndUpdate(
-    { _id: user._id, storageBytes: { $lte: limit - bytes } },
-    { $inc: { storageBytes: bytes } },
-    { new: true, projection: { storageBytes: 1 } }
+    {
+      _id: user._id,
+      $expr: {
+        $lte: [
+          { $add: [{ $ifNull: ["$storageBytes", 0] }, { $ifNull: ["$storageReserved", 0] }, bytes] },
+          limit,
+        ],
+      },
+    },
+    { $inc: { storageReserved: bytes } },
+    { new: true, projection: { storageBytes: 1, storageReserved: 1 } }
   );
   if (!won) {
     return {
@@ -224,21 +241,33 @@ async function reserveStorage(user, incoming) {
   }
   return {
     ok: true,
-    used: won.storageBytes,
+    used: (won.storageBytes || 0) + (won.storageReserved || 0),
     limit,
     incoming: bytes,
-    // Called when the upload does NOT become a row, so the claim does not
-    // outlive the file it was made for.
+    /*
+     * Released when the response ends, whether or not a file came of it.
+     *
+     * A claim is transient in BOTH outcomes: if the upload failed the bytes are
+     * nowhere, and if it succeeded they are in the rows, which is where the next
+     * reservation reads them from. There is therefore no "committed" state for a
+     * caller to forget to set — and forgetting it was exactly how the video
+     * replacement path lost a teacher's quota while storing their file.
+     */
     release: async () => {
-      await User.updateOne({ _id: user._id }, { $inc: { storageBytes: -bytes } }).catch(() => {});
+      await User.updateOne({ _id: user._id }, { $inc: { storageReserved: -bytes } }).catch(() => {});
+      // A double release must not leave a negative claim, which would read as
+      // free space that does not exist.
+      await User.updateOne({ _id: user._id, storageReserved: { $lt: 0 } }, { $set: { storageReserved: 0 } }).catch(() => {});
     },
   };
 }
 
 /*
- * After a deletion the counter is recomputed rather than decremented: a
- * decrement can go negative when it races a repair, and a negative counter is
- * the one drift direction that would let an account over its limit.
+ * After a deletion the COMMITTED counter is recomputed from the rows.
+ *
+ * Only that field. In-flight claims live in storageReserved and are left alone,
+ * so a delete landing in the middle of an upload no longer erases that upload's
+ * claim — which was a race that let the account past its limit.
  */
 async function recountStorage(userId) {
   const used = await usedBytes(userId);
@@ -262,7 +291,14 @@ const storageGate = asyncHandler(async (req, res, next) => {
   if (!declared) return next();
   const limit = quotaFor(req.user);
   const used = await usedBytes(req.user._id);
-  if (used + declared <= limit) return next();
+  /*
+   * The declared length is the whole multipart envelope — boundaries, field
+   * names, the title, the class list — so it overstates the file by a few
+   * hundred bytes. Judged strictly, a file that fits with room to spare could be
+   * refused for its own form fields. The slack keeps borderline cases for the
+   * exact check downstream, which measures the file itself.
+   */
+  if (used + declared - MULTIPART_SLACK <= limit) return next();
   res.status(402);
   throw new Error(
     `Yaddaş limiti dolub. Paketiniz: ${human(limit)}, istifadə olunub: ${human(used)}. ` +
@@ -295,18 +331,18 @@ const storageQuota = asyncHandler(async (req, res, next) => {
   }
   req.storageClaim = claim;
   /*
-   * Give the bytes back unless the upload actually became a row.
+   * The claim ends with the response, whatever the response was.
    *
-   * A handler can refuse after this point for a dozen reasons — a bad magic
-   * byte, a missing title, a failed conversion, a thrown error — and releasing
-   * at each of those sites means the one that gets forgotten silently charges a
-   * teacher for a file that never existed. Hooking the response instead covers
-   * every exit, including the ones nobody thought of, and the handler opts IN by
-   * setting storageCommitted once the material is saved.
+   * A handler can finish a dozen ways — saved, refused for a bad magic byte,
+   * refused for a missing title, thrown — and a claim that each of those has to
+   * remember to settle is a claim that one of them will get wrong. It did: the
+   * video replacement path stored the file and never marked it, so a teacher's
+   * quota was handed back under a file that existed.
+   *
+   * There is nothing to remember now. A successful upload's bytes are in the
+   * rows by the time this runs, and the rows are what the next reservation reads.
    */
-  res.on("finish", () => {
-    if (!req.storageCommitted) claim.release().catch(() => {});
-  });
+  res.on("finish", () => { claim.release().catch(() => {}); });
   next();
 });
 
