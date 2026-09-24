@@ -7,7 +7,7 @@
  */
 const { renderBlock, esc } = require("./lessonDocHtml");
 
-const { GEOMETRY_TYPES, geometrySvg } = require("./lessonDocGeometry");
+const { GEOMETRY_TYPES, geometrySvg, geometryUsable } = require("./lessonDocGeometry");
 
 /*
  * The six semantic diagrams arrange LABELS; the six geometry figures construct
@@ -111,18 +111,33 @@ qeyd, cədvəl və lazım olduqda semantic diagram. Platforma görünüşü və 
 hazırlayacaq. Mövzunu uydurma: əlavə fayl verilirsə, onun məzmununa söykən.
 Hər materialda ən azı bir heading və bir text olsun. Nümunənin həlli example.solution
 field-də, tapşırığın cavabı isə solution-da olsun; platforma tələbəyə cavabı göstərmir.
-Diagram yalnız məna üçün seçilsin: flow, cycle, compare, timeline, bars və ya concept.
-Həndəsi fiqur lazımdırsa bunlardan birini seç və ÖLÇÜLƏRİ values-də ver — platforma
-fiquru həmin ölçülərə görə miqyasla çəkir, ona görə rəqəmlər düzgün olmalıdır:
+Diagram bloku İKİ ayrı qrupdan ibarətdir. Qrupu qarışdırma.
+
+1) SEMANTİK diagram — anlayışları qutularda düzür, FİQUR ÇƏKMİR:
+flow, cycle, compare, timeline, bars, concept. Yalnız mərhələ, müqayisə,
+ardıcıllıq və ya say üçün.
+
+2) HƏNDƏSİ fiqur — platforma şəkli ÖLÇÜLƏRƏ görə miqyasla qurur:
 - triangle: values=[a, b, c] üç tərəfin uzunluğu; labels=[a adı, b adı, c adı, A, B, C].
-  Düz bucaq varsa platforma özü işarə edir — a²+b²=c² olsun kifayətdir.
-- pythagoras: values=[a, b] iki katet; hipotenuz və hər tərəf üzərindəki kvadratlar
-  (a², b², c²) avtomatik qurulur. Pifaqor teoremi üçün məhz bunu seç.
+  Düz bucağı platforma özü tapır və işarə edir — a²+b²=c² olması kifayətdir.
+- pythagoras: values=[a, b] iki katet. Hipotenuz və hər üç tərəf üzərindəki
+  kvadratlar (a², b², c²) və onların sahələri avtomatik hesablanır və çəkilir.
 - circle: values=[r] radius; labels=[mərkəz, radius adı, diametr adı].
 - rectangle: values=[en, hündürlük]; sahə və perimetr avtomatik yazılır.
 - angle: values=[dərəcə]; labels=[təpə, birinci şüa, ikinci şüa].
 - grid: values=[x1, y1, x2, y2, ...] koordinat cütləri; labels=[nöqtə adları].
-Fiqurda ölçü yazma — rəqəmi values-ə qoy, platforma onu şəkildə göstərir.
+
+QAYDA: üçbucaq, çevrə, düzbucaqlı, bucaq, kvadrat və ya koordinat müstəvisi
+göstərmək lazımdırsa MÜTLƏQ 2-ci qrupdan seç. Belə fiqur üçün compare, concept
+və ya flow İSTİFADƏ ETMƏ — onlar sözləri qutulara yığır, fiqur çəkmir, və nəticə
+səhv material olur. Pifaqor teoremi üçün həmişə pythagoras seç.
+
+MÖVCUD MATERİALI DÜZƏLT: əgər materialda artıq fiqur yerinə compare/concept/flow
+diagramı varsa, onu saxlama — düzgün həndəsi tiplə ƏVƏZ ET və ölçüləri ver.
+
+Ölçülər mətndəki rəqəmlərlə eyni olmalıdır. Ölçü verilmirsə, sıfırdırsa və ya
+mümkün deyilsə (məsələn üçbucaq bağlanmırsa) fiqur ÇƏKİLMİR və blok atılır —
+ona görə ya düzgün rəqəm ver, ya da fiqur istəmə. Fiqurun içinə mətn yazma.
 Müəllim çap parametrini istəyirsə (səhifə nömrəsi, rəng), onu printOptions-da qaytar;
 istəməyibsə printOptions null olsun. Yalnız istənilən sahəni doldur, digərini null qoy —
 soruşulmayan parametri dəyişmə. Parametri mətnin içinə yazma.
@@ -173,7 +188,10 @@ function normalizeNative(raw = {}) {
         columns: cleanArray(b?.columns, 8),
         rows: (Array.isArray(b?.rows) ? b.rows : []).slice(0, 12).map((r) => cleanRow(r, cleanArray(b?.columns, 8).length)),
         tone: ["info", "warning", "success"].includes(b?.tone) ? b.tone : "info",
+        // A geometry figure whose measurements cannot build it is dropped here,
+        // rather than drawn from substituted numbers that contradict the lesson.
         diagram: b?.diagram && DIAGRAM_TYPES.includes(b.diagram.type)
+          && (!GEOMETRY_TYPES.includes(b.diagram.type) || geometryUsable(b.diagram.type, b.diagram.values))
           ? { type: b.diagram.type, title: clamp(b.diagram.title, 180), labels: cleanArray(b.diagram.labels, 8), values: (Array.isArray(b.diagram.values) ? b.diagram.values : []).map(Number).filter(Number.isFinite).slice(0, 8) }
           : null,
       }))

@@ -521,6 +521,34 @@ async function costByDoc(docIds) {
     { $sort: { lastAt: -1 } },
   ]);
 
+  /*
+   * How many turns each material has actually had, from its own transcript.
+   *
+   * Spend was only attributed to a document from 2026-09-24; every turn before
+   * that wrote a usage row pointing at a person and not at a thing, and there is
+   * nothing to recover it from. The totals for those materials are therefore
+   * LOWER BOUNDS — and a lower bound presented as a total is the one thing this
+   * panel must not do, because it exists to answer "are we charging enough".
+   *
+   * Comparing each material's assistant messages with its attributed rows finds
+   * this without a hard-coded date: a transcript longer than the meter means the
+   * meter is missing turns. It self-corrects as new turns land, and it stays
+   * quiet when a failed turn logs a row but writes no message.
+   */
+  const spoken = await LessonDoc.aggregate([
+    { $match: { _id: { $in: docIds } } },
+    {
+      $project: {
+        turns: {
+          $size: {
+            $filter: { input: { $ifNull: ["$messages", []] }, as: "m", cond: { $eq: ["$$m.role", "assistant"] } },
+          },
+        },
+      },
+    },
+  ]);
+  const saidBy = new Map(spoken.map((d) => [String(d._id), d.turns || 0]));
+
   const byDoc = new Map();
   for (const r of rows) {
     const key = String(r._id.doc);
@@ -535,6 +563,14 @@ async function costByDoc(docIds) {
       outputTokens: r.outputTokens || 0,
       lastAt: r.lastAt,
     });
+    byDoc.set(key, entry);
+  }
+  // Every requested material gets an answer, including the ones with no rows at
+  // all — silence there reads as "free" rather than "not recorded".
+  for (const id of docIds) {
+    const key = String(id);
+    const entry = byDoc.get(key) || { usd: 0, turns: 0, models: [] };
+    entry.partial = (saidBy.get(key) || 0) > entry.turns;
     byDoc.set(key, entry);
   }
   return byDoc;
@@ -1726,6 +1762,11 @@ ${S.SOURCE_RULES}`;
         at: new Date(),
       });
       const fresh = saved || doc;
+      // A turn that changed nothing still called the provider and was still
+      // paid for. Without this row the spend existed and the meter did not
+      // know it — and this is the path a vague instruction lands on, so it is
+      // not a rare one. Metered before charged, as on every other path.
+      await logStudioUsage(req, { doc: fresh, out, hadBlocks });
       // The turn ran to its end: it is charged. A question back is free.
       chargeTurn(req, send);
       await sendDone({ doc: fresh, summary: S.summarize(fresh.blocks || []), provider: out.provider });
@@ -1746,6 +1787,8 @@ ${S.SOURCE_RULES}`;
         action: "failed",
         at: new Date(),
       });
+      // Paid for, and discarded. The row is the only trace it ever happened.
+      await logStudioUsage(req, { doc, hadBlocks, out: { ...out, timing: { ...(out.timing || {}), failed: true } } }).catch(() => {});
       send("failed", { code: "validation_failed", message: "Material boş qayıtdı — istəyinizi dəqiqləşdirin." });
       return;
     }

@@ -381,6 +381,44 @@ function grid(labels, values, h) {
 const FIGURES = { triangle, pythagoras, circle, rectangle, angle, grid };
 
 /*
+ * Can this figure be built from these numbers — truthfully?
+ *
+ * The figures used to substitute a default when the measurements were missing or
+ * impossible: three lengths that cannot close a triangle drew the 3-4-5 instead.
+ * That is the same failure as the boxes it replaced, only better disguised. The
+ * text beside it says "tərəfləri 1, 2 və 99 olan üçbucaq" and the picture shows
+ * a 3-4-5 with "= 5" written on it, and a pupil believes the picture.
+ *
+ * So a figure that cannot be constructed from what it was given is not drawn at
+ * all, and the block is dropped. A missing figure is a gap the teacher can see
+ * and fix; a confident wrong one is a mistake they will not catch.
+ */
+function geometryUsable(type, raw) {
+  const v = (Array.isArray(raw) ? raw : []).map(Number);
+  const pos = (i) => Number.isFinite(v[i]) && v[i] > 0;
+  switch (type) {
+    case "triangle": {
+      if (!pos(0) || !pos(1) || !pos(2)) return false;
+      // The triangle inequality: lengths that cannot meet are not a triangle,
+      // however confidently they were sent.
+      const [a, b, c] = v;
+      return a + b > c && a + c > b && b + c > a;
+    }
+    case "pythagoras":
+    case "rectangle":
+      return pos(0) && pos(1);
+    case "circle":
+      return pos(0);
+    case "angle":
+      return Number.isFinite(v[0]) && v[0] > 0 && v[0] < 360;
+    case "grid":
+      return v.length >= 2 && Number.isFinite(v[0]) && Number.isFinite(v[1]);
+    default:
+      return false;
+  }
+}
+
+/*
  * The figure, framed. Same canvas, ground and title bar as the semantic
  * diagrams, so a material that mixes a flow chart and a triangle looks like one
  * document rather than two.
@@ -390,6 +428,9 @@ function geometrySvg(d) {
   if (!draw) return "";
   const labels = (Array.isArray(d.labels) ? d.labels : []).map((s) => String(s).slice(0, 24));
   const values = (Array.isArray(d.values) ? d.values : []).map(Number).filter(Number.isFinite);
+  // Checked here as well as in the normaliser, so a direct call cannot produce a
+  // figure that contradicts its own caption either.
+  if (!geometryUsable(d.type, values)) return "";
   const title = d.title
     ? `<text x="${W / 2}" y="30" text-anchor="middle" font-family="Arial,sans-serif" font-size="16" fill="${INK}">${esc(d.title)}</text>`
     : "";
@@ -406,4 +447,4 @@ function geometrySvg(d) {
     `<rect width="100%" height="100%" rx="16" fill="#F4F6FF"/><g>${title}${art}</g></svg>`;
 }
 
-module.exports = { GEOMETRY_TYPES, geometrySvg };
+module.exports = { GEOMETRY_TYPES, geometrySvg, geometryUsable };

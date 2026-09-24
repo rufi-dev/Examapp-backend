@@ -21,6 +21,7 @@ const {
   diagramSvg,
   salvageNative,
   MAX_BLOCKS,
+  NATIVE_SYSTEM,
 } = require("../helper/lessonDocNative");
 const { geometrySvg, GEOMETRY_TYPES } = require("../helper/lessonDocGeometry");
 const { sanitizeDocHtml } = require("../helper/lessonDocSanitize");
@@ -1002,6 +1003,25 @@ const doc = { html, blocks: [] };
    */
   console.log("\n— geometry —");
   {
+    /*
+     * The instruction the model actually failed on.
+     *
+     * The prompt listed the six semantic types, then said "if you need a
+     * geometric figure, choose one of these" — and "these" read as the list
+     * directly above it. The model duly chose `compare` and drew the teacher's
+     * eight labels as eight boxes, twice. The prohibition has to be explicit,
+     * and so does the instruction to REPLACE a wrong diagram already in the
+     * material, because the model is asked to return that material complete and
+     * will otherwise preserve the mistake forever.
+     */
+    const P = NATIVE_SYSTEM;
+    ok("the prompt names pythagoras for the theorem", /Pifaqor teoremi üçün həmişə pythagoras/.test(P));
+    ok("...forbids the box types for a shape", /İSTİFADƏ ETMƏ/.test(P) && /compare, concept/.test(P));
+    ok("...tells it to replace a wrong diagram already in the material", /ƏVƏZ ET/.test(P));
+    ok("...and says an unmeasured figure is dropped", /ÇƏKİLMİR/.test(P));
+    ok("...with the two groups kept apart", /SEMANTİK/.test(P) && /HƏNDƏSİ/.test(P));
+  }
+  {
     const svg = geometrySvg({ type: "pythagoras", title: "Pifaqor", labels: ["a", "b", "c"], values: [3, 4] });
     ok("the pythagoras figure draws", svg.startsWith("<svg") && svg.includes("</svg>"));
     ok("...with the square on each leg", svg.includes(">a²<") && svg.includes(">b²<"));
@@ -1035,18 +1055,69 @@ const doc = { html, blocks: [] };
     const scalene = geometrySvg({ type: "triangle", title: "", labels: [], values: [5, 6, 7] });
     ok("...and a 5-6-7 one is not", (scalene.match(/polygon/g) || []).length < (right.match(/polygon/g) || []).length);
 
-    // Three lengths that cannot close a triangle must not produce a broken one.
+    /*
+     * A figure that cannot be built truthfully is not built at all.
+     *
+     * These assertions replace three that asserted the opposite: that an
+     * impossible triangle fell back to the 3-4-5, and that every figure
+     * "survived" being sent nothing by drawing a default. That IS survival for
+     * the renderer and a lie on the page — the text beside it says "tərəfləri
+     * 1, 2 və 99" and the picture shows a 3-4-5 labelled "= 5". A teacher does
+     * not re-derive the drawing; they trust it. A missing figure is a gap they
+     * can see. A confident wrong one is a mistake they will not catch.
+     */
     const impossible = geometrySvg({ type: "triangle", title: "", labels: [], values: [1, 2, 99] });
-    ok("an impossible triangle falls back rather than tearing", impossible.includes("<polygon") && !impossible.includes("NaN"));
-    ok("...to the 3-4-5 every pupil knows", impossible.includes("= 5"));
+    eq("three lengths that cannot close draw nothing", impossible, "");
+    ok("...rather than a 3-4-5 wearing their labels", !impossible.includes("= 5"));
 
-    // Nothing the model can send may take the whole material down with it.
+    // Nothing the model can send may draw a figure it was not given.
     for (const t of GEOMETRY_TYPES) {
-      const junk = geometrySvg({ type: t, title: "x", labels: [], values: [] });
-      ok(`${t} survives being sent nothing`, junk.includes("<svg") && !junk.includes("NaN"));
+      eq(`${t} with no measurements draws nothing`, geometrySvg({ type: t, title: "x", labels: [], values: [] }), "");
+      /*
+       * Zero is never a valid LENGTH, but it is a perfectly good COORDINATE —
+       * the origin is a point a teacher plots on purpose. So the grid is the one
+       * figure this rule does not apply to, and saying so here is the difference
+       * between a rule and a blanket ban.
+       */
+      if (t !== "grid") {
+        eq(`${t} with zero measurements draws nothing`, geometrySvg({ type: t, title: "x", labels: [], values: [0, 0] }), "");
+      }
       const nasty = geometrySvg({ type: t, title: "x", labels: ["<script>"], values: [0, -1, NaN] });
       ok(`${t} survives being sent rubbish`, !nasty.includes("NaN") && !nasty.includes("<script>"));
     }
+    // ...and a real measurement still draws.
+    ok("a real circle still draws", geometrySvg({ type: "circle", title: "", labels: [], values: [4] }).includes("<svg"));
+    ok("a real angle still draws", geometrySvg({ type: "angle", title: "", labels: [], values: [55] }).includes("<svg"));
+    ok("a real grid still draws", geometrySvg({ type: "grid", title: "", labels: [], values: [1, 2] }).includes("<svg"));
+    ok("...and the origin is a point, not a missing measurement", geometrySvg({ type: "grid", title: "", labels: [], values: [0, 0] }).includes("A(0; 0)"));
+    eq("...but a grid with no pair at all draws nothing", geometrySvg({ type: "grid", title: "", labels: [], values: [5] }), "");
+
+    /*
+     * The normaliser drops the block entirely, so an unbuildable figure never
+     * reaches the page as an empty frame with a caption under it.
+     */
+    const withBad = normalizeNative({
+      title: "T",
+      blocks: [
+        { kind: "heading", text: "Başlıq" },
+        { kind: "diagram", diagram: { type: "triangle", title: "Mümkün olmayan", labels: [], values: [1, 2, 99] } },
+      ],
+    });
+    eq("an unbuildable figure block is dropped, not framed empty", withBad.blocks.length, 1);
+    const withGood = normalizeNative({
+      title: "T",
+      blocks: [
+        { kind: "heading", text: "Başlıq" },
+        { kind: "diagram", diagram: { type: "triangle", title: "Olur", labels: [], values: [3, 4, 5] } },
+      ],
+    });
+    eq("a buildable one is kept", withGood.blocks.length, 2);
+    // A semantic diagram has no measurements and must not be judged by them.
+    const semantic = normalizeNative({
+      title: "T",
+      blocks: [{ kind: "diagram", diagram: { type: "compare", title: "Müqayisə", labels: ["a", "b"], values: [] } }],
+    });
+    eq("a semantic diagram is unaffected by the measurement rule", semantic.blocks.length, 1);
     eq("an unknown figure draws nothing at all", geometrySvg({ type: "dodecahedron", title: "", labels: [], values: [] }), "");
 
     // The figure reaches the document through the ordinary diagram block.
