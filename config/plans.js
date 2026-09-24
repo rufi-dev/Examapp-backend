@@ -39,6 +39,15 @@ const PLANS = {
       assignments: num("PLAN_FREE_ASSIGNMENTS", 2),
       // Files in the library ("Materiallar"). Concurrent, like assignments.
       materials: num("PLAN_FREE_MATERIALS", 5),
+      /*
+       * Disk, in megabytes, shared by library materials and uploaded videos.
+       *
+       * A COUNT limit does not bound disk: five files is five scanned textbooks
+       * at 400MB each. This is the dimension that actually costs us money, and
+       * the free tier is sized for a handful of worksheets rather than a
+       * library — enough to try the product properly, not enough to host on.
+       */
+      storageMb: num("PLAN_FREE_STORAGE_MB", 50),
     },
     credits: { welcome: num("PLAN_FREE_WELCOME_CREDITS", 60), monthly: num("PLAN_FREE_MONTHLY_CREDITS", 20) },
     // Live monitoring ("Canlı izlə") is FREE for everyone — it is not enforced by
@@ -55,6 +64,7 @@ const PLANS = {
       examCreations: Infinity,
       assignments: num("PLAN_PRO_ASSIGNMENTS", 30),
       materials: num("PLAN_PRO_MATERIALS", 50),
+      storageMb: num("PLAN_PRO_STORAGE_MB", 2048),
     },
     credits: { welcome: 0, monthly: num("PLAN_PRO_MONTHLY_CREDITS", 350) },
     // `whatsapp` = parent notifications (sent from the platform number).
@@ -72,6 +82,12 @@ const PLANS = {
       examCreations: Infinity,
       assignments: Infinity,
       materials: Infinity,
+      /*
+       * Premium hosts video, and one uploaded lesson can be 2GB — so this is
+       * generous rather than unlimited. Disk is the one resource we cannot
+       * oversell: an unbounded tier is a tier whose cost we do not know.
+       */
+      storageMb: num("PLAN_PREMIUM_STORAGE_MB", 15360),
     },
     credits: { welcome: 0, monthly: num("PLAN_PREMIUM_MONTHLY_CREDITS", 2000) },
     // `videos` = the video library. Premium only: hosting and range-streaming video

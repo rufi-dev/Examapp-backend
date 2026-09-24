@@ -230,6 +230,8 @@ const addVideo = asyncHandler(async (req, res) => {
     const storedName = path.basename(file.path); // vid-<rand>.ext
     // Store the client-captured poster frame (best-effort) named after the video.
     const posterName = writePoster(req.body.posterData, storedName.replace(/\.[^.]+$/, ""));
+    // The reserved bytes are backed by a row from here on, so the claim stands.
+    req.storageCommitted = true;
     const video = await Video.create({
       title,
       source: "file",
@@ -427,6 +429,8 @@ const deleteVideo = asyncHandler(async (req, res) => {
   const storedName = video.source === "file" ? video.fileName : "";
   const posterName = video.source === "file" ? video.posterName : "";
   await video.deleteOne();
+  // Video and materials share one allowance, so deleting either gives room back.
+  await require("../middleware/uploadLimit").recountStorage(video.owner).catch(() => {});
   if (storedName) cleanup(path.join(VIDEOS_DIR, storedName)); // free the disk
   if (posterName) cleanup(path.join(VIDEOS_DIR, posterName));
   res.json({ id: req.params.id });

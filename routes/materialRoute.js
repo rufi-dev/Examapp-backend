@@ -4,7 +4,7 @@ const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
 const { protect, teacherOnly, attachUser } = require("../middleware/authMiddleware");
-const { uploadRateLimit, storageQuota } = require("../middleware/uploadLimit");
+const { uploadRateLimit, storageGate, storageQuota } = require("../middleware/uploadLimit");
 // AUD-013: magic-byte validation — the uploaded content must match its extension.
 const verifyUploadSignature = require("../middleware/verifyUpload");
 const {
@@ -80,12 +80,28 @@ router.get("/share/:token/file", attachUser, getSharedFile);
 // class it belongs to. Requires a real session, so `protect`, not `attachUser`.
 router.post("/share/:token/join", protect, joinFromShare);
 
+/*
+ * What this account holds and what it may hold. Read by the library before an
+ * upload is even offered, so a teacher who is full learns it from the page
+ * rather than from a refusal after a 300MB transfer.
+ */
+router.get("/storage", protect, teacherOnly, require("express-async-handler")(async (req, res) => {
+  const { storageStatus } = require("../middleware/uploadLimit");
+  res.json(await storageStatus(req.user));
+}));
+
 router.get("/", protect, getMaterials);
 router.get("/:id/file", protect, viewMaterial);
 router.get("/:id/download", protect, downloadMaterial);
 // Rate limit BEFORE multer so a flood is refused without writing 400MB to
 // disk first; the quota check needs the file size, so it comes after.
-router.post("/", protect, teacherOnly, uploadRateLimit, uploadSingle, verifyUploadSignature, storageQuota, addMaterial);
+/*
+ * storageGate runs BEFORE multer, on the declared length, so an upload with no
+ * hope of fitting is refused without writing 400MB to disk first. storageQuota
+ * runs after, on the real size, and RESERVES the room atomically — the second is
+ * the gate, the first only spares the disk.
+ */
+router.post("/", protect, teacherOnly, uploadRateLimit, storageGate, uploadSingle, verifyUploadSignature, storageQuota, addMaterial);
 router.patch("/:id", protect, teacherOnly, updateMaterial);
 router.patch("/:id/share", protect, teacherOnly, setMaterialShare);
 router.delete("/:id", protect, teacherOnly, deleteMaterial);

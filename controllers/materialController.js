@@ -246,6 +246,12 @@ const addMaterial = asyncHandler(async (req, res) => {
     cleanup(file.path);
     return res.status(413).json({ message: req.quotaRejected.message });
   }
+  /*
+   * PDF post-processing below can SHRINK the stored file and rewrite sizeBytes.
+   * The reservation was made against the uploaded size, so the counter is
+   * recomputed once that settles — otherwise a teacher who compresses every
+   * upload slowly loses room to files that are no longer that big.
+   */
 
   const title = String(req.body.title || "").trim();
   if (!title) {
@@ -345,6 +351,14 @@ const addMaterial = asyncHandler(async (req, res) => {
     ownerName: req.user.name || "",
   });
 
+  /*
+   * The reserved bytes are now backed by a row, so the claim is kept rather than
+   * released when the response ends. Set immediately after the create and before
+   * anything that can throw — a claim released under a material that exists would
+   * let the account over its limit on the next upload.
+   */
+  req.storageCommitted = true;
+
   // Teacher Journey (flag-gated, best-effort): a valid uploaded material (already passed
   // secure upload validation above) awards the teacher XP once.
   try { Promise.resolve(require("../services/teacherJourneyEvents").onMaterialUploaded(req.user._id, material._id)).catch(() => {}); } catch (_) { /* ignore */ }
@@ -377,6 +391,9 @@ const addMaterial = asyncHandler(async (req, res) => {
             pdfOptimizedAt: done ? new Date() : null,
           }
         );
+        // Compression can free real space; the counter follows the rows so the
+        // teacher gets that room back rather than paying for the original size.
+        await require("../middleware/uploadLimit").recountStorage(material.owner).catch(() => {});
       } catch {
         /* non-fatal */
       }
@@ -434,6 +451,7 @@ async function loadForRead(req, res) {
       }
     );
     material.pdfOptimizationStatus = optimized.ok ? "ready" : "failed";
+    await require("../middleware/uploadLimit").recountStorage(material.owner).catch(() => {});
   }
   return { material, abs };
 }
@@ -543,6 +561,12 @@ const deleteMaterial = asyncHandler(async (req, res) => {
     /* keep going — the row must still go */
   }
   await material.deleteOne();
+  /*
+   * Recomputed rather than decremented: a decrement can race the repair in
+   * reserveStorage and go negative, and a negative counter is the one drift
+   * direction that would let an account past its limit.
+   */
+  await require("../middleware/uploadLimit").recountStorage(material.owner);
   res.json({ id: req.params.id });
 });
 

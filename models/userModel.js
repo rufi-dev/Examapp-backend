@@ -192,6 +192,22 @@ const userSchema = Schema(
         storageQuotaBytes: {
             type: Number,
         },
+        /*
+         * Bytes this account currently holds, as a RESERVABLE counter.
+         *
+         * The truth is the sum of their material and video rows, and that is
+         * what they are shown. This exists so the gate can be atomic: summing,
+         * deciding and then writing is a read-then-write, and two uploads sent
+         * at the same moment both read the same "before" and both fit. A
+         * conditional $inc is the only thing Mongo offers that cannot be raced.
+         *
+         * Repaired UPWARD from the truth before every reservation and never
+         * downward, so a counter that drifts can only ever be stricter than
+         * reality — the safe direction for a limit.
+         */
+        storageBytes: {
+            type: Number,
+        },
         // Setup walkthrough. Every step except the last is read from real data
         // (does a class exist, an exam, questions in it) so it cannot drift out
         // of sync with reality. Sharing the join link is the one step that

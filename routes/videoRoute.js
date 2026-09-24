@@ -4,7 +4,7 @@ const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
 const { protect, teacherOnly } = require("../middleware/authMiddleware");
-const { uploadRateLimit, storageQuota } = require("../middleware/uploadLimit");
+const { uploadRateLimit, storageGate, storageQuota } = require("../middleware/uploadLimit");
 const {
   getVideos,
   addVideo,
@@ -60,7 +60,8 @@ router.get("/:id/poster", getPoster); // token-gated thumbnail (no bearer on <im
 router.get("/:id/token", protect, getStreamToken);
 // Rate-limit BEFORE multer so a flood is refused without writing 500MB to disk;
 // the quota needs the written size, so it runs after.
-router.post("/", protect, teacherOnly, uploadRateLimit, uploadVideo, storageQuota, addVideo);
+// Gated before multer on the declared length, then again on the real size.
+router.post("/", protect, teacherOnly, uploadRateLimit, storageGate, uploadVideo, storageQuota, addVideo);
 // Edit: multipart (title/audience + optional new thumbnail base64 + optional new
 // video file). uploadVideo parses text fields and any file; storageQuota bounds a
 // replacement file. A JSON edit passes straight through (multer no-ops).
