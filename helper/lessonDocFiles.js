@@ -672,46 +672,111 @@ function readStream(bytes) {
 }
 
 /*
- * A content stream with its comments removed.
+ * A content stream, read as PDF rather than as text.
  *
- * `%` runs to the end of the line, and a comment may sit between an operand and
- * its operator — "10 10 100 100\n% the box\nre S" is legal and draws a box. The
- * operators were matched by looking for a digit immediately before them, so a
- * comment in that gap hid the drawing completely.
+ * Regexes over the raw bytes kept failing in both directions, and the failures
+ * were not fixable by a better pattern:
  *
- * Replaced with a space rather than deleted, so removing one can never fuse two
- * tokens into a third.
+ *   "(100% complete)" — the % begins a comment only OUTSIDE a string, so
+ *   stripping to end-of-line threw away the rest of the line and with it the
+ *   diagonal that followed. A drawing vanished.
+ *
+ *   "(Find y given the equation)" — the y is a letter in a sentence, not the
+ *   curve operator, so an ordinary worksheet was called a diagram and never
+ *   qualified for the saving.
+ *
+ *   "re W S" and "re 1 0 0 RG S" — the paint operator need not follow `re`
+ *   immediately; a clip flag or a colour change may sit between. Both draw a
+ *   visible rectangle and both were read as painting nothing.
+ *
+ * So the stream is tokenised. It is a small grammar — whitespace, delimiters,
+ * comments, literal and hex strings, names, numbers, operators — and knowing
+ * where a string begins and ends is the whole difference.
  */
-const stripComments = (text) => text.replace(/%[^\r\n]*/g, " ");
+function* contentTokens(src) {
+  const n = src.length;
+  let i = 0;
+  const isWs = (c) => c === " " || c === "\n" || c === "\r" || c === "\t" || c === "\f" || c === "\0";
+  const isDelim = (c) => c === "(" || c === ")" || c === "<" || c === ">" || c === "[" || c === "]" || c === "{" || c === "}" || c === "/" || c === "%";
+
+  while (i < n) {
+    const c = src[i];
+    if (isWs(c)) { i += 1; continue; }
+
+    // A comment, but only here — outside a string.
+    if (c === "%") {
+      while (i < n && src[i] !== "\n" && src[i] !== "\r") i += 1;
+      continue;
+    }
+
+    // A literal string: parentheses nest, and a backslash escapes the next byte.
+    if (c === "(") {
+      let depth = 1;
+      i += 1;
+      while (i < n && depth > 0) {
+        const ch = src[i];
+        if (ch === "\\") { i += 2; continue; }
+        if (ch === "(") depth += 1;
+        else if (ch === ")") depth -= 1;
+        i += 1;
+      }
+      continue; // an operand, never an operator
+    }
+
+    if (c === "<") {
+      if (src[i + 1] === "<") { i += 2; continue; } // dictionary
+      while (i < n && src[i] !== ">") i += 1; // hex string
+      i += 1;
+      continue;
+    }
+    if (c === ">") { i += src[i + 1] === ">" ? 2 : 1; continue; }
+    if (c === "[" || c === "]" || c === "{" || c === "}") { i += 1; continue; }
+
+    if (c === "/") { // a name
+      i += 1;
+      while (i < n && !isWs(src[i]) && !isDelim(src[i])) i += 1;
+      continue;
+    }
+
+    let j = i;
+    while (j < n && !isWs(src[j]) && !isDelim(src[j])) j += 1;
+    const token = src.slice(i, j);
+    i = j === i ? i + 1 : j;
+    if (token) yield token;
+  }
+}
+
+const IS_NUMBER = /^[+-]?(?:\d+\.?\d*|\.\d+)$/;
+// Operators that build a path. None of them is a mark on its own.
+const PATH_OPS = new Set(["m", "l", "c", "v", "y", "re", "h"]);
+// Operators that put the built path on the page.
+const PAINT_OPS = new Set(["S", "s", "f", "F", "f*", "B", "B*", "b", "b*"]);
 
 /*
  * Does this much content stream put marks on the page?
  *
- * Operators are matched as whole tokens, not as "a digit, then the letter".
- * PDF only requires operands and operators to be separated by whitespace or a
- * delimiter, so anything that assumes a digit sits immediately in front of the
- * operator can be stepped around by ordinary, legal syntax.
+ * A path is only a drawing once something PAINTS it. That single rule replaces
+ * every heuristic that came before: "re W* n" builds a rectangle and discards
+ * it as a clip, which is what every typeset page opens with, while "re S",
+ * "re W S" and "re 1 0 0 RG S" all stroke a visible box no matter what sits
+ * between the two operators.
+ *
+ * `sh` paints a shading directly, and `BI` opens an inline image; neither
+ * builds a path first, so both are marks in their own right.
  */
 function streamDraws(text) {
-  // Curves are charts, circles and arrows. Body text never emits one.
-  if (/(?:^|[\s\]>)])(c|v|y)(?=[\s[<(/]|$)/.test(text)) return true;
-  // Nor does it emit a lineto. One is enough: an underline is drawn as a
-  // rectangle, so a line here is somebody drawing something.
-  if (/(?:^|[\s\]>)])l(?=[\s[<(/]|$)/.test(text)) return true;
-
-  /*
-   * Rectangles are judged by what happens to them, not by how many there are.
-   *
-   * Most rectangles in a typeset PDF are not drawings: every page opens with a
-   * CLIP, "… re W* n", which paints nothing. Measured on a plain Chromium text
-   * page, that clip is the ONLY rectangle; put one bordered box on the page and
-   * a second appears as "… re S". So the paint operator decides — W/W* clips
-   * and n paints nothing, while f, S, B and their variants leave marks.
-   */
-  for (const m of text.matchAll(/(?:^|[\s\]>)])re\s+([^\s]+)/g)) {
-    const op = m[1];
-    if (/^W\*?$/.test(op) || op === "n") continue;
-    if (/^(f\*?|F|B\*?|b\*?|S|s)$/.test(op)) return true;
+  let pending = false;
+  for (const token of contentTokens(text)) {
+    if (IS_NUMBER.test(token)) continue;
+    if (PATH_OPS.has(token)) { pending = true; continue; }
+    if (token === "n") { pending = false; continue; } // clipped, or thrown away
+    if (PAINT_OPS.has(token)) {
+      if (pending) return true;
+      pending = false;
+      continue;
+    }
+    if (token === "sh" || token === "BI") return true;
+    // Anything else — W, W*, a colour, a graphics state — leaves the path alone.
   }
   return false;
 }
@@ -799,9 +864,8 @@ async function pdfHasDrawings(src) {
       continue;
     }
 
-    const clean = stripComments(text);
-    if (streamDraws(carry + " " + clean)) return true;
-    carry = clean.slice(-256);
+    if (streamDraws(`${carry} ${text}`)) return true;
+    carry = text.slice(-256);
     read += 1;
   }
 

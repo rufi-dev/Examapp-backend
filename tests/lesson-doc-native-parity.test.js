@@ -640,10 +640,72 @@ const doc = { html, blocks: [] };
       `%PDF-1.4\n1 0 obj\n<< /Length ${bombBody.length} /Filter /FlateDecode >>\nstream\n${bombBody}\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF`,
       "latin1"
     );
-    const before = process.memoryUsage().heapUsed;
     ok("a 40MiB expansion is refused, and keeps the file", (await check("bomb", bomb)) === true);
-    const grew = (process.memoryUsage().heapUsed - before) / 1024 / 1024;
-    ok(`...without decompressing it first (heap grew ${grew.toFixed(1)}MiB, not 40)`, grew < 20);
+    /*
+     * And the refusal happens INSIDE zlib. Measuring heap around the call was
+     * the obvious check and a worthless one: a garbage collection during the
+     * call makes the delta negative, so it passed whether or not 40MiB had been
+     * allocated. This asserts the mechanism instead — unbounded, the payload
+     * really does expand to 40MiB; bounded, inflation refuses rather than
+     * returning a truncated string that would then be scanned and found empty.
+     */
+    const payload = Buffer.from(bombBody, "latin1");
+    ok("...and the fixture really is a bomb", zlib.inflateSync(payload).length === 40 * 1024 * 1024);
+    let refused = null;
+    try {
+      zlib.inflateSync(payload, { maxOutputLength: 32 * 1024 * 1024 });
+    } catch (e) {
+      refused = e;
+    }
+    ok("...which inflation refuses at the ceiling, rather than truncating", Boolean(refused));
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  console.log("\nThe stream is read as PDF, not as text:");
+  {
+    const fs = require("fs");
+    const os = require("os");
+    const zlib = require("zlib");
+    const { pdfHasDrawings } = require("../helper/lessonDocFiles");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lessondoc-token-"));
+    const T = (t) => `BT /F1 12 Tf 72 700 Td (${t}) Tj ET\n`;
+    const TEXT = T("Faiz bir kemiyyetin yuzde bir hissesidir").repeat(20);
+    const mk = (streams) => {
+      let out = "%PDF-1.4\n";
+      streams.forEach((c, i) => {
+        const b = zlib.deflateSync(Buffer.from(c, "latin1")).toString("latin1");
+        out += `${i + 1} 0 obj\n<< /Length ${b.length} /Filter /FlateDecode >>\nstream\n${b}\nendstream\nendobj\n`;
+      });
+      return Buffer.from(`${out}trailer<</Root 1 0 R>>\n%%EOF`, "latin1");
+    };
+    const check = async (name, streams) => {
+      const f = path.join(dir, `${name}.pdf`);
+      fs.writeFileSync(f, mk(streams));
+      return pdfHasDrawings(f);
+    };
+
+    /*
+     * Every one of these was wrong while the scan used regexes over raw text,
+     * and none of them was fixable by a better pattern — a % means "comment"
+     * only outside a string, and a letter means "operator" only outside one too.
+     */
+    ok("a % inside a string does not begin a comment", (await check("pct", [`${T("100% complete")}10 10 m 90 90 l S\n`])) === true);
+    ok("letters in a sentence are not operators", (await check("letters", [T("Find y given the equation")])) === false);
+    ok("...even a sentence full of them", (await check("letters2", [T("solve for x c v y l re S here")])) === false);
+
+    /*
+     * A path is a drawing once something PAINTS it, and the painting operator
+     * need not come next: a clip flag or a colour change may sit between.
+     */
+    ok("re W S paints (clip flag between)", (await check("re-w-s", [`${TEXT}10 10 100 60 re W S\n`])) === true);
+    ok("re 1 0 0 RG S paints (colour between)", (await check("re-rg-s", [`${TEXT}10 10 100 60 re 1 0 0 RG S\n`])) === true);
+    ok("re n does NOT paint — the path is thrown away", (await check("re-n", [`${TEXT}10 10 120 60 re n\n`])) === false);
+    ok("re W* n is the clip every typeset page opens with", (await check("re-clip", [`${TEXT}0 0 600 800 re W* n\n`])) === false);
+
+    // Marks that never build a path first.
+    ok("a shading is a mark", (await check("sh", [`${TEXT}/Sh0 sh\n`])) === true);
+    ok("an inline image is a mark", (await check("bi", [`${TEXT}BI /W 4 /H 4 ID xxxx EI\n`])) === true);
 
     fs.rmSync(dir, { recursive: true, force: true });
   }
