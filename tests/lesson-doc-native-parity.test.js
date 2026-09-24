@@ -289,7 +289,7 @@ const doc = { html, blocks: [] };
     stubPages([prose, prose]);
     const r3 = await freshFiles.nativeSourceText([{ key: withFigure, ext: "pdf", mime: "application/pdf", name: "c.pdf" }]);
     ok("an embedded image keeps the file in the request", r3[0] && r3[0].complete === false);
-    ok("...and it is reported as such", r3[0].hasImages === true);
+    ok("...and it is reported as such", r3[0].hasDrawings === true);
 
     if (realEv) require.cache[evPath] = realEv; else delete require.cache[evPath];
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -316,6 +316,58 @@ const doc = { html, blocks: [] };
       blocks: [{ kind: "text", text: "B" }],
     });
     eq("a value the renderer does not know is dropped, not written", bogus.printOptions, {});
+  }
+
+  console.log("\nA vector diagram is not a token saving:");
+  {
+    /*
+     * The hole this closes: a raster marker survives in the raw bytes, but a
+     * chart, a circle or an arrow is drawing operators inside a compressed
+     * content stream. A worksheet of selectable text plus a vector figure
+     * looked like pure text, so the file was dropped and only the words
+     * reached the model.
+     */
+    const fs = require("fs");
+    const os = require("os");
+    const { renderPdf } = require("../helper/lessonPlanPdf");
+    const { pdfHasDrawings } = require("../helper/lessonDocFiles");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lessondoc-vector-"));
+    const page = (body) => `<!doctype html><meta charset="utf-8"><body style="font-family:Arial">${body}</body>`;
+    const prose = "<p>" + "Faiz bir kəmiyyətin yüzdə bir hissəsidir. ".repeat(40) + "</p>";
+    const make = async (name, html) => {
+      const f = path.join(dir, `${name}.pdf`);
+      fs.writeFileSync(f, await renderPdf(page(html), { footerLabel: null, pageNumbers: false }));
+      return pdfHasDrawings(f);
+    };
+
+    ok("plain typeset text draws nothing, so it can be replaced", (await make("text", prose)) === false);
+    ok("a vector circle keeps the file", (await make("circle", prose + '<svg width="200" height="200"><circle cx="100" cy="100" r="80" fill="none" stroke="black"/></svg>')) === true);
+    ok("a vector chart keeps the file", (await make("chart", prose + '<svg width="300" height="200"><path d="M10 190 C 60 20, 140 20, 290 120" stroke="blue" fill="none"/></svg>')) === true);
+    ok("an unreadable file answers yes, never no", (await pdfHasDrawings(path.join(dir, "does-not-exist.pdf"))) === true);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  console.log("\nThe -məsin negation, which is how people actually ask:");
+  eq("göstərməsin hides them", nativePrintOptions("səhifə nömrələrini göstərməsin"), { pageNumbers: false });
+  eq("the passive göstərilməsin too", nativePrintOptions("səhifə nömrələrini göstərilməsin"), { pageNumbers: false });
+  eq("silinməsin KEEPS them (two negatives)", nativePrintOptions("səhifə nömrələrini silinməsin"), { pageNumbers: true });
+  eq("and olmasın still reads as itself, not as a stripped stem", nativePrintOptions("səhifə nömrəsi olmasın"), { pageNumbers: false });
+
+  console.log("\nOne setting can be changed without inventing the other:");
+  {
+    const onlyPages = normalizeNative({
+      title: "T", audience: "A", reply: "R",
+      printOptions: { pageNumbers: true, accent: null },
+      blocks: [{ kind: "heading", text: "H" }, { kind: "text", text: "B" }],
+    });
+    eq("page numbers alone", onlyPages.printOptions, { pageNumbers: true });
+    const onlyAccent = normalizeNative({
+      title: "T", audience: "A", reply: "R",
+      printOptions: { pageNumbers: null, accent: "teal" },
+      blocks: [{ kind: "heading", text: "H" }, { kind: "text", text: "B" }],
+    });
+    eq("an accent alone", onlyAccent.printOptions, { accent: "teal" });
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

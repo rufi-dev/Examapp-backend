@@ -70,9 +70,20 @@ const NATIVE_SCHEMA = {
         {
           type: "object",
           additionalProperties: false,
+          /*
+           * Both fields are required by the schema — strict structured output
+           * demands it — but either may be null. Requiring real VALUES for both
+           * meant a teacher who asked only for page numbers got an accent
+           * invented alongside, silently repainting the document.
+           */
           properties: {
-            pageNumbers: { type: "boolean" },
-            accent: { type: "string", enum: ["red", "orange", "green", "teal", "purple", "slate"] },
+            pageNumbers: { anyOf: [{ type: "boolean" }, { type: "null" }] },
+            accent: {
+              anyOf: [
+                { type: "string", enum: ["red", "orange", "green", "teal", "purple", "slate"] },
+                { type: "null" },
+              ],
+            },
           },
           required: ["pageNumbers", "accent"],
         },
@@ -93,7 +104,8 @@ Hər materialda ən azı bir heading və bir text olsun. Nümunənin həlli exam
 field-də, tapşırığın cavabı isə solution-da olsun; platforma tələbəyə cavabı göstərmir.
 Diagram yalnız məna üçün seçilsin: flow, cycle, compare, timeline, bars və ya concept.
 Müəllim çap parametrini istəyirsə (səhifə nömrəsi, rəng), onu printOptions-da qaytar;
-istəməyibsə printOptions null olsun. Parametri mətnin içinə yazma.
+istəməyibsə printOptions null olsun. Yalnız istənilən sahəni doldur, digərini null qoy —
+soruşulmayan parametri dəyişmə. Parametri mətnin içinə yazma.
 Diagramda ən çox 8 qısa label və 8 rəqəm ver. Bir diagram kifayətdir.
 `.trim();
 
@@ -330,9 +342,32 @@ const stemHit = (word, stems) => stems.some((stem) => word.startsWith(stem));
  * Guarded against words that merely end in those letters — "olmalıdır" (must
  * be) is not a negation, nor is "nömrə".
  */
-const NEGATION = /(ma|mə)(dan|dən|yın|yin|yun|yün)?$/;
+/*
+ * Whole words whose polarity is settled, checked BEFORE any suffix stripping.
+ *
+ * "olmasın" is the ordinary way to say "there should not be one", and it ends
+ * in the negation suffix — strip it and what is left is "ol", which means
+ * nothing on its own. These are read as themselves.
+ */
+const EXPLICIT = new Map([
+  ["olmasın", false], ["olmasin", false],
+  ["olsun", true], ["olmalı", true], ["olmali", true], ["olmalıdır", true], ["olmalidir", true],
+  ["lazımdır", true], ["lazimdir", true],
+]);
+
+/*
+ * The negation suffix, with the endings that actually follow it.
+ *
+ * -ma / -mə is the negation; what comes after is person and mood, and the most
+ * common request form in the wild is -məsin ("let it not…"): "göstərməsin",
+ * "silinməsin". Those were falling through and producing the OPPOSITE setting —
+ * someone asking for page numbers to be hidden got them switched on.
+ */
+const NEGATION = /(ma|mə)(sın|sin|sun|sün|dan|dən|yın|yin|yun|yün)?$/;
 const looksNegated = (word) =>
-  NEGATION.test(word) && !/^(olmalı|olmali|nömrə|nomre|əlavə|elave|rəngi|rengi)/.test(word);
+  !EXPLICIT.has(word) &&
+  NEGATION.test(word) &&
+  !/^(olmalı|olmali|nömrə|nomre|əlavə|elave|rəngi|rengi)/.test(word);
 
 /*
  * Is this turn ONLY about how the material prints?
@@ -366,6 +401,7 @@ function nativePrintOptions(request) {
   let polarity = null; // null = unstated, true = on, false = off
 
   for (const word of words) {
+    if (EXPLICIT.has(word)) { polarity = EXPLICIT.get(word); continue; }
     const negated = looksNegated(word);
     const base = negated ? word.replace(NEGATION, "") : word;
 

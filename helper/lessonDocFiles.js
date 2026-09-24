@@ -559,22 +559,73 @@ const NATIVE_MIN_TEXT = 200;
 const MIN_PAGE_TEXT = 40;
 
 /*
- * Does the file contain an embedded image?
+ * Does this PDF draw anything the text extractor cannot hand over?
  *
- * Read as bytes and looked for by marker rather than parsed: a real PDF parser
- * is a dependency and a decompression pass for a question that only needs a
- * conservative yes. A false yes costs tokens; a false no costs a diagram the
- * teacher can see and the model never received, so the only acceptable error is
- * the first one — and an unreadable file answers yes.
+ * Two kinds, and the first version only caught one:
+ *
+ *   RASTER — a scan, a photo, a pasted screenshot. These leave markers in the
+ *   object dictionaries (/Subtype /Image, /DCTDecode…) that survive in the raw
+ *   bytes, so a byte scan finds them.
+ *
+ *   VECTOR — a chart, a circle, a geometry figure, an arrow. These are drawing
+ *   operators inside the page's content stream, which is almost always
+ *   Flate-compressed, so the raw bytes say nothing at all. A worksheet of
+ *   selectable text plus a vector diagram therefore looked like pure text, got
+ *   called complete, and the file was dropped: the words reached the model and
+ *   the figure did not.
+ *
+ * So the streams are decompressed and read. Curve operators (c, v, y) are the
+ * signal that matters — charts, circles and arrows are curves, and body text
+ * never emits one. Rectangles are counted separately with a floor, because
+ * every ruled table and every underline draws a few and flagging those would
+ * mean no PDF is ever replaceable.
+ *
+ * Every failure answers YES. An unreadable file, an undecompressable stream, a
+ * format this does not understand — all of them keep the PDF in the request.
+ * The cost of a wrong yes is tokens; the cost of a wrong no is a diagram the
+ * teacher can see and the model never received, answered in the same confident
+ * tone. Those are not comparable.
  */
-async function pdfHasImages(src) {
+const VECTOR_SCAN_BYTES = 4 * 1024 * 1024; // enough of a stream to judge it by
+const RECT_FLOOR = 8; // rules, borders and table lines are not a diagram
+
+async function pdfHasDrawings(src) {
+  let buf;
   try {
-    const buf = await fsp.readFile(src);
-    const head = buf.toString("latin1");
-    return /\/Subtype\s*\/Image|\/Image\b|\/DCTDecode|\/JPXDecode|\/CCITTFaxDecode/.test(head);
+    buf = await fsp.readFile(src);
   } catch {
     return true;
   }
+  const raw = buf.toString("latin1");
+  if (/\/Subtype\s*\/Image|\/DCTDecode|\/JPXDecode|\/CCITTFaxDecode|\/JBIG2Decode/.test(raw)) {
+    return true;
+  }
+
+  const zlib = require("zlib");
+  let decoded = "";
+  // Walk the stream objects. `stream` … `endstream` is the only framing needed:
+  // anything that will not inflate is skipped, and skipping is not a verdict.
+  const re = /stream\r?\n/g;
+  let m;
+  while ((m = re.exec(raw)) && decoded.length < VECTOR_SCAN_BYTES) {
+    const from = m.index + m[0].length;
+    const to = raw.indexOf("endstream", from);
+    if (to < 0) break;
+    try {
+      decoded += zlib.inflateSync(Buffer.from(raw.slice(from, to), "latin1")).toString("latin1");
+    } catch {
+      /* not a Flate stream, or truncated: no verdict either way */
+    }
+  }
+  if (!decoded) {
+    // Nothing could be read. If the file has content streams at all, it may
+    // well draw something, and the safe answer is the conservative one.
+    return /stream\r?\n/.test(raw);
+  }
+
+  if (/\d\s+(c|v|y)[\s\r\n]/.test(decoded)) return true;
+  const rects = (decoded.match(/\d\s+re[\s\r\n]/g) || []).length;
+  return rects > RECT_FLOOR;
 }
 
 /*
@@ -642,7 +693,7 @@ async function nativeSourceText(files = []) {
        * the model while the answer claims to be based on it.
        */
       // eslint-disable-next-line no-await-in-loop
-      const hasImages = await pdfHasImages(src);
+      const hasDrawings = await pdfHasDrawings(src);
 
       if (extracted < NATIVE_MIN_TEXT) {
         /*
@@ -661,7 +712,7 @@ async function nativeSourceText(files = []) {
         pages,
         pagesRead: read,
         thinPages,
-        hasImages,
+        hasDrawings,
         /*
          * `complete` means one thing only: the extracted text can STAND IN for
          * the file, so the file itself need not be sent. That requires every
@@ -673,7 +724,7 @@ async function nativeSourceText(files = []) {
           read >= pages &&
           extracted < NATIVE_MAX_CHARS &&
           thinPages === 0 &&
-          !hasImages,
+          !hasDrawings,
       }));
     } catch {
       // No local extractor, or an unreadable file: the original PDF part stands.
@@ -734,6 +785,7 @@ module.exports = {
   OFFICE_EXTS,
   toParts,
   nativeSourceText,
+  pdfHasDrawings,
   partForPages,
   parsePages,
   pageCountOf,
