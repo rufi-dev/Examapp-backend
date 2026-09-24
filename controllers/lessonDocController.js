@@ -553,6 +553,14 @@ const listDocs = asyncHandler(async (req, res) => {
     {
       $project: {
         title: 1, topic: 1, subject: 1, grade: 1, format: 1, status: 1, updatedAt: 1,
+        /*
+         * The accent the PDF renderer prints this material's headings, rules and
+         * callouts in. The library card draws its cover in the same ink, so the
+         * colour on the shelf is the colour on the page — which is the whole
+         * reason it is worth sending: one small string per row, and the red
+         * material becomes findable among thirty blue ones.
+         */
+        accent: { $ifNull: ["$settings.accent", "default"] },
         // Needed to name the author and to mark a row as the admin's own. Kept
         // out of a teacher's response below — every row there is already theirs.
         owner: 1,
