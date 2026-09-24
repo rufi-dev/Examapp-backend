@@ -725,6 +725,16 @@ async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abor
       hadBlocks,
       out: { provider: "platform-local", cost: { model: "platform-local", usd: 0 }, timing: { rounds: 0 } },
     });
+    /*
+     * Charged, although no provider was called and this turn cost nothing to
+     * serve. Owner's decision, 2026-09-24: every modification to a material is
+     * a turn, whether or not an AI did the work.
+     *
+     * Recorded here because it looks like a bug otherwise. Six review rounds
+     * flagged it as one — the usage row above says usd: 0 and the credit still
+     * moves — and each time the answer was the same, so the reasoning belongs
+     * at the call site rather than in a review thread nobody reads later.
+     */
     chargeTurn(req, send);
     // Summarised from the BODY, not from `blocks`: a platform-rendered material
     // keeps its content in `html` and no blocks at all, so counting blocks would
