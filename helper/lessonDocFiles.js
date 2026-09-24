@@ -587,16 +587,6 @@ const MIN_PAGE_TEXT = 40;
  * tone. Those are not comparable.
  */
 const VECTOR_SCAN_BYTES = 4 * 1024 * 1024; // enough of a stream to judge it by
-/*
- * How much drawing is furniture rather than a figure.
- *
- * A page rule, a table border and an underline all emit path operators, so a
- * floor of zero would mean no PDF is ever replaceable. These are low on
- * purpose: a bar chart can be four bars, and a line chart is a handful of
- * lineto operators, and both of those were slipping under the old limits.
- */
-const RECT_FLOOR = 2;
-const LINE_FLOOR = 2;
 
 /*
  * A stream that cannot be decoded but cannot hold a drawing either.
@@ -735,7 +725,13 @@ async function pdfHasDrawings(src) {
     if (!/>>\s*$/.test(before)) continue;
 
     seen += 1;
-    const text = readStream(Buffer.from(raw.slice(from, to), "latin1"));
+    /*
+     * The bytes, without the end-of-line that separates them from `endstream`.
+     * zlib tolerates that trailing byte; gunzip does not, so a gzip-wrapped
+     * text PDF failed to decode and was kept in the paid request forever.
+     */
+    const body = raw.slice(from, to).replace(/[\r\n]+$/, "");
+    const text = readStream(Buffer.from(body, "latin1"));
     if (text === null) {
       // Only count a skip that could have been a content stream.
       if (!BENIGN_STREAM.test(before)) skipped += 1;
@@ -748,11 +744,30 @@ async function pdfHasDrawings(src) {
   if (skipped > 0) return true;
   if (!decoded) return seen > 0;
 
-  if (/\d\s+(c|v|y)[\s\r\n]/.test(decoded)) return true; // curves: charts, circles, arrows
-  const lines = (decoded.match(/\d\s+l[\s\r\n]/g) || []).length;
-  if (lines > LINE_FLOOR) return true; // a line chart, an axis, a drawn arrow
-  const rects = (decoded.match(/\d\s+re[\s\r\n]/g) || []).length;
-  return rects > RECT_FLOOR; // bars, boxes, framed figures
+  // Curves are charts, circles and arrows. Body text never emits one.
+  if (/\d\s+(c|v|y)[\s\r\n]/.test(decoded)) return true;
+  // Nor does it emit a lineto. One is enough: an underline is drawn as a
+  // rectangle, so a line here is somebody drawing something.
+  if (/\d\s+l[\s\r\n]/.test(decoded)) return true;
+
+  /*
+   * Rectangles are judged by what happens to them, not by how many there are.
+   *
+   * Counting meant a floor, and a floor meant a page with one box on it read as
+   * no drawing at all. But most rectangles in a typeset PDF are not drawings:
+   * every page opens with a CLIP, "… re W* n", which paints nothing. Measured
+   * on a plain Chromium text page: exactly one rectangle, and it is that clip.
+   * Put one bordered box on the page and a second appears as "… re S".
+   *
+   * So the paint operator decides. W/W* is a clip and n paints nothing; f, S, B
+   * and their variants put marks on the page.
+   */
+  for (const m of decoded.matchAll(/\d\s+re\s+([^\s]+)/g)) {
+    const op = m[1];
+    if (/^W\*?$/.test(op) || op === "n") continue; // clip, or no paint at all
+    if (/^(f\*?|F|B\*?|b\*?|S|s)$/.test(op)) return true;
+  }
+  return false;
 }
 
 /*

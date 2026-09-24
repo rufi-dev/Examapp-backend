@@ -450,6 +450,85 @@ const doc = { html, blocks: [] };
     fs.rmSync(dir, { recursive: true, force: true });
   }
 
+  console.log("\nEvery wrapping a stream comes in, and the smallest diagram:");
+  {
+    const fs = require("fs");
+    const os = require("os");
+    const zlib = require("zlib");
+    const { pdfHasDrawings } = require("../helper/lessonDocFiles");
+    const { renderPdf } = require("../helper/lessonPlanPdf");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lessondoc-wrap-"));
+
+    const a85 = (b) => {
+      let o = "";
+      for (let i = 0; i < b.length; i += 4) {
+        const c = b.slice(i, i + 4);
+        const n = c.length;
+        let v = Buffer.concat([c, Buffer.alloc(4 - n)]).readUInt32BE(0);
+        if (v === 0 && n === 4) { o += "z"; continue; }
+        const a = [];
+        for (let k = 0; k < 5; k += 1) { a.unshift(String.fromCharCode(33 + (v % 85))); v = Math.floor(v / 85); }
+        o += a.join("").slice(0, n + 1);
+      }
+      return o + "~>";
+    };
+    const mk = (content, kind) => {
+      const src = Buffer.from(content, "latin1");
+      const flate = zlib.deflateSync(src);
+      const shapes = {
+        Flate: [flate.toString("latin1"), "/FlateDecode"],
+        ASCII85: [a85(flate), "[/ASCII85Decode /FlateDecode]"],
+        ASCIIHex: [flate.toString("hex") + ">", "[/ASCIIHexDecode /FlateDecode]"],
+        RawDeflate: [zlib.deflateRawSync(src).toString("latin1"), "/FlateDecode"],
+        Gzip: [zlib.gzipSync(src).toString("latin1"), "/FlateDecode"],
+      };
+      const [body, filter] = shapes[kind];
+      return Buffer.from(
+        `%PDF-1.4\n1 0 obj\n<< /Length ${body.length} /Filter ${filter} >>\nstream\n${body}\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF`,
+        "latin1"
+      );
+    };
+    const TEXT = "BT /F1 12 Tf 72 700 Td (Faiz bir kemiyyetin yuzde bir hissesidir) Tj ET\n".repeat(30);
+    const check = async (name, bytes) => {
+      const f = path.join(dir, `${name}.pdf`);
+      fs.writeFileSync(f, bytes);
+      return pdfHasDrawings(f);
+    };
+
+    /*
+     * Gzip is the one that was broken: the slice kept the end-of-line before
+     * `endstream`, zlib tolerated that trailing byte and gunzip did not, so a
+     * gzip-wrapped text PDF never decoded and was paid for in full every time.
+     */
+    for (const kind of ["Flate", "ASCII85", "ASCIIHex", "RawDeflate", "Gzip"]) {
+      // eslint-disable-next-line no-await-in-loop
+      ok(`text-only through ${kind} is replaceable`, (await check(`t-${kind}`, mk(TEXT, kind))) === false);
+    }
+
+    /*
+     * The floors are gone. Counting meant a page with ONE box on it read as no
+     * drawing — but most rectangles in a typeset PDF are not drawings at all:
+     * every page opens with a clip, "… re W* n", which paints nothing. What
+     * happens to the rectangle decides, not how many there are.
+     */
+    ok("one stroked box IS a drawing", (await check("box", mk(TEXT + "10 10 120 60 re S\n", "Flate"))) === true);
+    ok("one line IS a drawing", (await check("line", mk(TEXT + "10 10 m 120 60 l S\n", "Flate"))) === true);
+    ok("a clipping rectangle is NOT", (await check("clip", mk(TEXT + "0 0 600 800 re W* n\n", "Flate"))) === false);
+
+    // And against the real renderer, where that clip actually occurs.
+    const page = (b) => `<!doctype html><meta charset="utf-8"><body style="font-family:Arial">${b}</body>`;
+    const prose = "<p>" + "Faiz bir kəmiyyətin yüzdə bir hissəsidir. ".repeat(40) + "</p>";
+    const render = async (name, html) => {
+      const f = path.join(dir, `${name}.pdf`);
+      fs.writeFileSync(f, await renderPdf(page(html), { footerLabel: null, pageNumbers: false }));
+      return pdfHasDrawings(f);
+    };
+    ok("a real text page is still replaceable", (await render("real-text", prose)) === false);
+    ok("...and a single bordered box on it is caught", (await render("real-box", prose + "<div style='width:120px;height:60px;border:2px solid black'></div>")) === true);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   assert.strictEqual(failed, 0, `${failed} parity assertions failed`);
 })();
