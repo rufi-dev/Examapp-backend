@@ -765,6 +765,69 @@ const doc = { html, blocks: [] };
     fs.rmSync(dir, { recursive: true, force: true });
   }
 
+  console.log("\nA drawing split across streams, in any storage order:");
+  {
+    const fs = require("fs");
+    const os = require("os");
+    const zlib = require("zlib");
+    const { pdfHasDrawings } = require("../helper/lessonDocFiles");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lessondoc-order-"));
+    const T = (t) => `BT /F1 12 Tf 72 700 Td (${t}) Tj ET\n`;
+    const TEXT = T("Faiz bir kemiyyetin yuzde bir hissesidir").repeat(6);
+    const mk = (streams) => {
+      let o = "%PDF-1.4\n";
+      streams.forEach((c, i) => {
+        const b = zlib.deflateSync(Buffer.from(c, "latin1")).toString("latin1");
+        o += `${i + 1} 0 obj\n<< /Length ${b.length} /Filter /FlateDecode >>\nstream\n${b}\nendstream\nendobj\n`;
+      });
+      return Buffer.from(`${o}trailer<</Root 1 0 R>>\n%%EOF`, "latin1");
+    };
+    const check = async (name, streams) => {
+      const f = path.join(dir, `${name}.pdf`);
+      fs.writeFileSync(f, mk(streams));
+      return pdfHasDrawings(f);
+    };
+    // Comfortably past the 256-character tail that used to be carried over.
+    const COLOURS = `${Array.from({ length: 40 }, (_, i) => `${(i % 9) / 10} ${(i % 7) / 10} ${(i % 5) / 10} RG`).join(" ")}\n`;
+
+    /*
+     * A page's content may be split across streams, stored in ANY order and
+     * sequenced by its /Contents array. Carrying a tail of text between them
+     * handled the shortest case and failed these two: more than a tail's worth
+     * of colour settings between the path and its stroke, and objects stored in
+     * reverse of the order the page reads them.
+     *
+     * Rather than resolve the page tree, a stream that does not contain a WHOLE
+     * path keeps the PDF.
+     */
+    ok("a stroke far after its path is not lost", (await check("far", [`${TEXT}10 10 m 90 90 l ${COLOURS}`, "S\n"])) === true);
+    ok("...nor when the objects are stored in reverse", (await check("rev", ["S\n", `${TEXT}10 10 m 90 90 l ${COLOURS}`])) === true);
+    ok("a stream ending mid-path keeps the file", (await check("mid", [`${TEXT}10 10 m 90 90 l\n`])) === true);
+    ok("so does one painting a path it never built", (await check("orphan", [`${TEXT}S\n`])) === true);
+
+    // The counterweight: this must not become "more than one stream, keep it".
+    ok("plain text across THREE streams is still replaceable", (await check("three", [TEXT, TEXT, TEXT])) === false);
+
+    /*
+     * And a font program is not page content. It inflates perfectly well, and
+     * 60KB of compressed glyph outlines contains stray letters that read as
+     * path and paint operators — so once the scan became a tokenizer, every
+     * typeset page was briefly a drawing. Fonts are skipped by dictionary now,
+     * before they are read at all. The real-PDF assertions above are what
+     * caught this; these fixtures alone would not have.
+     */
+    const fontish = `%PDF-1.4\n1 0 obj\n<< /Length1 9999 /Filter /FlateDecode /Length 30 >>\nstream\n${zlib
+      .deflateSync(Buffer.from("m l S re f binary-ish glyph noise", "latin1"))
+      .toString("latin1")}\nendstream\nendobj\n2 0 obj\n<< /Length 20 /Filter /FlateDecode >>\nstream\n${zlib
+      .deflateSync(Buffer.from(TEXT, "latin1"))
+      .toString("latin1")}\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF`;
+    const ff = path.join(dir, "fontish.pdf");
+    fs.writeFileSync(ff, Buffer.from(fontish, "latin1"));
+    ok("operator-shaped bytes inside a FONT are not a drawing", (await pdfHasDrawings(ff)) === false);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   assert.strictEqual(failed, 0, `${failed} parity assertions failed`);
 })();

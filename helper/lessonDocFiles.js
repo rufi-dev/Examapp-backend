@@ -753,32 +753,47 @@ const PATH_OPS = new Set(["m", "l", "c", "v", "y", "re", "h"]);
 const PAINT_OPS = new Set(["S", "s", "f", "F", "f*", "B", "B*", "b", "b*"]);
 
 /*
- * Does this much content stream put marks on the page?
+ * What one content stream does, as a verdict rather than a boolean.
  *
- * A path is only a drawing once something PAINTS it. That single rule replaces
- * every heuristic that came before: "re W* n" builds a rectangle and discards
- * it as a clip, which is what every typeset page opens with, while "re S",
- * "re W S" and "re 1 0 0 RG S" all stroke a visible box no matter what sits
- * between the two operators.
+ *   DRAWS      a path was built AND painted, both inside this stream.
+ *   UNCERTAIN  the stream begins or ends mid-path, so its other half is in
+ *              another stream and this one cannot be judged alone.
+ *   CLEAN      nothing was painted.
  *
- * `sh` paints a shading directly, and `BI` opens an inline image; neither
- * builds a path first, so both are marks in their own right.
+ * The middle answer is the point. A page's content may legally be split across
+ * several streams, stored in any order, and reached through the page's
+ * /Contents array — so "the stream before this one in the file" is not
+ * necessarily the stream before this one on the page. Carrying a tail of text
+ * between them papered over the simplest case and failed two others: a path
+ * built, then more than the tail's worth of colour settings, then a stroke; and
+ * objects stored in reverse of their /Contents order.
+ *
+ * Rather than resolve the page tree to put them back in order, a stream that
+ * does not contain a whole path keeps the PDF. A well-formed stream that draws
+ * nothing never ends mid-path and never paints one it did not build, so this
+ * costs nothing on the documents the saving is for, and refuses exactly the
+ * ones whose drawings span a boundary.
  */
-function streamDraws(text) {
+const DRAWS = "draws";
+const UNCERTAIN = "uncertain";
+const CLEAN = "clean";
+
+function streamVerdict(text) {
   let pending = false;
   for (const token of contentTokens(text)) {
     if (IS_NUMBER.test(token)) continue;
     if (PATH_OPS.has(token)) { pending = true; continue; }
     if (token === "n") { pending = false; continue; } // clipped, or thrown away
     if (PAINT_OPS.has(token)) {
-      if (pending) return true;
-      pending = false;
-      continue;
+      if (pending) return DRAWS;
+      // Painting a path this stream never built: the path came from elsewhere.
+      return UNCERTAIN;
     }
-    if (token === "sh" || token === "BI") return true;
+    if (token === "sh" || token === "BI") return DRAWS;
     // Anything else — W, W*, a colour, a graphics state — leaves the path alone.
   }
-  return false;
+  // Built a path and never painted it: the painting is in another stream.
+  return pending ? UNCERTAIN : CLEAN;
 }
 
 /*
@@ -825,10 +840,10 @@ function ownDictionary(raw, streamAt) {
  * raw bytes. Vector content is drawing operators inside a compressed content
  * stream, so the streams are decoded and read as they come.
  *
- * Streams are read in order and carry a short tail into the next one, because a
- * page's content may legally be SPLIT across several streams — one ending
- * "10 10 100 100" and the next beginning "l S" is one drawing written in two
- * objects, and judging each alone finds nothing in either.
+ * Streams are read one at a time, and any stream that does not contain a WHOLE
+ * path keeps the PDF. A page's content may legally be split across several
+ * streams, stored in any order and sequenced by its /Contents array, so a
+ * drawing can begin in one object and be painted in another.
  *
  * Every uncertainty answers YES and keeps the PDF in the request: an unreadable
  * file, a stream that would not decode, one too large to examine, an unfamiliar
@@ -850,7 +865,6 @@ async function pdfHasDrawings(src) {
 
   let seen = 0;
   let read = 0;
-  let carry = ""; // the tail of the previous stream, for operators split across two
   /*
    * CR alone is a legal separator in the wild. Ordered longest-first so that
    * "\r\n" is never matched as "\r" with the newline left behind.
@@ -869,8 +883,22 @@ async function pdfHasDrawings(src) {
     const before = raw.slice(Math.max(0, m.index - 600), m.index);
     if (!/>>\s*$/.test(before)) continue;
 
-    seen += 1;
     const dict = ownDictionary(raw, m.index);
+    /*
+     * A font program is not page content, and it inflates perfectly well.
+     *
+     * This check used to run only when decoding FAILED, which was enough while
+     * the scan looked for "digit, whitespace, operator" — binary glyph data
+     * rarely spells that. Reading the stream as tokens, it spells everything:
+     * 60KB of compressed outlines contains stray letters that look like path
+     * and paint operators, and every typeset page was suddenly a drawing.
+     *
+     * Glyphs reach the page through text operators in the content stream, so a
+     * font, an ICC profile or a metadata blob cannot put a mark there itself.
+     */
+    if (BENIGN_STREAM.test(dict)) continue;
+
+    seen += 1;
 
     /*
      * Prefer the declared length, and check that it lands where a stream ends.
@@ -896,12 +924,9 @@ async function pdfHasDrawings(src) {
     const text = readStream(Buffer.from(body, "latin1"));
 
     if (text === OVERSIZE) return true; // real, readable, too big to examine
-    if (text === null) {
-      // A stream nobody could read might be the one with the picture in it —
-      // unless ITS OWN dictionary says it is a font, a profile or metadata.
-      if (!BENIGN_STREAM.test(dict)) return true;
-      continue;
-    }
+    // A stream nobody could read might be the one with the picture in it. The
+    // ones that cannot be are already gone, above.
+    if (text === null) return true;
     /*
      * An UNCOMPRESSED stream whose end was guessed cannot be trusted to be
      * whole: the guess stops at the first "endstream", which its own text may
@@ -912,8 +937,9 @@ async function pdfHasDrawings(src) {
      */
     if (!trusted && text === body) return true;
 
-    if (streamDraws(`${carry} ${text}`)) return true;
-    carry = text.slice(-256);
+    // A stream that does not hold a whole path keeps the PDF: its other half is
+    // in another stream, and the page may store them in any order.
+    if (streamVerdict(text) !== CLEAN) return true;
     read += 1;
   }
 
