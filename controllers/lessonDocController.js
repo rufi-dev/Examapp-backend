@@ -262,6 +262,8 @@ const logStudioUsage = async (req, { doc, out, hadBlocks }) => {
   );
   const row = {
     user: req.user._id,
+    // What the money was spent ON, not just who spent it.
+    doc: doc && doc._id ? doc._id : undefined,
     operation: hadBlocks ? "ai.edit.material" : "ai.generate.material",
     model: c.model || (out && out.provider) || "unknown",
     inputTokens: c.inputTokens || 0,
@@ -490,6 +492,54 @@ const ADMIN_LIST_CAP = Number(process.env.STUDIO_ADMIN_LIST_MAX || 500);
  * denormalised copy is wrong the moment a teacher is renamed, and it would need
  * a backfill for every material that already exists.
  */
+/*
+ * What each material has cost in AI, by model. ADMIN ONLY.
+ *
+ * Read from the usage rows rather than stored on the document, so it cannot
+ * drift from what the meter actually recorded — this is a projection of the
+ * spend table, not a second copy of it.
+ *
+ * `models` is ordered by most recent use, which is what makes a switch visible:
+ * a material written on the platform engine and later edited on something
+ * dearer shows both, with the dates, rather than one blended number.
+ */
+async function costByDoc(docIds) {
+  if (!docIds.length) return new Map();
+  const AiUsage = require("../models/aiUsageModel");
+  const rows = await AiUsage.aggregate([
+    { $match: { doc: { $in: docIds } } },
+    {
+      $group: {
+        _id: { doc: "$doc", model: "$model" },
+        usd: { $sum: "$usd" },
+        turns: { $sum: 1 },
+        inputTokens: { $sum: "$inputTokens" },
+        outputTokens: { $sum: "$outputTokens" },
+        lastAt: { $max: "$createdAt" },
+      },
+    },
+    { $sort: { lastAt: -1 } },
+  ]);
+
+  const byDoc = new Map();
+  for (const r of rows) {
+    const key = String(r._id.doc);
+    const entry = byDoc.get(key) || { usd: 0, turns: 0, models: [] };
+    entry.usd += r.usd || 0;
+    entry.turns += r.turns || 0;
+    entry.models.push({
+      model: r._id.model || "unknown",
+      usd: r.usd || 0,
+      turns: r.turns || 0,
+      inputTokens: r.inputTokens || 0,
+      outputTokens: r.outputTokens || 0,
+      lastAt: r.lastAt,
+    });
+    byDoc.set(key, entry);
+  }
+  return byDoc;
+}
+
 const listDocs = asyncHandler(async (req, res) => {
   const isAdmin = req.user.role === "admin";
   const match = isAdmin
@@ -541,6 +591,7 @@ const listDocs = asyncHandler(async (req, res) => {
   const authorOf = new Map(authors.map((u) => [String(u._id), u]));
 
   const total = await LessonDoc.countDocuments(match);
+  const spend = await costByDoc(docs.map((d) => d._id));
   res.json({
     admin: true,
     total,
@@ -548,6 +599,8 @@ const listDocs = asyncHandler(async (req, res) => {
       const author = authorOf.get(String(owner));
       return {
         ...d,
+        // Admin-only, and only ever sent on this branch.
+        cost: spend.get(String(d._id)) || { usd: 0, turns: 0, models: [] },
         mine: String(owner) === String(req.user._id),
         // A deleted account leaves its materials behind; say so rather than
         // rendering a card with a blank author.
@@ -587,7 +640,17 @@ const createDoc = asyncHandler(async (req, res) => {
 
 // GET /:id
 const getDoc = asyncHandler(async (req, res) => {
-  res.json({ doc: await mine(req, req.params.id) });
+  const doc = await mine(req, req.params.id);
+  /*
+   * What this material has cost, for an admin looking at it. Sent only on the
+   * admin branch: a teacher pays in credits, and the provider bill behind them
+   * is not their number to read.
+   */
+  if (req.user.role === "admin") {
+    const spend = await costByDoc([doc._id]);
+    return res.json({ doc, cost: spend.get(String(doc._id)) || { usd: 0, turns: 0, models: [] } });
+  }
+  res.json({ doc });
 });
 
 /*

@@ -7,6 +7,18 @@ const aiUsageSchema = new mongoose.Schema(
     user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
     exam: { type: mongoose.Schema.Types.ObjectId, ref: "Exam" },
     /*
+     * Which lesson material this turn was spent on.
+     *
+     * Without it the spend was attributable to a person and an operation but
+     * not to a THING: the admin page could say Studio cost $4 last week and
+     * nothing could say which materials it went on, or which model wrote them.
+     * Indexed because the per-material total is read on every library page.
+     *
+     * Rows written before this existed have no doc, so historical Studio spend
+     * stays unattributed — there is nothing to recover it from.
+     */
+    doc: { type: mongoose.Schema.Types.ObjectId, ref: "LessonDoc", index: true },
+    /*
      * Which AI operation produced this row, as a stable name from
      * config/aiOperations.js. Added when Lesson Studio started reporting its
      * spend: it has no exam to point at, so without this the admin page could
