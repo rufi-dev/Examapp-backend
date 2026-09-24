@@ -1724,8 +1724,15 @@ const setUserStorage = asyncHandler(async (req, res) => {
  * downloadable, only new uploads stop. Nothing is deleted for non-payment.
  */
 const setUserStorageAddon = asyncHandler(async (req, res) => {
+  /*
+   * planExpiresAt is in this projection because the response reports the new
+   * allowance, and working that out means knowing whether the PLAN is still in
+   * force. Without it a lapsed Premium was quoted its old 15GB back — the
+   * enforcement was right on every later request, but the one screen an admin
+   * looks at right after granting showed a number that was not true.
+   */
   const user = await User.findById(req.params.id).select(
-    "name email role plan storageAddonGb storageAddonExpiresAt storageQuotaBytes"
+    "name email role plan planExpiresAt storageAddonGb storageAddonExpiresAt storageQuotaBytes"
   );
   if (!user) {
     res.status(404);
@@ -1737,6 +1744,17 @@ const setUserStorageAddon = asyncHandler(async (req, res) => {
     throw new Error("Yanlış yaddaş həcmi");
   }
   const months = Math.round(Number(req.body?.months));
+  /*
+   * A rental needs a term. This used to fall back to open-ended when `months`
+   * was missing, which quietly turned a monthly product into a free-forever
+   * grant on a typo — and the disk it holds is billed to us every month either
+   * way. An admin who genuinely wants a permanent figure has storageQuotaBytes,
+   * which exists for exactly that and says so.
+   */
+  if (gb > 0 && (!Number.isFinite(months) || months < 1 || months > 24)) {
+    res.status(400);
+    throw new Error("Müddət (ay) göstərilməlidir — daimi həcm üçün storageQuotaBytes istifadə edin");
+  }
   user.storageAddonGb = gb;
   if (gb === 0) {
     user.storageAddonExpiresAt = null;
@@ -1749,10 +1767,7 @@ const setUserStorageAddon = asyncHandler(async (req, res) => {
     const from = user.storageAddonExpiresAt && new Date(user.storageAddonExpiresAt).getTime() > now
       ? new Date(user.storageAddonExpiresAt).getTime()
       : now;
-    user.storageAddonExpiresAt =
-      Number.isFinite(months) && months > 0
-        ? new Date(from + months * 30 * 24 * 60 * 60 * 1000)
-        : null; // open-ended until a term is set
+    user.storageAddonExpiresAt = new Date(from + months * 30 * 24 * 60 * 60 * 1000);
   }
   await user.save();
 
