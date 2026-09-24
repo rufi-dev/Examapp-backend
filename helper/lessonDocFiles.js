@@ -558,35 +558,12 @@ const NATIVE_MIN_TEXT = 200;
 // one large figure. Either way the file still has to travel.
 const MIN_PAGE_TEXT = 40;
 
-/*
- * Does this PDF draw anything the text extractor cannot hand over?
- *
- * Two kinds, and the first version only caught one:
- *
- *   RASTER — a scan, a photo, a pasted screenshot. These leave markers in the
- *   object dictionaries (/Subtype /Image, /DCTDecode…) that survive in the raw
- *   bytes, so a byte scan finds them.
- *
- *   VECTOR — a chart, a circle, a geometry figure, an arrow. These are drawing
- *   operators inside the page's content stream, which is almost always
- *   Flate-compressed, so the raw bytes say nothing at all. A worksheet of
- *   selectable text plus a vector diagram therefore looked like pure text, got
- *   called complete, and the file was dropped: the words reached the model and
- *   the figure did not.
- *
- * So the streams are decompressed and read. Curve operators (c, v, y) are the
- * signal that matters — charts, circles and arrows are curves, and body text
- * never emits one. Rectangles are counted separately with a floor, because
- * every ruled table and every underline draws a few and flagging those would
- * mean no PDF is ever replaceable.
- *
- * Every failure answers YES. An unreadable file, an undecompressable stream, a
- * format this does not understand — all of them keep the PDF in the request.
- * The cost of a wrong yes is tokens; the cost of a wrong no is a diagram the
- * teacher can see and the model never received, answered in the same confident
- * tone. Those are not comparable.
- */
-const VECTOR_SCAN_BYTES = 4 * 1024 * 1024; // enough of a stream to judge it by
+// A single content stream larger than this is not examined; the PDF is kept
+// instead. No real page stream approaches it, so this bounds memory without
+// deciding anything — too big to look at is not the same as looked at and found
+// empty, and the previous version's shared budget could be exhausted by a long
+// document before the page with the diagram on it was ever reached.
+const MAX_STREAM_CHARS = 32 * 1024 * 1024;
 
 /*
  * A stream that cannot be decoded but cannot hold a drawing either.
@@ -675,21 +652,49 @@ function readStream(bytes) {
 }
 
 /*
+ * Does one decoded content stream put marks on the page?
+ *
+ * Split out so each stream is judged on its own as it is read. The scan used to
+ * concatenate every stream into one buffer and test it at the end, which meant
+ * a budget — and a budget meant a long document could exhaust it before the
+ * page with the diagram on it was ever looked at, returning "no drawings" for a
+ * file that has one.
+ */
+function streamDraws(text) {
+  // Curves are charts, circles and arrows. Body text never emits one.
+  if (/\d\s+(c|v|y)[\s\r\n]/.test(text)) return true;
+  // Nor does it emit a lineto. One is enough: an underline is drawn as a
+  // rectangle, so a line here is somebody drawing something.
+  if (/\d\s+l[\s\r\n]/.test(text)) return true;
+
+  /*
+   * Rectangles are judged by what happens to them, not by how many there are.
+   *
+   * Most rectangles in a typeset PDF are not drawings: every page opens with a
+   * CLIP, "… re W* n", which paints nothing. Measured on a plain Chromium text
+   * page, that clip is the ONLY rectangle; put one bordered box on the page and
+   * a second appears as "… re S". So the paint operator decides — W/W* clips
+   * and n paints nothing, while f, S, B and their variants leave marks.
+   */
+  for (const m of text.matchAll(/\d\s+re\s+([^\s]+)/g)) {
+    const op = m[1];
+    if (/^W\*?$/.test(op) || op === "n") continue;
+    if (/^(f\*?|F|B\*?|b\*?|S|s)$/.test(op)) return true;
+  }
+  return false;
+}
+
+/*
  * Does this PDF draw anything the text extractor cannot hand over?
  *
- * Raster content — a scan, a photo, a screenshot — leaves markers in the object
- * dictionaries that survive in the raw bytes. Vector content — a chart, a
- * circle, an arrow, a bar — is drawing operators inside a compressed content
- * stream, so the streams have to be decoded and read.
+ * Raster content leaves markers in the object dictionaries that survive in the
+ * raw bytes. Vector content is drawing operators inside a compressed content
+ * stream, so the streams are decoded and each is read as it comes.
  *
  * Every uncertainty answers YES and keeps the PDF in the request: an unreadable
- * file, a stream that would not decode, an unfamiliar shape. Crucially that
- * includes a stream skipped ALONGSIDE ones that decoded — analysing only the
- * readable half and concluding "no drawings" is exactly how a figure goes
- * missing, because the figure is in the half that was skipped.
- *
- * The cost of a wrong yes is tokens. The cost of a wrong no is a diagram the
- * teacher can see, that the model never received, answered in the same
+ * file, a stream that would not decode, one too large to examine, an unfamiliar
+ * shape. The cost of a wrong yes is tokens; the cost of a wrong no is a diagram
+ * the teacher can see, that the model never received, answered in the same
  * confident tone. Those are not comparable, so the bias is not symmetric.
  */
 async function pdfHasDrawings(src) {
@@ -704,21 +709,23 @@ async function pdfHasDrawings(src) {
     return true;
   }
 
-  let decoded = "";
-  let skipped = 0;
   let seen = 0;
-  const re = /stream\r?\n/g;
+  let read = 0;
+  /*
+   * CR alone is a legal separator in the wild. Ordered longest-first so that
+   * "\r\n" is never matched as "\r" with the newline left behind.
+   */
+  const re = /stream(?:\r\n|\n|\r)/g;
   let m;
-  while ((m = re.exec(raw)) && decoded.length < VECTOR_SCAN_BYTES) {
+  while ((m = re.exec(raw))) {
     const from = m.index + m[0].length;
     const to = raw.indexOf("endstream", from);
     if (to < 0) break;
     /*
      * A real stream is introduced by its dictionary, so the bytes before the
-     * keyword end in ">>". Without that check the scan also matched the letters
-     * "stream" occurring INSIDE another stream's compressed payload — on a
-     * plain Chromium text PDF that invented two extra streams, neither of which
-     * could be decoded (they are not streams), which then read as "something
+     * keyword end in ">>". Without this the scan also matched the letters
+     * "stream" occurring INSIDE another stream's compressed payload, inventing
+     * streams that could not be decoded either — which then read as "something
      * unreadable is in here" and marked every typeset document as drawing.
      */
     const before = raw.slice(Math.max(0, m.index - 600), m.index);
@@ -728,46 +735,25 @@ async function pdfHasDrawings(src) {
     /*
      * The bytes, without the end-of-line that separates them from `endstream`.
      * zlib tolerates that trailing byte; gunzip does not, so a gzip-wrapped
-     * text PDF failed to decode and was kept in the paid request forever.
+     * text PDF failed every decoding and was kept in the paid request forever.
      */
     const body = raw.slice(from, to).replace(/[\r\n]+$/, "");
     const text = readStream(Buffer.from(body, "latin1"));
+
     if (text === null) {
-      // Only count a skip that could have been a content stream.
-      if (!BENIGN_STREAM.test(before)) skipped += 1;
-    } else {
-      decoded += text;
+      // A stream nobody could read might be the one with the picture in it —
+      // unless its dictionary says it is a font, a profile or metadata.
+      if (!BENIGN_STREAM.test(before)) return true;
+      continue;
     }
+    // Too big to examine is not the same as examined and found empty.
+    if (text.length > MAX_STREAM_CHARS) return true;
+    if (streamDraws(text)) return true;
+    read += 1;
   }
 
-  // A stream nobody could read might be the one with the picture in it.
-  if (skipped > 0) return true;
-  if (!decoded) return seen > 0;
-
-  // Curves are charts, circles and arrows. Body text never emits one.
-  if (/\d\s+(c|v|y)[\s\r\n]/.test(decoded)) return true;
-  // Nor does it emit a lineto. One is enough: an underline is drawn as a
-  // rectangle, so a line here is somebody drawing something.
-  if (/\d\s+l[\s\r\n]/.test(decoded)) return true;
-
-  /*
-   * Rectangles are judged by what happens to them, not by how many there are.
-   *
-   * Counting meant a floor, and a floor meant a page with one box on it read as
-   * no drawing at all. But most rectangles in a typeset PDF are not drawings:
-   * every page opens with a CLIP, "… re W* n", which paints nothing. Measured
-   * on a plain Chromium text page: exactly one rectangle, and it is that clip.
-   * Put one bordered box on the page and a second appears as "… re S".
-   *
-   * So the paint operator decides. W/W* is a clip and n paints nothing; f, S, B
-   * and their variants put marks on the page.
-   */
-  for (const m of decoded.matchAll(/\d\s+re\s+([^\s]+)/g)) {
-    const op = m[1];
-    if (/^W\*?$/.test(op) || op === "n") continue; // clip, or no paint at all
-    if (/^(f\*?|F|B\*?|b\*?|S|s)$/.test(op)) return true;
-  }
-  return false;
+  // Nothing could be read at all, but there were streams to read.
+  return read === 0 && seen > 0;
 }
 
 /*

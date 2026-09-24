@@ -529,6 +529,49 @@ const doc = { html, blocks: [] };
     fs.rmSync(dir, { recursive: true, force: true });
   }
 
+  console.log("\nA long document does not hide its diagrams:");
+  {
+    const fs = require("fs");
+    const os = require("os");
+    const zlib = require("zlib");
+    const { pdfHasDrawings } = require("../helper/lessonDocFiles");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lessondoc-long-"));
+    const TEXT = "BT /F1 12 Tf 72 700 Td (Faiz bir kemiyyetin yuzde bir hissesidir) Tj ET\n";
+
+    // Several objects, each its own stream, with the chosen end-of-line.
+    const mkMulti = (streams, eol) => {
+      let out = "%PDF-1.4\n";
+      streams.forEach((c, i) => {
+        const body = zlib.deflateSync(Buffer.from(c, "latin1")).toString("latin1");
+        out += `${i + 1} 0 obj\n<< /Length ${body.length} /Filter /FlateDecode >>\nstream${eol}${body}\nendstream\nendobj\n`;
+      });
+      return Buffer.from(`${out}trailer<</Root 1 0 R>>\n%%EOF`, "latin1");
+    };
+    const check = async (name, bytes) => {
+      const f = path.join(dir, `${name}.pdf`);
+      fs.writeFileSync(f, bytes);
+      return pdfHasDrawings(f);
+    };
+
+    /*
+     * The scan used to concatenate every stream into one buffer with a 4 MiB
+     * budget and test it at the end. A document longer than that exhausted the
+     * budget before the page with the diagram on it was ever read, and the
+     * answer came back "no drawings" for a file that has one. Each stream is
+     * judged on its own now, so length cannot hide anything.
+     */
+    const huge = TEXT.repeat(Math.ceil((4.2 * 1024 * 1024) / TEXT.length));
+    ok("a line in a stream AFTER 4.2MiB of text is found", (await check("long-draw", mkMulti([huge, `${TEXT}10 10 m 120 60 l S\n`], "\n"))) === true);
+    // And the saving is not bought by simply calling everything long a drawing.
+    ok("...while 4.2MiB of plain text is still replaceable", (await check("long-text", mkMulti([huge, TEXT], "\n"))) === false);
+
+    // CR alone is a legal separator in the wild, and was not matched at all.
+    ok("a stream delimited by CR alone is read", (await check("cr-draw", mkMulti([`${TEXT}10 10 m 120 60 l S\n`], "\r"))) === true);
+    ok("...and its text-only case stays replaceable", (await check("cr-text", mkMulti([TEXT], "\r"))) === false);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   assert.strictEqual(failed, 0, `${failed} parity assertions failed`);
 })();
