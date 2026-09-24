@@ -379,7 +379,13 @@ function summarizeHtml(html) {
  */
 const { ACCENTS } = require("../helper/lessonDocHtml");
 function printOptions(input = {}) {
-  const patch = { "settings.pageNumbers": input.pageNumbers !== false };
+  /*
+   * Only what the caller actually set. This used to write pageNumbers on every
+   * call, so a request that named a colour and nothing else switched page
+   * numbers on as a side effect of asking for green.
+   */
+  const patch = {};
+  if (input.pageNumbers !== undefined) patch["settings.pageNumbers"] = input.pageNumbers !== false;
   if (typeof input.accent === "string" && ACCENTS[input.accent]) patch["settings.accent"] = input.accent;
   return patch;
 }
@@ -613,6 +619,188 @@ const getDoc = asyncHandler(async (req, res) => {
  * client shows the plan with an indeterminate wait — which is the truth about that
  * request rather than motion invented to cover it.
  */
+/*
+ * Cost-bounded content generation. The legacy path below is retained for old
+ * documents and can be re-enabled with LESSON_DOC_NATIVE_ENGINE=false while a
+ * deployment is being rolled out. New turns use one structured request and the
+ * platform renderer; there is no planning call, tool loop, screenshot round, or
+ * model-authored CSS/SVG.
+ */
+async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abortSignal, hadBlocks, baseRevision, send }) {
+  const native = require("../helper/lessonDocNative");
+  // One structured request, and nothing else: no planning call, no tool loop, no
+  // screenshot round. This is the whole model interaction for a turn.
+  const { runDocument: runStructured } = require("../helper/aiDocument");
+  /*
+   * The model the teacher chose is the model that runs.
+   *
+   * This used to rewrite any non-OpenAI selection to a cheap model, which meant
+   * the picker said "Claude Opus 5" while the turn ran something else — and the
+   * usage row recorded the one that ran. The list is ordered so the cheap
+   * platform engine is the DEFAULT; choosing something dearer is then a decision
+   * someone made on purpose, and the label stays true.
+   */
+  const chosen = S.DOC_MODELS.find((entry) => entry.id === model);
+  const nativeModel = String(process.env.LESSON_NATIVE_MODEL || chosen?.id || S.DEFAULT_DOC_MODEL);
+  const nativeProvider = /^claude/i.test(nativeModel)
+    ? "claude"
+    : /^gemini/i.test(nativeModel)
+      ? "gemini"
+      : "openai";
+  const started = Date.now();
+  send("phase", { phase: "content", editing: hadBlocks, engine: "platform" });
+  send("activity", {
+    kind: "native_engine",
+    text: "Məzmun hazırlanır — görünüş, sxemlər və PDF platformada qurulur.",
+    at: Date.now(),
+  });
+
+  const current = doc.aiMeta?.native && typeof doc.aiMeta.native === "object" ? doc.aiMeta.native : null;
+  /*
+   * Local extraction runs over EVERY file the document holds, not just the ones
+   * this turn is sending.
+   *
+   * The legacy engine keeps older attachments out of the request and reaches
+   * back into them with a read_source tool when it needs a page. This engine has
+   * no tools, so the same filter meant a material forgot its textbook after the
+   * first turn: edit three turns later and the model was working from the chat
+   * alone. Reading them here costs nothing — it is Ghostscript on our own disk —
+   * and it is the only way a later edit still knows what the source said.
+   */
+  const lessonFiles = require("../helper/lessonDocFiles");
+  const sourceText = await lessonFiles.nativeSourceText(doc.files || []);
+  const readByName = new Map(sourceText.map((x) => [x.name, x]));
+  /*
+   * A PDF is dropped from the paid request only when the local read replaces it
+   * completely: text was found AND the whole document was covered. A scan, or a
+   * textbook longer than the local read, keeps its file part — otherwise the
+   * answer to "the exercise on page 30" is in the part nobody sent.
+   */
+  const partsForModel = parts.filter((part) => {
+    if (!part.isPdf) return true;
+    const read = readByName.get(part.name);
+    return !(read && read.complete);
+  });
+  const localPrint = native.nativePrintOptions(text);
+  if (localPrint) {
+    const saved = await svc.commit(
+      doc._id,
+      doc.owner,
+      printOptions(localPrint),
+      baseRevision,
+      {
+        push: {
+          messages: {
+            role: "assistant",
+            text: "Çap parametrləri platformada yeniləndi.",
+            action: "settings",
+            work: { engine: "platform-local", rounds: 0, renderer: "lessonDocHtml" },
+            at: new Date(),
+          },
+        },
+      }
+    );
+    await logStudioUsage(req, {
+      doc: saved,
+      hadBlocks,
+      out: { provider: "platform-local", cost: { model: "platform-local", usd: 0 }, timing: { rounds: 0 } },
+    });
+    chargeTurn(req, send);
+    // Summarised from the BODY, not from `blocks`: a platform-rendered material
+    // keeps its content in `html` and no blocks at all, so counting blocks would
+    // report a finished material as empty every time a print setting changed.
+    send("done", {
+      doc: saved,
+      summary: saved.html ? summarizeHtml(saved.html) : S.summarize(saved.blocks || []),
+      provider: "platform-local",
+      engine: "platform-native",
+    });
+    return;
+  }
+  const out = await runStructured({
+    prompt: native.nativePrompt({ request: text, current, sourceNotes: doc.sourceNotes || [], sourceText }),
+    parts: partsForModel,
+    system: native.NATIVE_SYSTEM,
+    schema: native.NATIVE_SCHEMA,
+    geminiSchema: native.NATIVE_SCHEMA,
+    model: nativeModel,
+    provider: nativeProvider,
+    signal: abortSignal,
+    maxTokens: 10000,
+  });
+  const content = native.normalizeNative(out.doc || {});
+  if (!content.blocks.length || !content.blocks.some((b) => b.kind === "heading") || !content.blocks.some((b) => b.kind === "text")) {
+    /*
+     * The provider has already been paid by this point. Validation failing, or
+     * the commit losing a revision race, must not make that spend invisible:
+     * Studio's usage row is the only meter on this feature, and a turn that
+     * cost money with no row reads as a turn that never happened.
+     */
+    await logStudioUsage(req, { doc, hadBlocks, out: { ...out, timing: { rounds: 1, failed: true } } }).catch(() => {});
+    const e = new Error("empty_native_document");
+    e.aiStatus = 422;
+    e.userMessage = "Materialın məzmunu tam qayıtmadı. Yenidən cəhd edin.";
+    throw e;
+  }
+  const html = sanitizeDocHtml(native.nativeBlocksToHtml(content));
+  if (!html) {
+    await logStudioUsage(req, { doc, hadBlocks, out: { ...out, timing: { rounds: 1, failed: true } } }).catch(() => {});
+    throw new Error("empty_native_html");
+  }
+  const sum = summarizeHtml(html);
+  let saved;
+  try {
+    saved = await svc.commit(
+    doc._id,
+    doc.owner,
+    {
+      html,
+      blocks: [],
+      partCount: sum.blocks,
+      ...(content.title ? { title: content.title } : {}),
+      ...(!doc.topic && content.title ? { topic: content.title } : {}),
+      ...(content.audience && !doc.audience ? { audience: content.audience } : {}),
+      status: "ready",
+      aiMeta: {
+        ...(doc.aiMeta && typeof doc.aiMeta === "object" ? doc.aiMeta : {}),
+        provider: out.provider,
+        model: out.cost?.model || nativeModel,
+        engine: "platform-native",
+        native: content,
+        at: new Date(),
+      },
+    },
+    baseRevision,
+    {
+      push: {
+        messages: {
+          role: "assistant",
+          text: content.reply || (hadBlocks ? "Material platforma mühərriki ilə yeniləndi." : "Material platforma mühərriki ilə hazırlandı."),
+          action: hadBlocks ? "edited" : "created",
+          stats: sum,
+          work: { engine: "platform-native", rounds: 1, renderer: "lessonDocHtml" },
+          at: new Date(),
+        },
+      },
+    }
+    );
+  } catch (err) {
+    // Same reason as above: a lost revision race is not a free turn.
+    await logStudioUsage(req, { doc, hadBlocks, out: { ...out, timing: { rounds: 1, failed: true } } }).catch(() => {});
+    throw err;
+  }
+  await logStudioUsage(req, {
+    doc: saved,
+    hadBlocks,
+    out: {
+      ...out,
+      timing: { planMs: 0, writeMs: Date.now() - started, rounds: 1, reads: parts.length ? 1 : 0, looked: false, fixes: 0 },
+    },
+  });
+  chargeTurn(req, send);
+  send("done", { doc: saved, summary: sum, provider: out.provider, engine: "platform-native" });
+}
+
 const streamMessage = asyncHandler(async (req, res) => {
   const doc = await mine(req, req.params.id);
   const text = String((req.body && req.body.text) || "").trim();
@@ -811,6 +999,33 @@ const streamMessage = asyncHandler(async (req, res) => {
     assertSourcesReadable(sending, parts, unreadable);
     if (unreadable.length) send("source_warning", { unreadable });
     if (sending.length) report("files", { names: sending.map((f) => f.name) });
+
+    /*
+     * A document this engine did not write is edited by the engine that did.
+     *
+     * The native turn rebuilds the whole material from its own semantic source
+     * (`aiMeta.native`). A document that predates it has no such source, so the
+     * model was handed nothing to preserve, was told to write a new material,
+     * and the commit replaced the teacher's existing work with it. Rather than
+     * teach this engine to parse arbitrary old HTML, an existing document keeps
+     * the engine that understands it; everything created from here on is native.
+     */
+    const nativeCanHandle = require("../helper/lessonDocNative").nativeCanHandle(doc, S.countParts);
+    if (process.env.LESSON_DOC_NATIVE_ENGINE !== "false" && nativeCanHandle) {
+      await runNativeMaterialTurn({
+        req,
+        doc,
+        text,
+        parts,
+        files: sending,
+        model,
+        abortSignal: ac.signal,
+        hadBlocks,
+        baseRevision,
+        send,
+      });
+      return;
+    }
 
     /*
      * ---- phase 1: what are we about to do? ---------------------------------

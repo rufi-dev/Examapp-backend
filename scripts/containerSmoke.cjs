@@ -86,7 +86,16 @@ async function waitListening(logs, tries = 80) {
 }
 function bootServer(uri, port, extra = {}) {
   const child = spawn(process.execPath, [path.join(BE, "server.js")], {
-    env: { ...process.env, MONGO_URI: uri, PORT: String(port), NODE_ENV: "production", EMAIL_ENABLED: "false", WHATSAPP_WEB_ENABLED: "false", MIGRATION_TS: "2026-07-10T12:00:00Z", FRONTEND_URL: "https://example.test", JWT_SECRET: "smoke", CRYPTR_KEY: "smoke", SESSION_MODEL_ENABLED: "true", EXAM_PDF_DIR: SMOKE_PDF_DIR, PDF_STAGING_DIR: SMOKE_STAGING_DIR, ...extra },
+    /*
+     * The smoke boots a PRODUCTION server, so it must supply production-shaped
+     * origins rather than inherit whatever the developer has in .env. FRONTEND_URL
+     * was already pinned here; ALLOWED_ORIGINS was not, so a normal dev value of
+     * http://localhost:5173 made the boot guard refuse to start — and because this
+     * file sits at position 76 of the && chain in `npm test`, that took the last
+     * 48 test files with it on every local run, including every lesson and board
+     * suite. The guard itself is right and is covered by origin-validation.test.js.
+     */
+    env: { ...process.env, MONGO_URI: uri, PORT: String(port), NODE_ENV: "production", EMAIL_ENABLED: "false", WHATSAPP_WEB_ENABLED: "false", MIGRATION_TS: "2026-07-10T12:00:00Z", FRONTEND_URL: "https://example.test", ALLOWED_ORIGINS: "https://example.test", JWT_SECRET: "smoke", CRYPTR_KEY: "smoke", SESSION_MODEL_ENABLED: "true", EXAM_PDF_DIR: SMOKE_PDF_DIR, PDF_STAGING_DIR: SMOKE_STAGING_DIR, ...extra },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const logs = { text: "" };

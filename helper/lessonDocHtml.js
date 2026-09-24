@@ -401,8 +401,19 @@ function renderBlock(b, forWord, a = ACCENTS.default) {
  */
 async function withRasterFigures(doc = {}) {
   const blocks = Array.isArray(doc.blocks) ? doc.blocks : [];
-  if (!blocks.some((b) => b && b.kind === "figure")) return doc;
+  const hasFigureBlocks = blocks.some((b) => b && b.kind === "figure");
+  /*
+   * A document whose body is HTML keeps its diagrams INSIDE that HTML, as inline
+   * <svg>, so walking `blocks` finds nothing to rasterise and Word receives SVG
+   * the LibreOffice import cannot be relied on to draw. The platform renderer
+   * produces exactly that shape, so every diagram it makes would be missing from
+   * the Word file while the preview and the PDF show it — the one difference
+   * between preview and export this engine exists to avoid.
+   */
+  const hasInlineSvg = has(doc.html) && /<svg[\s>]/i.test(String(doc.html));
+  if (!hasFigureBlocks && !hasInlineSvg) return doc;
   const { svgToPngDataUri } = require("./lessonDocSvg");
+
   const out = [];
   for (const b of blocks) {
     if (b && b.kind === "figure" && b.svg) {
@@ -412,7 +423,42 @@ async function withRasterFigures(doc = {}) {
       out.push(b);
     }
   }
-  return { ...doc, blocks: out };
+
+  let html = doc.html;
+  if (hasInlineSvg) {
+    const svgs = String(doc.html).match(/<svg[\s\S]*?<\/svg>/gi) || [];
+    for (const svg of svgs) {
+      let png = "";
+      // One retry: rasterising shells out, and a transient failure there should
+      // not cost a teacher their export.
+      for (let attempt = 0; attempt < 2 && !png; attempt += 1) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          png = await svgToPngDataUri(svg);
+        } catch {
+          png = "";
+        }
+      }
+      /*
+       * If it still will not rasterise, the export FAILS.
+       *
+       * The alternative was to leave the SVG in and let LibreOffice decide,
+       * which produces a Word file that is missing a diagram the preview shows —
+       * a wrong document that looks like a right one. A teacher handing that to
+       * a class would not know. An error they can act on is the honest outcome.
+       */
+      if (!png) {
+        const e = new Error("figure_rasterise_failed");
+        e.status = 422;
+        e.code = "export_failed";
+        e.userMessage = "Sxemi Word üçün şəklə çevirmək alınmadı. PDF olaraq yükləyin və ya yenidən cəhd edin.";
+        throw e;
+      }
+      html = html.split(svg).join(`<img src="${png}" alt="" style="width:100%;max-width:460pt"/>`);
+    }
+  }
+
+  return { ...doc, blocks: out, ...(hasInlineSvg ? { html } : {}) };
 }
 
 /*

@@ -527,6 +527,56 @@ async function toParts(files = []) {
 }
 
 /*
+ * A text-first source path for the platform renderer. Sending a whole textbook PDF
+ * as vision input is the largest avoidable lesson cost. Ghostscript is already used
+ * by the evidence tools, so extract a bounded text sample locally and send that as
+ * prompt context; image-only PDFs still use the existing file part unchanged.
+ */
+const NATIVE_MAX_PAGES = 12;
+const NATIVE_MAX_CHARS = 12000;
+// Below this much REAL text a PDF is treated as a scan. A page label is not text:
+// twelve empty pages still produce "[Səhifə 1]…[Səhifə 12]", which sailed past a
+// naive length check and convinced the caller a scanned worksheet was readable —
+// so the file was dropped from the request and the model was handed nothing but
+// page numbers.
+const NATIVE_MIN_TEXT = 200;
+
+async function nativeSourceText(files = []) {
+  const out = [];
+  const evidence = require("./curriculumEvidence");
+  for (const f of files) {
+    if (f?.mime !== "application/pdf") continue;
+    try {
+      const src = pathForKey(f.key, f.ext);
+      const pages = await evidence.pdfPageCount(src);
+      const read = Math.min(NATIVE_MAX_PAGES, pages);
+      const chunks = [];
+      let extracted = 0; // characters of ACTUAL page text, labels excluded
+      for (let page = 0; page < read && extracted < NATIVE_MAX_CHARS; page += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const body = String((await evidence.pdfPageText(src, page)) || "").replace(/\s+/g, " ").trim();
+        if (!body) continue;
+        extracted += body.length;
+        chunks.push(`[Səhifə ${page + 1}] ${body}`);
+      }
+      if (extracted < NATIVE_MIN_TEXT) continue; // a scan: keep the file itself
+      out.push({
+        name: f.name || "PDF",
+        text: chunks.join("\n").slice(0, NATIVE_MAX_CHARS),
+        pages,
+        // Whether the local read covered the WHOLE document. A 40-page textbook
+        // read to page 12 must not let the caller drop the file: the answer to
+        // "explain the exercise on page 30" is in the part that was not read.
+        complete: read >= pages && extracted < NATIVE_MAX_CHARS,
+      });
+    } catch {
+      // No local extractor, or an unreadable file: the original PDF part stands.
+    }
+  }
+  return out;
+}
+
+/*
  * Remove a file only when NO document still references it. The key is a content
  * hash, so two materials that attached the same page share one file on disk and
  * deleting one of them must not blind the other.
@@ -577,6 +627,7 @@ module.exports = {
   trustedType,
   OFFICE_EXTS,
   toParts,
+  nativeSourceText,
   partForPages,
   parsePages,
   pageCountOf,

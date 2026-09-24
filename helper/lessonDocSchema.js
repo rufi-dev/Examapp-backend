@@ -82,6 +82,18 @@ const BLOCK = {
  * Order matters — the first entry is the default.
  */
 const DOC_MODELS = [
+  /*
+   * The default, and the one the platform engine is built around: the model
+   * writes semantic content only, and the layout, the diagrams and the PDF are
+   * made here. One bounded request instead of a planning call, a writing loop
+   * and a screenshot round.
+   */
+  {
+    id: "gpt-5.6-luna",
+    provider: "openai",
+    label: "Platforma mühərriki",
+    note: "Bir sərfəli sorğu; görünüş, sxem və PDF platformada hazırlanır. Canlı gedişat yoxdur.",
+  },
   {
     id: "claude-opus-5",
     provider: "claude",

@@ -1923,7 +1923,28 @@ console.log("\nThe model picker, and the meter behind it:");
   ok("no Gemini model is offered in Studio", !S9.DOC_MODELS.some((m) => m.provider === "gemini"));
   ok("Gemini remains available to the rest of the app", typeof A9.computeGeminiCost === "function");
 
-  ok("the default is a Claude model", S9.providerOf(S9.DOC_MODELS[0].id) === "claude");
+  /*
+   * The default is the PLATFORM ENGINE, not the strongest model.
+   *
+   * It used to be a Claude model, from when a turn meant a planning call, a
+   * writing loop and a screenshot round, and the best writer was worth paying
+   * for. A turn is now one bounded request whose output is semantic content the
+   * platform lays out itself, so the default is the cheap model that job needs;
+   * anything dearer is a choice someone makes deliberately in the picker.
+   */
+  ok("the default is the low-cost platform engine", S9.DOC_MODELS[0].id === "gpt-5.6-luna");
+  ok("...and it is genuinely the cheapest thing offered", (() => {
+    const priceOf = (id) => {
+      const c = A9.computeOpenAIGenCost(
+        { prompt_tokens: 10000, completion_tokens: 10000, total_tokens: 20000, prompt_tokens_details: { cached_tokens: 0 } },
+        id,
+        id
+      );
+      return (c || {}).usd;
+    };
+    const mine = priceOf(S9.DOC_MODELS[0].id);
+    return S9.DOC_MODELS.filter((m) => m.provider !== "claude").every((m) => priceOf(m.id) >= mine);
+  })());
   ok("a retired id falls back rather than failing", S9.pickModel("gemini-2.5-pro") === S9.DOC_MODELS[0].id);
   ok("a known id is kept", S9.pickModel("claude-sonnet-5") === "claude-sonnet-5");
 
