@@ -22,6 +22,7 @@ const assert = require("assert");
 const mongoose = require("mongoose");
 const { MongoMemoryServer } = require("mongodb-memory-server");
 
+const { limitsFor } = require("../config/plans");
 const User = require("../models/userModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
@@ -201,23 +202,26 @@ async function sec8b() {
   const addFile = (title) =>
     Material.create({ owner: t._id, ownerName: "T", title, kind: "pdf", fileName: `${title}.pdf`, filePath: `/x/${title}.pdf` });
 
-  // ── files: free 5 ────────────────────────────────────────────────────────
-  ok("an empty library may upload", (await refused(() => planLimits.assertUnderMaterialCap(t))) === null);
-  for (let i = 0; i < 5; i++) await addFile(`Fayl ${i}`);
-  ok("at the cap (5) → refused", (await refused(() => planLimits.assertUnderMaterialCap(t))) === "plan_limit");
-
-  // Already over when the cap arrived: keeps everything, cannot add.
-  for (let i = 0; i < 4; i++) await addFile(`Köhnə ${i}`);
-  ok("an over-cap library is refused", (await refused(() => planLimits.assertUnderMaterialCap(t))) === "plan_limit");
-  ok("and keeps every file", (await Material.countDocuments({ owner: t._id })) === 9);
-
-  await User.updateOne({ _id: t._id }, { $set: { plan: "pro" } });
-  let u = await User.findById(t._id).lean();
-  ok("pro (50) lets them continue", (await refused(() => planLimits.assertUnderMaterialCap(u))) === null);
+  /*
+   * The library has no COUNT cap any more — it is sold by size.
+   *
+   * A count was the wrong dimension: it did not bound what the library costs
+   * (five files can be five 400MB scans) and it punished the teacher who uploads
+   * twenty small worksheets. The byte limit that replaced it has its own suite,
+   * tests/storage-quota.test.js, including the concurrency case a count check
+   * never had. What is asserted here is that the old cap is genuinely gone
+   * rather than merely unused somewhere.
+   */
+  for (let i = 0; i < 9; i++) await addFile(`Fayl ${i}`);
+  ok("a large library is no longer refused on count", (await refused(() => planLimits.assertUnderMaterialCap(t))) === null);
+  ok("...at any number", (await refused(() => planLimits.assertUnderMaterialCap(t, 1000))) === null);
+  ok("...and keeps every file", (await Material.countDocuments({ owner: t._id })) === 9);
+  ok("no tier declares a file count", ["free", "pro", "premium"].every((p) => limitsFor(p).materials === undefined));
+  ok("every tier declares a size instead", ["free", "pro", "premium"].every((p) => Number(limitsFor(p).storageMb) > 0));
 
   await User.updateOne({ _id: t._id }, { $set: { plan: "premium" } });
-  u = await User.findById(t._id).lean();
-  ok("premium is unlimited", (await refused(() => planLimits.assertUnderMaterialCap(u, 1000))) === null);
+  let u = await User.findById(t._id).lean();
+  void u;
 
   // ── video: a FEATURE, premium only ───────────────────────────────────────
   ok("premium may add video", (await refused(() => planLimits.assertVideoAllowed(u))) === null);
@@ -234,7 +238,15 @@ async function sec8b() {
   await User.updateOne({ _id: t._id }, { $set: { plan: "premium", planExpiresAt: new Date(Date.now() - DAY) } });
   u = await User.findById(t._id).lean();
   ok("a lapsed premium loses video", (await refused(() => planLimits.assertVideoAllowed(u))) === "plan_limit");
-  ok("and falls back to the free file cap", (await refused(() => planLimits.assertUnderMaterialCap(u))) === "plan_limit");
+  /*
+   * And loses the STORAGE allowance, which is the limit the library actually
+   * has now. This was reading the stored plan rather than the effective one, so
+   * a Premium that expired last month kept its 15GB indefinitely — the only
+   * limit in the app that a payment stopping did not touch.
+   */
+  const { quotaFor } = require("../middleware/uploadLimit");
+  ok("and falls back to the free storage allowance", quotaFor(u) === limitsFor("free").storageMb * 1024 * 1024);
+  ok("...while a live premium keeps its own", quotaFor({ plan: "premium" }) === limitsFor("premium").storageMb * 1024 * 1024);
 
   const adm = await User.findOne({ role: "admin" }).lean();
   if (adm) {
@@ -243,7 +255,11 @@ async function sec8b() {
   }
 
   const usage = await planLimits.usageFor(await User.findById(t._id).lean());
-  ok("usage reports files", usage.materials.used === 9 && usage.materials.limit === 5, JSON.stringify(usage.materials));
+  // The file count is still reported — it is just no longer a limit.
+  ok("usage reports files without a ceiling", usage.materials.used === 9 && usage.materials.limit === null, JSON.stringify(usage.materials));
+  // And the allowance that DOES apply travels with it, so one request feeds both
+  // the plan page's meter and the library's.
+  ok("usage carries the storage allowance", usage.storage && typeof usage.storage.used === "number" && typeof usage.storage.limitLabel === "string");
 }
 
 async function main() {

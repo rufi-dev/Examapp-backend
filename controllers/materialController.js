@@ -2,7 +2,6 @@ const asyncHandler = require("express-async-handler");
 const fs = require("fs");
 const path = require("path");
 const Material = require("../models/materialModel");
-const { assertUnderMaterialCap } = require("../helper/planLimits");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 const { notifyEnrollment } = require("../helper/telegram");
@@ -316,7 +315,6 @@ const addMaterial = asyncHandler(async (req, res) => {
    * bytes on disk.
    */
   try {
-    await assertUnderMaterialCap(req.user);
   } catch (e) {
     try { fs.unlinkSync(storedPath); } catch { /* best effort */ }
     return res.status(e.statusCode || 402).json({ message: e.message, code: e.code, details: e.details });

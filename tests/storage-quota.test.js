@@ -43,6 +43,21 @@ const eq = (name, actual, expected) =>
 
   eq("sizes read the way a teacher writes them", [human(50 * MB), human(2048 * MB), human(900 * 1024)], ["50 MB", "2.0 GB", "900 KB"]);
 
+  /*
+   * A lapsed subscription loses the allowance, like every other limit. This read
+   * the STORED plan rather than the effective one, so a Premium that expired last
+   * month kept 15GB — the only limit a payment stopping did not touch.
+   */
+  const DAY = 86400000;
+  const lapsed = { plan: "premium", planExpiresAt: new Date(Date.now() - DAY) };
+  eq("a lapsed premium falls back to free", quotaFor(lapsed) / MB, 50);
+  eq("...and a live one does not", quotaFor({ plan: "premium" }) / MB, 15360);
+  eq("a plan with time left keeps its own", quotaFor({ plan: "pro", planExpiresAt: new Date(Date.now() + DAY) }) / MB, 2048);
+
+  // There is no file COUNT limit any more; the library is sold by size alone.
+  const { limitsFor } = require("../config/plans");
+  ok("no tier declares a file count", ["free", "pro", "premium"].every((p) => limitsFor(p).materials === undefined));
+
   // ── the gate itself, against a real database ─────────────────────────────
   console.log("\n— the gate —");
   const mongod = await MongoMemoryServer.create();

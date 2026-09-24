@@ -37,15 +37,16 @@ const PLANS = {
       // live tasks a teacher holds, so deleting one frees a slot and an account
       // already over the cap simply cannot post another.
       assignments: num("PLAN_FREE_ASSIGNMENTS", 2),
-      // Files in the library ("Materiallar"). Concurrent, like assignments.
-      materials: num("PLAN_FREE_MATERIALS", 5),
       /*
-       * Disk, in megabytes, shared by library materials and uploaded videos.
+       * The library is limited by SIZE, not by how many files are in it.
        *
-       * A COUNT limit does not bound disk: five files is five scanned textbooks
-       * at 400MB each. This is the dimension that actually costs us money, and
-       * the free tier is sized for a handful of worksheets rather than a
-       * library — enough to try the product properly, not enough to host on.
+       * A count was the wrong dimension twice over: it does not bound what we
+       * actually pay for — five files is five scanned textbooks at 400MB each —
+       * and it punishes the tidy teacher who uploads twenty small worksheets
+       * while waving through the one who uploads five enormous scans. Megabytes
+       * are the thing that costs money, so megabytes are the thing that is sold.
+       *
+       * Shared by library materials and uploaded videos, because they share a disk.
        */
       storageMb: num("PLAN_FREE_STORAGE_MB", 50),
     },
@@ -63,7 +64,6 @@ const PLANS = {
       students: num("PLAN_PRO_STUDENTS", 40),
       examCreations: Infinity,
       assignments: num("PLAN_PRO_ASSIGNMENTS", 30),
-      materials: num("PLAN_PRO_MATERIALS", 50),
       storageMb: num("PLAN_PRO_STORAGE_MB", 2048),
     },
     credits: { welcome: 0, monthly: num("PLAN_PRO_MONTHLY_CREDITS", 350) },
@@ -81,7 +81,6 @@ const PLANS = {
       students: Infinity,
       examCreations: Infinity,
       assignments: Infinity,
-      materials: Infinity,
       /*
        * Premium hosts video, and one uploaded lesson can be 2GB — so this is
        * generous rather than unlimited. Disk is the one resource we cannot

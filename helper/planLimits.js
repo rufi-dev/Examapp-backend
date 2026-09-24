@@ -114,15 +114,19 @@ async function assertUnderAssignmentCap(user, n = 1) {
   if (used + n > cap) throw planLimitError("assignments", cap, used, storedPlan(user), isExpired(user));
 }
 
-// Library files. Counted from what exists, so an account already over the cap
-// keeps its files and simply cannot upload another.
-async function assertUnderMaterialCap(user, n = 1) {
-  if (isAdmin(user)) return;
-  const cap = limitsFor(effectivePlan(user)).materials;
-  if (!Number.isFinite(cap)) return;
-  const used = await materialCount(user._id);
-  if (used + n > cap) throw planLimitError("materials", cap, used, storedPlan(user), isExpired(user));
-}
+/*
+ * The library has no count cap.
+ *
+ * It is limited by SIZE instead — see middleware/uploadLimit.js, which reserves
+ * bytes atomically before a file is written. A count never bounded what the
+ * library costs us, and it penalised the teacher who uploads twenty small
+ * worksheets over the one who uploads five enormous scans.
+ *
+ * Kept as a no-op rather than deleted at every call site: the upload path has
+ * one guard now, and a function that quietly does nothing is easier to follow
+ * than a caller that looks like it forgot to check.
+ */
+async function assertUnderMaterialCap() {}
 
 /*
  * The video library is a FEATURE, not a quota: hosting and range-streaming video is
@@ -400,12 +404,14 @@ async function consumeExamCreate(user, session) {
 async function usageFor(user) {
   const expired = isExpired(user);
   const limits = limitsFor(effectivePlan(user));
-  const [classes, students, frozen, assignments, materials] = await Promise.all([
+  const { storageStatus } = require("../middleware/uploadLimit");
+  const [classes, students, frozen, assignments, materials, storage] = await Promise.all([
     classCount(user._id),
     studentCount(user._id),
     frozenStudentCount(user._id),
     assignmentCount(user._id),
     materialCount(user._id),
+    storageStatus(user),
   ]);
   const examCap = limits.examCreations;
   return {
@@ -422,10 +428,13 @@ async function usageFor(user) {
       used: assignments,
       limit: Number.isFinite(limits.assignments) ? limits.assignments : null,
     },
-    materials: {
-      used: materials,
-      limit: Number.isFinite(limits.materials) ? limits.materials : null,
-    },
+    /*
+     * The library, in bytes rather than in files. `materials` stays as a plain
+     * count with no limit beside it — it is still worth seeing how many files
+     * you have, it is simply not what the plan sells.
+     */
+    materials: { used: materials, limit: null },
+    storage,
     examCreates: {
       left: expired
         ? 0

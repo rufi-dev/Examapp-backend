@@ -4,6 +4,13 @@ const Video = require("../models/videoModel");
 const User = require("../models/userModel");
 const { limitsFor, normalizePlan } = require("../config/plans");
 
+/*
+ * Required lazily: planLimits requires this module for storageStatus, so a
+ * top-level require here would be a cycle and one of the two would get a
+ * half-built exports object.
+ */
+const effectivePlan = (user) => require("../helper/planLimits").effectivePlan(user);
+
 // ---------------------------------------------------------------------------
 // Upload abuse protection for study materials.
 //
@@ -71,7 +78,13 @@ function uploadRateLimit(req, res, next) {
  */
 const quotaFor = (user) => {
   if (Number(user?.storageQuotaBytes) > 0) return Number(user.storageQuotaBytes);
-  const mb = limitsFor(normalizePlan(user?.plan)).storageMb;
+  /*
+   * The EFFECTIVE plan, so a lapsed subscription loses its allowance the way it
+   * loses every other limit. Reading the stored plan meant a Premium that
+   * expired last month kept its 15GB indefinitely — the one limit in the app
+   * that a payment stopping did not touch.
+   */
+  const mb = limitsFor(effectivePlan(user)).storageMb;
   return Number.isFinite(mb) && mb > 0 ? mb * 1024 * 1024 : DEFAULT_QUOTA;
 };
 
@@ -118,7 +131,9 @@ async function storageStatus(user) {
     remaining: unlimited ? null : Math.max(0, limit - used),
     percent: unlimited ? 0 : Math.min(100, Math.round((used / Math.max(limit, 1)) * 10000) / 100),
     full: unlimited ? false : used >= limit,
-    plan: normalizePlan(user?.plan),
+    // What is in force, not what was bought — a lapsed plan shows as free here
+    // because that is the allowance being applied.
+    plan: effectivePlan(user),
     usedLabel: human(used),
     limitLabel: unlimited ? "limitsiz" : human(limit),
     // Formatted here rather than in the browser so the page and the refusal
