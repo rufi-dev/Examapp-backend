@@ -710,6 +710,61 @@ const doc = { html, blocks: [] };
     fs.rmSync(dir, { recursive: true, force: true });
   }
 
+  console.log("\nWhere a stream ends is the file's answer, not a guess:");
+  {
+    const fs = require("fs");
+    const os = require("os");
+    const zlib = require("zlib");
+    const { pdfHasDrawings } = require("../helper/lessonDocFiles");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lessondoc-length-"));
+    const T = (t) => `BT /F1 12 Tf 72 700 Td (${t}) Tj ET\n`;
+
+    /*
+     * The trap: an UNCOMPRESSED stream whose own text contains the word
+     * "endstream". Searching for the next occurrence of it ends the stream
+     * early, so everything past the false boundary — here, a visible diagonal —
+     * was never read at all.
+     */
+    const trap = `${T("the word endstream appears here")}10 10 m 90 90 l S\n`;
+    const uncompressed = (content, lengthMode) => {
+      const dictLen =
+        lengthMode === "direct" ? `/Length ${content.length}` : lengthMode === "indirect" ? "/Length 9 0 R" : "";
+      let out = `%PDF-1.4\n1 0 obj\n<< ${dictLen} >>\nstream\n${content}\nendstream\nendobj\n`;
+      if (lengthMode === "indirect") out += `9 0 obj\n${content.length}\nendobj\n`;
+      return Buffer.from(`${out}trailer<</Root 1 0 R>>\n%%EOF`, "latin1");
+    };
+    const compressed = (c) => {
+      const b = zlib.deflateSync(Buffer.from(c, "latin1")).toString("latin1");
+      return Buffer.from(
+        `%PDF-1.4\n1 0 obj\n<< /Length ${b.length} /Filter /FlateDecode >>\nstream\n${b}\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF`,
+        "latin1"
+      );
+    };
+    const check = async (name, bytes) => {
+      const f = path.join(dir, `${name}.pdf`);
+      fs.writeFileSync(f, bytes);
+      return pdfHasDrawings(f);
+    };
+
+    ok("a line past a false 'endstream' is still found", (await check("trap", uncompressed(trap, "direct"))) === true);
+    // "/Length 9 0 R" is ordinary in files written in one pass.
+    ok("...when the length is an INDIRECT reference too", (await check("trap-ind", uncompressed(trap, "indirect"))) === true);
+    /*
+     * With no /Length there is nothing to check the guess against, and an
+     * uncompressed stream may therefore have been cut short. A compressed one
+     * needs no such guard: a truncated deflate stream fails to inflate and is
+     * already treated as unreadable.
+     */
+    ok("...and with NO /Length, the guess is not trusted at all", (await check("trap-none", uncompressed(trap, "none"))) === true);
+
+    // The counterweight: this must not become "every uncompressed PDF travels".
+    ok("plain uncompressed text with a good /Length IS replaceable", (await check("plain", uncompressed(T("plain lesson text"), "direct"))) === false);
+    ok("...and compressed text still is", (await check("z-text", compressed(T("plain lesson text").repeat(20)))) === false);
+    ok("...while a compressed drawing is still caught", (await check("z-draw", compressed(`${T("x").repeat(20)}10 10 m 90 90 l S\n`))) === true);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   assert.strictEqual(failed, 0, `${failed} parity assertions failed`);
 })();

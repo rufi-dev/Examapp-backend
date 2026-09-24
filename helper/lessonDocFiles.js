@@ -782,6 +782,27 @@ function streamDraws(text) {
 }
 
 /*
+ * Where this stream actually ends, according to the file.
+ *
+ * Searching for the next "endstream" is a guess, and an uncompressed stream can
+ * contain those very letters — a worksheet with the word in its text ends the
+ * stream early, everything after the false boundary is never read, and a
+ * diagram past it is invisible. /Length is the file telling us the answer.
+ *
+ * It may be an indirect reference ("/Length 12 0 R"), which is ordinary in
+ * files written in one pass, so that object is resolved too. The result is only
+ * used when it lands where a stream should end; anything else is not trusted.
+ */
+function declaredLength(raw, dict) {
+  const m = dict.match(/\/Length\s+(\d+)(?:\s+(\d+)\s+R\b)?/);
+  if (!m) return null;
+  if (m[2] === undefined) return Number(m[1]);
+  const found = raw.match(new RegExp(`(?:^|[^0-9])${m[1]}\\s+${m[2]}\\s+obj\\b([\\s\\S]{0,64}?)endobj`));
+  const n = found && found[1].match(/\d+/);
+  return n ? Number(n[0]) : null;
+}
+
+/*
  * The object dictionary that introduces THIS stream, and nothing else.
  *
  * A fixed lookback of several hundred bytes reached into whatever object
@@ -849,20 +870,47 @@ async function pdfHasDrawings(src) {
     if (!/>>\s*$/.test(before)) continue;
 
     seen += 1;
+    const dict = ownDictionary(raw, m.index);
+
+    /*
+     * Prefer the declared length, and check that it lands where a stream ends.
+     * A wrong /Length is worse than none, so it has to point at "endstream"
+     * before it is believed.
+     */
+    const declared = declaredLength(raw, dict);
+    let end = to;
+    let trusted = false;
+    if (declared !== null && declared >= 0 && from + declared <= raw.length) {
+      const at = from + declared;
+      if (/^\s*endstream/.test(raw.slice(at, at + 32))) {
+        end = at;
+        trusted = true;
+      }
+    }
+
     /*
      * The bytes, without the end-of-line that separates them from `endstream`.
      * zlib tolerates that trailing byte; gunzip does not.
      */
-    const body = raw.slice(from, to).replace(/[\r\n]+$/, "");
+    const body = raw.slice(from, end).replace(/[\r\n]+$/, "");
     const text = readStream(Buffer.from(body, "latin1"));
 
     if (text === OVERSIZE) return true; // real, readable, too big to examine
     if (text === null) {
       // A stream nobody could read might be the one with the picture in it —
       // unless ITS OWN dictionary says it is a font, a profile or metadata.
-      if (!BENIGN_STREAM.test(ownDictionary(raw, m.index))) return true;
+      if (!BENIGN_STREAM.test(dict)) return true;
       continue;
     }
+    /*
+     * An UNCOMPRESSED stream whose end was guessed cannot be trusted to be
+     * whole: the guess stops at the first "endstream", which its own text may
+     * contain, and everything after that — including a diagram — was never
+     * looked at. A compressed stream does not need this guard, because a
+     * truncated deflate stream fails to inflate and has already been handled
+     * above as unreadable.
+     */
+    if (!trusted && text === body) return true;
 
     if (streamDraws(`${carry} ${text}`)) return true;
     carry = text.slice(-256);
