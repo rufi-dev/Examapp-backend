@@ -370,6 +370,86 @@ const doc = { html, blocks: [] };
     eq("an accent alone", onlyAccent.printOptions, { accent: "teal" });
   }
 
+  console.log("\nThe detector reads real PDFs, not just the ones we render:");
+  {
+    const fs = require("fs");
+    const os = require("os");
+    const zlib = require("zlib");
+    const { pdfHasDrawings } = require("../helper/lessonDocFiles");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lessondoc-filters-"));
+
+    // ASCII85 is an ordinary wrapper around Flate in PDFs from other tools.
+    const a85 = (buf) => {
+      let out = "";
+      for (let i = 0; i < buf.length; i += 4) {
+        const chunk = buf.slice(i, i + 4);
+        const n = chunk.length;
+        let v = Buffer.concat([chunk, Buffer.alloc(4 - n)]).readUInt32BE(0);
+        if (v === 0 && n === 4) { out += "z"; continue; }
+        const c = [];
+        for (let k = 0; k < 5; k += 1) { c.unshift(String.fromCharCode(33 + (v % 85))); v = Math.floor(v / 85); }
+        out += c.join("").slice(0, n + 1);
+      }
+      return out + "~>";
+    };
+    const makePdf = (content, filters) => {
+      const flate = zlib.deflateSync(Buffer.from(content, "latin1"));
+      const body = filters.includes("ASCII85") ? a85(flate) : flate.toString("latin1");
+      const chain = filters.map((f) => `/${f}Decode`).join(" ");
+      return Buffer.from(
+        `%PDF-1.4\n1 0 obj\n<< /Length ${body.length} /Filter [${chain}] >>\nstream\n${body}\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF`,
+        "latin1"
+      );
+    };
+    const TEXT = "BT /F1 12 Tf 72 700 Td (Faiz bir kemiyyetin yuzde bir hissesidir) Tj ET\n".repeat(30);
+    const LINE = TEXT + "10 10 m 50 90 l 90 30 l 130 70 l 170 20 l S\n";
+    const BARS4 = TEXT + "10 10 40 60 re f 60 10 40 90 re f 110 10 40 30 re f 160 10 40 75 re f\n";
+    const check = async (name, bytes) => {
+      const f = path.join(dir, `${name}.pdf`);
+      fs.writeFileSync(f, bytes);
+      return pdfHasDrawings(f);
+    };
+
+    ok("plain Flate text is replaceable", (await check("t1", makePdf(TEXT, ["Flate"]))) === false);
+    // The chain that made the saving fail for outside PDFs: these would not
+    // inflate directly, so every one of them was kept in full.
+    ok("an ASCII85+Flate chain is decoded, so text-only is replaceable", (await check("t2", makePdf(TEXT, ["ASCII85", "Flate"]))) === false);
+    // Neither of these emits a curve, which is all the first version looked for.
+    ok("a straight-line chart (m/l) is a drawing", (await check("t3", makePdf(LINE, ["Flate"]))) === true);
+    ok("...through an ASCII85 chain too", (await check("t4", makePdf(LINE, ["ASCII85", "Flate"]))) === true);
+    ok("a four-bar chart is a drawing", (await check("t5", makePdf(BARS4, ["Flate"]))) === true);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  console.log("\nA real text document is still worth the saving:");
+  {
+    /*
+     * The counterweight to all the caution above. Two things used to make every
+     * typeset PDF look like a drawing: embedded font programs, which never
+     * inflate, and the letters "stream" occurring inside another stream's
+     * compressed payload, which invented streams that could not be decoded
+     * either. Both read as "something unreadable is in here".
+     */
+    const fs = require("fs");
+    const os = require("os");
+    const { renderPdf } = require("../helper/lessonPlanPdf");
+    const { pdfHasDrawings } = require("../helper/lessonDocFiles");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lessondoc-real-"));
+    const page = (b) => `<!doctype html><meta charset="utf-8"><body style="font-family:Arial">${b}</body>`;
+    const prose = "<p>" + "Faiz bir kəmiyyətin yüzdə bir hissəsidir. ".repeat(40) + "</p>";
+    const render = async (name, html) => {
+      const f = path.join(dir, `${name}.pdf`);
+      fs.writeFileSync(f, await renderPdf(page(html), { footerLabel: null, pageNumbers: false }));
+      return pdfHasDrawings(f);
+    };
+
+    ok("a page of nothing but text IS replaceable", (await render("text", prose)) === false);
+    ok("...and a circle on it is still caught", (await render("circle", prose + '<svg width="200" height="200"><circle cx="100" cy="100" r="80" fill="none" stroke="black"/></svg>')) === true);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   assert.strictEqual(failed, 0, `${failed} parity assertions failed`);
 })();

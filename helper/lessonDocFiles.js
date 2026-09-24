@@ -587,8 +587,121 @@ const MIN_PAGE_TEXT = 40;
  * tone. Those are not comparable.
  */
 const VECTOR_SCAN_BYTES = 4 * 1024 * 1024; // enough of a stream to judge it by
-const RECT_FLOOR = 8; // rules, borders and table lines are not a diagram
+/*
+ * How much drawing is furniture rather than a figure.
+ *
+ * A page rule, a table border and an underline all emit path operators, so a
+ * floor of zero would mean no PDF is ever replaceable. These are low on
+ * purpose: a bar chart can be four bars, and a line chart is a handful of
+ * lineto operators, and both of those were slipping under the old limits.
+ */
+const RECT_FLOOR = 2;
+const LINE_FLOOR = 2;
 
+/*
+ * A stream that cannot be decoded but cannot hold a drawing either.
+ *
+ * Embedded fonts are the common case: a TrueType or CFF program is binary, does
+ * not inflate, and is present in every PDF with text in it. Treating those
+ * skips as "something might be hidden here" marked every typeset document as
+ * having drawings — the conservative answer, but so conservative it switched
+ * the saving off entirely. Measured on a plain Chromium text PDF: five streams,
+ * two of them fonts.
+ *
+ * Judged by the object dictionary that precedes the stream, which is not
+ * compressed. Anything NOT recognised here is still treated as a content
+ * stream, so the caution stays where it matters.
+ */
+const BENIGN_STREAM = /\/(FontFile[23]?|Metadata|ICCBased|Length1|Type1C|CIDFontType0C|OpenType|XML)\b/;
+
+/*
+ * Every way a content stream is commonly wrapped, tried in turn.
+ *
+ * Streams are not simply Flate. `/ASCII85Decode /FlateDecode` is an ordinary
+ * chain in PDFs from other tools, and inflating those bytes directly fails —
+ * which the first version treated as "skip this one", so text-only files from
+ * outside kept being sent in full and the saving never applied to them.
+ *
+ * Nothing here parses the stream dictionary to find out which filter was used.
+ * Each decoding is simply attempted; the one that works, works. That is shorter
+ * than a filter parser and cannot be fooled by a dictionary it fails to find.
+ */
+function decodeAscii85(text) {
+  const body = text.replace(/^\s*<~/, "").replace(/~>[\s\S]*$/, "").replace(/\s+/g, "");
+  const out = [];
+  let tuple = 0;
+  let count = 0;
+  for (const ch of body) {
+    if (ch === "z" && count === 0) {
+      out.push(0, 0, 0, 0);
+      continue;
+    }
+    const v = ch.charCodeAt(0) - 33;
+    if (v < 0 || v > 84) throw new Error("not ascii85");
+    tuple = tuple * 85 + v;
+    count += 1;
+    if (count === 5) {
+      out.push((tuple >>> 24) & 255, (tuple >>> 16) & 255, (tuple >>> 8) & 255, tuple & 255);
+      tuple = 0;
+      count = 0;
+    }
+  }
+  if (count > 0) {
+    for (let i = count; i < 5; i += 1) tuple = tuple * 85 + 84;
+    const bytes = [(tuple >>> 24) & 255, (tuple >>> 16) & 255, (tuple >>> 8) & 255, tuple & 255];
+    out.push(...bytes.slice(0, count - 1));
+  }
+  return Buffer.from(out);
+}
+
+function decodeAsciiHex(text) {
+  const body = text.replace(/>[\s\S]*$/, "").replace(/[^0-9a-fA-F]/g, "");
+  if (!body.length) throw new Error("not asciihex");
+  return Buffer.from(body.length % 2 ? body + "0" : body, "hex");
+}
+
+// The decoded stream, or null when this one could not be read at all.
+function readStream(bytes) {
+  const zlib = require("zlib");
+  const attempts = [
+    () => zlib.inflateSync(bytes),
+    () => zlib.inflateRawSync(bytes),
+    () => zlib.unzipSync(bytes),
+    () => zlib.inflateSync(decodeAscii85(bytes.toString("latin1"))),
+    () => zlib.inflateSync(decodeAsciiHex(bytes.toString("latin1"))),
+  ];
+  for (const attempt of attempts) {
+    try {
+      const out = attempt();
+      if (out && out.length) return out.toString("latin1");
+    } catch {
+      /* try the next wrapping */
+    }
+  }
+  // An uncompressed content stream is legal and needs no decoding at all.
+  const plain = bytes.toString("latin1");
+  if (/\bBT\b|\bET\b|\bTj\b|\bre\b|\bcm\b/.test(plain)) return plain;
+  return null;
+}
+
+/*
+ * Does this PDF draw anything the text extractor cannot hand over?
+ *
+ * Raster content — a scan, a photo, a screenshot — leaves markers in the object
+ * dictionaries that survive in the raw bytes. Vector content — a chart, a
+ * circle, an arrow, a bar — is drawing operators inside a compressed content
+ * stream, so the streams have to be decoded and read.
+ *
+ * Every uncertainty answers YES and keeps the PDF in the request: an unreadable
+ * file, a stream that would not decode, an unfamiliar shape. Crucially that
+ * includes a stream skipped ALONGSIDE ones that decoded — analysing only the
+ * readable half and concluding "no drawings" is exactly how a figure goes
+ * missing, because the figure is in the half that was skipped.
+ *
+ * The cost of a wrong yes is tokens. The cost of a wrong no is a diagram the
+ * teacher can see, that the model never received, answered in the same
+ * confident tone. Those are not comparable, so the bias is not symmetric.
+ */
 async function pdfHasDrawings(src) {
   let buf;
   try {
@@ -601,31 +714,45 @@ async function pdfHasDrawings(src) {
     return true;
   }
 
-  const zlib = require("zlib");
   let decoded = "";
-  // Walk the stream objects. `stream` … `endstream` is the only framing needed:
-  // anything that will not inflate is skipped, and skipping is not a verdict.
+  let skipped = 0;
+  let seen = 0;
   const re = /stream\r?\n/g;
   let m;
   while ((m = re.exec(raw)) && decoded.length < VECTOR_SCAN_BYTES) {
     const from = m.index + m[0].length;
     const to = raw.indexOf("endstream", from);
     if (to < 0) break;
-    try {
-      decoded += zlib.inflateSync(Buffer.from(raw.slice(from, to), "latin1")).toString("latin1");
-    } catch {
-      /* not a Flate stream, or truncated: no verdict either way */
+    /*
+     * A real stream is introduced by its dictionary, so the bytes before the
+     * keyword end in ">>". Without that check the scan also matched the letters
+     * "stream" occurring INSIDE another stream's compressed payload — on a
+     * plain Chromium text PDF that invented two extra streams, neither of which
+     * could be decoded (they are not streams), which then read as "something
+     * unreadable is in here" and marked every typeset document as drawing.
+     */
+    const before = raw.slice(Math.max(0, m.index - 600), m.index);
+    if (!/>>\s*$/.test(before)) continue;
+
+    seen += 1;
+    const text = readStream(Buffer.from(raw.slice(from, to), "latin1"));
+    if (text === null) {
+      // Only count a skip that could have been a content stream.
+      if (!BENIGN_STREAM.test(before)) skipped += 1;
+    } else {
+      decoded += text;
     }
   }
-  if (!decoded) {
-    // Nothing could be read. If the file has content streams at all, it may
-    // well draw something, and the safe answer is the conservative one.
-    return /stream\r?\n/.test(raw);
-  }
 
-  if (/\d\s+(c|v|y)[\s\r\n]/.test(decoded)) return true;
+  // A stream nobody could read might be the one with the picture in it.
+  if (skipped > 0) return true;
+  if (!decoded) return seen > 0;
+
+  if (/\d\s+(c|v|y)[\s\r\n]/.test(decoded)) return true; // curves: charts, circles, arrows
+  const lines = (decoded.match(/\d\s+l[\s\r\n]/g) || []).length;
+  if (lines > LINE_FLOOR) return true; // a line chart, an axis, a drawn arrow
   const rects = (decoded.match(/\d\s+re[\s\r\n]/g) || []).length;
-  return rects > RECT_FLOOR;
+  return rects > RECT_FLOOR; // bars, boxes, framed figures
 }
 
 /*
