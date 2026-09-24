@@ -828,6 +828,54 @@ const doc = { html, blocks: [] };
     fs.rmSync(dir, { recursive: true, force: true });
   }
 
+  console.log("\nBroken framing keeps the file:");
+  {
+    const fs = require("fs");
+    const os = require("os");
+    const zlib = require("zlib");
+    const { pdfHasDrawings } = require("../helper/lessonDocFiles");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lessondoc-frame-"));
+    const T = (t) => `BT /F1 12 Tf 72 700 Td (${t}) Tj ET\n`;
+    const wrap = (len, body) =>
+      Buffer.from(
+        `%PDF-1.4\n1 0 obj\n<< /Length ${len} >>\nstream\n${body}\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF`,
+        "latin1"
+      );
+    const check = async (name, bytes) => {
+      const f = path.join(dir, `${name}.pdf`);
+      fs.writeFileSync(f, bytes);
+      return pdfHasDrawings(f);
+    };
+
+    // A real stream that simply stops. Breaking out of the scan here used to
+    // report the file clean, which is the opposite of the fail-closed rule.
+    ok(
+      "a truncated file with a visible path is kept",
+      (await check("trunc", Buffer.from(`%PDF-1.4\n1 0 obj\n<< /Length 999 >>\nstream\n${T("lesson text")}10 10 m 90 90 l S\n`, "latin1"))) === true
+    );
+
+    /*
+     * "endstream" alone was accepted as proof of a boundary, so a wrong
+     * /Length aimed at the word sitting inside a text string cut the stream
+     * short and missed the drawing after it. A real boundary is followed by the
+     * end of the object.
+     */
+    const content = `${T("the word endstream sits here")}10 10 m 90 90 l S\n`;
+    ok("a /Length aimed at 'endstream' inside text is not believed", (await check("bad-len", wrap(content.indexOf("endstream"), content))) === true);
+    ok("...and the honest length reads the whole thing", (await check("good-len", wrap(content.length, content))) === true);
+
+    /*
+     * The counterweight, and it caught a real mistake: the terminator check was
+     * written before the is-this-a-stream check, so the "stream" inside the
+     * final "endstream" had nothing after it, fired the missing-terminator rule,
+     * and made EVERY plain text PDF unreplaceable.
+     */
+    const plain = T("plain lesson text with nothing drawn");
+    ok("plain uncompressed text with an honest length is replaceable", (await check("plain", wrap(plain.length, plain))) === false);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   assert.strictEqual(failed, 0, `${failed} parity assertions failed`);
 })();

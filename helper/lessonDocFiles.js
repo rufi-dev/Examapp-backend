@@ -872,16 +872,30 @@ async function pdfHasDrawings(src) {
   const re = /stream(?:\r\n|\n|\r)/g;
   let m;
   while ((m = re.exec(raw))) {
-    const from = m.index + m[0].length;
-    const to = raw.indexOf("endstream", from);
-    if (to < 0) break;
     /*
-     * A real stream is introduced by its dictionary, so the bytes before the
-     * keyword end in ">>". Without this the scan also matched the letters
-     * "stream" occurring INSIDE another stream's compressed payload.
+     * Is this a stream at all?
+     *
+     * A real one is introduced by its dictionary, so the bytes before the
+     * keyword end in ">>". Two things match the keyword and are not streams:
+     * the letters inside another stream's compressed payload, and the tail of
+     * the word "endstream" itself.
+     *
+     * This has to come FIRST. Checking for a terminator before knowing whether
+     * this is a stream meant the "stream" inside the final "endstream" had
+     * nothing after it, so the missing-terminator rule below fired on it and
+     * every plain text PDF came back unreplaceable.
      */
     const before = raw.slice(Math.max(0, m.index - 600), m.index);
     if (!/>>\s*$/.test(before)) continue;
+
+    const from = m.index + m[0].length;
+    const to = raw.indexOf("endstream", from);
+    /*
+     * A real stream with no terminator. The file is truncated or malformed, and
+     * whatever it was going to say is unreadable — which is a reason to keep the
+     * PDF, not to stop looking and report it clean.
+     */
+    if (to < 0) return true;
 
     const dict = ownDictionary(raw, m.index);
     /*
@@ -910,7 +924,16 @@ async function pdfHasDrawings(src) {
     let trusted = false;
     if (declared !== null && declared >= 0 && from + declared <= raw.length) {
       const at = from + declared;
-      if (/^\s*endstream/.test(raw.slice(at, at + 32))) {
+      /*
+       * "endstream" alone is not proof: the word can sit inside a text string
+       * halfway through the stream, and a wrong /Length pointing at it validated
+       * happily, cut the stream short, and missed the drawing after it.
+       *
+       * A real boundary is followed by the END of the object — "endstream" then
+       * "endobj", or the next object beginning. Anything else and the length is
+       * not believed, which drops through to the untrusted path below.
+       */
+      if (/^\s*endstream\s*(endobj\b|\d+\s+\d+\s+obj\b)/.test(raw.slice(at, at + 64))) {
         end = at;
         trusted = true;
       }
