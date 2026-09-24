@@ -876,6 +876,60 @@ const doc = { html, blocks: [] };
     fs.rmSync(dir, { recursive: true, force: true });
   }
 
+  console.log("\nA boundary inside a string is not a boundary:");
+  {
+    const fs = require("fs");
+    const os = require("os");
+    const zlib = require("zlib");
+    const { pdfHasDrawings } = require("../helper/lessonDocFiles");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lessondoc-forge-"));
+    const T = (t) => `BT /F1 12 Tf 72 700 Td (${t}) Tj ET\n`;
+    const wrap = (len, body) =>
+      Buffer.from(
+        `%PDF-1.4\n1 0 obj\n<< /Length ${len} >>\nstream\n${body}\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF`,
+        "latin1"
+      );
+    const zwrap = (c) => {
+      const b = zlib.deflateSync(Buffer.from(c, "latin1")).toString("latin1");
+      return Buffer.from(
+        `%PDF-1.4\n1 0 obj\n<< /Length ${b.length} /Filter /FlateDecode >>\nstream\n${b}\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF`,
+        "latin1"
+      );
+    };
+    const check = async (name, bytes) => {
+      const f = path.join(dir, `${name}.pdf`);
+      fs.writeFileSync(f, bytes);
+      return pdfHasDrawings(f);
+    };
+
+    /*
+     * Matching the WORDS at a boundary can be forged: a literal string
+     * containing "endstream 9 0 obj" reads exactly like the end of an object,
+     * so a /Length aimed into the middle of a sentence validated and cut the
+     * stream short, losing the line drawn after it.
+     *
+     * What a forgery cannot do is balance. If the bytes up to the claimed
+     * boundary leave a string open, the boundary is inside that string —
+     * whatever the words there happen to spell.
+     */
+    const forged = `${T("text saying endstream 9 0 obj inside it")}10 10 m 90 90 l S\n`;
+    ok("a length aimed inside a forged boundary is refused", (await check("forged", wrap(forged.indexOf("endstream"), forged))) === true);
+    ok("...and the honest length reads the whole stream", (await check("forged-ok", wrap(forged.length, forged))) === true);
+
+    // Counterweights: this must not make ordinary prose unreplaceable.
+    const plain = T("plain lesson text with nothing drawn");
+    ok("plain text with an honest length is still replaceable", (await check("plain", wrap(plain.length, plain))) === false);
+    ok("...including text containing its own parentheses", (await check("parens", wrap(T("faiz (yuzde) hesabla").length, T("faiz (yuzde) hesabla")))) === false);
+    /*
+     * A compressed stream is corroborated by inflating it — a wrong length
+     * truncates the deflate data and fails — so the balance check does not
+     * apply there and must not start rejecting compressed text.
+     */
+    ok("compressed text is unaffected by the new check", (await check("z-plain", zwrap(plain.repeat(8)))) === false);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   assert.strictEqual(failed, 0, `${failed} parity assertions failed`);
 })();

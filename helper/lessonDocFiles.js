@@ -797,6 +797,45 @@ function streamVerdict(text) {
 }
 
 /*
+ * Does this slice end OUTSIDE every string?
+ *
+ * The boundary test is otherwise text-matching, and text can be forged: a
+ * literal string containing "endstream 9 0 obj" looks exactly like the end of an
+ * object, so a wrong /Length aimed into the middle of a sentence validated and
+ * cut the stream short.
+ *
+ * What a forgery cannot do is balance. If the bytes up to the claimed boundary
+ * leave a string open, the boundary is inside that string and is not a boundary
+ * at all — whatever the words there happen to spell.
+ *
+ * Only meaningful for an UNCOMPRESSED stream, where the bytes are the content.
+ * A compressed one is validated by inflating it: get the length wrong and the
+ * deflate stream is truncated and fails, which is already handled as unreadable.
+ */
+function endsOutsideString(text) {
+  let literal = 0;
+  let hex = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (literal > 0) {
+      if (c === "\\") { i += 1; continue; }
+      if (c === "(") literal += 1;
+      else if (c === ")") literal -= 1;
+      continue;
+    }
+    if (hex) {
+      if (c === ">") hex = false;
+      continue;
+    }
+    if (c === "(") { literal = 1; continue; }
+    if (c === "<" && text[i + 1] !== "<") { hex = true; continue; }
+    if (c === "<" && text[i + 1] === "<") { i += 1; continue; }
+    if (c === "%") { while (i < text.length && text[i] !== "\n" && text[i] !== "\r") i += 1; continue; }
+  }
+  return literal === 0 && !hex;
+}
+
+/*
  * Where this stream actually ends, according to the file.
  *
  * Searching for the next "endstream" is a guess, and an uncompressed stream can
@@ -933,7 +972,16 @@ async function pdfHasDrawings(src) {
        * "endobj", or the next object beginning. Anything else and the length is
        * not believed, which drops through to the untrusted path below.
        */
-      if (/^\s*endstream\s*(endobj\b|\d+\s+\d+\s+obj\b)/.test(raw.slice(at, at + 64))) {
+      const looksLikeEnd = /^\s*endstream\s*(endobj\b|\d+\s+\d+\s+obj\b)/.test(raw.slice(at, at + 64));
+      /*
+       * For an uncompressed stream the words at the boundary prove nothing on
+       * their own — they can be inside a sentence. The bytes up to it must also
+       * leave no string open. A compressed stream needs no such check: a wrong
+       * length truncates the deflate data and inflation fails.
+       */
+      const corroborated =
+        /\/Filter\b/.test(dict) || endsOutsideString(raw.slice(from, at));
+      if (looksLikeEnd && corroborated) {
         end = at;
         trusted = true;
       }
