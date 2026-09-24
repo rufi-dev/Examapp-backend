@@ -19,6 +19,7 @@ const {
   nativePrintOptions,
   nativeCanHandle,
   diagramSvg,
+  salvageNative,
 } = require("../helper/lessonDocNative");
 const { sanitizeDocHtml } = require("../helper/lessonDocSanitize");
 const { buildLessonDocHtml, withRasterFigures } = require("../helper/lessonDocHtml");
@@ -928,6 +929,64 @@ const doc = { html, blocks: [] };
     ok("compressed text is unaffected by the new check", (await check("z-plain", zwrap(plain.repeat(8)))) === false);
 
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  /*
+   * Round 15 — a maths worksheet is not a malformed document.
+   *
+   * The turn was rejected unless it contained both a heading block AND a text
+   * block. A geometry material — heading, diagram, two worked examples, four
+   * tasks — has no prose paragraph anywhere in it, so it failed that check and
+   * a teacher who had already been billed for the provider call was told the
+   * content "did not come back". It had come back. We threw it away.
+   *
+   * Reproduced from the shape that actually failed in production on 2026-09-24.
+   */
+  console.log("\n— salvaging a paid answer —");
+  {
+    const mathsShape = {
+      title: "Pifaqor teoremi",
+      blocks: [
+        { kind: "heading", text: "Pifaqor teoremi" },
+        { kind: "diagram", diagram: { type: "concept", title: "Düzbucaqlı üçbucaq", labels: ["a", "b", "c"] } },
+        { kind: "example", text: "a=3, b=4", solution: "c=5" },
+        { kind: "task", text: "a=6, b=8 olarsa c=?" },
+      ],
+    };
+    const maths = salvageNative(normalizeNative(mathsShape));
+    ok("a worksheet with no prose paragraph survives", maths.blocks.length === 4);
+    ok("...and is not given a paragraph it did not ask for", !maths.blocks.some((b) => b.kind === "text"));
+
+    // The other half: content with no heading gets one from its own title
+    // rather than being discarded for the want of a single line.
+    const headless = salvageNative(normalizeNative({
+      title: "Kəsrlər",
+      blocks: [{ kind: "text", text: "Kəsr bütövün hissəsidir." }],
+    }));
+    eq("a headless document is given its own title", headless.blocks[0], {
+      kind: "heading", text: "Kəsrlər", term: "", items: [], ordered: false,
+      solution: "", columns: [], rows: [], tone: "info", diagram: null,
+    });
+    ok("...and keeps everything that was already there", headless.blocks.length === 2);
+    ok("...and renders as a real heading", /<h2[^>]*>Kəsrlər<\/h2>/.test(nativeBlocksToHtml(headless)));
+
+    // A document that already has a heading is left exactly as it was.
+    const intact = normalizeNative({ title: "Faizlər", blocks: [{ kind: "heading", text: "Başlıq" }, { kind: "text", text: "Mətn" }] });
+    eq("an intact document is untouched", salvageNative(intact).blocks.length, 2);
+    eq("...and its own heading is kept, not the title", salvageNative(intact).blocks[0].text, "Başlıq");
+
+    // Only genuine emptiness still fails — there is nothing to salvage from
+    // nothing, and inventing a document would be worse than the error.
+    eq("an empty answer stays empty", salvageNative(normalizeNative({ title: "Var", blocks: [] })).blocks.length, 0);
+    eq("...as does a document with neither blocks nor title", salvageNative(normalizeNative({})).blocks.length, 0);
+    /*
+     * A titleless document still gets a heading, borrowed from its own first
+     * line of text: the alternative is a PDF that opens with a paragraph and
+     * no name on it.
+     */
+    const noTitle = salvageNative(normalizeNative({ blocks: [{ kind: "text", text: "Kvadrat tənlik" }] }));
+    eq("a titleless document borrows its first line", noTitle.blocks[0].kind, "heading");
+    eq("...without losing that line", noTitle.blocks.length, 2);
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

@@ -163,6 +163,41 @@ function normalizeNative(raw = {}) {
   };
 }
 
+// A block of the shape normalizeNative produces, so anything added afterwards
+// walks the same renderer as everything the model wrote.
+const emptyBlock = (kind, text) => ({
+  kind,
+  text: clamp(text),
+  term: "",
+  items: [],
+  ordered: false,
+  solution: "",
+  columns: [],
+  rows: [],
+  tone: "info",
+  diagram: null,
+});
+
+/*
+ * Make a usable document out of a nearly-usable one.
+ *
+ * The turn used to be rejected unless it contained BOTH a heading block and a
+ * text block. A material that came back as a heading, a list and four tasks —
+ * perfectly good, and already paid for — was thrown away, and the teacher was
+ * told to try again. That is the worst outcome available: the money is spent
+ * either way, and the only question is whether anybody gets the material.
+ *
+ * So what can be repaired is repaired. A document with content but no heading
+ * gets one from its own title. Only genuine emptiness is still a failure.
+ */
+function salvageNative(content) {
+  if (!content.blocks.length) return content;
+  if (content.blocks.some((b) => b.kind === "heading")) return content;
+  const title = content.title || content.blocks.find((b) => b.text)?.text || "";
+  if (!title) return content;
+  return { ...content, blocks: [emptyBlock("heading", title), ...content.blocks] };
+}
+
 function svgText(x, y, value, size = 14, anchor = "middle") {
   return `<text x="${x}" y="${y}" text-anchor="${anchor}" font-family="Arial,sans-serif" font-size="${size}" fill="#222631">${esc(value)}</text>`;
 }
@@ -483,4 +518,4 @@ function nativeCanHandle(doc = {}, countParts) {
   return !parts;
 }
 
-module.exports = { NATIVE_SCHEMA, NATIVE_SYSTEM, MAX_BLOCKS, normalizeNative, nativeBlocksToHtml, nativePrompt, nativePrintOptions, diagramSvg, nativeCanHandle };
+module.exports = { salvageNative, NATIVE_SCHEMA, NATIVE_SYSTEM, MAX_BLOCKS, normalizeNative, nativeBlocksToHtml, nativePrompt, nativePrintOptions, diagramSvg, nativeCanHandle };

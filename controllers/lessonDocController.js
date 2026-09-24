@@ -839,8 +839,8 @@ async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abor
       : "Cavab yarımçıq gəldi. Yenidən cəhd edin.";
     throw e;
   }
-  const content = native.normalizeNative(out.doc || {});
-  if (!content.blocks.length || !content.blocks.some((b) => b.kind === "heading") || !content.blocks.some((b) => b.kind === "text")) {
+  const content = native.salvageNative(native.normalizeNative(out.doc || {}));
+  if (!content.blocks.length) {
     /*
      * The provider has already been paid by this point. Validation failing, or
      * the commit losing a revision race, must not make that spend invisible:
@@ -848,6 +848,22 @@ async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abor
      * cost money with no row reads as a turn that never happened.
      */
     await logStudioUsage(req, { doc, hadBlocks, out: { ...out, timing: { rounds: 1, failed: true } } }).catch(() => {});
+    /*
+     * What actually came back, by SHAPE. A 422 that says only "empty" cannot be
+     * diagnosed afterwards — this failure cost real money and left no trace of
+     * what the model returned. Kinds and counts, never the teacher's text.
+     */
+    const raw = (out && out.doc) || {};
+    console.error(
+      "[LESSON DOC] native_empty",
+      JSON.stringify({
+        keys: Object.keys(raw).slice(0, 12),
+        rawBlocks: Array.isArray(raw.blocks) ? raw.blocks.length : null,
+        kinds: Array.isArray(raw.blocks) ? [...new Set(raw.blocks.map((b) => b && b.kind).filter(Boolean))] : [],
+        hasTitle: Boolean(raw.title),
+        outTokens: (out && out.cost && out.cost.outputTokens) || 0,
+      })
+    );
     const e = new Error("empty_native_document");
     e.aiStatus = 422;
     e.userMessage = "Materialın məzmunu tam qayıtmadı. Yenidən cəhd edin.";
