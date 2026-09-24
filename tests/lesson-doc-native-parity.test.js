@@ -967,7 +967,7 @@ const doc = { html, blocks: [] };
       blocks: [{ kind: "text", text: "Kəsr bütövün hissəsidir." }],
     }));
     eq("a headless document is given its own title", headless.blocks[0], {
-      kind: "heading", text: "Kəsrlər", term: "", items: [], ordered: false,
+      kind: "heading", imageRef: null, text: "Kəsrlər", term: "", items: [], ordered: false,
       solution: "", columns: [], rows: [], tone: "info", diagram: null,
     });
     ok("...and keeps everything that was already there", headless.blocks.length === 2);
@@ -1030,8 +1030,16 @@ const doc = { html, blocks: [] };
     ok("...9 and 16 as well, so the sum is checkable", svg.includes("= 9") && svg.includes("= 16"));
     ok("...and c itself, derived", svg.includes("c = 5"));
 
+    /*
+     * The hypotenuse is COMPUTED from the two legs — 5 and 12 are given, 13 and
+     * 169 are not. Asserted on the area, which is always drawn, rather than on
+     * the side label, which a narrow triangle may drop to avoid printing three
+     * measurements on top of each other. What must never change is the
+     * arithmetic; where the label lands is a layout decision.
+     */
     const big = geometrySvg({ type: "pythagoras", title: "", labels: [], values: [5, 12] });
-    ok("a 5-12-13 triangle computes its own 13", big.includes("c = 13") && big.includes("= 169"));
+    ok("a 5-12-13 triangle computes its own 169", big.includes("= 169") && big.includes("= 144") && big.includes("= 25"));
+    ok("...and a roomier one still prints the derived side", geometrySvg({ type: "pythagoras", title: "", labels: [], values: [3, 4] }).includes("c = 5"));
 
     /*
      * To scale, or it is a picture of a triangle rather than this triangle.
@@ -1145,6 +1153,97 @@ const doc = { html, blocks: [] };
     eq("...and keeps its last block", salvagedFull.blocks[MAX_BLOCKS - 1].text, `sətir ${MAX_BLOCKS - 1}`);
     const nearlyFull = { title: "Az qalıb", blocks: Array.from({ length: MAX_BLOCKS - 1 }, (_, i) => ({ kind: "text", text: `sətir ${i}` })) };
     eq("one short of the ceiling still gets its heading", salvageNative(normalizeNative(nearlyFull)).blocks[0].kind, "heading");
+  }
+
+  /*
+   * Round 17 — a teacher's own picture reaches the page.
+   *
+   * Generated figures printed; uploaded photographs did not. They were read by
+   * the model and then dropped, because the sanitizer forbids src of any kind
+   * and nothing resolved them afterwards. A teacher who attaches a photo and
+   * asks for it in the material was getting a material without it and no word
+   * said about why.
+   */
+  console.log("\n— the teacher's own pictures —");
+  {
+    const fs = require("fs");
+    const os = require("os");
+    const F = require("../helper/lessonDocFiles");
+    const { sanitizeDocHtml } = require("../helper/lessonDocSanitize");
+
+    // The block survives, carries its reference, and renders as a NAMED figure
+    // rather than one that contains megabytes.
+    const doc = normalizeNative({
+      title: "Şəkilli material",
+      blocks: [
+        { kind: "heading", text: "Başlıq" },
+        { kind: "image", imageRef: 1, text: "Müəllimin şəkli" },
+      ],
+    });
+    eq("an image block survives normalisation", doc.blocks.length, 2);
+    eq("...keeping the number it was given", doc.blocks[1].imageRef, 1);
+    const html = nativeBlocksToHtml(doc);
+    ok("...and renders as a figure that NAMES a picture", /<figure class="doc-image" data-image="1">/.test(html));
+    ok("...carrying its caption", /Müəllimin şəkli/.test(html));
+    ok("...and no bytes at all, so the document stays small", !/base64/.test(html));
+
+    // An image block with no reference is not a figure.
+    eq("an image block with no picture is dropped", normalizeNative({
+      title: "T", blocks: [{ kind: "image", text: "altyazı" }],
+    }).blocks.length, 0);
+    eq("...as is one with a nonsense reference", normalizeNative({
+      title: "T", blocks: [{ kind: "image", imageRef: -3, text: "x" }],
+    }).blocks.length, 0);
+
+    /*
+     * The security boundary is unchanged. `data-image` is inert text; a src of
+     * any kind still does not survive, not even a data: one, because nothing in
+     * a MODEL-written document is allowed to embed anything.
+     */
+    ok("a remote image is still stripped", sanitizeDocHtml('<img src="https://evil.test/a.png">') === "");
+    ok("...and so is an inline one", sanitizeDocHtml('<img src="data:image/png;base64,AAAA">') === "");
+    ok("a path in data-image is refused", !/data-image/.test(sanitizeDocHtml('<figure data-image="../../etc/passwd">x</figure>')));
+    ok("...and so is a zero", !/data-image/.test(sanitizeDocHtml('<figure data-image="0">x</figure>')));
+    ok("a real reference survives sanitisation", /data-image="2"/.test(sanitizeDocHtml('<figure data-image="2">x</figure>')));
+
+    // Numbering: the prompt and the resolver must agree, or a material shows the
+    // wrong photograph with complete confidence.
+    const files = [
+      { key: "aaa", name: "qeyd.pdf", mime: "application/pdf", ext: "pdf" },
+      { key: "bbb", name: "lovhe.jpg", mime: "image/jpeg", ext: "jpg" },
+      { key: "ccc", name: "defter.png", mime: "image/png", ext: "png" },
+    ];
+    const imgs = F.docImages({ files });
+    eq("only pictures are numbered", imgs.map((f) => f.name), ["lovhe.jpg", "defter.png"]);
+
+    /*
+     * End to end, against real bytes on disk: the reference becomes an actual
+     * image, and the same call is what both the preview and the export make.
+     */
+    const key = "a".repeat(64);
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+    fs.mkdirSync(F.DIR, { recursive: true });
+    const onDisk = F.pathForKey(key, "png");
+    fs.writeFileSync(onDisk, png);
+    const withPhoto = { files: [{ key, name: "lövhə.png", mime: "image/png", ext: "png" }] };
+    const named = '<figure class="doc-image" data-image="1"><figcaption>Lövhə</figcaption></figure>';
+    const filled = await F.embedDocImages(named, withPhoto);
+    ok("the named picture becomes real bytes on the page", filled.includes(`data:image/png;base64,${png.toString("base64")}`));
+    ok("...keeping its caption", /Lövhə<\/figcaption>/.test(filled));
+    ok("...and its file name as alt text", /alt="lövhə\.png"/.test(filled));
+    // The same call serves the screen and the file, which is the whole promise.
+    eq("preview and export resolve identically", await F.embedDocImages(named, withPhoto), filled);
+    fs.rmSync(onDisk, { force: true });
+    // A picture the document names but disk has lost must not leave a blank frame.
+    eq("a picture missing from disk leaves no empty frame", (await F.embedDocImages(named, withPhoto)).trim(), "");
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "docimg-"));
+    const missing = await F.embedDocImages('<figure class="doc-image" data-image="9"><figcaption>yox</figcaption></figure>', { files });
+    eq("a reference naming no attachment leaves no empty frame", missing.trim(), "");
+    const untouched = await F.embedDocImages("<p>şəkilsiz material</p>", { files });
+    eq("a document with no pictures is returned unchanged", untouched, "<p>şəkilsiz material</p>");
+
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

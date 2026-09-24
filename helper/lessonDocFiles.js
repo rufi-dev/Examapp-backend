@@ -1161,6 +1161,86 @@ async function removeIfUnused(key, ext, stillUsed) {
   }
 }
 
+
+/*
+ * The teacher's own pictures, numbered.
+ *
+ * ONE definition, used by both the prompt that offers them to the model and the
+ * resolver that puts them on the page. If those two ever numbered the files
+ * differently, a material would confidently show the wrong photograph — so they
+ * are not allowed to be two functions.
+ */
+const IMAGE_MIME = /^image\/(png|jpe?g|gif|webp)$/i;
+const docImages = (doc) => (doc?.files || []).filter((f) => IMAGE_MIME.test(f?.mime || ""));
+
+// A whole document's pictures, inlined. Generous for a handout, and far below
+// what Chromium or Word will choke on.
+const MAX_INLINE_BYTES = 12 * 1024 * 1024;
+const FIGURE = /<figure\b[^>]*?\sdata-image="(\d{1,2})"[^>]*>([\s\S]*?)<\/figure>/g;
+
+/*
+ * Put the pictures INTO the document, as bytes.
+ *
+ * The stored html only names them — `data-image="1"` — because a material that
+ * carried its photographs base64-encoded would be several megabytes of database
+ * row per lesson and would hit Mongo's document limit on the third picture. The
+ * bytes are attached here instead, at the moment something is rendered.
+ *
+ * Inlined rather than linked on BOTH paths, screen and file, for one reason: the
+ * promise this feature is built on is that the preview and the export are the
+ * same document. A linked image is one that can be missing from the file, or
+ * present on screen and absent on paper, and that is exactly the difference we
+ * said would not exist. It also means the PDF a teacher sends home needs nothing
+ * from our servers to open.
+ *
+ * A reference that names no attachment resolves to nothing and the figure is
+ * removed — a caption under a blank frame is worse than no figure.
+ */
+async function embedDocImages(html, doc) {
+  const src = String(html || "");
+  if (!src.includes("data-image=")) return src;
+  const images = docImages(doc);
+  const fsp = require("fs/promises");
+  const cache = new Map();
+  let spent = 0;
+
+  const parts = [];
+  let last = 0;
+  let m;
+  FIGURE.lastIndex = 0;
+  while ((m = FIGURE.exec(src))) {
+    parts.push({ start: m.index, end: m.index + m[0].length, ref: Number(m[1]), inner: m[2] });
+  }
+  if (!parts.length) return src;
+
+  let out = "";
+  for (const part of parts) {
+    out += src.slice(last, part.start);
+    last = part.end;
+    const file = images[part.ref - 1];
+    if (!file) continue; // names nothing: the figure goes with it
+    let uri = cache.get(file.key);
+    if (uri === undefined) {
+      uri = null;
+      try {
+        const buf = await fsp.readFile(pathForKey(file.key, file.ext));
+        if (spent + buf.length <= MAX_INLINE_BYTES) {
+          spent += buf.length;
+          uri = `data:${file.mime};base64,${buf.toString("base64")}`;
+        }
+      } catch {
+        /* the picture is gone from disk; the lesson is not */
+      }
+      cache.set(file.key, uri);
+    }
+    if (!uri) continue;
+    const alt = String(file.name || "").replace(/[<>"&]/g, "");
+    out += `<figure class="doc-image"><img src="${uri}" alt="${alt}" />${part.inner}</figure>`;
+  }
+  out += src.slice(last);
+  return out;
+}
+
 module.exports = {
   DIR,
   ACCEPT,
@@ -1171,6 +1251,8 @@ module.exports = {
   SLIM_JPEG_Q,
   SLIM_OVER_BYTES,
   saveFile,
+  docImages,
+  embedDocImages,
   trustedType,
   OFFICE_EXTS,
   toParts,

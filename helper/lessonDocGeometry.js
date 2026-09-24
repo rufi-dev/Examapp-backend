@@ -49,17 +49,57 @@ const num = (v) => {
 };
 
 /*
+ * How wide this label will be, near enough to place it by.
+ *
+ * There is no text metric available while generating SVG on a server, so labels
+ * were positioned by fixed offsets and hope: "Hipotenuz c = 10" and "a = 3" were
+ * given the same room, and the long one ran over the line it named. Arial's
+ * lowercase averages about 0.52 em and its digits are 0.556 em; this errs
+ * slightly wide, which is the safe direction for deciding whether something fits.
+ */
+const textWidth = (value, size) => {
+  const str = String(value);
+  let em = 0;
+  for (const ch of str) {
+    if (/[ .,:;'|!]/.test(ch)) em += 0.28;
+    else if (/[ijlt]/.test(ch)) em += 0.31;
+    else if (/[A-ZĞÜŞİÖÇ0-9]/.test(ch)) em += 0.62;
+    else if (/[mwMW]/.test(ch)) em += 0.83;
+    else em += 0.54;
+  }
+  return em * size;
+};
+
+/*
  * `halo` paints the label's own outline in the ground colour BEHIND the glyphs,
  * so a measurement stays readable wherever it lands — on a line, on a fill, on
- * another figure's edge. Without it, "Katet b = 8" on a long shallow triangle
- * sat directly on the side it was naming and could not be read at all, and no
- * amount of nudging the offset fixes that for every possible triangle.
+ * another figure's edge.
+ *
+ * The width is PROPORTIONAL to the type size, and small. At a flat 4.5px it was
+ * wider than the strokes of 12px Arial: the halo of one glyph met the halo of
+ * the next, the letters filled in, and every measurement in the figure printed
+ * as a pale smudge. A halo has to be thinner than the thing it separates.
  */
 const text = (x, y, value, { size = 13, anchor = "middle", fill = INK, weight = "normal", italic = false, halo = false } = {}) =>
   `<text x="${n2(x)}" y="${n2(y)}" text-anchor="${anchor}" font-family="Arial,sans-serif" font-size="${size}"` +
   ` font-weight="${weight}"${italic ? ' font-style="italic"' : ""}` +
-  `${halo ? ` paint-order="stroke" stroke="${GROUND}" stroke-width="4.5" stroke-linejoin="round"` : ""}` +
+  `${halo ? ` paint-order="stroke" stroke="${GROUND}" stroke-width="${n2(Math.max(1.6, size * 0.2))}" stroke-linejoin="round" stroke-opacity="0.9"` : ""}` +
   ` fill="${fill}">${esc(String(value).slice(0, 40))}</text>`;
+
+/*
+ * Keep a label inside the drawing. A measurement that runs off the edge of the
+ * figure is not a label, and the fitter only guarantees the SHAPE fits — the
+ * text hangs outside it by design, which is exactly where the canvas ends.
+ */
+const inBounds = (x, value, size, anchor) => {
+  const w = textWidth(value, size);
+  const half = anchor === "middle" ? w / 2 : 0;
+  const left = anchor === "end" ? x - w : x - half;
+  const right = anchor === "end" ? x : x + (anchor === "start" ? w : half);
+  if (left < 6) return x + (6 - left);
+  if (right > W - 6) return x - (right - (W - 6));
+  return x;
+};
 
 const poly = (pts, attrs) => `<polygon points="${pts.map((p) => `${n2(p[0])},${n2(p[1])}`).join(" ")}" ${attrs}/>`;
 
@@ -92,8 +132,16 @@ const edgeLabel = (p, q, away, value, opts = {}) => {
   const dx = mx - away[0];
   const dy = my - away[1];
   const len = Math.hypot(dx, dy) || 1;
-  const off = opts.off || 20;
-  return text(mx + (dx / len) * off, my + (dy / len) * off + 4, value, { weight: "bold", halo: true, ...opts });
+  const size = opts.size || 13;
+  /*
+   * Clear the line by the label's own HEIGHT along the perpendicular, plus a
+   * little — a fixed 20px was too little for a 16px label and too much for a
+   * 10px one, and on a shallow triangle the long side label landed on its line.
+   */
+  const off = opts.off || size * 1.25 + 7;
+  const x = mx + (dx / len) * off;
+  const y = my + (dy / len) * off + size * 0.34;
+  return text(inBounds(x, value, size, opts.anchor || "middle"), y, value, { weight: "bold", halo: true, ...opts });
 };
 
 // The square that marks a right angle, drawn inside the corner at `v`.
@@ -107,6 +155,45 @@ const rightAngleMark = (v, a, b, size = 15) => {
   const p3 = [p1[0] + p2[0] - v[0], p1[1] + p2[1] - v[1]];
   return poly([p1, p3, p2], `fill="none" stroke="${LINE}" stroke-width="1.6"`);
 };
+
+/*
+ * Place what fits; drop what would land on something already placed.
+ *
+ * Measuring each label against its own edge was not enough. The hypotenuse of a
+ * 5-12-13 is long, so "Hipotenuz c = 13" fits along it comfortably — but the
+ * triangle is only five units tall, so that label, "Katet a" and "Katet b = 12"
+ * all came to rest within a few pixels of one another and printed as one
+ * unreadable pile. Length along an edge says nothing about clearance from the
+ * next edge's label.
+ *
+ * Each candidate offers its forms longest-first; the first that collides with
+ * nothing already placed is drawn, and a candidate with no surviving form is
+ * simply not drawn. Dropping a side label costs nothing here: the square built
+ * on that side already prints its area, and the lesson text prints the lengths.
+ * An overlapping pile costs the whole figure.
+ */
+function placeLabels(candidates, occupied = []) {
+  const taken = occupied.slice();
+  const hits = (b) => taken.some((o) =>
+    b.x1 < o.x2 && b.x2 > o.x1 && b.y1 < o.y2 && b.y2 > o.y1);
+  let out = "";
+  for (const c of candidates) {
+    for (const form of c.forms) {
+      if (!form) continue;
+      const w = textWidth(form, c.size);
+      const h = c.size * 1.25;
+      const box = {
+        x1: c.x - w / 2 - 2, x2: c.x + w / 2 + 2,
+        y1: c.y - h * 0.8 - 1, y2: c.y + h * 0.3 + 1,
+      };
+      if (hits(box)) continue;
+      taken.push(box);
+      out += text(inBounds(c.x, form, c.size, "middle"), c.y, form, c.opts);
+      break;
+    }
+  }
+  return out;
+}
 
 const pick = (values, i, fallback) => {
   const v = Number(values[i]);
@@ -154,16 +241,38 @@ function triangle(labels, values, h) {
 
   // Side a faces vertex A, b faces B, c faces C — the convention every textbook
   // here uses, so a teacher's labels land where they expect them.
-  art += edgeLabel(pB, pC, centre, `${name(labels, 0, "a")} = ${num(a)}`);
-  art += edgeLabel(pA, pC, centre, `${name(labels, 1, "b")} = ${num(b)}`);
-  art += edgeLabel(pA, pB, centre, `${name(labels, 2, "c")} = ${num(c)}`);
+  /*
+   * Outside the triangle, and never on top of one another: a very flat triangle
+   * brings two of its three edge midpoints close enough that their labels meet.
+   */
+  const sideAt = (p, q, label, value) => {
+    const mx = (p[0] + q[0]) / 2;
+    const my = (p[1] + q[1]) / 2;
+    const dx = mx - centre[0];
+    const dy = my - centre[1];
+    const len = Math.hypot(dx, dy) || 1;
+    const off = 13 * 1.25 + 7;
+    return {
+      x: mx + (dx / len) * off,
+      y: my + (dy / len) * off + 13 * 0.34,
+      size: 13,
+      forms: [`${label} = ${num(value)}`, label, `${num(value)}`],
+      opts: { size: 13, weight: "bold", halo: true },
+    };
+  };
+  art += placeLabels([
+    sideAt(pB, pC, name(labels, 0, "a"), a),
+    sideAt(pA, pC, name(labels, 1, "b"), b),
+    sideAt(pA, pB, name(labels, 2, "c"), c),
+  ]);
 
   [[pA, "A"], [pB, "B"], [pC, "C"]].forEach(([p, v], i) => {
     const dx = p[0] - centre[0];
     const dy = p[1] - centre[1];
     const len = Math.hypot(dx, dy) || 1;
     art += `<circle cx="${n2(p[0])}" cy="${n2(p[1])}" r="3.4" fill="${LINE}"/>`;
-    art += text(p[0] + (dx / len) * 16, p[1] + (dy / len) * 16 + 5, name(labels, i + 3, v), { size: 14, weight: "bold", fill: ACCENT, halo: true });
+    const vName = name(labels, i + 3, v);
+    art += text(inBounds(p[0] + (dx / len) * 16, vName, 14, "middle"), p[1] + (dy / len) * 16 + 5, vName, { size: 14, weight: "bold", fill: ACCENT, halo: true });
   });
   return art;
 }
@@ -213,10 +322,26 @@ function pythagoras(labels, values, h) {
 
   // Each square says what it holds. The three areas together ARE the theorem,
   // so they are the largest type in the figure after the labels themselves.
+  /*
+   * Two lines in the middle of each square: what it is, then how much it holds.
+   * Both are measured against the square's own width — a square built on a short
+   * leg is small, and "= 144" written across its corners is not a label.
+   */
   const areaText = (pts, label, value) => {
     const q = m(mid(pts));
-    return text(q[0], q[1] - 2, label, { size: 15, weight: "bold", fill: ACCENT, halo: true }) +
-      text(q[0], q[1] + 16, `= ${num(value)}`, { size: 13, halo: true });
+    const side = Math.hypot(m(pts[1])[0] - m(pts[0])[0], m(pts[1])[1] - m(pts[0])[1]);
+    const fit = (str, want) => {
+      let size = want;
+      while (size > 8 && textWidth(str, size) > side - 8) size -= 1;
+      return textWidth(str, size) <= side - 6 ? size : 0;
+    };
+    const s1 = fit(label, 15);
+    const s2 = fit(`= ${num(value)}`, 13);
+    // The name of the square matters more than its number: if only one line
+    // fits, it is the one that says which square this is.
+    const two = s1 && s2 && side > 46;
+    return (s1 ? text(q[0], q[1] + (two ? -2 : 5), label, { size: s1, weight: "bold", fill: ACCENT, halo: true }) : "") +
+      (two ? text(q[0], q[1] + 16, `= ${num(value)}`, { size: s2, halo: true }) : "");
   };
   art += areaText(sqA, `${la}²`, a * a);
   art += areaText(sqB, `${lb}²`, b * b);
@@ -230,17 +355,42 @@ function pythagoras(labels, values, h) {
    * of "a² = 9". This is the one figure whose outside is already occupied.
    */
   const centre = [(pP[0] + pA[0] + pB[0]) / 3, (pP[1] + pA[1] + pB[1]) / 3];
-  const inward = (p, q, value) => {
+  /*
+   * Inside the white triangle, and only what fits there.
+   *
+   * "Hipotenuz c = 13" is four times the width of "c" and the triangle it has to
+   * sit in does not grow to accommodate it — on a 5-12-13 the three labels ran
+   * into each other and over the edges. So each label is measured against the
+   * room it actually has: the full "name = value" when it fits, the name alone
+   * when it does not, and nothing at all when even that would not. The value is
+   * never lost by this: the square beside it already prints the area, and the
+   * lesson text prints the lengths.
+   */
+  const SIDE = 12;
+  const candidate = (p, q, label, value) => {
     const mx = (p[0] + q[0]) / 2;
     const my = (p[1] + q[1]) / 2;
     const dx = centre[0] - mx;
     const dy = centre[1] - my;
     const len = Math.hypot(dx, dy) || 1;
-    return text(mx + (dx / len) * 15, my + (dy / len) * 15 + 4, value, { size: 12, weight: "bold", halo: true });
+    const push = Math.min(len, SIDE * 1.1 + 5);
+    const room = Math.hypot(q[0] - p[0], q[1] - p[1]) - 16;
+    // Longest first, and only forms that fit along the edge at all.
+    const forms = [`${label} = ${num(value)}`, label, `${num(value)}`]
+      .filter((f) => textWidth(f, SIDE) <= room);
+    return {
+      x: mx + (dx / len) * push,
+      y: my + (dy / len) * push + SIDE * 0.34,
+      size: SIDE, forms,
+      opts: { size: SIDE, weight: "bold", halo: true },
+    };
   };
-  art += inward(pP, pA, `${la} = ${num(a)}`);
-  art += inward(pP, pB, `${lb} = ${num(b)}`);
-  art += inward(pA, pB, `${lc} = ${num(c)}`);
+  // The right-angle mark is already on the page and must not be written over.
+  const markBox = { x1: pP[0] - 18, x2: pP[0] + 18, y1: pP[1] - 18, y2: pP[1] + 18 };
+  art += placeLabels(
+    [candidate(pP, pA, la, a), candidate(pP, pB, lb, b), candidate(pA, pB, lc, c)],
+    [markBox]
+  );
   return art;
 }
 
@@ -259,7 +409,8 @@ function circle(labels, values, h) {
   art += `<line x1="${n2(O[0])}" y1="${n2(O[1])}" x2="${n2(rEnd[0])}" y2="${n2(rEnd[1])}" stroke="${ACCENT}" stroke-width="2.4"/>`;
   art += `<circle cx="${n2(O[0])}" cy="${n2(O[1])}" r="4" fill="${INK}"/>`;
   art += text(O[0] - 13, O[1] + 18, name(labels, 0, "O"), { size: 14, weight: "bold", halo: true });
-  art += text((O[0] + rEnd[0]) / 2 + 6, (O[1] + rEnd[1]) / 2 - 8, `${name(labels, 1, "r")} = ${num(r)}`, { size: 13, weight: "bold", fill: ACCENT, anchor: "start", halo: true });
+  const rLabel = `${name(labels, 1, "r")} = ${num(r)}`;
+  art += text(inBounds((O[0] + rEnd[0]) / 2 + 6, rLabel, 13, "start"), (O[1] + rEnd[1]) / 2 - 8, rLabel, { size: 13, weight: "bold", fill: ACCENT, anchor: "start", halo: true });
 
   // The diameter, dashed, because it is the second fact this figure teaches.
   const d1 = map(-r, 0);
@@ -371,8 +522,15 @@ function grid(labels, values, h) {
   pts.forEach(([x, y], i) => {
     const p = map(x, y);
     art += `<circle cx="${n2(p[0])}" cy="${n2(p[1])}" r="5.5" fill="${ACCENT}"/>`;
-    art += text(p[0] + 10, p[1] - 10, `${name(labels, i, String.fromCharCode(65 + i))}(${num(x)}; ${num(y)})`, {
-      size: 12, weight: "bold", anchor: "start", halo: true,
+    /*
+     * A point near the right edge gets its name on the LEFT of the dot instead,
+     * rather than running off the plane. The plotted position is the fact here;
+     * which side the name sits on is not.
+     */
+    const pLabel = `${name(labels, i, String.fromCharCode(65 + i))}(${num(x)}; ${num(y)})`;
+    const right = p[0] + 10 + textWidth(pLabel, 12) < W - 6;
+    art += text(right ? p[0] + 10 : p[0] - 10, p[1] - 10, pLabel, {
+      size: 12, weight: "bold", anchor: right ? "start" : "end", halo: true,
     });
   });
   return art;

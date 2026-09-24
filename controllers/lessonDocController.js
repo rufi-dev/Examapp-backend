@@ -686,6 +686,17 @@ const createDoc = asyncHandler(async (req, res) => {
 const getDoc = asyncHandler(async (req, res) => {
   const doc = await mine(req, req.params.id);
   /*
+   * The teacher's attached pictures, put into the html before it is sent.
+   *
+   * The stored document only NAMES them, so this is where the screen gets its
+   * bytes — and it is the same call the export makes, which is the whole reason
+   * the preview and the file can be trusted to match.
+   */
+  if (doc.html && doc.html.includes("data-image=")) {
+    const F = require("../helper/lessonDocFiles");
+    doc.html = await F.embedDocImages(doc.html, doc);
+  }
+  /*
    * What this material has cost, for an admin looking at it. Sent only on the
    * admin branch: a teacher pays in credits, and the provider bill behind them
    * is not their number to read.
@@ -855,7 +866,15 @@ async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abor
     return;
   }
   const out = await runStructured({
-    prompt: native.nativePrompt({ request: text, current, sourceNotes: doc.sourceNotes || [], sourceText }),
+    prompt: native.nativePrompt({
+      request: text,
+      current,
+      sourceNotes: doc.sourceNotes || [],
+      sourceText,
+      // Numbered by the SAME function the resolver uses, so the picture the
+      // model asks for is the picture that gets drawn.
+      images: require("../helper/lessonDocFiles").docImages(doc),
+    }),
     parts: partsForModel,
     system: native.NATIVE_SYSTEM,
     schema: native.NATIVE_SCHEMA,
@@ -2168,6 +2187,13 @@ const exportDoc = asyncHandler(async (req, res) => {
   const plain = doc.toObject();
   const { safeName } = require("../helper/lessonDocDocx");
   const { withRasterFigures } = require("../helper/lessonDocHtml");
+  /*
+   * The same resolver the preview uses, on the same html, before either renderer
+   * sees it. A picture that is on screen is therefore in the file — and because
+   * the bytes are inlined rather than linked, the PDF a teacher emails home
+   * needs nothing from us to open.
+   */
+  plain.html = await require("../helper/lessonDocFiles").embedDocImages(plain.html, doc);
 
   let body;
   let mime;

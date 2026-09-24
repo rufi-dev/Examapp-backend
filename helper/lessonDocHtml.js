@@ -178,6 +178,13 @@ blockquote p{margin:0}
 .fig{margin:0 0 12pt;padding:8pt 0;text-align:center;break-inside:avoid}
 .fig svg{max-width:100%;height:auto}
 .fig figcaption{margin-top:5pt;color:var(--muted);font-size:9pt;font-style:italic}
+/* A teacher's own photograph. Bounded by HEIGHT as well as width: a portrait
+   phone photo at 100% width is three pages tall and pushes the lesson off the
+   sheet, which is not what "put my picture in" means. */
+.doc-image{margin:0 0 12pt;padding:4pt 0;text-align:center;break-inside:avoid}
+.doc-image img{max-width:100%;max-height:118mm;height:auto;object-fit:contain;
+  border:0.5pt solid var(--accent-tint);border-radius:3pt}
+.doc-image figcaption{margin-top:5pt;color:var(--muted);font-size:9pt;font-style:italic}
 
 @page{size:A4;margin:16mm 16mm 18mm}
 `;
@@ -241,6 +248,9 @@ blockquote{margin:0 0 9pt;padding:8pt 10pt;background:#F4F5F8}
 blockquote p{margin:0}
 .fig{margin:0 0 12pt;text-align:center}
 .fig figcaption{margin-top:4pt;color:#676C78;font-size:9.5pt;font-style:italic}
+.doc-image{margin:0 0 12pt;text-align:center}
+.doc-image img{max-width:100%;height:auto}
+.doc-image figcaption{margin-top:4pt;color:#676C78;font-size:9.5pt;font-style:italic}
 `;
 
 /* ------------------------------------------------------------ the content --- */

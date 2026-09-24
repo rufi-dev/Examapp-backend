@@ -48,6 +48,14 @@ const NATIVE_SCHEMA = {
           columns: { type: "array", maxItems: 8, items: { type: "string" } },
           rows: { type: "array", maxItems: 12, items: { type: "array", maxItems: 8, items: { type: "string" } } },
           tone: { type: "string", enum: ["info", "warning", "success"] },
+          /*
+           * Which of the teacher's attached pictures this block shows, by its
+           * NUMBER in the list the prompt gives — not a filename and not a key.
+           * A number is the one identifier a model cannot mistype into something
+           * that resolves to a different file, and it is validated against the
+           * document's own attachments before anything is read.
+           */
+          imageRef: { anyOf: [{ type: "integer" }, { type: "null" }] },
           diagram: {
             anyOf: [{
             type: "object",
@@ -62,7 +70,7 @@ const NATIVE_SCHEMA = {
             }, { type: "null" }],
           },
         },
-        required: ["kind", "text", "term", "items", "ordered", "solution", "columns", "rows", "tone", "diagram"],
+        required: ["kind", "text", "term", "items", "ordered", "solution", "columns", "rows", "tone", "diagram", "imageRef"],
       },
     },
     /*
@@ -142,6 +150,9 @@ Müəllim çap parametrini istəyirsə (səhifə nömrəsi, rəng), onu printOpt
 istəməyibsə printOptions null olsun. Yalnız istənilən sahəni doldur, digərini null qoy —
 soruşulmayan parametri dəyişmə. Parametri mətnin içinə yazma.
 Diagramda ən çox 8 qısa label və 8 rəqəm ver. Bir diagram kifayətdir.
+Müəllimin əlavə etdiyi şəkil varsa və onu materialda göstərmək istəyirsə,
+kind:"image" bloku ilə imageRef nömrəsini ver — şəkil PDF-ə də düşür.
+Şəkil yoxdursa imageRef həmişə null olsun.
 `.trim();
 
 const clamp = (value, limit = MAX_TEXT) => String(value == null ? "" : value).trim().slice(0, limit);
@@ -179,7 +190,7 @@ function normalizeNative(raw = {}) {
     reply: clamp(raw.reply, 500),
     blocks: blocks
       .map((b) => ({
-        kind: ["heading", "text", "list", "definition", "example", "task", "note", "table", "diagram"].includes(b?.kind) ? b.kind : "text",
+        kind: ["heading", "text", "list", "definition", "example", "task", "note", "table", "diagram", "image"].includes(b?.kind) ? b.kind : "text",
         text: clamp(b?.text),
         term: clamp(b?.term, 180),
         items: cleanArray(b?.items),
@@ -188,6 +199,9 @@ function normalizeNative(raw = {}) {
         columns: cleanArray(b?.columns, 8),
         rows: (Array.isArray(b?.rows) ? b.rows : []).slice(0, 12).map((r) => cleanRow(r, cleanArray(b?.columns, 8).length)),
         tone: ["info", "warning", "success"].includes(b?.tone) ? b.tone : "info",
+        // A positive whole number or nothing. Which attachment it names is not
+        // this function's business — it does not know what is attached.
+        imageRef: Number.isInteger(b?.imageRef) && b.imageRef > 0 && b.imageRef < 100 ? b.imageRef : null,
         // A geometry figure whose measurements cannot build it is dropped here,
         // rather than drawn from substituted numbers that contradict the lesson.
         diagram: b?.diagram && DIAGRAM_TYPES.includes(b.diagram.type)
@@ -195,9 +209,13 @@ function normalizeNative(raw = {}) {
           ? { type: b.diagram.type, title: clamp(b.diagram.title, 180), labels: cleanArray(b.diagram.labels, 8), values: (Array.isArray(b.diagram.values) ? b.diagram.values : []).map(Number).filter(Number.isFinite).slice(0, 8) }
           : null,
       }))
-      .filter((b) => (b.kind === "diagram"
-        ? Boolean(b.diagram)
-        : Boolean(b.text || b.term || b.items.length || b.columns.length || b.rows.some((r) => r.some(Boolean))))),
+      .filter((b) => {
+        if (b.kind === "diagram") return Boolean(b.diagram);
+        // An image block is its picture; a caption is optional, and requiring
+        // text would drop a perfectly good figure for having none.
+        if (b.kind === "image") return Boolean(b.imageRef);
+        return Boolean(b.text || b.term || b.items.length || b.columns.length || b.rows.some((r) => r.some(Boolean)));
+      }),
   };
 }
 
@@ -205,6 +223,7 @@ function normalizeNative(raw = {}) {
 // walks the same renderer as everything the model wrote.
 const emptyBlock = (kind, text) => ({
   kind,
+  imageRef: null,
   text: clamp(text),
   term: "",
   items: [],
@@ -330,12 +349,21 @@ function nativeBlocksToHtml(native) {
     if (b.kind === "diagram") return { kind: "figure", text: b.diagram.title, svg: diagramSvg(b.diagram) };
     return b;
   });
+  /*
+   * An image block becomes a figure that NAMES a picture rather than containing
+   * one. The bytes are attached later, by the platform, from the document's own
+   * files — see embedDocImages. Stored this way the document stays small enough
+   * to live in Mongo however many photographs it shows, and the same markup
+   * serves the screen and the PDF.
+   */
+  const imageHtml = (b) =>
+    `<figure class="doc-image" data-image="${b.imageRef}">${b.text ? `<figcaption>${esc(b.text)}</figcaption>` : ""}</figure>`;
   const title = native.title ? `<h1>${esc(native.title)}</h1>` : "";
   const meta = native.audience ? `<p class="meta">${esc(native.audience)}</p>` : "";
-  return `${title}${meta}${blocks.map((b) => renderBlock(b, false)).join("\n")}`;
+  return `${title}${meta}${blocks.map((b) => (b.kind === "image" ? imageHtml(b) : renderBlock(b, false))).join("\n")}`;
 }
 
-function nativePrompt({ request, current, sourceNotes, sourceText }) {
+function nativePrompt({ request, current, sourceNotes, sourceText, images }) {
   /*
    * The whole document, or none of it.
    *
@@ -362,6 +390,12 @@ function nativePrompt({ request, current, sourceNotes, sourceText }) {
     currentText ? `HAZIR SEMANTİK MATERİAL:\n${currentText}` : "",
     sourceNotes?.length ? `MƏNBƏ QEYDLƏRİ:\n${sourceNotes.map((x) => `${x.name}: ${x.found}`).join("\n")}` : "",
     sourceText?.length ? `YERLİ ÇIXARILMIŞ MƏTN (PDF serverdə oxundu):\n${sourceText.map((x) => `${x.name}: ${x.text}`).join("\n")}` : "",
+    images?.length
+      ? `MÜƏLLİMİN ƏLAVƏ ETDİYİ ŞƏKİLLƏR (nömrə ilə):\n${images.map((f, i) => `${i + 1}. ${f.name}`).join("\n")}\n` +
+        "Şəkli materiala qoymaq üçün kind:\"image\" bloku yarat, imageRef-ə həmin nömrəni yaz, " +
+        "text-ə isə altyazı yaz. Şəkli təsvir edib mətnə çevirmə — nömrəsini ver, platforma şəkli özü yerləşdirir. " +
+        "Müəllim şəkilləri göstərməyi istəyirsə hamısını qoy."
+      : "",
     `MÜƏLLİMİN İSTƏYİ:\n${clamp(request, 4000)}`,
     "Bütün nəticəni blocks-da qaytar. Əsas məzmunu itirmə; bir dəyişiklik tələb olunanda qalan blokları saxla.",
   ].filter(Boolean).join("\n\n");

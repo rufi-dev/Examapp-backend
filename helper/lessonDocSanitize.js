@@ -40,12 +40,30 @@ const TAGS = [
  * width or a cell background, which is most of what makes a form look like a form,
  * and refusing it outright was what pushed layout back into prose.
  */
+/*
+ * `data-image` is how a material says "the teacher's first attached picture goes
+ * here" without ever naming a file, a path or a URL.
+ *
+ * The rule above — no href or src of any kind — is unchanged, and this does not
+ * bend it. A data attribute cannot fetch, navigate or execute; it is inert text
+ * that survives sanitisation so the PLATFORM can resolve it afterwards, reading
+ * the bytes itself from the document's own attachments. The model writes a small
+ * number and nothing else, and a number that names no attachment resolves to
+ * nothing. That is why the value is checked here as strictly as a tag name.
+ */
 const ATTRS = {
   "*": ["class", "style", "colspan", "rowspan", "align", "valign", "width", "dir", "lang"],
+  figure: ["class", "style", "data-image"],
   col: ["span", "width"],
   td: ["colspan", "rowspan", "align", "valign", "width", "class", "style"],
   th: ["colspan", "rowspan", "align", "valign", "width", "scope", "class", "style"],
 };
+
+/*
+ * A `data-image` may be a small positive integer and nothing else — never a
+ * path, never a key, never anything a resolver could be talked into fetching.
+ */
+const ATTR_VALUES = { "data-image": /^[1-9][0-9]?$/ };
 
 /*
  * The CSS properties a document may set on itself.
@@ -212,6 +230,23 @@ function sanitizeDocHtml(raw) {
     // correct if that list is ever widened by mistake.
     allowedSchemes: [],
     allowProtocolRelative: false,
+    /*
+     * The attribute list says WHICH attributes may appear; this says what one of
+     * them may contain. `data-image` is the only attribute in this document that
+     * a later stage acts on, so it is the only one whose value has to be exact:
+     * a small positive integer, or the attribute is removed. Anything a resolver
+     * could be talked into treating as a path never survives this line.
+     */
+    transformTags: {
+      figure: (tagName, attribs) => {
+        const ref = attribs["data-image"];
+        if (ref !== undefined && !ATTR_VALUES["data-image"].test(String(ref))) {
+          const { "data-image": _drop, ...rest } = attribs;
+          return { tagName, attribs: rest };
+        }
+        return { tagName, attribs };
+      },
+    },
     // The SVG pass above already ran; keep its casing (viewBox, not viewbox).
     parser: { lowerCaseAttributeNames: false },
     allowVulnerableTags: false,
