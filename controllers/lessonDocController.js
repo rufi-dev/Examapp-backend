@@ -669,7 +669,14 @@ async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abor
    */
   const lessonFiles = require("../helper/lessonDocFiles");
   const sourceText = await lessonFiles.nativeSourceText(doc.files || []);
-  const readByName = new Map(sourceText.map((x) => [x.name, x]));
+  /*
+   * Keyed by the file KEY, not its name. Matching on `part.name` was matching
+   * on undefined — parts carried no name — so the filter below never dropped a
+   * single PDF and every textbook was sent as vision input AND as extracted
+   * text in the prompt. A key is a content hash: unique, always present, and
+   * impossible to confuse with another file that happens to share a filename.
+   */
+  const readByKey = new Map(sourceText.map((x) => [x.key, x]));
   /*
    * A PDF is dropped from the paid request only when the local read replaces it
    * completely: text was found AND the whole document was covered. A scan, or a
@@ -678,9 +685,16 @@ async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abor
    */
   const partsForModel = parts.filter((part) => {
     if (!part.isPdf) return true;
-    const read = readByName.get(part.name);
+    const read = readByKey.get(part.key);
     return !(read && read.complete);
   });
+  if (partsForModel.length < parts.length) {
+    // Worth saying in the log, because this line IS the cost saving: without it
+    // the expensive half of the request is still being sent.
+    console.log(
+      `[LESSON DOC] native turn: ${parts.length - partsForModel.length}/${parts.length} PDF(s) replaced by local text`
+    );
+  }
   const localPrint = native.nativePrintOptions(text);
   if (localPrint) {
     const saved = await svc.commit(
@@ -728,6 +742,24 @@ async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abor
     signal: abortSignal,
     maxTokens: 10000,
   });
+  /*
+   * A cut-off answer is not a document.
+   *
+   * The provider reports when it stopped mid-structure, and that was ignored:
+   * a reply containing one heading and one paragraph passed the checks below
+   * and REPLACED a forty-block material. Nothing else in this path can tell the
+   * difference, because a truncated answer is perfectly well-formed as far as
+   * the schema is concerned — it is simply missing everything after the cut.
+   */
+  if (out.truncated) {
+    await logStudioUsage(req, { doc, hadBlocks, out: { ...out, timing: { rounds: 1, failed: true } } }).catch(() => {});
+    const e = new Error("truncated_native_document");
+    e.aiStatus = 422;
+    e.userMessage = hadBlocks
+      ? "Cavab yarımçıq gəldi, material dəyişdirilmədi. Yenidən cəhd edin."
+      : "Cavab yarımçıq gəldi. Yenidən cəhd edin.";
+    throw e;
+  }
   const content = native.normalizeNative(out.doc || {});
   if (!content.blocks.length || !content.blocks.some((b) => b.kind === "heading") || !content.blocks.some((b) => b.kind === "text")) {
     /*

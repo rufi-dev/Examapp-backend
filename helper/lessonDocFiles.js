@@ -517,7 +517,21 @@ async function toParts(files = []) {
       }
       // eslint-disable-next-line no-await-in-loop
       const buf = await fsp.readFile(readFrom);
-      parts.push({ mime: f.mime, data: buf.toString("base64"), isPdf: f.mime === "application/pdf" });
+      /*
+       * The key travels with the part. Without it the caller holds an anonymous
+       * blob: the native engine matched extracted text to parts by `part.name`,
+       * which was never set, so `readByName.get(undefined)` missed every time
+       * and NO PDF was ever dropped from the paid request — while its extracted
+       * text went into the prompt as well. Every textbook was billed twice, and
+       * the feature's whole reason for existing quietly did nothing.
+       */
+      parts.push({
+        key: f.key,
+        name: f.name || "",
+        mime: f.mime,
+        data: buf.toString("base64"),
+        isPdf: f.mime === "application/pdf",
+      });
     } catch {
       console.error("[LESSON DOC] attachment unreadable:", f.key);
       unreadable.push(f.name || "fayl");
@@ -541,11 +555,39 @@ const NATIVE_MAX_CHARS = 12000;
 // page numbers.
 const NATIVE_MIN_TEXT = 200;
 
+/*
+ * Extracted text, remembered.
+ *
+ * A key is the sha256 of the file's contents, so what Ghostscript reads out of
+ * it can never change: the same key is always the same bytes. Without this, a
+ * document holding six PDFs re-ran a page count plus up to twelve extractions
+ * per file on EVERY turn — around seventy subprocesses to answer "make the page
+ * numbers green". No provider money, but seconds of latency and a busy box.
+ *
+ * Bounded, and oldest-out: this is a cache, not a store.
+ */
+const EXTRACT_CACHE = new Map();
+const EXTRACT_CACHE_MAX = 200;
+
+function cacheExtraction(key, value) {
+  if (!key) return value;
+  if (EXTRACT_CACHE.size >= EXTRACT_CACHE_MAX) {
+    EXTRACT_CACHE.delete(EXTRACT_CACHE.keys().next().value);
+  }
+  EXTRACT_CACHE.set(key, value);
+  return value;
+}
+
 async function nativeSourceText(files = []) {
   const out = [];
   const evidence = require("./curriculumEvidence");
   for (const f of files) {
     if (f?.mime !== "application/pdf") continue;
+    if (f.key && EXTRACT_CACHE.has(f.key)) {
+      const hit = EXTRACT_CACHE.get(f.key);
+      if (hit) out.push({ ...hit, name: f.name || hit.name });
+      continue;
+    }
     try {
       const src = pathForKey(f.key, f.ext);
       const pages = await evidence.pdfPageCount(src);
@@ -559,8 +601,12 @@ async function nativeSourceText(files = []) {
         extracted += body.length;
         chunks.push(`[Səhifə ${page + 1}] ${body}`);
       }
-      if (extracted < NATIVE_MIN_TEXT) continue; // a scan: keep the file itself
-      out.push({
+      if (extracted < NATIVE_MIN_TEXT) {
+        cacheExtraction(f.key, null); // a scan stays a scan; do not re-read it
+        continue;
+      }
+      out.push(cacheExtraction(f.key, {
+        key: f.key,
         name: f.name || "PDF",
         text: chunks.join("\n").slice(0, NATIVE_MAX_CHARS),
         pages,
@@ -568,7 +614,7 @@ async function nativeSourceText(files = []) {
         // read to page 12 must not let the caller drop the file: the answer to
         // "explain the exercise on page 30" is in the part that was not read.
         complete: read >= pages && extracted < NATIVE_MAX_CHARS,
-      });
+      }));
     } catch {
       // No local extractor, or an unreadable file: the original PDF part stands.
     }

@@ -11,6 +11,9 @@ const DIAGRAM_TYPES = ["flow", "cycle", "compare", "timeline", "bars", "concept"
 const MAX_BLOCKS = 36;
 const MAX_ITEMS = 12;
 const MAX_TEXT = 1200;
+// 36 blocks x 1,200 characters plus JSON overhead, with room to spare. A native
+// document cannot legitimately exceed this; see nativePrompt.
+const MAX_CURRENT_CHARS = 120000;
 
 const NATIVE_SCHEMA = {
   type: "object",
@@ -201,7 +204,27 @@ function nativeBlocksToHtml(native) {
 }
 
 function nativePrompt({ request, current, sourceNotes, sourceText }) {
-  const currentText = current ? JSON.stringify(current).slice(0, 18000) : "";
+  /*
+   * The whole document, or none of it.
+   *
+   * This used to slice the serialised material at 18,000 characters, which cut
+   * mid-JSON and simply dropped the blocks at the end — and since the model is
+   * asked to return the material COMPLETE, whatever fell off the end was gone
+   * from the answer too. A teacher's last three sections could disappear because
+   * of a number in a helper.
+   *
+   * The schema bounds a native document to 36 blocks of 1,200 characters, so a
+   * legitimate one always fits. Anything past this ceiling is damaged or from
+   * somewhere else, and refusing is the only safe answer: an edit that silently
+   * loses the tail is worse than an edit that does not happen.
+   */
+  const currentText = current ? JSON.stringify(current) : "";
+  if (currentText.length > MAX_CURRENT_CHARS) {
+    const e = new Error("native_document_too_large");
+    e.aiStatus = 422;
+    e.userMessage = "Material həddindən böyükdür. Bir neçə hissəyə bölüb yenidən cəhd edin.";
+    throw e;
+  }
   return [
     current ? "HAZIR MATERİALI DƏYİŞ: aşağıdakı semantic materialı qoruyaraq yalnız müəllimin istədiyini yenilə." : "YENİ MATERIAL YARAT.",
     currentText ? `HAZIR SEMANTİK MATERİAL:\n${currentText}` : "",
@@ -235,9 +258,12 @@ function nativePrompt({ request, current, sourceNotes, sourceText }) {
 const PAGE_STEMS = ["səhifə", "sehife", "nömrə", "nomre", "nomer"];
 const COLOR_STEMS = ["rəng", "reng", "accent"];
 const PRINT_STEMS = ["çap", "cap", "print"];
+// Stems that mean "turn it off" on their own.
 const OFF_STEMS = ["olmasın", "olmasin", "sil", "çıxar", "cixar", "gizlət", "gizlet", "istəmirəm", "istemirem", "istəmir", "istemir", "lazımsız", "lazimsiz"];
-const ON_STEMS = ["olmalı", "olmali", "olsun", "əlavə", "elave", "göstər", "goster", "lazımdır", "lazimdir", "qoy", "yaz"];
-// Words that carry no instruction of their own and are safe to ignore.
+// Stems that mean "turn it on" on their own. Deliberately NOT here: "yaz"
+// (write) and "qoy" (put), which are how people ask for content — "material
+// yaz" is a request for a lesson, not for a setting.
+const ON_STEMS = ["olmalı", "olmali", "olsun", "əlavə", "elave", "göstər", "goster", "lazımdır", "lazimdir"];
 const FILLER_STEMS = [
   "və", "ve", "ile", "ilə", "et", "elə", "ele", "edin", "edək", "edek", "bu", "o",
   "material", "materialın", "materialin", "sənəd", "sened", "sənədin", "senedin",
@@ -252,55 +278,110 @@ const COLOR_WORDS = [
 
 const stemHit = (word, stems) => stems.some((stem) => word.startsWith(stem));
 
+/*
+ * Azerbaijani negates a verb with -ma / -mə, and that inverts the instruction.
+ *
+ * "göstər" is show; "göstərmə" is DON'T show — and reading the second as the
+ * first turned page numbers on for someone asking to turn them off. The same
+ * suffix flips the other direction too: "sil" is delete, "silmə" is don't
+ * delete, which means keep them.
+ *
+ * Guarded against the words that merely happen to contain those letters:
+ * "olmalıdır" (must be) is not a negation, and neither is "nömrə".
+ */
+const NEGATION = /(ma|mə)(dan|dən|yın|yin|yun|yün)?$/;
+const isNegated = (word) =>
+  NEGATION.test(word) && !/^(olmalı|olmali|nömrə|nomre|əlavə|elave|rəngi|rengi)/.test(word);
+
 function nativePrintOptions(request) {
   const raw = String(request || "").trim();
-  // A settings instruction is short. Anything long is a request about content
-  // with a setting mentioned in passing, and belongs to the engine.
+  // A settings instruction is short. Anything longer is a request about the
+  // material with a setting mentioned along the way, and belongs to the engine.
   if (!raw || raw.length > 60) return null;
   const words = raw.toLocaleLowerCase("az").split(/[^\p{L}\p{N}]+/u).filter(Boolean);
   if (!words.length) return null;
 
+  /*
+   * A digit means a quantity, and a quantity is about content: "2 səhifə
+   * material yaz" is two pages of lesson, not a page-number setting. Page-number
+   * and colour requests never need a number, so any digit hands the turn over.
+   */
+  if (words.some((w) => /\d/.test(w))) return null;
+
   let page = false;
   let colour = null;
-  let polarity = null; // null = not stated, true = on, false = off
+  let polarity = null; // null = unstated, true = on, false = off
+  let negatedSomething = false;
 
   for (const word of words) {
-    if (stemHit(word, PAGE_STEMS)) { page = true; continue; }
-    const named = COLOR_WORDS.find(([w]) => word.startsWith(w));
+    const negated = isNegated(word);
+    // The stem to classify is the word without its negation suffix.
+    const base = negated ? word.replace(NEGATION, "") : word;
+
+    if (stemHit(base, PAGE_STEMS)) { page = true; continue; }
+    const named = COLOR_WORDS.find(([w]) => base.startsWith(w));
     if (named) { colour = named[1]; continue; }
-    if (stemHit(word, COLOR_STEMS) || stemHit(word, PRINT_STEMS)) continue;
-    // OFF before ON: "olmasın" also starts with the letters of nothing here, but
-    // keeping the order explicit is what stops the next stem added from flipping
-    // a negation into an affirmation.
-    if (stemHit(word, OFF_STEMS)) { polarity = false; continue; }
-    if (stemHit(word, ON_STEMS)) { if (polarity === null) polarity = true; continue; }
-    if (stemHit(word, FILLER_STEMS) || /^\d+$/.test(word)) continue;
-    // A word this shortcut does not know. It is not a settings-only request.
+    if (stemHit(base, COLOR_STEMS) || stemHit(base, PRINT_STEMS)) continue;
+
+    if (stemHit(base, OFF_STEMS)) { polarity = negated ? true : false; negatedSomething ||= negated; continue; }
+    if (stemHit(base, ON_STEMS)) {
+      if (negated) { polarity = false; negatedSomething = true; }
+      else if (polarity === null) polarity = true;
+      continue;
+    }
+    if (stemHit(base, FILLER_STEMS)) { negatedSomething ||= negated; continue; }
+    // A word this shortcut does not know. Not a settings-only request.
     return null;
   }
 
-  // Only the settings the teacher actually named are returned. Asking for a
-  // green accent used to switch page numbers on as a side effect.
   const patch = {};
   if (page) patch.pageNumbers = polarity !== false;
-  if (colour) patch.accent = colour;
+  /*
+   * A negated colour cannot be expressed. "rəngi yaşıl etmə" asks for NOT green,
+   * and the setting only holds one colour — so rather than guess at green, the
+   * turn goes to the engine, which can read the sentence properly.
+   */
+  if (colour) {
+    if (negatedSomething) return null;
+    patch.accent = colour;
+  }
   return Object.keys(patch).length ? patch : null;
 }
 
 /*
  * May the platform engine take this turn?
  *
- * Only for a material it can rebuild: one it wrote itself (so its semantic
- * source is on the document), or one with nothing in it yet. Anything else is an
- * older material whose content this engine cannot read, and running it would
- * replace the teacher's work with a freshly written document.
+ * Only for a material it can rebuild: one it wrote itself, or one with nothing
+ * in it yet. Anything else is an older material whose content this engine
+ * cannot read, and running it would replace the teacher's work with a freshly
+ * written document.
  *
  * `countParts` is passed in rather than imported: lessonDocSchema pulls in
  * Mongoose, and this module is required by a test that has no database.
  */
 function nativeCanHandle(doc = {}, countParts) {
-  const hasNativeSource = Boolean(doc.aiMeta && typeof doc.aiMeta.native === "object" && doc.aiMeta.native);
-  if (hasNativeSource) return true;
+  /*
+   * A native source means blocks this engine actually wrote. An empty object
+   * was enough before, so a document whose aiMeta was damaged — `native: {}` —
+   * looked native, got rebuilt from nothing, and lost its contents.
+   */
+  const native = doc.aiMeta && doc.aiMeta.native;
+  if (native && typeof native === "object" && Array.isArray(native.blocks) && native.blocks.length) {
+    return true;
+  }
+  /*
+   * Otherwise it may only write into a document that is genuinely empty.
+   *
+   * `countParts` counts block-level tags, so a body made of <div>, <section> or
+   * an SVG figure counted as ZERO and an older material was treated as a blank
+   * page. Anything with visible text or a drawing in it is somebody's work and
+   * belongs to the engine that understands it.
+   */
+  const html = String(doc.html || "");
+  const hasText = html.replace(/<[^>]*>/g, "").replace(/&[a-z#0-9]+;/gi, " ").trim().length > 0;
+  const hasDrawing = /<(svg|img|figure|table|canvas)\b/i.test(html);
+  if (hasText || hasDrawing) return false;
+  if (Array.isArray(doc.blocks) && doc.blocks.length) return false;
   const parts = typeof countParts === "function" ? countParts(doc) : 0;
   return !parts;
 }
