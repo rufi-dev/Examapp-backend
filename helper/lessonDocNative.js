@@ -7,7 +7,16 @@
  */
 const { renderBlock, esc } = require("./lessonDocHtml");
 
-const DIAGRAM_TYPES = ["flow", "cycle", "compare", "timeline", "bars", "concept"];
+const { GEOMETRY_TYPES, geometrySvg } = require("./lessonDocGeometry");
+
+/*
+ * The six semantic diagrams arrange LABELS; the six geometry figures construct
+ * SHAPES from measurements. They are one list because a diagram block is a
+ * diagram block, and the model should choose between "these four ideas relate"
+ * and "this triangle has these sides" on meaning alone.
+ */
+const SEMANTIC_TYPES = ["flow", "cycle", "compare", "timeline", "bars", "concept"];
+const DIAGRAM_TYPES = [...SEMANTIC_TYPES, ...GEOMETRY_TYPES];
 const MAX_BLOCKS = 36;
 const MAX_ITEMS = 12;
 const MAX_TEXT = 1200;
@@ -103,6 +112,17 @@ hazırlayacaq. Mövzunu uydurma: əlavə fayl verilirsə, onun məzmununa söyk�
 Hər materialda ən azı bir heading və bir text olsun. Nümunənin həlli example.solution
 field-də, tapşırığın cavabı isə solution-da olsun; platforma tələbəyə cavabı göstərmir.
 Diagram yalnız məna üçün seçilsin: flow, cycle, compare, timeline, bars və ya concept.
+Həndəsi fiqur lazımdırsa bunlardan birini seç və ÖLÇÜLƏRİ values-də ver — platforma
+fiquru həmin ölçülərə görə miqyasla çəkir, ona görə rəqəmlər düzgün olmalıdır:
+- triangle: values=[a, b, c] üç tərəfin uzunluğu; labels=[a adı, b adı, c adı, A, B, C].
+  Düz bucaq varsa platforma özü işarə edir — a²+b²=c² olsun kifayətdir.
+- pythagoras: values=[a, b] iki katet; hipotenuz və hər tərəf üzərindəki kvadratlar
+  (a², b², c²) avtomatik qurulur. Pifaqor teoremi üçün məhz bunu seç.
+- circle: values=[r] radius; labels=[mərkəz, radius adı, diametr adı].
+- rectangle: values=[en, hündürlük]; sahə və perimetr avtomatik yazılır.
+- angle: values=[dərəcə]; labels=[təpə, birinci şüa, ikinci şüa].
+- grid: values=[x1, y1, x2, y2, ...] koordinat cütləri; labels=[nöqtə adları].
+Fiqurda ölçü yazma — rəqəmi values-ə qoy, platforma onu şəkildə göstərir.
 Müəllim çap parametrini istəyirsə (səhifə nömrəsi, rəng), onu printOptions-da qaytar;
 istəməyibsə printOptions null olsun. Yalnız istənilən sahəni doldur, digərini null qoy —
 soruşulmayan parametri dəyişmə. Parametri mətnin içinə yazma.
@@ -195,6 +215,16 @@ function salvageNative(content) {
   if (content.blocks.some((b) => b.kind === "heading")) return content;
   const title = content.title || content.blocks.find((b) => b.text)?.text || "";
   if (!title) return content;
+  /*
+   * At the ceiling, the document keeps what it has.
+   *
+   * normalizeNative caps a document at MAX_BLOCKS; prepending to a full one
+   * makes MAX_BLOCKS + 1, and the NEXT turn re-normalises and drops the last
+   * block — so a heading added here would silently cost the teacher their
+   * closing section one edit later. A document with 36 blocks and no heading is
+   * vanishingly rare and perfectly readable; losing its final block is not.
+   */
+  if (content.blocks.length >= MAX_BLOCKS) return content;
   return { ...content, blocks: [emptyBlock("heading", title), ...content.blocks] };
 }
 
@@ -203,6 +233,9 @@ function svgText(x, y, value, size = 14, anchor = "middle") {
 }
 
 function diagramSvg(d) {
+  // A figure is built from its numbers, not laid out from its labels, so it has
+  // its own renderer rather than another branch of the box-placing code below.
+  if (GEOMETRY_TYPES.includes(d.type)) return geometrySvg(d);
   const labels = d.labels.slice(0, 8);
   const w = 640;
   // Two rows of boxes need the room; a short canvas would clip the second row.

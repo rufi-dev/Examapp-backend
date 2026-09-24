@@ -697,7 +697,7 @@ const getDoc = asyncHandler(async (req, res) => {
  * platform renderer; there is no planning call, tool loop, screenshot round, or
  * model-authored CSS/SVG.
  */
-async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abortSignal, hadBlocks, baseRevision, send }) {
+async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abortSignal, hadBlocks, baseRevision, send, sendDone }) {
   const native = require("../helper/lessonDocNative");
   // One structured request, and nothing else: no planning call, no tool loop, no
   // screenshot round. This is the whole model interaction for a turn.
@@ -810,7 +810,7 @@ async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abor
     // Summarised from the BODY, not from `blocks`: a platform-rendered material
     // keeps its content in `html` and no blocks at all, so counting blocks would
     // report a finished material as empty every time a print setting changed.
-    send("done", {
+    await sendDone({
       doc: saved,
       summary: saved.html ? summarizeHtml(saved.html) : S.summarize(saved.blocks || []),
       provider: "platform-local",
@@ -940,7 +940,7 @@ async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abor
     },
   });
   chargeTurn(req, send);
-  send("done", { doc: saved, summary: sum, provider: out.provider, engine: "platform-native" });
+  await sendDone({ doc: saved, summary: sum, provider: out.provider, engine: "platform-native" });
 }
 
 const streamMessage = asyncHandler(async (req, res) => {
@@ -1020,6 +1020,32 @@ const streamMessage = asyncHandler(async (req, res) => {
     } catch {
       /* client gone */
     }
+  };
+
+  /*
+   * The finished turn carries the new spend with it.
+   *
+   * The admin cost panel read its figure once, when the material was opened,
+   * and then sat unchanged through every turn — so the number on screen was
+   * always one turn behind, and the turn you had just watched cost money was
+   * the one it did not include. Refreshing after each turn would have meant the
+   * admin reloading the page to see what the page had just caused.
+   *
+   * Sent only to an admin, and only on `done`: the same rule as the listing, so
+   * the figure's presence is the permission check and a teacher's payload is
+   * byte for byte what it always was. A failure to read the meter must never
+   * fail the turn that succeeded, so it degrades to sending nothing.
+   */
+  const sendDone = async (data) => {
+    if (req.user.role !== "admin") return send("done", data);
+    let cost = null;
+    try {
+      const spend = await costByDoc([doc._id]);
+      cost = spend.get(String(doc._id)) || { usd: 0, turns: 0, models: [] };
+    } catch {
+      /* the material is finished either way */
+    }
+    return send("done", cost ? { ...data, cost } : data);
   };
   res.write(": ok\n\n");
   // Mobile networks and proxies drop an idle connection; the plan call alone can
@@ -1165,6 +1191,7 @@ const streamMessage = asyncHandler(async (req, res) => {
         hadBlocks,
         baseRevision,
         send,
+        sendDone,
       });
       return;
     }
@@ -1643,7 +1670,7 @@ ${S.SOURCE_RULES}`;
         at: new Date(),
       });
       await logStudioUsage(req, { doc: withQuestion || doc, out, hadBlocks });
-      send("done", { doc: withQuestion || doc, summary: null, provider: out.provider });
+      await sendDone({ doc: withQuestion || doc, summary: null, provider: out.provider });
       return;
     }
 
@@ -1672,7 +1699,7 @@ ${S.SOURCE_RULES}`;
       await logStudioUsage(req, { doc: saved, out, hadBlocks });
       // The turn ran to its end: it is charged. A question back is free.
       chargeTurn(req, send);
-      send("done", { doc: saved, summary: S.summarize(saved.blocks || []), provider: out.provider });
+      await sendDone({ doc: saved, summary: S.summarize(saved.blocks || []), provider: out.provider });
       return;
     }
 
@@ -1701,7 +1728,7 @@ ${S.SOURCE_RULES}`;
       const fresh = saved || doc;
       // The turn ran to its end: it is charged. A question back is free.
       chargeTurn(req, send);
-      send("done", { doc: fresh, summary: S.summarize(fresh.blocks || []), provider: out.provider });
+      await sendDone({ doc: fresh, summary: S.summarize(fresh.blocks || []), provider: out.provider });
       return;
     }
     /*
@@ -1770,7 +1797,7 @@ ${S.SOURCE_RULES}`;
     await logStudioUsage(req, { doc: saved, out, hadBlocks });
     // The turn ran to its end: it is charged. A question back is free.
     chargeTurn(req, send);
-    send("done", { doc: saved, summary: sum, provider: out.provider });
+    await sendDone({ doc: saved, summary: sum, provider: out.provider });
     return;
   } catch (e) {
     // A deliberate stop is not a failure — it must not read like "Alınmadı" in

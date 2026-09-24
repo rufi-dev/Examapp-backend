@@ -227,9 +227,9 @@ const buildInstructions = (presetId, typed) =>
  * mis-state the bill by a multiple, and always in the same direction: the most
  * expensive model would report the cheapest-looking number.
  *
- * Cache write (5-min ephemeral) is 1.25x base input; cache read is 0.1x base
- * input; output includes thinking tokens. Those ratios hold across models, so
- * only the two base rates are listed.
+ * Cache write is 1.25x base input at the 5-minute TTL and 2x at the one-hour
+ * TTL; cache read is 0.1x base input; output includes thinking tokens. Those
+ * ratios hold across models, so only the two base rates are listed.
  */
 const CLAUDE_PRICE_PER_MTOK = {
   "claude-fable-5-1": { input: 10, output: 50 },
@@ -250,24 +250,50 @@ const claudePriceFor = (model) => {
     // A dated snapshot ("claude-haiku-4-5-20251001") prices as its family.
     CLAUDE_PRICE_PER_MTOK[String(model || "").replace(/-\d{8}$/, "")] ||
     CLAUDE_PRICE_PER_MTOK[COST_MODEL_DEFAULT];
-  return { ...base, cacheWrite: base.input * 1.25, cacheRead: base.input * 0.1 };
+  return { ...base, cacheWrite: base.input * 1.25, cacheWrite1h: base.input * 2, cacheRead: base.input * 0.1 };
 };
 
 const PRICE_PER_MTOK = claudePriceFor(COST_MODEL_DEFAULT);
 
 // Turn an Anthropic usage object into a token breakdown + USD cost for THIS call,
 // so the teacher can see (and tally) what each extraction cost.
-function computeCost(u, model = COST_MODEL_DEFAULT) {
+function computeCost(u, model = COST_MODEL_DEFAULT, opts = {}) {
   if (!u) return null;
   const price = claudePriceFor(model);
   const input = u.input_tokens || 0;
   const output = u.output_tokens || 0;
-  const cacheWrite = u.cache_creation_input_tokens || 0;
   const cacheRead = u.cache_read_input_tokens || 0;
+
+  /*
+   * A one-hour cache write costs 2x base input, not 1.25x.
+   *
+   * Lesson Studio caches its system block with ttl:"1h" (see LONG_LIVED in
+   * aiDocAdapters) and every one of its turns was billed here at the five-minute
+   * rate — a 60% understatement on the cache-write portion of every Studio call.
+   * The direction matters: the admin cost page exists to answer "are we charging
+   * enough", and it was answering with a number that flattered us.
+   *
+   * The API reports the split per TTL when it knows it; `cacheTtl` covers the
+   * older flat shape, where the caller knows what it asked for and the usage
+   * object does not say.
+   */
+  const split = u.cache_creation || null;
+  const write5 = split ? (split.ephemeral_5m_input_tokens || 0) : 0;
+  const write1h = split ? (split.ephemeral_1h_input_tokens || 0) : 0;
+  const flat = u.cache_creation_input_tokens || 0;
+  const known = write5 + write1h;
+  const rest = Math.max(0, flat - known);
+  const restIs1h = opts.cacheTtl === "1h";
+  const cacheWrite = known + rest;
+  const writeCost =
+    write5 * price.cacheWrite +
+    write1h * price.cacheWrite1h +
+    rest * (restIs1h ? price.cacheWrite1h : price.cacheWrite);
+
   const usd =
     (input * price.input +
       output * price.output +
-      cacheWrite * price.cacheWrite +
+      writeCost +
       cacheRead * price.cacheRead) /
     1e6;
   return {

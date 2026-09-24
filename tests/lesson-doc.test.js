@@ -2495,8 +2495,15 @@ console.log("\nA turn is metered (LS-R3-001, owner decision 2026-09-13):");
    * Charged at the genuine success points, and not at a question back — the
    * model has not done the work yet — nor on failure, stop or refusal.
    */
-  const doneSites = (stream.match(/send\("done", \{/g) || []).length;
-  const chargedSites = (stream.match(/chargeTurn\(req, send\);\n\s*send\("done", \{/g) || []).length;
+  /*
+   * `sendDone` rather than a bare send: every completion now goes through one
+   * emitter so an admin's `done` frame can carry the material's refreshed spend.
+   * The property under test is unchanged — a charge immediately before each one
+   * except the question back — and these patterns follow the rename rather than
+   * relaxing into something that would pass whatever the code did.
+   */
+  const doneSites = (stream.match(/await sendDone\(\{/g) || []).length;
+  const chargedSites = (stream.match(/chargeTurn\(req, send\);\n(?:\s*\/\/[^\n]*\n|\s*\/\*[\s\S]*?\*\/\n)*\s*await sendDone\(\{/g) || []).length;
   ok("every done except the question is charged", doneSites >= 3 && chargedSites === doneSites - 1);
   const askedBlock = stream.slice(stream.indexOf('action: "asked"'), stream.indexOf('action: "asked"') + 700);
   ok("a question back is free", !/chargeTurn/.test(askedBlock));

@@ -20,7 +20,9 @@ const {
   nativeCanHandle,
   diagramSvg,
   salvageNative,
+  MAX_BLOCKS,
 } = require("../helper/lessonDocNative");
+const { geometrySvg, GEOMETRY_TYPES } = require("../helper/lessonDocGeometry");
 const { sanitizeDocHtml } = require("../helper/lessonDocSanitize");
 const { buildLessonDocHtml, withRasterFigures } = require("../helper/lessonDocHtml");
 
@@ -987,6 +989,91 @@ const doc = { html, blocks: [] };
     const noTitle = salvageNative(normalizeNative({ blocks: [{ kind: "text", text: "Kvadrat tənlik" }] }));
     eq("a titleless document borrows its first line", noTitle.blocks[0].kind, "heading");
     eq("...without losing that line", noTitle.blocks.length, 2);
+  }
+
+  /*
+   * Round 16 — figures are constructed, not illustrated.
+   *
+   * A teacher asked for the Pythagoras diagram twice and got eight rounded
+   * boxes in two columns both times, because the only shapes the engine could
+   * draw were boxes. These assertions are about the numbers reaching the
+   * drawing: a figure that ignores its own measurements is the same failure
+   * wearing a better picture.
+   */
+  console.log("\n— geometry —");
+  {
+    const svg = geometrySvg({ type: "pythagoras", title: "Pifaqor", labels: ["a", "b", "c"], values: [3, 4] });
+    ok("the pythagoras figure draws", svg.startsWith("<svg") && svg.includes("</svg>"));
+    ok("...with the square on each leg", svg.includes(">a²<") && svg.includes(">b²<"));
+    // The hypotenuse is never given: it is the theorem, so it is computed.
+    ok("...and the hypotenuse square it never was told", svg.includes(">c²<") && svg.includes("= 25"));
+    ok("...9 and 16 as well, so the sum is checkable", svg.includes("= 9") && svg.includes("= 16"));
+    ok("...and c itself, derived", svg.includes("c = 5"));
+
+    const big = geometrySvg({ type: "pythagoras", title: "", labels: [], values: [5, 12] });
+    ok("a 5-12-13 triangle computes its own 13", big.includes("c = 13") && big.includes("= 169"));
+
+    /*
+     * To scale, or it is a picture of a triangle rather than this triangle.
+     * Drawn at equal sizes, a 3-4-5 and a 5-12-13 would look identical, which is
+     * the exact lie a labelled stock figure tells.
+     */
+    const legs = (out) => {
+      const poly = out.match(/<polygon points="([^"]+)" fill="#FFFFFF"/);
+      const pts = poly[1].split(" ").map((q) => q.split(",").map(Number));
+      return [Math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]),
+        Math.hypot(pts[2][0] - pts[0][0], pts[2][1] - pts[0][1])];
+    };
+    const [h1, v1] = legs(geometrySvg({ type: "pythagoras", title: "", labels: [], values: [3, 4] }));
+    ok("the 3-4 legs are drawn in a 3:4 ratio", Math.abs((v1 / h1) - (3 / 4)) < 0.02);
+    const [h2, v2] = legs(geometrySvg({ type: "pythagoras", title: "", labels: [], values: [5, 12] }));
+    ok("...and the 5-12 legs in a 5:12 ratio, not the same shape", Math.abs((v2 / h2) - (5 / 12)) < 0.02);
+
+    // A right angle is read off the numbers, so it cannot be claimed falsely.
+    const right = geometrySvg({ type: "triangle", title: "", labels: [], values: [6, 8, 10] });
+    ok("a 6-8-10 triangle is marked square", (right.match(/polygon/g) || []).length >= 2);
+    const scalene = geometrySvg({ type: "triangle", title: "", labels: [], values: [5, 6, 7] });
+    ok("...and a 5-6-7 one is not", (scalene.match(/polygon/g) || []).length < (right.match(/polygon/g) || []).length);
+
+    // Three lengths that cannot close a triangle must not produce a broken one.
+    const impossible = geometrySvg({ type: "triangle", title: "", labels: [], values: [1, 2, 99] });
+    ok("an impossible triangle falls back rather than tearing", impossible.includes("<polygon") && !impossible.includes("NaN"));
+    ok("...to the 3-4-5 every pupil knows", impossible.includes("= 5"));
+
+    // Nothing the model can send may take the whole material down with it.
+    for (const t of GEOMETRY_TYPES) {
+      const junk = geometrySvg({ type: t, title: "x", labels: [], values: [] });
+      ok(`${t} survives being sent nothing`, junk.includes("<svg") && !junk.includes("NaN"));
+      const nasty = geometrySvg({ type: t, title: "x", labels: ["<script>"], values: [0, -1, NaN] });
+      ok(`${t} survives being sent rubbish`, !nasty.includes("NaN") && !nasty.includes("<script>"));
+    }
+    eq("an unknown figure draws nothing at all", geometrySvg({ type: "dodecahedron", title: "", labels: [], values: [] }), "");
+
+    // The figure reaches the document through the ordinary diagram block.
+    const doc = normalizeNative({
+      title: "Pifaqor teoremi",
+      blocks: [
+        { kind: "heading", text: "Pifaqor teoremi" },
+        { kind: "diagram", diagram: { type: "pythagoras", title: "Sxem", labels: ["a", "b", "c"], values: [3, 4] } },
+      ],
+    });
+    eq("a geometry block survives normalisation", doc.blocks.length, 2);
+    eq("...keeping its type", doc.blocks[1].diagram.type, "pythagoras");
+    ok("...and renders as a figure in the document", /<svg[^>]*viewBox="0 0 640 440"/.test(nativeBlocksToHtml(doc)));
+
+    /*
+     * Salvage must not push a document over the ceiling.
+     *
+     * normalizeNative caps at MAX_BLOCKS; prepending a heading to a full one
+     * makes MAX_BLOCKS + 1, and the NEXT turn re-normalises and silently drops
+     * the last block — the teacher's closing section, gone one edit later.
+     */
+    const full = { title: "Dolu", blocks: Array.from({ length: MAX_BLOCKS }, (_, i) => ({ kind: "text", text: `sətir ${i}` })) };
+    const salvagedFull = salvageNative(normalizeNative(full));
+    eq("a full document is not pushed over the ceiling", salvagedFull.blocks.length, MAX_BLOCKS);
+    eq("...and keeps its last block", salvagedFull.blocks[MAX_BLOCKS - 1].text, `sətir ${MAX_BLOCKS - 1}`);
+    const nearlyFull = { title: "Az qalıb", blocks: Array.from({ length: MAX_BLOCKS - 1 }, (_, i) => ({ kind: "text", text: `sətir ${i}` })) };
+    eq("one short of the ceiling still gets its heading", salvageNative(normalizeNative(nearlyFull)).blocks[0].kind, "heading");
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

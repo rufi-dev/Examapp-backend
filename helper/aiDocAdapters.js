@@ -248,7 +248,9 @@ function claudeAdapter({ client, model, tools, maxTokens, onText, effort = "high
     },
 
     // Priced at the model the teacher actually picked — the tiers span 10x.
-    addCost: (cost, turn) => sumCost(cost, computeCost(turn.usage, model)),
+    // LONG_LIVED above: this adapter caches for an hour, which is priced at 2x
+    // base input rather than the five-minute 1.25x.
+    addCost: (cost, turn) => sumCost(cost, computeCost(turn.usage, model, { cacheTtl: "1h" })),
 
     /*
      * Say something when there is no call to answer.
