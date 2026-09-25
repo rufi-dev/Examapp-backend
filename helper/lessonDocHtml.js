@@ -85,6 +85,27 @@ const cssPdf = (a) => `
   --serif:"Open Sans","DejaVu Sans",sans-serif;--sans:"Open Sans","DejaVu Sans",sans-serif}
 *{box-sizing:border-box}
 html,body{margin:0;background:#fff}
+/* The teacher's own page, under everything. Fixed to the page box rather than
+   the flow, so it repeats on EVERY sheet the material runs to - a letterhead
+   that appears only on page one is not a letterhead. The print-color-adjust
+   rule above is what stops Chromium dropping it when it prints. */
+/* Measured, not assumed: position:fixed in print is laid out against the page
+   AREA and anything outside it is CLIPPED, so a design can only reach the
+   paper's edge when the page margins are zero. They are, for a material that has
+   one - and the text then keeps its distance through the spacer rows below,
+   which are a table header and footer group and therefore repeat on every
+   printed page. Padding would have inset the first page only. */
+/* The page's own white fill would paint straight over the layer below it, which
+   sits at z-index -1 - and it did, hiding the design everywhere the content
+   reached. A page that HAS a design does not need one. */
+html:has(body.has-bg),body.has-bg{background:transparent}
+body.has-bg > table.doc-sheet,body.has-bg > table.doc-sheet > * > tr > td{background:transparent}
+body.has-bg::before{content:"";position:fixed;inset:0;z-index:-1;
+  background-image:var(--doc-bg);background-size:100% 100%;background-repeat:no-repeat}
+body.has-bg > table.doc-sheet{width:100%;border-collapse:collapse}
+body.has-bg > table.doc-sheet > thead > tr > td{height:var(--doc-mt,16mm);padding:0;border:0}
+body.has-bg > table.doc-sheet > tfoot > tr > td{height:var(--doc-mb,18mm);padding:0;border:0}
+body.has-bg > table.doc-sheet > tbody > tr > td{padding:0 var(--doc-mx,16mm);border:0;vertical-align:top}
 body{orphans:2;widows:2;font-family:var(--sans);font-size:10.5pt;line-height:1.55;color:var(--ink);
   -webkit-print-color-adjust:exact;print-color-adjust:exact}
 
@@ -493,7 +514,7 @@ th{color:inherit;text-transform:none;letter-spacing:normal;font-weight:700;
   border-bottom:.5pt solid var(--rule-soft,#EBEDF2)}
 `;
 
-function buildLessonDocHtml(rawDoc = {}, { forWord = false } = {}) {
+function buildLessonDocHtml(rawDoc = {}, { forWord = false, backgroundDataUri = "", backgroundSafe = null } = {}) {
   const doc = rawDoc && typeof rawDoc === "object" ? rawDoc : {};
   const blocks = Array.isArray(doc.blocks) ? doc.blocks : [];
   const title = has(doc.title) ? doc.title : has(doc.topic) ? doc.topic : "Dərs materialı";
@@ -515,6 +536,63 @@ function buildLessonDocHtml(rawDoc = {}, { forWord = false } = {}) {
    * makes the preview the file rather than an approximation of it.
    */
   const body = has(doc.html) ? doc.html : blocks.map((b) => renderBlock(b, forWord, a)).join("\n");
+
+  /*
+   * The teacher's own page, under the text.
+   *
+   * PDF and screen only. LibreOffice does not honour a fixed full-bleed layer,
+   * so a Word file would come out with the background stretched down the first
+   * page or missing entirely — and a wrong background is worse than none. The
+   * teacher is told this rather than handed two files that disagree.
+   *
+   * Passed in as a data URI rather than read here: this function is synchronous
+   * and is called from three renderers, and the bytes live in the blob store.
+   */
+  const useBg = !forWord && typeof backgroundDataUri === "string" && backgroundDataUri.startsWith("data:image/");
+  /*
+   * Margins that clear the design.
+   *
+   * A letterhead has a band at the top and often a bar at the bottom, and text
+   * on the page's ordinary margins lands inside them - the first render of this
+   * put a heading across a school's blue header. The measured clear area (see
+   * safeArea) becomes page margins here, with the normal margin kept as the
+   * floor so a design that needs nothing still gets proper spacing.
+   */
+  const safe = backgroundSafe && typeof backgroundSafe === "object" ? backgroundSafe : {};
+  const mmOf = (f, floor) => Math.max(floor, Math.round(297 * (Number(f) || 0)) + 4);
+  /*
+   * The sheet, not the page area.
+   *
+   * In paged media `position:fixed` is laid out against the area INSIDE the
+   * margins, so raising the top margin to clear a letterhead pushed the
+   * letterhead down with it and left white above. The background is inset by the
+   * NEGATIVE of each margin, which puts it back on the paper's own edges while
+   * the text keeps the margins it needs.
+   */
+  const mt = useBg ? mmOf(safe.top, 16) : 16;
+  const mb = useBg ? mmOf(safe.bottom, 18) : 18;
+  const pageCss = useBg
+    ? `
+@page{margin:0}` +
+      `
+body.has-bg{--doc-mt:${mt}mm;--doc-mb:${mb}mm;--doc-mx:16mm}`
+    : "";
+  const bgCss = useBg ? `\n:root{--doc-bg:url("${backgroundDataUri.replace(/"/g, "")}")}${pageCss}` : "";
+  const bgClass = useBg ? ' class="has-bg"' : "";
+  /*
+   * The spacer rows that keep the material off the design.
+   *
+   * A table header and footer group are the only constructs that REPEAT on every
+   * printed page, which is what a letterhead needs: padding would have cleared
+   * the band on page one and let page two start underneath it. Only added when
+   * there is a background - an ordinary material is the same markup it always was.
+   */
+  const wrap = (inner) =>
+    useBg
+      ? `<table class="doc-sheet"><thead><tr><td></td></tr></thead>` +
+        `<tfoot><tr><td></td></tr></tfoot>` +
+        `<tbody><tr><td>${inner}</td></tr></tbody></table>`
+      : inner;
 
   /*
    * No brandline. The PDF used to open with "EXAMOPIA" and "DƏRS MATERİALI"
@@ -539,9 +617,9 @@ function buildLessonDocHtml(rawDoc = {}, { forWord = false } = {}) {
   const head = has(doc.html) ? "" : `<h1>${esc(title)}</h1>${meta ? `<p class="meta">${esc(meta)}</p>` : ""}`;
 
   return `<!DOCTYPE html><html lang="az"><head><meta charset="utf-8">
-<title>${esc(title)}</title><style>${forWord ? cssDocx(a) : cssPdf(a)}${has(doc.html) ? PLAIN_CSS : ""}</style></head><body>
-${head}
-${body || '<p class="meta">Bu materialda hələ məzmun yoxdur.</p>'}
+<title>${esc(title)}</title><style>${forWord ? cssDocx(a) : cssPdf(a)}${has(doc.html) ? PLAIN_CSS : ""}${bgCss}</style></head><body${bgClass}>
+${wrap(`${head}
+${body || '<p class="meta">Bu materialda hələ məzmun yoxdur.</p>'}`)}
 </body></html>`;
 }
 

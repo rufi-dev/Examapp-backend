@@ -692,10 +692,16 @@ const getDoc = asyncHandler(async (req, res) => {
    * bytes — and it is the same call the export makes, which is the whole reason
    * the preview and the file can be trusted to match.
    */
+  const F = require("../helper/lessonDocFiles");
   if (doc.html && doc.html.includes("data-image=")) {
-    const F = require("../helper/lessonDocFiles");
     doc.html = await F.embedDocImages(doc.html, doc);
   }
+  /*
+   * The teacher's own paper, sent with the material so the SCREEN shows what the
+   * PDF will print. Only when there is one, so an ordinary material's payload is
+   * unchanged - this is most of a megabyte when it exists.
+   */
+  const bgUri = await F.backgroundDataUri(doc);
   /*
    * What this material has cost, for an admin looking at it. Sent only on the
    * admin branch: a teacher pays in credits, and the provider bill behind them
@@ -703,9 +709,9 @@ const getDoc = asyncHandler(async (req, res) => {
    */
   if (req.user.role === "admin") {
     const spend = await costByDoc([doc._id]);
-    return res.json({ doc, cost: spend.get(String(doc._id)) || { usd: 0, turns: 0, models: [] } });
+    return res.json({ doc, background: bgUri, cost: spend.get(String(doc._id)) || { usd: 0, turns: 0, models: [] } });
   }
-  res.json({ doc });
+  res.json({ doc, background: bgUri });
 });
 
 /*
@@ -819,6 +825,64 @@ async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abor
       `[LESSON DOC] native turn: ${parts.length - partsForModel.length}/${parts.length} PDF(s) replaced by local text`
     );
   }
+  /*
+   * "Make it look like this" — taken off the attachment, locally, before any
+   * provider is involved.
+   *
+   * A PDF page is drawn in layers, and Ghostscript will render it with the text
+   * layer suppressed: the letterhead, border, watermark and tint survive, the
+   * words do not. That is the whole feature, and it costs no tokens at all — so
+   * it happens here, ahead of the model, rather than being something the model
+   * is asked to describe.
+   */
+  const bgWant = require("../helper/lessonDocBackground").backgroundIntent(text);
+  if (bgWant) {
+    const BG = require("../helper/lessonDocBackground");
+    if (bgWant.remove) {
+      await LessonDoc.updateOne({ _id: doc._id, owner: doc.owner }, { $set: { background: {} } });
+      doc.background = undefined;
+    } else {
+      // The newest attachment it could possibly come from: a teacher who just
+      // attached their letterhead means that one, not something from last week.
+      const source = [...(doc.files || [])].reverse().find((f) => /pdf|^image\//i.test(f.mime || ""));
+      if (source) {
+        try {
+          const F = require("../helper/lessonDocFiles");
+          const taken = await BG.extractBackground(F.pathForKey(source.key, source.ext), source.mime, {
+            keepText: bgWant.keepText,
+          });
+          if (taken) {
+            const saved = await F.saveFile({ buffer: taken.buffer, mime: taken.mime, name: "fon.png" });
+            const background = {
+              key: saved.key,
+              ext: saved.ext,
+              mime: saved.mime,
+              keptText: taken.keptText,
+              safeTop: taken.safe?.top || 0,
+              safeBottom: taken.safe?.bottom || 0,
+              fromName: source.name || "",
+              addedAt: new Date(),
+            };
+            await LessonDoc.updateOne({ _id: doc._id, owner: doc.owner }, { $set: { background } });
+            doc.background = background;
+            console.log(`[LESSON DOC] background taken from ${source.name || "attachment"} (text kept: ${taken.keptText})`);
+          }
+        } catch {
+          /*
+           * The material is still a material; it simply does not get the
+           * decoration. Never fail a turn over a picture.
+           *
+           * The error itself is NOT logged: a Ghostscript failure echoes the
+           * path it was reading, which is inside the attachment store, and the
+           * redaction guard in the tests refuses any console.error that prints a
+           * message field for exactly that reason.
+           */
+          console.error("[LESSON DOC] background extraction failed");
+        }
+      }
+    }
+  }
+
   const localPrint = native.nativePrintOptions(text);
   if (localPrint) {
     const saved = await svc.commit(
@@ -2239,10 +2303,23 @@ const exportDoc = asyncHandler(async (req, res) => {
     // and only when the document says it wants them. That flag is what the AI's
     // set_print_options tool writes, which is why "add page numbers" is a real
     // change to a real setting rather than words typed into the content.
-    body = await renderPdf(buildLessonDocHtml(plain), {
-      footerLabel: null,
-      pageNumbers: doc.settings?.pageNumbers !== false,
-    });
+    /*
+     * The teacher's own paper, under the text. PDF only: LibreOffice does not
+     * honour a fixed full-bleed layer, so a Word file would come out with the
+     * background stretched down page one or missing altogether, and a wrong
+     * background is worse than none.
+     */
+    const backgroundDataUri = await require("../helper/lessonDocFiles").backgroundDataUri(doc);
+    body = await renderPdf(
+      buildLessonDocHtml(plain, {
+        backgroundDataUri,
+        backgroundSafe: { top: doc.background?.safeTop, bottom: doc.background?.safeBottom },
+      }),
+      {
+        footerLabel: null,
+        pageNumbers: doc.settings?.pageNumbers !== false,
+      }
+    );
     mime = "application/pdf";
   }
 

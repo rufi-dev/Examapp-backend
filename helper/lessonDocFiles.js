@@ -1196,6 +1196,25 @@ const FIGURE = /<figure\b[^>]*?\sdata-image="([a-f0-9]{16})"[^>]*>([\s\S]*?)<\/f
  * A reference that names no attachment resolves to nothing and the figure is
  * removed — a caption under a blank frame is worse than no figure.
  */
+/*
+ * The material's background, as bytes a renderer can use.
+ *
+ * Read at RENDER time rather than stored in the document, for the same reason
+ * the pictures are: a page image is most of a megabyte, and a document carrying
+ * one inline would be that much heavier on every read of it.
+ */
+async function backgroundDataUri(doc) {
+  const bg = doc && doc.background;
+  if (!bg || !bg.key) return "";
+  try {
+    const buf = await require("fs/promises").readFile(pathForKey(bg.key, bg.ext || "png"));
+    return `data:${bg.mime || "image/png"};base64,${buf.toString("base64")}`;
+  } catch {
+    // Gone from disk. The material renders on plain paper rather than failing.
+    return "";
+  }
+}
+
 // A figure that could not be filled, kept visible and labelled.
 const marked = (inner, why) =>
   `<figure class="doc-image doc-image-missing">${inner || ""}<figcaption class="doc-image-note">${why}</figcaption></figure>`;
@@ -1262,6 +1281,7 @@ module.exports = {
   SLIM_OVER_BYTES,
   saveFile,
   docImages,
+  backgroundDataUri,
   embedDocImages,
   trustedType,
   OFFICE_EXTS,

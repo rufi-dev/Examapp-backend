@@ -215,6 +215,35 @@ const lessonDocSchema = new Schema(
       },
     },
 
+    /*
+     * The teacher's own paper, under our text.
+     *
+     * Taken off an attachment with Ghostscript — the page rendered with its text
+     * layer suppressed, so the letterhead, border, watermark and tint survive and
+     * the words do not. Stored as a KEY into the same blob store the attachments
+     * use, never as bytes: a background carried inline would be a megabyte on
+     * every read of the document, and three of them would breach Mongo's limit.
+     *
+     * `keptText` records which way it was taken, because the answer is not
+     * obvious from the image and the teacher may want the other one.
+     */
+    background: {
+      key: { type: String, default: "" },
+      ext: { type: String, default: "png" },
+      mime: { type: String, default: "image/png" },
+      keptText: { type: Boolean, default: false },
+      /*
+       * Where it is safe to write, as fractions of the page. A letterhead has a
+       * band at the top and often a bar at the bottom; text laid out on the
+       * ordinary margins lands inside them. Measured once, when the background
+       * is taken, so no render has to look at the image again.
+       */
+      safeTop: { type: Number, default: 0 },
+      safeBottom: { type: Number, default: 0 },
+      fromName: { type: String, default: "" },
+      addedAt: { type: Date, default: null },
+    },
+
     status: { type: String, enum: ["draft", "ready", "archived"], default: "draft" },
     // Draft-side CAS, same contract as LessonPlan: a write with a stale revision
     // gets 409 rather than silently overwriting another tab.
