@@ -401,10 +401,19 @@ const addExam = asyncHandler(async (req, res) => {
       endDate,
       class: classId,
       owner: req.user._id,
-      // Described, not written. It becomes a real exam when a question is saved
-      // into it, and until then it is listed nowhere — see the field's comment.
-      provisional: true,
-      provisionalSince: new Date(),
+      /*
+       * NOT provisional. An exam that exists is an exam the teacher can see.
+       *
+       * Hiding the empty ones solved the symptom and created a worse problem:
+       * a teacher pressed "create" eight times in half an hour, saw one exam,
+       * and had seven invisible rows held against her in the admin directory as
+       * abandoned work. She could not find them, could not delete them, and did
+       * not know they existed. A row nobody can see is a row nobody can fix.
+       *
+       * So the emptiness is dealt with at both honest ends instead: the AI path
+       * no longer creates an exam until it has questions to put in it (see the
+       * assistant), and the sweep below removes anything that stayed empty.
+       */
       // Only PDF exams carry a pdf reference.
       ...(savedPdf ? { pdf: savedPdf._id } : {}),
     };
@@ -795,25 +804,31 @@ async function replaceExamPdf(examId, uploadId, ownerId, opts = {}) {
 /*
  * Clear away exams that were described and never written.
  *
- * A provisional exam is invisible, so an abandoned one costs nobody anything to
- * look at — but it is still a row, and a teacher who starts the same paper three
- * times leaves three. After a week it is not "in progress", it is abandoned.
+ * Judged on EMPTINESS and AGE, not on how the row was made. It used to require
+ * `provisional: true`, which stopped working the moment exams stopped being
+ * created provisional — and a flag was the wrong test anyway: what makes a row
+ * worth removing is that there is nothing in it and nobody came back to it, not
+ * which code path produced it. The same query now also reaches the historical
+ * empties that the flag could never see.
  *
- * Only ones created SINCE this became the behaviour are touched: `provisionalSince`
- * is set at creation and the historical 312 do not have it, so this can never
- * reach an exam that predates the rule. It also refuses to touch anything that
- * has a question, an attempt or a purchase against it, because those are the ways
- * a row could matter even if the flag says otherwise.
+ * Empty means no question set and no PDF. Nothing with a question, an attempt or
+ * a purchase against it is touched — those are the ways a row can matter even
+ * when it looks bare — and each candidate is re-checked individually below
+ * before anything is deleted.
+ *
+ * These are visible to their owner now, so a teacher can delete their own before
+ * this ever runs. This is the backstop, not the mechanism.
  */
 async function purgeAbandonedExams(now = Date.now(), opts = {}) {
   const olderThanMs = opts.olderThanMs || 7 * 24 * 60 * 60 * 1000;
   const cutoff = new Date(now - olderThanMs);
   const candidates = await Exam.find({
-    provisional: true,
-    provisionalSince: { $lt: cutoff },
     deletedAt: null,
+    createdAt: { $lt: cutoff },
+    questions: { $in: [null, undefined] },
+    pdf: { $in: [null, undefined] },
   })
-    .select("_id name questions provisionalSince")
+    .select("_id name questions provisionalSince createdAt")
     .lean();
 
   let removed = 0;
@@ -834,7 +849,15 @@ async function purgeAbandonedExams(now = Date.now(), opts = {}) {
       continue;
     }
     // eslint-disable-next-line no-await-in-loop
-    await Exam.deleteOne({ _id: exam._id, provisional: true, provisionalSince: { $lt: cutoff } });
+    // Re-stated in the delete itself, so a question saved between the scan and
+    // this line means the row is no longer matched and survives.
+    await Exam.deleteOne({
+      _id: exam._id,
+      deletedAt: null,
+      createdAt: { $lt: cutoff },
+      questions: { $in: [null, undefined] },
+      pdf: { $in: [null, undefined] },
+    });
     removed += 1;
   }
   if (removed) console.log(`[EXAM] removed ${removed} abandoned exam(s) that never had a question`);
@@ -1385,9 +1408,10 @@ const getExamsByClass = asyncHandler(async (req, res) => {
   // A plan-blocked exam stays fully visible to the teacher who owns it (with a
   // badge saying why), and does not exist as far as students are concerned.
   const canSeeBlocked = isAdminUser(req.user) || String(exists.owner) === String(req.user._id);
-  // A provisional exam is a name and a date with nothing in it: not listed, for
-  // anyone, until a question makes it real.
-  const examFilter = { class: exists._id, deletedAt: null, provisional: { $ne: true } };
+  // Everything the teacher owns is listed, including a paper they started and
+  // have not filled in yet. An exam they cannot see is one they cannot finish
+  // or delete.
+  const examFilter = { class: exists._id, deletedAt: null };
   if (!canSeeBlocked) examFilter.blockedByPlan = { $ne: true };
   const exams = await Exam.find(examFilter).populate("class", "name level");
 
@@ -1582,7 +1606,7 @@ const getAllClasses = asyncHandler(async (req, res) => {
   const allIds = classes.map((c) => c._id);
   if (allIds.length) {
     const examCounts = await Exam.aggregate([
-      { $match: { class: { $in: allIds }, deletedAt: null, provisional: { $ne: true } } },
+      { $match: { class: { $in: allIds }, deletedAt: null } },
       {
         $lookup: {
           from: "questions",
@@ -1632,11 +1656,11 @@ const getAllClasses = asyncHandler(async (req, res) => {
 // Used by the teacher "İmtahan nəticələri" list — scoped so a teacher sees only
 // their OWN exams (admins see all).
 const getExams = asyncHandler(async (req, res) => {
-  // A provisional exam is a name and a date with nothing in it: not listed, for
-  // anyone, until a question makes it real.
+  // Not filtered by emptiness. A paper with no questions shows zero results,
+  // which is the truth about it; leaving it out of the teacher's own list was
+  // how seven of them went unnoticed for a day.
   const filter = {
     deletedAt: null,
-    provisional: { $ne: true },
     ...(isAdminUser(req.user) ? {} : { owner: req.user._id }),
   };
   const query = req.query || {};
@@ -5331,7 +5355,20 @@ const getExamsByUser = asyncHandler(async (req, res) => {
 const getPublicExams = asyncHandler(async (req, res) => {
   const publicIds = await Class.find({ requireCode: false }).distinct("_id");
   if (!publicIds.length) return res.status(200).json([]);
-  const exams = await Exam.find({ class: { $in: publicIds }, hidden: { $ne: true }, deletedAt: null, provisional: { $ne: true } })
+  /*
+   * Students see only papers they can actually sit.
+   *
+   * This used to lean on the `provisional` flag, which is going away — and a
+   * flag was the wrong test anyway: it described how the row was made rather
+   * than whether there is anything in it. The requirement is content, so that
+   * is what is asked for: a saved question set, or a PDF to answer from.
+   */
+  const exams = await Exam.find({
+    class: { $in: publicIds },
+    hidden: { $ne: true },
+    deletedAt: null,
+    $or: [{ questions: { $nin: [null, undefined] } }, { pdf: { $nin: [null, undefined] } }],
+  })
     .sort({ createdAt: -1 })
     .limit(24)
     .populate("class", "name level")

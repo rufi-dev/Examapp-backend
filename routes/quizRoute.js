@@ -153,6 +153,17 @@ router.get("/aiUsage", protect, adminOnly, getAiUsage);
 // AI chat assistant for teachers (in-dashboard floating helper).
 router.post("/chat", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.chat.message"), chatAssistant);
 // AI: generate questions from a text description (for the in-chat exam wizard).
+/*
+ * Write questions from a prompt, with no exam to write them into.
+ *
+ * The handler never read :examId — it takes a prompt and returns questions — but
+ * because the URL demanded one, the assistant had to CREATE an exam before it
+ * could ask for the content to put in it. Every failed or abandoned generation
+ * then left an empty paper behind. This is the same handler under a URL that
+ * tells the truth about what it needs.
+ */
+router.post("/generateQuestions", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.generate.questions"), generateQuestions);
+// Kept for an exam that already exists (the builder's own regenerate path).
 router.post("/generateQuestions/:examId", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.generate.questions"), generateQuestions);
 // The B variant of a finished paper: one provider call, priced and rate-limited
 // exactly like a generation, because that is what it is.

@@ -33,10 +33,29 @@ const ctl = read("../controllers/quizController.js");
 const model = read("../models/examModel.js");
 const jobs = read("../jobs/backgroundJobs.js");
 
-console.log("\n1. A described exam is not yet an exam:");
-ok("the flag exists on the model", /provisional: \{ type: Boolean/.test(model));
-ok("with the timestamp the janitor keys on", /provisionalSince: \{ type: Date/.test(model));
-ok("creating one sets both", /provisional: true,\s*\n\s*provisionalSince: new Date\(\),/.test(ctl));
+/*
+ * WHAT CHANGED, and why the assertions below are the opposite of what they were.
+ *
+ * Empty exams used to be created INVISIBLE and swept up a week later. It solved
+ * the row count and created a worse problem: a teacher pressed "create" eight
+ * times in half an hour, saw one exam, and had seven invisible rows counted
+ * against her in the admin directory as abandoned work. She could not see them,
+ * could not delete them, and did not know they existed.
+ *
+ * A row nobody can see is a row nobody can fix. So nothing is hidden now, and
+ * emptiness is handled at its two honest ends instead: the AI path does not
+ * create an exam until it has questions to put in it, and the sweep removes what
+ * stayed empty — judged on being empty and old, not on a flag.
+ */
+console.log("\n1. Nothing is created invisible:");
+ok("creation no longer marks a row provisional", !/provisional: true,\s*\n\s*provisionalSince: new Date\(\),/.test(ctl));
+ok("...and says why, so it is not re-added by habit", /NOT provisional\. An exam that exists is an exam the teacher can see/.test(ctl));
+/*
+ * The field stays on the model. Twenty rows still carry it, the promotion path
+ * still clears it, and dropping a field that live documents hold is a separate
+ * job from changing what is written.
+ */
+ok("the field remains for the rows that already have it", /provisional: \{ type: Boolean/.test(model));
 
 console.log("\n2. Saving a question is what makes it real:");
 ok("promotion is tied to having answers",
@@ -54,29 +73,47 @@ ok("the first saved question spends", /if \(becomesReal\) \{[\s\S]{0,120}consume
 ok("and an exhausted allowance blocks rather than discards",
   /blockedByPlan: true/.test(ctl) && /allowance exhausted at first save/.test(ctl));
 
-console.log("\n4. Listed nowhere until then:");
-const filters = ctl.match(/provisional: \{ \$ne: true \}/g) || [];
-ok("every exam list applies the rule", filters.length >= 3, `found ${filters.length}`);
-ok("the class list", /class: exists\._id, deletedAt: null, provisional: \{ \$ne: true \}/.test(ctl));
-ok("the results list", /deletedAt: null,\s*\n\s*provisional: \{ \$ne: true \},/.test(ctl));
-ok("and the count on the class card",
-  /\$match: \{ class: \{ \$in: allIds \}, deletedAt: null, provisional: \{ \$ne: true \} \}/.test(ctl));
+console.log("\n4. Listed everywhere its owner looks:");
+/*
+ * No teacher-facing list filters on the flag any more. This is the assertion
+ * that fails if hiding is ever reintroduced — which is exactly how seven exams
+ * went missing for a day.
+ */
+const hidden = ctl.match(/provisional: \{ \$ne: true \}/g) || [];
+ok("no list hides a row by flag", hidden.length === 0, `found ${hidden.length}`);
+ok("the class list shows everything in the class", /const examFilter = \{ class: exists\._id, deletedAt: null \};/.test(ctl));
+ok("the class card counts it too", /\$match: \{ class: \{ \$in: allIds \}, deletedAt: null \} \}/.test(ctl));
+
+/*
+ * Students are the one audience that must NOT see an empty paper — they cannot
+ * sit it. That gate asks for CONTENT rather than for the absence of a flag,
+ * which is both the honest test and one that survives the flag going away.
+ */
+ok("students still only see papers they can sit",
+  /\$or: \[\{ questions: \{ \$nin: \[null, undefined\] \} \}, \{ pdf: \{ \$nin: \[null, undefined\] \} \}\]/.test(ctl));
 
 console.log("\n5. Abandoned ones are cleared, carefully:");
 ok("there is a sweeper", /async function purgeAbandonedExams/.test(ctl));
 ok("scheduled daily", /schedule\("abandoned-exam-purge"/.test(jobs));
 /*
- * The historical 312 have no provisionalSince, so this can never reach them —
- * they are the owner's to decide about, not a sweep's.
+ * Judged on emptiness and age rather than on how the row was made. Keying on the
+ * flag stopped working the moment exams stopped being created with it — and the
+ * flag was the wrong test anyway: what makes a row worth removing is that there
+ * is nothing in it and nobody came back, not which code path produced it.
  */
-ok("it keys on the timestamp, so it cannot reach the backfilled ones",
-  /provisionalSince: \{ \$lt: cutoff \}/.test(ctl));
+ok("it selects on emptiness, not on a flag",
+  /questions: \{ \$in: \[null, undefined\] \},\s*\n\s*pdf: \{ \$in: \[null, undefined\] \},/.test(ctl));
+ok("...and on age", /createdAt: \{ \$lt: cutoff \}/.test(ctl));
 ok("a week is the cutoff", /7 \* 24 \* 60 \* 60 \* 1000/.test(ctl));
 // The flag is a claim; the questions and attempts are the evidence.
 ok("it verifies before deleting anything", /if \(qCount \|\| attempts\)/.test(ctl));
 ok("and promotes what turns out to be real instead", /kept and promoted/.test(ctl));
+/*
+ * The predicate is restated in the delete itself, so a question saved between
+ * the scan and the delete means the row no longer matches and survives.
+ */
 ok("the delete is fenced on the same predicate",
-  /deleteOne\(\{ _id: exam\._id, provisional: true, provisionalSince: \{ \$lt: cutoff \} \}\)/.test(ctl));
+  /deleteOne\(\{[\s\S]{0,260}questions: \{ \$in: \[null, undefined\] \},[\s\S]{0,80}pdf: \{ \$in: \[null, undefined\] \},[\s\S]{0,40}\}\)/.test(ctl));
 
 console.log("\n6. Only one path can make an empty exam, and it makes a provisional one:");
 /*
