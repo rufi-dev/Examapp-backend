@@ -289,6 +289,84 @@ const eq = (name, actual, expected) =>
     ok("a double release cannot go negative", twice.storageReserved >= 0);
   }
 
+  /*
+   * Every store a TEACHER uploads into counts against the same allowance.
+   *
+   * It used to be library materials and uploaded videos only, which made the
+   * meter a lie by omission: a teacher could fill the server with whiteboards,
+   * exam PDFs and curriculum scans and still be told they had used nothing.
+   */
+  console.log("\n— every upload takes space —");
+  {
+    const u = await makeUser("free");
+    const own = { owner: u._id };
+    eq("a new account holds nothing", await usedBytes(u._id), 0);
+
+    const Assignment = require("../models/assignmentModel");
+    const Board = require("../models/boardModel");
+    const Pdf = require("../models/pdfModel");
+    const LessonDoc = require("../models/lessonDocModel");
+    const CurriculumSource = require("../models/curriculumSourceModel");
+    const CurriculumSourceVersion = require("../models/curriculumSourceVersionModel");
+
+    await addMaterial(u._id, 1 * MB);
+    eq("a library material counts", (await usedBytes(u._id)) / MB, 1);
+
+    await Assignment.create({ ...own, title: "T", class: new mongoose.Types.ObjectId(),
+      attachments: [{ fileName: "brief.pdf", sizeBytes: 2 * MB }] });
+    eq("the worksheet a teacher attaches to a task counts", (await usedBytes(u._id)) / MB, 3);
+
+    await Board.create({ ...own, title: "B", sizeBytes: 4 * MB });
+    eq("a whiteboard counts", (await usedBytes(u._id)) / MB, 7);
+
+    // A staged upload is bytes on disk too, so it counts from the moment it lands.
+    await Pdf.create({ ...own, size: 8 * MB, state: "staged", storageKey: `k${Date.now()}` });
+    eq("an exam PDF counts", (await usedBytes(u._id)) / MB, 15);
+
+    await LessonDoc.create({ ...own, title: "D", files: [{ key: "a", name: "x.pdf", bytes: 16 * MB }] });
+    eq("a studio attachment counts", (await usedBytes(u._id)) / MB, 31);
+
+    const src = await CurriculumSource.create({ ...own, title: "S" });
+    await CurriculumSourceVersion.create({ source: src._id, versionNumber: 1, bytes: 5 * MB, storageKey: `v${Date.now()}`, state: "ready" });
+    eq("a curriculum source counts", (await usedBytes(u._id)) / MB, 36);
+
+    /*
+     * And what a STUDENT sends in does not. A teacher cannot control how much
+     * their class uploads, and charging them for it would mean a popular teacher
+     * running out of room for work that is not theirs.
+     */
+    const Submission = require("../models/submissionModel");
+    await Submission.create({
+      student: new mongoose.Types.ObjectId(),
+      assignment: new mongoose.Types.ObjectId(),
+      class: new mongoose.Types.ObjectId(),
+      owner: u._id,
+      sizeBytes: 500 * MB,
+    }).catch(() => {});
+    eq("a student's own upload does not", (await usedBytes(u._id)) / MB, 36);
+
+    // Everything together is still one allowance, and it is enforced as one.
+    ok("the whole lot is weighed at the gate", (await reserveStorage(await User.findById(u._id), 20 * MB)).ok === false);
+    ok("...while what fits still passes", (await reserveStorage(await User.findById(u._id), 10 * MB)).ok === true);
+  }
+
+  /*
+   * Deleting anywhere gives the room back.
+   *
+   * The committed counter was raised only, never lowered, because one counter
+   * also held the in-flight claims. They have their own field now - so a board
+   * deleted is a board's worth of space returned, which it was not before.
+   */
+  console.log("\n— space comes back —");
+  {
+    const u = await makeUser("free");
+    const Board = require("../models/boardModel");
+    const b = await Board.create({ owner: u._id, title: "B", sizeBytes: 40 * MB });
+    ok("a full account is blocked", (await reserveStorage(await User.findById(u._id), 20 * MB)).ok === false);
+    await Board.deleteOne({ _id: b._id });
+    ok("...and freed by the delete", (await reserveStorage(await User.findById(u._id), 20 * MB)).ok === true);
+  }
+
   // An admin has no ceiling, and is not shown a meter at all.
   {
     const admin = { _id: new mongoose.Types.ObjectId(), role: "admin", plan: "free" };

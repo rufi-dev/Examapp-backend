@@ -112,20 +112,92 @@ const quotaFor = (user) => {
   return base + addonBytes(user);
 };
 
-// Bytes this user already has stored — study materials AND uploaded videos both
-// live on the same disk, so they share one quota.
+/*
+ * Everything this teacher has put on our disk.
+ *
+ * It used to be library materials and uploaded videos only, which made the meter
+ * a lie by omission: a teacher could fill the server with whiteboards, exam PDFs
+ * and curriculum scans and still be told they had used nothing. Every store a
+ * TEACHER uploads into is counted now, because every one of them is disk we pay
+ * for every month.
+ *
+ * Student submissions are deliberately NOT counted. A teacher cannot control how
+ * much their class uploads, and charging them for it would mean a popular
+ * teacher running out of room for work that is not theirs.
+ *
+ * Seven scoped counts rather than one, run together. Each is a single-owner
+ * query against an indexed field, which is why this is cheap enough to sit in
+ * front of every upload.
+ */
 async function usedBytes(userId) {
-  const [mat, vid] = await Promise.all([
-    Material.aggregate([
-      { $match: { owner: userId } },
-      { $group: { _id: null, bytes: { $sum: { $ifNull: ["$sizeBytes", 0] } } } },
-    ]),
-    Video.aggregate([
-      { $match: { owner: userId, source: "file" } },
-      { $group: { _id: null, bytes: { $sum: { $ifNull: ["$sizeBytes", 0] } } } },
-    ]),
+  const sumOf = (model, match, field) =>
+    model.aggregate([
+      { $match: match },
+      { $group: { _id: null, bytes: { $sum: { $ifNull: [`$${field}`, 0] } } } },
+    ]).then((r) => r[0]?.bytes || 0).catch(() => 0);
+
+  const Assignment = require("../models/assignmentModel");
+  const Board = require("../models/boardModel");
+  const LessonDoc = require("../models/lessonDocModel");
+  const Pdf = require("../models/pdfModel");
+  const CurriculumSource = require("../models/curriculumSourceModel");
+  const CurriculumSourceVersion = require("../models/curriculumSourceVersionModel");
+
+  /*
+   * A curriculum version does not carry its owner - it reaches one through the
+   * source it belongs to. Two indexed steps beat a $lookup: the sources are
+   * indexed by owner, and a teacher has a handful of them.
+   */
+  const curriculumBytes = async () => {
+    try {
+      const ids = await CurriculumSource.find({ owner: userId }).distinct("_id");
+      if (!ids.length) return 0;
+      return await sumOf(CurriculumSourceVersion, { source: { $in: ids } }, "bytes");
+    } catch {
+      return 0;
+    }
+  };
+
+  const assignmentBytes = async () => {
+    try {
+      const r = await Assignment.aggregate([
+        { $match: { owner: userId } },
+        { $unwind: { path: "$attachments", preserveNullAndEmptyArrays: false } },
+        { $group: { _id: null, bytes: { $sum: { $ifNull: ["$attachments.sizeBytes", 0] } } } },
+      ]);
+      return r[0]?.bytes || 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  // Studio attachments hang off the document in an array.
+  const lessonDocBytes = async () => {
+    try {
+      const r = await LessonDoc.aggregate([
+        { $match: { owner: userId } },
+        { $unwind: { path: "$files", preserveNullAndEmptyArrays: false } },
+        { $group: { _id: null, bytes: { $sum: { $ifNull: ["$files.bytes", 0] } } } },
+      ]);
+      return r[0]?.bytes || 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  const parts = await Promise.all([
+    sumOf(Material, { owner: userId }, "sizeBytes"),
+    sumOf(Video, { owner: userId, source: "file" }, "sizeBytes"),
+    // The worksheets a TEACHER hands out with a task - an ARRAY on the task, not
+    // a field, which is why summing it needs an unwind. What students send back
+    // lives in submissions and is not counted at all.
+    assignmentBytes(),
+    sumOf(Board, { owner: userId }, "sizeBytes"),
+    sumOf(Pdf, { owner: userId }, "size"),
+    lessonDocBytes(),
+    curriculumBytes(),
   ]);
-  return (mat[0]?.bytes || 0) + (vid[0]?.bytes || 0);
+  return parts.reduce((n, b) => n + b, 0);
 }
 
 // Sizes the way a teacher reads them: MB until it is silly, then GB.
@@ -202,12 +274,16 @@ async function reserveStorage(user, incoming) {
   const bytes = Math.max(0, Number(incoming) || 0);
   const used = await usedBytes(user._id);
 
-  // Committed bytes are never allowed below the truth. `$lt` leaves a larger
-  // value alone; it holds no reservations, so this cannot erase one.
-  await User.updateOne(
-    { _id: user._id, $or: [{ storageBytes: { $lt: used } }, { storageBytes: { $exists: false } }] },
-    { $set: { storageBytes: used } }
-  );
+  /*
+   * The committed counter is simply set to the truth.
+   *
+   * It used to be raised only, never lowered, because a single counter also held
+   * the in-flight claims and lowering it would have erased them. They live in
+   * storageReserved now, so there is nothing here to protect - and raising only
+   * had become a real fault: deleting a board or an exam PDF left the counter
+   * high for ever, and the teacher could not reclaim the space they had freed.
+   */
+  await User.updateOne({ _id: user._id }, { $set: { storageBytes: used } });
 
   /*
    * Committed + already-claimed + this file must fit. `$expr` lets the sum be
