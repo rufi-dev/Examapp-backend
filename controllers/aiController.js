@@ -8,6 +8,20 @@ const Exam = require("../models/examModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 
+/*
+ * The exam this AI call belongs to, when there is one.
+ *
+ * File- and prompt-fed exams are generated BEFORE the exam row exists, so these
+ * routes are mounted without an id as well. A missing or non-id value must leave
+ * the field unset rather than throw a cast error and lose the cost row, which is
+ * the billing record.
+ */
+const OBJECT_ID = /^[0-9a-fA-F]{24}$/;
+const usageExamId = (req) => {
+  const id = req?.params?.examId;
+  return id && OBJECT_ID.test(String(id)) ? String(id) : undefined;
+};
+
 // Lazy client so the server still boots without the key (the feature just
 // returns a clear error until ANTHROPIC_API_KEY is set in the env).
 let _client = null;
@@ -1461,7 +1475,7 @@ const extractQuestions = asyncHandler(async (req, res) => {
     try {
       await AiUsage.create({
         user: req.user._id,
-        exam: req.params.examId,
+        exam: usageExamId(req),
         model: finalCost.model,
         inputTokens: finalCost.inputTokens,
         outputTokens: finalCost.outputTokens,
@@ -1838,7 +1852,7 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     try {
       await AiUsage.create({
         user: req.user._id,
-        exam: req.params.examId,
+        exam: usageExamId(req),
         model: cost.model,
         inputTokens: cost.inputTokens,
         outputTokens: cost.outputTokens,
@@ -2637,7 +2651,7 @@ const logGenerationUsage = async (req, out) => {
     const c = out.cost || {};
     await AiUsage.create({
       user: req.user._id,
-      exam: req.params.examId,
+      exam: usageExamId(req),
       model: c.model,
       inputTokens: c.inputTokens || 0,
       outputTokens: c.outputTokens || 0,

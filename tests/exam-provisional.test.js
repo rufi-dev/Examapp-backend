@@ -81,6 +81,15 @@ console.log("\n4. Listed everywhere its owner looks:");
  */
 const hidden = ctl.match(/provisional: \{ \$ne: true \}/g) || [];
 ok("no list hides a row by flag", hidden.length === 0, `found ${hidden.length}`);
+/*
+ * And not in memory either. This assertion is here because the one above was not
+ * enough: it reads Mongo filters, so it went on passing while a JavaScript
+ * `.filter(e => e.provisional !== true)` in `getExamsByUser` kept hiding the
+ * very rows the flag was retired to stop hiding. A list can discard a row after
+ * the query as easily as inside it.
+ */
+const hiddenInMemory = ctl.match(/provisional\s*!==\s*true/g) || [];
+ok("nor after the query, in memory", hiddenInMemory.length === 0, `found ${hiddenInMemory.length}`);
 ok("the class list shows everything in the class", /const examFilter = \{ class: exists\._id, deletedAt: null \};/.test(ctl));
 ok("the class card counts it too", /\$match: \{ class: \{ \$in: allIds \}, deletedAt: null \} \}/.test(ctl));
 
@@ -144,6 +153,38 @@ ok("the save reply says when it created the exam",
 ok("the details form no longer announces an exam", !/Exam added successfully/.test(slice));
 ok("the first save does", /p\.createdExam\)[\s\S]{0,40}toast\.success\("İmtahan yaradıldı/.test(slice));
 ok("the assistant does not claim one before a question exists", !/✅ İmtahan yaradıldı/.test(assistant));
+
+/*
+ * 8. The AI runs before the exam exists.
+ *
+ * Both generators used to be reachable only at a URL carrying an exam id, which
+ * is why the exam had to be created first, and why a generation that failed left
+ * the row behind. Neither ever read the id for anything but tagging the cost row,
+ * so both are mounted without one - and the tag has to survive its absence,
+ * because a lost cost row is a lost billing record.
+ */
+console.log("\n8. The AI runs before the exam exists:");
+const route = read("../routes/quizRoute.js");
+const aiCtl = read("../controllers/aiController.js");
+const builder = fs.readFileSync(
+  path.join(__dirname, "../../Frontend/src/pages/admin/StructuredBuilder.jsx"),
+  "utf8"
+);
+
+ok("questions can be written with no exam", /router\.post\("\/generateQuestions",/.test(route));
+ok("a file can be read with no exam", /router\.post\(\s*"\/extractQuestionsStream",/.test(route));
+ok(
+  "the builder posts without an id while the exam is unsaved",
+  /extractQuestionsStream\$\{[\s\S]{0,120}pending \? "" :/.test(builder)
+);
+ok(
+  "no cost row is tagged with a raw route value",
+  !/exam: req\.params\.examId,/.test(aiCtl) && /const usageExamId = \(req\) =>/.test(aiCtl)
+);
+ok(
+  "and every tag site goes through the guard",
+  (aiCtl.match(/exam: usageExamId\(req\),/g) || []).length === 3
+);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

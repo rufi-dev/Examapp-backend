@@ -137,7 +137,24 @@ router.post(
   chargeAi("ai.extract.questions"),
   extractQuestions
 );
-// Same extraction, streamed over SSE so the teacher watches questions appear.
+/*
+ * Same extraction, streamed over SSE so the teacher watches questions appear.
+ *
+ * Registered with and without an exam id, because the exam no longer exists
+ * when this runs: a file-fed exam is extracted first and created by the first
+ * save, so nothing is left behind if the extraction fails or is abandoned. The
+ * id was only ever used to tag the usage row.
+ */
+router.post(
+  "/extractQuestionsStream",
+  protect,
+  teacherOnly,
+  aiRateLimit,
+  aiBudgetGuard,
+  memUpload.array("pdf", 10),
+  chargeAi("ai.extract.questions"),
+  extractQuestionsStream
+);
 router.post(
   "/extractQuestionsStream/:examId",
   protect,

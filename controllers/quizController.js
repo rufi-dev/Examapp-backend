@@ -5318,9 +5318,17 @@ const getExamsByUser = asyncHandler(async (req, res) => {
     throw new Error("User not found!");
   }
 
-  const exams = (user.exams || []).filter(
-    (e) => !e.deletedAt && e.provisional !== true
-  ); // hide archived and builder drafts
+  /*
+   * A student's acquired exams: archived ones are gone, and one with nothing in
+   * it cannot be sat, so it is not offered.
+   *
+   * Judged on substance rather than on the `provisional` flag this used to test.
+   * Nothing sets that flag any more - an exam is created with its questions or
+   * not at all - so the flag test silently stopped meaning anything, while still
+   * hiding the historical rows that carry it. Emptiness is the real question and
+   * it keeps working whatever made the row.
+   */
+  const exams = (user.exams || []).filter((e) => !e.deletedAt && (e.questions || e.pdf));
 
   // Question count per exam for the card stats — the SAME cheap $size aggregation
   // the other listings use. Without it every card here showed "Sual: —" even
