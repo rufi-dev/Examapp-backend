@@ -324,12 +324,24 @@ const addExam = asyncHandler(async (req, res) => {
     const suppliedKey =
       req.get?.("x-idempotency-key") ||
       req.body?.clientMutationId;
+    /*
+     * The same rule in every environment.
+     *
+     * This used to hand tests a generated key when they sent none, so the whole
+     * suite ran against a server that did NOT enforce what production enforces.
+     * The cost of that convenience was a day of production breakage: the builder
+     * shipped without sending a key, every first save was refused with a 400 that
+     * no test could reproduce, and nineteen exams were created empty by teachers
+     * retrying a button that could not work.
+     *
+     * A test that passes because the server was lenient for it is not evidence
+     * about anything. A client that cannot supply a key cannot create an exam -
+     * in a test exactly as in production.
+     */
     const creationKey =
       typeof suppliedKey === "string" && /^[A-Za-z0-9:_-]{16,128}$/.test(suppliedKey)
         ? suppliedKey
-        : process.env.NODE_ENV === "test"
-          ? `test:${crypto.randomUUID()}`
-          : null;
+        : null;
     if (!creationKey) {
       throw httpError(
         400,

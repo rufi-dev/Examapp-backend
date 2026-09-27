@@ -70,7 +70,9 @@ async function main() {
 
   // ── addExam FORCES price 0 even with a forged positive price ──
   const created = await req(server, { method: "POST", path: `/addExam/${klass._id}`, token: tok(owner),
-    body: { name: "Forged paid", duration: 600, totalMarks: 100, passingMarks: 50, price: 999, mode: "structured" } });
+    // A real client supplies an idempotency key; the server requires one in
+    // every environment now, so the test sends what a client sends.
+    body: { name: "Forged paid", duration: 600, totalMarks: 100, passingMarks: 50, price: 999, mode: "structured", clientMutationId: "test:payments-removed-forged" } });
   ok("addExam returns 201", created.status === 201);
   const createdExam = await Exam.findById(created.body?.data?._id);
   ok("addExam stored price 0 despite forged price=999", createdExam && createdExam.price === 0);
