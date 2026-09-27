@@ -77,6 +77,7 @@
   "tests/http/admin-whatsapp-message.test.js",
   "tests/attempt-result-contract.test.js",
   "tests/attempt-result-indexes-migration.test.js",
+  "tests/smoke-prep-drift.test.js",
   "tests/container-smoke.test.js",
   "tests/closure-gates.test.cjs",
   "tests/teacher-success-config.test.js",
