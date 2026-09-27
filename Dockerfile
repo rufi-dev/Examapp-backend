@@ -50,6 +50,12 @@ ENV PUPPETEER_SKIP_DOWNLOAD=true \
 COPY package*.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
+# Headless provider CLIs. They are selected only when the admin switches the
+# persisted AI execution mode to `cli`; API mode never starts either process.
+# Authentication is kept in the named volumes from docker-compose, never in the
+# image or repository.
+RUN npm install --global --no-audit --no-fund @anthropic-ai/claude-code @openai/codex@alpha
+
 # Copy the rest of the source
 COPY . .
 

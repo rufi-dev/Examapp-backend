@@ -552,6 +552,32 @@ async function documentWithGemini({ prompt, parts = [], system, schema, signal, 
  * billing two more providers for output nobody is waiting for.
  */
 async function runDocument({ prompt, parts = [], system, schema, geminiSchema, model, provider, signal, maxTokens, onText, effort }) {
+  const { getAiExecution } = require("../config/aiExecution");
+  const runtime = await getAiExecution().catch(() => ({ mode: "api", fallbackToApi: false }));
+  if (runtime.mode === "cli") {
+    try {
+      const { runCliStructured } = require("./cliAi");
+      const cliProvider = provider === "openai" ? "codex" : provider;
+      const out = await runCliStructured({
+        provider: cliProvider,
+        model,
+        system: typeof system === "string" ? system : JSON.stringify(system || ""),
+        prompt,
+        schema,
+        parts,
+        signal,
+      });
+      return { doc: out.doc, provider: out.provider, cost: out.cost, usage: null, truncated: false };
+    } catch (error) {
+      if (!runtime.fallbackToApi) {
+        const e = docError(503, "CLI xidməti hazır deyil. Administrator CLI-ni yoxlamalıdır.");
+        e.provider = provider;
+        e.code = error?.code || "cli_unavailable";
+        throw e;
+      }
+      console.error("document CLI failed; explicit API fallback enabled");
+    }
+  }
   const { findAiModel, DEFAULT_AI_MODEL } = require("../controllers/aiController");
   const picked = findAiModel(String(model || "")) || findAiModel(DEFAULT_AI_MODEL);
   const runners = {

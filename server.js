@@ -261,6 +261,8 @@ app.use("/api/curriculum", require("./routes/curriculumRoute"))
 app.use("/api/lesson-plans", require("./routes/lessonPlanRoute"))
 app.use("/api/updates", require("./routes/updatesRoute"))
 app.use("/api/lesson-docs", require("./routes/lessonDocRoute"))
+// Admin-only runtime switch for API-backed versus on-server CLI execution.
+app.use("/api/admin/ai-runtime", require("./routes/aiRuntimeRoute"))
 app.use("/api/health", healthRoute)
 // Public step-by-step "how to use the platform" guide videos (self-hosted help
 // content, NO auth — nothing sensitive). express.static gives byte-range support so

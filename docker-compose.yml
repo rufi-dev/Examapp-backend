@@ -42,6 +42,8 @@ services:
       - wa_auth:/app/.wwebjs_auth # persist the linked WhatsApp session
       - live_journal:/app/live-journal # durable write-ahead journal for live whiteboard sessions
       - curriculum:/app/lessonAssets # persist textbook sources + page crops across rebuilds
+      - cli_claude:/root/.claude # provider CLI login state; never baked into the image
+      - cli_codex:/root/.codex # provider CLI login state; never baked into the image
       # Read-only view of the nightly database backups, so the Health page can say
       # when the last one actually ran (BACKUP_LOG_DIR in controllers/healthController).
       - /root/backups/mongo:/app/backups-mongo:ro
@@ -71,6 +73,8 @@ services:
       - assignments:/app/assignments
       - videos:/app/videos
       - curriculum:/app/lessonAssets
+      - cli_claude:/root/.claude
+      - cli_codex:/root/.codex
     networks:
       - web
 
@@ -155,6 +159,8 @@ volumes:
   wa_auth:
   live_journal:
   curriculum:
+  cli_claude:
+  cli_codex:
   caddy_data:
   caddy_config:
   mongo_data: # the database itself — never `docker volume rm` this
