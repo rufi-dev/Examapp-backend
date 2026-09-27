@@ -73,6 +73,7 @@ const {
   classStudents,
   assignableStudents,
   addStudentToClass,
+  removeStudentFromMyClasses,
   decideEnrollment,
   setJoinSettings,
 } = require("../controllers/enrollmentController");
@@ -233,6 +234,18 @@ router.get("/class/:classId/students", protect, teacherOnly, classStudents);
 router.get("/class/:classId/assignable", protect, teacherOnly, assignableStudents);
 router.post("/class/:classId/addStudent", protect, teacherOnly, addStudentToClass);
 router.patch("/enrollment/:id", protect, teacherOnly, decideEnrollment);
+/*
+ * Remove a student from ALL of this teacher's classes in one action.
+ *
+ * `/enrollment/:id` with action "remove" already drops ONE membership, which is
+ * what the roster inside a class needs. This is the "Şagirdlərim" list, where
+ * the teacher is looking at a person rather than at a seat in one class, and
+ * removing them from four classes one at a time is not the same offer.
+ *
+ * DELETE on the student id, but it deletes memberships, never the account -
+ * that stays adminOnly on /api/users/deleteUser.
+ */
+router.delete("/teacher/student/:studentId", protect, teacherOnly, removeStudentFromMyClasses);
 router.patch("/class/:classId/joinSettings", protect, requireCapability("class:manage:own"), setJoinSettings);
 router.post("/addPhotoToResult/:resultId", protect, teacherOnly, addPhotoToResult);
 router.get("/getPdfByExam/:examId", protect, getPdfByExam);

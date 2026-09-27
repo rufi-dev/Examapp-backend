@@ -3,7 +3,7 @@ const Enrollment = require("../models/enrollmentModel");
 const Class = require("../models/classModel");
 const User = require("../models/userModel");
 const { notifyEnrollment } = require("../helper/telegram");
-const { hasStudentRoom } = require("../helper/planLimits");
+const { hasStudentRoom, promoteWaitlisted } = require("../helper/planLimits");
 const { httpError } = require("../utils/appError");
 
 const isAdmin = (u) => !!u && u.role === "admin";
@@ -307,6 +307,74 @@ const decideEnrollment = asyncHandler(async (req, res) => {
   throw new Error("Naməlum əməliyyat");
 });
 
+/*
+ * Remove a student from every class this teacher owns.
+ *
+ * This is NOT deleting the person. Only an admin can delete an account, and this
+ * student very likely sits in other teachers' classes too - an account is not a
+ * teacher's to destroy. What a teacher owns, and can properly revoke, is the
+ * membership: after this the student loses access to this teacher's exams,
+ * assignments and materials, and disappears from their lists.
+ *
+ * Their results and attempts are kept. A grade records something that actually
+ * happened; removing someone from a class does not unmake it, and the teacher's
+ * own exam statistics would quietly change if it did.
+ *
+ * Pending requests go along with the approved ones. Leaving a pending row behind
+ * would drop the student straight back into the approval queue, which is not
+ * what the teacher asked for.
+ *
+ * The scope is `Class.owner`, not the enrollment's denormalised `teacher` field,
+ * so a class that changed hands cannot be reached by its previous owner.
+ */
+const removeStudentFromMyClasses = asyncHandler(async (req, res) => {
+  const { studentId } = req.params;
+
+  const owned = await Class.find({ owner: req.user._id, deletedAt: null })
+    .select("_id name")
+    .lean();
+
+  const rows = owned.length
+    ? await Enrollment.find({
+        class: { $in: owned.map((c) => c._id) },
+        student: studentId,
+      })
+        .select("_id class status")
+        .lean()
+    : [];
+
+  // Same answer for "no such student" and "not one of yours": a teacher has no
+  // business learning which accounts exist by probing this.
+  if (!rows.length) {
+    res.status(404);
+    throw new Error("Şagird sizin siniflərinizdə deyil");
+  }
+
+  const nameOf = new Map(owned.map((c) => [String(c._id), c.name]));
+  const classes = rows.map((r) => nameOf.get(String(r.class))).filter(Boolean);
+
+  await Enrollment.deleteMany({
+    class: { $in: rows.map((r) => r.class) },
+    student: studentId,
+  });
+
+  // The seat is free now, so whoever was waiting for it should have it. Never
+  // the student just removed - their rows are gone, so nothing can promote them.
+  let promoted = 0;
+  try {
+    promoted = await promoteWaitlisted(req.user._id);
+  } catch (e) {
+    console.error("[ENROLL] waitlist promotion after removal failed:", e?.message);
+  }
+
+  res.status(200).json({
+    message: "Şagird siniflərinizdən çıxarıldı",
+    removed: rows.length,
+    classes,
+    promoted,
+  });
+});
+
 // Update a class's join settings (toggle approval, regenerate code, backfill).
 const setJoinSettings = asyncHandler(async (req, res) => {
   const { classId } = req.params;
@@ -342,5 +410,6 @@ module.exports = {
   assignableStudents,
   addStudentToClass,
   decideEnrollment,
+  removeStudentFromMyClasses,
   setJoinSettings,
 };
