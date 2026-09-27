@@ -5659,6 +5659,18 @@ const msoReport = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  /*
+   * The correctness evaluator, exported so that anything which has to REPRODUCE a
+   * grade uses the code that produced it in the first place.
+   *
+   * The alternative is a second implementation of "was this answer right", written
+   * from reading this one - which is how a maintenance script silently regrades a
+   * class differently from the server. Exported, not moved: `answerScore` is the
+   * evaluator `EVALUATORS["1"]` dispatches to, and relocating it would change
+   * which function that table points at.
+   */
+  answerScore,
+  isCorrectAnswer,
   createVariantB,
   msoReport,
   duplicateExam,
