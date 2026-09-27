@@ -21,6 +21,9 @@ services:
       # they must outlive a rebuild: the startup preflight refuses a non-absolute
       # CURRICULUM_DIR in production for exactly the same reason as EXAM_PDF_DIR.
       CURRICULUM_DIR: /app/lessonAssets
+      # CLI defaults to the subscription login stored in cli_* volumes. Set
+      # AI_CLI_USE_API_KEYS=true only when deliberately billing provider keys.
+      AI_CLI_USE_API_KEYS: ${AI_CLI_USE_API_KEYS:-false}
     # tini as PID 1 reaps zombie Chromium processes and forwards signals so the
     # browser shuts down cleanly (avoids stale profile locks on restart).
     init: true
@@ -62,6 +65,7 @@ services:
       CURRICULUM_DIR: /app/lessonAssets
       RUN_BACKGROUND_JOBS: "false"
       WHATSAPP_WEB_ENABLED: "false"
+      AI_CLI_USE_API_KEYS: ${AI_CLI_USE_API_KEYS:-false}
     init: true
     depends_on:
       mongo:

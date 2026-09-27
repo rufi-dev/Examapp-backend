@@ -79,6 +79,7 @@ function claudeResult(raw) {
 function runProcess(command, args, { cwd, signal, provider }) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env, CI: "1", NO_COLOR: "1" };
+    const useProviderApiKeys = String(process.env.AI_CLI_USE_API_KEYS || "").toLowerCase() === "true";
     // Do not let one provider's secret accidentally select another provider's
     // authentication path. The relevant CLI login volume or provider key is
     // preserved; unrelated keys are removed from the child environment.
@@ -86,9 +87,14 @@ function runProcess(command, args, { cwd, signal, provider }) {
       delete env.OPENAI_API_KEY;
       delete env.GEMINI_API_KEY;
       delete env.CODEX_API_KEY;
+      if (!useProviderApiKeys) delete env.ANTHROPIC_API_KEY;
     } else if (provider === "codex") {
       delete env.ANTHROPIC_API_KEY;
       delete env.GEMINI_API_KEY;
+      if (!useProviderApiKeys) {
+        delete env.OPENAI_API_KEY;
+        delete env.CODEX_API_KEY;
+      }
     }
     const child = spawn(command, args, {
       cwd,
