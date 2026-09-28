@@ -8,7 +8,17 @@
  */
 const assert = require("assert");
 const { normalize, DEFAULTS } = require("../config/aiExecution");
-const { parseJsonText, cliModel, limitFromText, claudeEnvelope } = require("../helper/cliAi");
+const fs = require("fs");
+const path = require("path");
+const {
+  parseJsonText,
+  cliModel,
+  limitFromText,
+  claudeEnvelope,
+  CLAUDE_BASE_ARGS,
+  claudeArgs,
+  claudeTurns,
+} = require("../helper/cliAi");
 const { isRouteExhausted } = require("../helper/aiRuntime");
 
 // Nothing stored, or nonsense stored, means the API - the route that bills but
@@ -73,5 +83,66 @@ assert.ok(isRouteExhausted(unlogged), "...and must send the work to the other su
 assert.strictEqual(claudeEnvelope('{"result":"salam","is_error":false}'), "salam");
 assert.strictEqual(claudeEnvelope("plain text, no envelope"), "plain text, no envelope");
 assert.throws(() => claudeEnvelope('{"result":"Claude AI usage limit reached|1759507140","is_error":true}'), /usage limit/);
+
+/*
+ * `--bare` must never come back.
+ *
+ * It looks exactly like the flag a one-shot backend turn wants - it skips hooks,
+ * plugin sync, LSP, auto-memory and CLAUDE.md discovery - and someone tidying
+ * this file will reach for it. Its help states the rest of the bargain:
+ * "Anthropic auth is strictly ANTHROPIC_API_KEY or apiKeyHelper (OAuth
+ * excluded)". CLI mode exists to run on the owner's SUBSCRIPTION, which is
+ * OAuth, so --bare makes the binary ignore a perfectly good login and report
+ * "Not logged in - Please run /login" - while `claude auth status`, in the same
+ * environment, reports a valid Max subscription, because that command does read
+ * the file. Nothing about the failure points at the flag.
+ */
+assert.ok(!CLAUDE_BASE_ARGS.includes("--bare"), "--bare disables OAuth: CLI mode would silently fall back to the API");
+assert.ok(CLAUDE_BASE_ARGS.includes("--no-session-persistence"), "a backend turn must not write session files");
+const runnerSource = fs.readFileSync(path.join(__dirname, "..", "helper", "cliAi.js"), "utf8");
+// Allowed in prose (the comment explaining this), never as an argument.
+assert.ok(
+  !/"--bare"|'--bare'/.test(runnerSource),
+  "--bare appears as an argument in helper/cliAi.js - it disables subscription auth"
+);
+
+/*
+ * The prompt is a positional argument behind two variadic options.
+ *
+ * `--add-dir <directories...>` and `--tools <tools...>` both keep consuming
+ * arguments, so a prompt placed after either is read as one more directory or one
+ * more tool name. The binary then refuses with "Input must be provided either
+ * through stdin or as a prompt argument", which reads like our bug and not an
+ * argument-parsing one - it is what made every structured CLI turn fail once the
+ * login started working. `--` ends option parsing and must always be the element
+ * before the prompt.
+ */
+const withFiles = claudeArgs({
+  model: "claude-sonnet-5",
+  fileCount: 2,
+  extra: ["--tools", "Read", "--add-dir", "/tmp/job"],
+  prompt: "THE PROMPT",
+});
+assert.strictEqual(withFiles[withFiles.length - 1], "THE PROMPT");
+assert.strictEqual(withFiles[withFiles.length - 2], "--", "the prompt must be fenced off by --");
+assert.strictEqual(withFiles.indexOf("--"), withFiles.length - 2, "only one -- and it comes last");
+assert.ok(withFiles.indexOf("--add-dir") < withFiles.indexOf("--"), "the variadic option stays on the left of the fence");
+
+/*
+ * Turns. A prompt with an attachment needs at least two: one for the model to
+ * call Read, one to answer with. At --max-turns 1 the binary exits with NO result
+ * at all - not an error, an empty string - so every CLI PDF extraction came back
+ * empty, which is indistinguishable from a PDF that could not be read.
+ */
+assert.strictEqual(claudeTurns(0), 1, "no attachment is a one-turn request");
+assert.ok(claudeTurns(1) >= 2, "an attachment needs a turn to read it and a turn to answer");
+assert.ok(claudeTurns(40) <= 20, "and it is still bounded");
+assert.strictEqual(claudeArgs({ prompt: "P" })[CLAUDE_BASE_ARGS.length + 1], "1");
+
+// A chat turn reads nothing and must therefore carry nothing: without --bare the
+// default tool set is available, and a conversation has no business running Bash
+// on this server.
+const chat = claudeArgs({ extra: ["--tools", ""], prompt: "hi" });
+assert.strictEqual(chat[chat.indexOf("--tools") + 1], "", 'tools are switched off with an explicit ""');
 
 console.log("ai-cli-runtime: all assertions passed");

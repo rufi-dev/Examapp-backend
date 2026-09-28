@@ -97,6 +97,78 @@ function modelArgs(provider, model) {
   return m ? ["--model", m] : [];
 }
 
+/*
+ * The flags every `claude` turn takes.
+ *
+ * NOTE: `--bare` is deliberately NOT here, and must never be added.
+ *
+ * It is tempting - it skips hooks, plugin sync, LSP, auto-memory and CLAUDE.md
+ * discovery, which is everything a one-shot backend turn does not want. But its
+ * own help says the rest of the bargain: "Anthropic auth is strictly
+ * ANTHROPIC_API_KEY or apiKeyHelper via --settings (OAuth ... excluded)".
+ *
+ * The whole point of CLI mode is to run on the owner's SUBSCRIPTION, which is
+ * OAuth. With --bare the binary ignores the stored login entirely and reports
+ * "Not logged in - Please run /login" - while `claude auth status` in the same
+ * environment cheerfully reports a valid Max subscription, because that command
+ * does read the file. It cost an afternoon to find. Setting
+ * CLAUDE_CODE_SIMPLE=1 by hand carries the same restriction, so there is no
+ * version of this that keeps both.
+ *
+ * Nothing is lost on this server: there is no CLAUDE.md anywhere above the
+ * sandbox the turn runs in, no settings.json and no hooks.
+ */
+const CLAUDE_BASE_ARGS = Object.freeze([
+  "-p",
+  "--output-format",
+  "json",
+  "--permission-mode",
+  "dontAsk",
+  "--permission-prompts",
+  "none",
+  "--no-session-persistence",
+]);
+
+/*
+ * How many turns a request is allowed, which is not a matter of taste.
+ *
+ * A prompt with no attachment is answered in one turn. A prompt WITH one is not:
+ * the model calls Read, our side answers, and only then can it write the JSON -
+ * two turns at the very least. With `--max-turns 1` that second step never
+ * happens and the binary exits with **no result at all**: not an error, not a
+ * partial answer, an empty string. Every PDF extraction on the CLI route would
+ * have come back empty, and an empty extraction looks exactly like a PDF the
+ * model could not read.
+ */
+function claudeTurns(fileCount) {
+  if (!fileCount) return 1;
+  const configured = Number(process.env.AI_CLI_MAX_TURNS);
+  if (Number.isFinite(configured) && configured >= 2) return Math.min(configured, 20);
+  return Math.min(2 + fileCount, 10);
+}
+
+/*
+ * The prompt is a POSITIONAL argument, and it has to be fenced off.
+ *
+ * `--add-dir <directories...>` and `--tools <tools...>` are both variadic, so a
+ * prompt that simply follows them is eaten as one more directory or one more tool
+ * name - and the binary then refuses with "Input must be provided either through
+ * stdin or as a prompt argument", which reads like our bug rather than an
+ * argument-parsing one. `--` ends option parsing, so whatever comes after it is
+ * the prompt and nothing else.
+ */
+function claudeArgs({ model, fileCount = 0, extra = [], prompt }) {
+  return [
+    ...CLAUDE_BASE_ARGS,
+    "--max-turns",
+    String(claudeTurns(fileCount)),
+    ...modelArgs("claude", model),
+    ...extra,
+    "--",
+    prompt,
+  ];
+}
+
 function parseJsonText(raw) {
   const text = String(raw || "").trim();
   if (!text) throw new Error("cli_empty_output");
@@ -183,6 +255,22 @@ function claudeResult(raw) {
 function runProcess(command, args, { cwd, signal, provider }) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env, CI: "1", NO_COLOR: "1" };
+    /*
+     * A variable that is defined but empty is not a credential, and compose
+     * defines CLAUDE_CODE_OAUTH_TOKEN as "" whenever the owner has not set one.
+     * A CLI that keys off "is this variable present" would then pick the token
+     * path and find nothing there, which fails as "not logged in" - true, and
+     * impossible to explain. Absent is clearer than empty.
+     */
+    for (const key of [
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "GEMINI_API_KEY",
+      "CODEX_API_KEY",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+    ]) {
+      if (env[key] !== undefined && String(env[key]).trim() === "") delete env[key];
+    }
     const useProviderApiKeys = String(process.env.AI_CLI_USE_API_KEYS || "").toLowerCase() === "true";
     // Do not let one provider's secret accidentally select another provider's
     // authentication path. The relevant CLI login volume or provider key is
@@ -295,13 +383,14 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
     const fullPrompt = buildPrompt({ system, prompt, schema, files });
     let args;
     if (chosen === "claude") {
-      args = [
-        "-p", "--output-format", "json", "--max-turns", "1",
-        ...modelArgs("claude", model),
-        "--permission-mode", "dontAsk", "--permission-prompts", "none",
-        "--tools", "Read", "--no-session-persistence", "--bare",
-        "--add-dir", job, fullPrompt,
-      ];
+      args = claudeArgs({
+        model,
+        fileCount: files.length,
+        // Read, and only Read: the model may look at the attachments written into
+        // this turn's sandbox and at nothing else on the machine.
+        extra: files.length ? ["--tools", "Read", "--add-dir", job] : ["--tools", ""],
+        prompt: fullPrompt,
+      });
     } else {
       args = ["exec", "--sandbox", "read-only", "--skip-git-repo-check",
         ...modelArgs("codex", model), "--output-last-message", answerFile, fullPrompt];
@@ -343,13 +432,8 @@ async function runCliChat({ messages = [], model, system, signal, provider = "cl
     let args;
     const answerFile = path.join(job, "answer.txt");
     if (chosen === "claude") {
-      args = [
-        "-p", "--output-format", "json", "--max-turns", "1",
-        ...modelArgs("claude", model),
-        "--permission-mode", "dontAsk", "--permission-prompts", "none",
-        "--no-session-persistence", "--bare",
-        full,
-      ];
+      // A chat turn reads nothing, so it gets no tools and one turn.
+      args = claudeArgs({ model, extra: ["--tools", ""], prompt: full });
     } else {
       args = ["exec", "--sandbox", "read-only", "--skip-git-repo-check",
         ...modelArgs("codex", model), "--output-last-message", answerFile, full];
@@ -376,6 +460,9 @@ async function runCliChat({ messages = [], model, system, signal, provider = "cl
 }
 
 module.exports = {
+  CLAUDE_BASE_ARGS,
+  claudeArgs,
+  claudeTurns,
   runCliStructured,
   runCliChat,
   parseJsonText,
