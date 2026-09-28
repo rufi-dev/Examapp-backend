@@ -52,7 +52,24 @@ function cliModel(provider, model) {
     };
     if (aliases[requested]) return safeModel(aliases[requested]);
   }
-  return safeModel(requested || (provider === "claude" ? "sonnet" : process.env.CODEX_CLI_DEFAULT_MODEL || "gpt-5.6-luna"));
+  /*
+   * No mapping, and nothing configured: say nothing.
+   *
+   * This used to fall back to a hard-coded Codex model name, which was a guess -
+   * the installed binary's own default turned out to be a different model
+   * entirely, so the guess would have forced every request onto a model the
+   * owner never chose (or one that does not exist). Returning null makes the
+   * caller omit the flag, and the CLI uses whatever it is configured with.
+   */
+  if (requested) return safeModel(requested);
+  if (provider === "claude") return safeModel(process.env.CLAUDE_CLI_DEFAULT_MODEL || "sonnet");
+  return process.env.CODEX_CLI_DEFAULT_MODEL ? safeModel(process.env.CODEX_CLI_DEFAULT_MODEL) : null;
+}
+
+/* `--model X`, or nothing at all when we have no business choosing one. */
+function modelArgs(provider, model) {
+  const m = cliModel(provider, model);
+  return m ? ["--model", m] : [];
 }
 
 function parseJsonText(raw) {
@@ -90,6 +107,9 @@ function runProcess(command, args, { cwd, signal, provider }) {
       if (!useProviderApiKeys) delete env.ANTHROPIC_API_KEY;
     } else if (provider === "codex") {
       delete env.ANTHROPIC_API_KEY;
+      // Claude's subscription token is a credential like any other: Codex's
+      // process has no use for it and should never be handed it.
+      delete env.CLAUDE_CODE_OAUTH_TOKEN;
       delete env.GEMINI_API_KEY;
       if (!useProviderApiKeys) {
         delete env.OPENAI_API_KEY;
@@ -175,13 +195,14 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
     if (chosen === "claude") {
       args = [
         "-p", "--output-format", "json", "--max-turns", "1",
-        "--model", cliModel("claude", model),
+        ...modelArgs("claude", model),
         "--permission-mode", "dontAsk", "--permission-prompts", "none",
         "--tools", "Read", "--no-session-persistence", "--bare",
         "--add-dir", job, fullPrompt,
       ];
     } else {
-      args = ["exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check", "--model", cliModel("codex", model), "--output-last-message", answerFile, fullPrompt];
+      args = ["exec", "--sandbox", "read-only", "--skip-git-repo-check",
+        ...modelArgs("codex", model), "--output-last-message", answerFile, fullPrompt];
     }
     const result = await runProcess(cliBinary(chosen), args, { cwd: job, signal, provider: chosen });
     const raw = chosen === "codex" ? await fs.readFile(answerFile, "utf8").catch(() => result.stdout) : result.stdout;
@@ -220,14 +241,14 @@ async function runCliChat({ messages = [], model, system, signal, provider = "cl
     if (chosen === "claude") {
       args = [
         "-p", "--output-format", "json", "--max-turns", "1",
-        "--model", cliModel("claude", model),
+        ...modelArgs("claude", model),
         "--permission-mode", "dontAsk", "--permission-prompts", "none",
         "--no-session-persistence", "--bare",
         full,
       ];
     } else {
-      args = ["exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check",
-        "--model", cliModel("codex", model), "--output-last-message", answerFile, full];
+      args = ["exec", "--sandbox", "read-only", "--skip-git-repo-check",
+        ...modelArgs("codex", model), "--output-last-message", answerFile, full];
     }
     const out = await runProcess(cliBinary(chosen), args, { cwd: job, signal, provider: chosen });
     let text;
@@ -254,4 +275,4 @@ async function runCliChat({ messages = [], model, system, signal, provider = "cl
   }
 }
 
-module.exports = { runCliStructured, runCliChat, parseJsonText, cliModel };
+module.exports = { runCliStructured, runCliChat, parseJsonText, cliModel, modelArgs };
