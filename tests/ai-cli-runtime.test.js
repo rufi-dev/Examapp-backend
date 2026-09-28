@@ -145,4 +145,48 @@ assert.strictEqual(claudeArgs({ prompt: "P" })[CLAUDE_BASE_ARGS.length + 1], "1"
 const chat = claudeArgs({ extra: ["--tools", ""], prompt: "hi" });
 assert.strictEqual(chat[chat.indexOf("--tools") + 1], "", 'tools are switched off with an explicit ""');
 
+/*
+ * A model that answers a vague brief with a QUESTION.
+ *
+ * A teacher typed "change all make english exam grammar" and the CLI replied in
+ * prose — asking which questions to change and how, and offering to send raw
+ * JSON if that was wanted. Sensible from an assistant, useless from a backend:
+ * the parser saw an essay and the teacher got "AI suallar yarada bilmədi" for a
+ * request the model had understood well enough to ask a good question about.
+ *
+ * Two defences, both asserted here. The prompt tells the turn not to ask, and a
+ * parse failure carries WHAT it could not parse, because "cli_invalid_json" on
+ * its own cannot tell an essay from an answer cut off by an output limit — and
+ * those want opposite fixes.
+ */
+const runnerText = fs.readFileSync(path.join(__dirname, "..", "helper", "cliAi.js"), "utf8");
+assert.ok(/SUAL VERMƏ/.test(runnerText), "the CLI turn must be told not to ask questions");
+assert.ok(/ÖNCƏKİ CAVAB JSON DEYİLDİ/.test(runnerText), "the retry must say why it is asking again");
+assert.ok(
+  /if \(e\?\.code !== "cli_invalid_json" \|\| signal\?\.aborted\) throw e;/.test(runnerText),
+  "only unparseable output is retried - never a spent plan, a cancel or a timeout"
+);
+
+const prose = (() => {
+  try {
+    parseJsonText("A couple of things I need clarified before I can act: 1. Which questions?");
+    return null;
+  } catch (e) {
+    return e;
+  }
+})();
+assert.ok(prose, "prose must not parse as JSON");
+assert.strictEqual(prose.code, "cli_invalid_json");
+assert.ok(prose.sample && prose.sample.includes("clarified"), "the failure must carry what it saw");
+
+const cut = (() => {
+  try {
+    parseJsonText('{"questions":[{"title":"x"');
+    return null;
+  } catch (e) {
+    return e;
+  }
+})();
+assert.ok(cut.truncated === true, "an answer cut off mid-array is reported as truncated, not malformed");
+
 console.log("ai-cli-runtime: all assertions passed");

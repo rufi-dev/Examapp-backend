@@ -205,6 +205,21 @@ function claudeArgs({ model, fileCount = 0, extra = [], prompt }) {
   ];
 }
 
+/*
+ * A parse failure has to say what it could not parse.
+ *
+ * "cli_invalid_json" on its own is undiagnosable in production: it cannot
+ * distinguish a model that wrote an apology from one whose JSON was cut off
+ * mid-array by an output limit, and those want opposite fixes. The sample is
+ * bounded and carries the head AND the tail, because truncation only shows at
+ * the end.
+ */
+function jsonSample(text) {
+  const t = String(text || "");
+  if (t.length <= 600) return t;
+  return `${t.slice(0, 300)} …[${t.length} chars]… ${t.slice(-300)}`;
+}
+
 function parseJsonText(raw) {
   const text = String(raw || "").trim();
   if (!text) throw new Error("cli_empty_output");
@@ -212,11 +227,28 @@ function parseJsonText(raw) {
     return JSON.parse(text);
   } catch {
     const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (fenced) return JSON.parse(fenced[1]);
+    if (fenced) {
+      try {
+        return JSON.parse(fenced[1]);
+      } catch {
+        /* a fenced block that is itself broken falls through to the brace slice */
+      }
+    }
     const start = text.indexOf("{");
     const end = text.lastIndexOf("}");
-    if (start >= 0 && end > start) return JSON.parse(text.slice(start, end + 1));
-    throw new Error("cli_invalid_json");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch {
+        /* fall through with the sample below */
+      }
+    }
+    throw Object.assign(new Error("cli_invalid_json"), {
+      code: "cli_invalid_json",
+      sample: jsonSample(text),
+      // An answer that ends without its closing brace was cut off, not malformed.
+      truncated: start >= 0 && end < start,
+    });
   }
 }
 
@@ -408,10 +440,31 @@ function runProcess(command, args, { cwd, signal, provider, timeoutMs } = {}) {
   });
 }
 
-function buildPrompt({ system, prompt, schema, files }) {
+/*
+ * The instruction that has to survive a vague request.
+ *
+ * The API route can REQUIRE a schema; a CLI turn cannot, so the only thing
+ * standing between a teacher and a parse error is the wording here. A real
+ * failure: a teacher typed "change all make english exam grammar" and the model
+ * — reasonably — answered in prose asking which questions to change and how,
+ * ending with "let me know if you specifically need the raw JSON with zero
+ * surrounding text". Perfectly sensible from an assistant, and unusable from a
+ * backend: the parser saw an essay, called it invalid JSON, and the teacher got
+ * an error instead of an exam.
+ *
+ * So the turn is told, in as many words, not to ask. A vague brief becomes a
+ * reasonable assumption and a paper the teacher can edit — which is what the
+ * API route would have given them, and what they can actually use.
+ */
+function buildPrompt({ system, prompt, schema, files, insist }) {
   return [
     "SƏN STRUCTURED JSON CAVABI VERƏN BACKEND MODELİSƏN.",
     "YALNIZ bir JSON obyekt qaytar. Markdown, izah, kod çəpəri və əlavə mətn qaytarma.",
+    "SUAL VERMƏ, aydınlaşdırma istəmə, şərh yazma. Tapşırıq qeyri-dəqiqdirsə, ən məntiqli " +
+      "fərziyyəni et və YENƏ DƏ tam JSON qaytar — müəllim nəticəni özü redaktə edəcək.",
+    insist
+      ? "ÖNCƏKİ CAVAB JSON DEYİLDİ. Bu dəfə cavabın İLK simvolu { , SON simvolu } olmalıdır. Başqa heç nə yazma."
+      : "",
     "JSON bu sxemə uyğun olmalıdır:",
     JSON.stringify(schema || {}),
     system ? `SYSTEM:\n${system}` : "",
@@ -438,26 +491,51 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
       files.push(file);
     }
     const answerFile = path.join(job, "answer.json");
-    const fullPrompt = buildPrompt({ system, prompt, schema, files });
-    let args;
-    if (chosen === "claude") {
-      args = claudeArgs({
-        model: wanted,
-        fileCount: files.length,
-        // Read, and only Read: the model may look at the attachments written into
-        // this turn's sandbox and at nothing else on the machine.
-        extra: files.length ? ["--tools", "Read", "--add-dir", job] : ["--tools", ""],
-        prompt: fullPrompt,
-      });
-    } else {
-      args = ["exec", "--sandbox", "read-only", "--skip-git-repo-check",
-        ...modelArgs("codex", wanted), "--output-last-message", answerFile, fullPrompt];
+
+    const attempt = async (insist) => {
+      const fullPrompt = buildPrompt({ system, prompt, schema, files, insist });
+      let args;
+      if (chosen === "claude") {
+        args = claudeArgs({
+          model: wanted,
+          fileCount: files.length,
+          // Read, and only Read: the model may look at the attachments written into
+          // this turn's sandbox and at nothing else on the machine.
+          extra: files.length ? ["--tools", "Read", "--add-dir", job] : ["--tools", ""],
+          prompt: fullPrompt,
+        });
+      } else {
+        args = ["exec", "--sandbox", "read-only", "--skip-git-repo-check",
+          ...modelArgs("codex", wanted), "--output-last-message", answerFile, fullPrompt];
+      }
+      const result = await runProcess(cliBinary(chosen), args, { cwd: job, signal, provider: chosen });
+      const raw = chosen === "codex" ? await fs.readFile(answerFile, "utf8").catch(() => result.stdout) : result.stdout;
+      const limited = limitFromText(raw, chosen);
+      if (limited) throw limited;
+      return chosen === "claude" ? claudeResult(raw) : parseJsonText(raw);
+    };
+
+    let doc;
+    try {
+      doc = await attempt(false);
+    } catch (e) {
+      /*
+       * One more try, and only for prose.
+       *
+       * A model that answered a vague brief with a question has not failed at
+       * the task — it has failed to be a backend, and telling it so once fixes
+       * it. That is worth another turn: the alternative is handing the teacher
+       * "AI suallar yarada bilmədi" for a request the model understood well
+       * enough to ask a sensible question about.
+       *
+       * Strictly one retry, and strictly for unparseable output. A spent plan, a
+       * cancelled request or a timeout all fail immediately — retrying those
+       * just makes the teacher wait twice for the same answer.
+       */
+      if (e?.code !== "cli_invalid_json" || signal?.aborted) throw e;
+      console.warn(`[AI] ${chosen} answered in prose instead of JSON; asking once more`);
+      doc = await attempt(true);
     }
-    const result = await runProcess(cliBinary(chosen), args, { cwd: job, signal, provider: chosen });
-    const raw = chosen === "codex" ? await fs.readFile(answerFile, "utf8").catch(() => result.stdout) : result.stdout;
-    const limited = limitFromText(raw, chosen);
-    if (limited) throw limited;
-    const doc = chosen === "claude" ? claudeResult(raw) : parseJsonText(raw);
     return { doc, provider: `${chosen}-cli`, cost: { model: wanted || model, cliModel: cliModel(chosen, wanted), usd: 0, inputTokens: 0, outputTokens: 0, cli: true } };
   } finally {
     await fs.rm(job, { recursive: true, force: true }).catch(() => {});
