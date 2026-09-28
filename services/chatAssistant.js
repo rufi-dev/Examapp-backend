@@ -156,9 +156,9 @@ async function generateSupportReply(messages, adminId) {
   const text = await runAi({
     label: "support-chat",
     capability: "structured",
-    cli: async () => {
+    cli: async (cliProvider) => {
       const { runCliChat } = require("../helper/cliAi");
-      const out = await runCliChat({ messages: history, system: SYSTEM_PROMPT });
+      const out = await runCliChat({ provider: cliProvider, messages: history, system: SYSTEM_PROMPT });
       return out.text;
     },
     api: () => replyOnApi(history),

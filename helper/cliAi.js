@@ -34,9 +34,34 @@ function readModelMap() {
   }
 }
 
+/*
+ * Does this model name belong to this binary?
+ *
+ * It matters because of the CLI-to-CLI switch. A teacher picks "claude-opus-5";
+ * Claude's subscription is out of quota; the gateway runs the same work on
+ * Codex. Passing the name along would mean `codex --model claude-opus-5`, which
+ * fails on a model that provider has never heard of - and it would fail as an
+ * ordinary error, so the platform would report a broken request instead of
+ * using the CLI that was available. A name that belongs to the other provider
+ * is therefore dropped, and the chosen binary uses its own default.
+ */
+const MODEL_OWNER = [
+  [/^(claude|sonnet|opus|haiku|fable)/i, "claude"],
+  [/^(gpt|o[0-9]|codex|chatgpt)/i, "codex"],
+];
+
+function modelBelongsTo(provider, model) {
+  const name = String(model || "").trim();
+  if (!name) return true;
+  for (const [pattern, owner] of MODEL_OWNER) {
+    if (pattern.test(name)) return owner === provider;
+  }
+  return true; // an unrecognised name is nobody's to claim
+}
+
 function cliModel(provider, model) {
-  const requested = String(model || "").trim();
-  const mapped = readModelMap()[requested];
+  const requested = modelBelongsTo(provider, model) ? String(model || "").trim() : "";
+  const mapped = requested ? readModelMap()[requested] : null;
   if (mapped) return safeModel(mapped);
 
   // The picker uses stable product names while the CLIs accept their own
@@ -87,8 +112,70 @@ function parseJsonText(raw) {
   }
 }
 
+/*
+ * A limit is not always an error exit.
+ *
+ * `claude -p` reports a spent subscription as its ANSWER - exit code 0, and the
+ * text "Claude AI usage limit reached|<epoch>" where the reply should be. Read
+ * naively that is a model that failed to produce JSON, which is an ordinary
+ * failure: no switch to the other CLI, no cooldown, and an owner watching an
+ * exhausted plan be retried all evening. So the output is examined before it is
+ * parsed.
+ *
+ * The length bound is deliberate. These phrases could in principle appear inside
+ * generated material; they cannot appear inside generated material that is only
+ * a few hundred characters long, which is what a refusal looks like.
+ */
+const LIMIT_PHRASES =
+  /usage limit reached|hit your usage limit|limit reached|out of (?:credit|quota)|quota exceeded|upgrade your plan|plan limit|rate limit/i;
+/*
+ * The other way a CLI declines to work: it is there, and it is not logged in.
+ * "Not logged in - Please run /login" is what the deployed binary actually
+ * prints, inside the same JSON envelope it uses for an answer. Treated as an
+ * ordinary failure it would look like a model that could not produce JSON; it is
+ * really a route that is unavailable, which means use the other one and tell the
+ * owner which login to fix.
+ */
+const UNAVAILABLE_PHRASES = /not logged in|please run \/login|invalid api key|no credentials|unauthorized/i;
+
+function limitFromText(raw, provider) {
+  const text = String(raw || "").trim();
+  if (!text || text.length > 600) return null;
+  const limited = LIMIT_PHRASES.test(text);
+  if (!limited && !UNAVAILABLE_PHRASES.test(text)) return null;
+  return Object.assign(new Error(text.slice(0, 400)), {
+    code: limited ? "cli_limit_reached" : "cli_unavailable",
+    provider,
+    stdout: text.slice(0, 600),
+  });
+}
+
+/*
+ * Claude's `--output-format json` wraps the reply in an envelope, and states
+ * failure inside it rather than only by exit code.
+ */
+function claudeEnvelope(raw) {
+  const text = String(raw || "");
+  let parsed = null;
+  try {
+    parsed = JSON.parse(text.trim());
+  } catch {
+    return text; // not the envelope; hand the text back untouched
+  }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const inner = typeof parsed.result === "string" ? parsed.result : null;
+    if (parsed.is_error === true || parsed.subtype === "error_during_execution") {
+      const message = inner || String(parsed.error || parsed.subtype || "cli_failed");
+      throw Object.assign(new Error(message.slice(0, 400)), { code: "cli_failed", stdout: message.slice(0, 600) });
+    }
+    if (inner !== null) return inner;
+  }
+  return text;
+}
+
 function claudeResult(raw) {
-  const parsed = parseJsonText(raw);
+  const inner = claudeEnvelope(raw);
+  const parsed = parseJsonText(inner);
   if (typeof parsed === "object" && parsed && typeof parsed.result === "string") return parseJsonText(parsed.result);
   return parsed;
 }
@@ -156,7 +243,22 @@ function runProcess(command, args, { cwd, signal, provider }) {
       if (timedOut) return reject(Object.assign(new Error("cli_timeout"), { code: "cli_timeout" }));
       if (outputTooLarge) return reject(Object.assign(new Error("cli_output_too_large"), { code: "cli_output_too_large" }));
       if (code !== 0) {
-        return reject(Object.assign(new Error("cli_failed"), { code: "cli_failed", exitCode: code, signal: sig, stderr: stderr.slice(-2000) }));
+        /*
+         * stdout is carried on the error too. When a CLI refuses, the reason may
+         * be on either stream - Codex prints its usage-limit notice where it
+         * likes - and the gateway decides whether to switch to the other
+         * subscription by READING that reason. A refusal we cannot read is
+         * classified as an ordinary failure, which means no switch, no cooldown,
+         * and a teacher told the request is broken when in truth one plan was
+         * simply spent.
+         */
+        return reject(Object.assign(new Error("cli_failed"), {
+          code: "cli_failed",
+          exitCode: code,
+          signal: sig,
+          stderr: stderr.slice(-2000),
+          stdout: stdout.slice(-2000),
+        }));
       }
       resolve({ stdout, stderr });
     });
@@ -206,6 +308,8 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
     }
     const result = await runProcess(cliBinary(chosen), args, { cwd: job, signal, provider: chosen });
     const raw = chosen === "codex" ? await fs.readFile(answerFile, "utf8").catch(() => result.stdout) : result.stdout;
+    const limited = limitFromText(raw, chosen);
+    if (limited) throw limited;
     const doc = chosen === "claude" ? claudeResult(raw) : parseJsonText(raw);
     return { doc, provider: `${chosen}-cli`, cost: { model, cliModel: cliModel(chosen, model), usd: 0, inputTokens: 0, outputTokens: 0, cli: true } };
   } finally {
@@ -255,14 +359,10 @@ async function runCliChat({ messages = [], model, system, signal, provider = "cl
     if (chosen === "codex") {
       text = await fs.readFile(answerFile, "utf8").catch(() => out.stdout);
     } else {
-      // Claude's -p --output-format json wraps the reply in { result: "..." }.
-      try {
-        const parsed = JSON.parse(String(out.stdout || "").trim());
-        text = typeof parsed?.result === "string" ? parsed.result : String(out.stdout || "");
-      } catch {
-        text = String(out.stdout || "");
-      }
+      text = claudeEnvelope(out.stdout);
     }
+    const spent = limitFromText(text, chosen);
+    if (spent) throw spent;
     text = String(text || "").trim();
     if (!text) throw Object.assign(new Error("cli_empty_output"), { code: "cli_empty_output" });
     return {
@@ -275,4 +375,13 @@ async function runCliChat({ messages = [], model, system, signal, provider = "cl
   }
 }
 
-module.exports = { runCliStructured, runCliChat, parseJsonText, cliModel, modelArgs };
+module.exports = {
+  runCliStructured,
+  runCliChat,
+  parseJsonText,
+  cliModel,
+  modelArgs,
+  modelBelongsTo,
+  limitFromText,
+  claudeEnvelope,
+};

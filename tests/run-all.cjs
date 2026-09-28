@@ -31,6 +31,43 @@ if (!files.length) {
   process.exit(1);
 }
 
+/*
+ * A test file that is not in the manifest never runs.
+ *
+ * That is how fourteen of them - including the one guarding the CLI runner -
+ * came to sit on disk for weeks without being executed once: the manifest was
+ * transcribed from the old `&&` chain, and anything the chain had already missed
+ * stayed missed. A suite that silently ignores its own files is the same failure
+ * this runner was written to fix, one level up.
+ */
+/*
+ * Files deliberately not in the suite, and why. A file is either run or listed
+ * here with a reason - never simply absent, which is indistinguishable from
+ * having been forgotten.
+ */
+const EXCLUDED = {
+  "tests/parentAccounts.rules.test.js":
+    "written for vitest, which the backend does not install - so it runs under no runner here at all",
+};
+
+function drift() {
+  const found = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (/\.test\.(js|cjs|mjs)$/.test(e.name)) {
+        found.push(path.relative(path.join(__dirname, ".."), full).split(path.sep).join("/"));
+      }
+    }
+  };
+  walk(__dirname);
+  return {
+    unlisted: found.filter((f) => !manifest.includes(f) && !EXCLUDED[f]).sort(),
+    missing: manifest.filter((f) => !found.includes(f)).sort(),
+  };
+}
+
 const failures = [];
 const started = Date.now();
 
@@ -59,6 +96,29 @@ files.forEach((file, i) => {
 const secs = Math.round((Date.now() - started) / 1000);
 console.log(`\n${files.length - failures.length}/${files.length} files passed in ${secs}s`);
 
+/* Only on a full run: a filtered run is deliberately partial. */
+let drifted = false;
+if (!filter) {
+  const { unlisted, missing } = drift();
+  if (unlisted.length) {
+    drifted = true;
+    console.log(`\n${unlisted.length} test file(s) exist but are NOT in tests/_manifest.json, so they never run:`);
+    for (const f of unlisted) console.log(`    ${f}`);
+    console.log("  Add them to the manifest (or delete them if they are dead).");
+  }
+  if (missing.length) {
+    drifted = true;
+    console.log(`\n${missing.length} manifest entr(ies) point at a file that is gone:`);
+    for (const f of missing) console.log(`    ${f}`);
+  }
+}
+
+if (failures.length || drifted) {
+  if (!failures.length) {
+    console.log("\nthe files that ran all passed, but the suite is not running every file.");
+    process.exit(1);
+  }
+}
 if (failures.length) {
   console.log(`\n${failures.length} file(s) failed:\n`);
   for (const f of failures) {

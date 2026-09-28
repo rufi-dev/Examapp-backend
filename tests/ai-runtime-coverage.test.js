@@ -32,9 +32,17 @@ const ok = (label, cond, extra = "") => {
 
 const BE = path.join(__dirname, "..");
 
-/* Anything that reaches a model provider. */
+/*
+ * Anything that reaches a model provider.
+ *
+ * Every SDK shape as well as the raw hostnames: OpenAI's Responses API and the
+ * Gemini SDK name no host and use neither `messages.create` nor
+ * `chat.completions.create`, so a new file built on either of those would
+ * otherwise slip past this census and quietly ignore the switch - which is the
+ * exact failure this test exists to prevent.
+ */
 const PROVIDER_CALL =
-  /\.messages\.(create|stream)\s*\(|\.chat\.completions\.create\s*\(|api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis\.com/;
+  /\.messages\.(create|stream)\s*\(|\.chat\.completions\.create\s*\(|\.responses\.(create|stream)\s*\(|generateContent\s*\(|GoogleGenerativeAI|api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis\.com/;
 
 /*
  * Files allowed to contain a provider call, and what makes that safe.
@@ -126,6 +134,33 @@ async function main() {
   ok("lesson documents / plans / curriculum", routes(doc, "async function runDocument("));
   ok("lesson documents that use tools", routes(doc, "async function documentWithTools("));
   ok("the support chat", routes(chat, "async function generateSupportReply("));
+
+  // -- no call site chooses its own CLI -----------------------------------
+  /*
+   * The gateway HANDS each CLI route its provider, because that is what makes
+   * one CLI running out of quota move the work to the other everywhere at once.
+   * A call site that took no argument would be choosing for itself again - and
+   * would keep spawning a subscription that is known to be out until the request
+   * failed. This is the mechanical version of that rule: a zero-argument cli
+   * route cannot be honouring the switch, whatever its comments say.
+   */
+  console.log("\nevery CLI route is handed its provider by the gateway:");
+  const ROUTE_FILES = ["controllers/aiController.js", "helper/aiDocument.js", "services/chatAssistant.js"];
+  let cliRoutes = 0;
+  for (const f of ROUTE_FILES) {
+    const text = fs.readFileSync(path.join(BE, f), "utf8");
+    const found = text.match(/\bcli:\s*(?:async\s*)?\(([^)]*)\)/g) || [];
+    cliRoutes += found.length;
+    const chooseTheirOwn = found.filter((m) => /\(\s*\)/.test(m));
+    ok(`${f} (${found.length} route${found.length === 1 ? "" : "s"})`, chooseTheirOwn.length === 0, chooseTheirOwn.join(", "));
+  }
+  /*
+   * Six: exam generation, PDF extraction, streamed PDF extraction, the
+   * assistant chat, every lesson document/plan/curriculum, and the support
+   * chat. The chat agent and the lesson-document tool loop have no cli route at
+   * all - they are declared API-only above, with the reason.
+   */
+  ok("and all six CLI-capable features are still there", cliRoutes === 6, `found ${cliRoutes}`);
 
   // -- what the CLI genuinely cannot do -----------------------------------
   console.log("\ndeclared API-only, with a reason:");

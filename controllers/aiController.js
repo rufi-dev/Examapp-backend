@@ -1452,10 +1452,13 @@ const extractQuestions = asyncHandler(async (req, res) => {
   ({ questions, usage, cost, usedProvider, fellBack } = await runAi({
     label: "extract-questions",
     capability: "structured",
-    cli: async () => {
+    // The CLI the picked model implies; the gateway overrides it when that
+    // subscription is out of quota.
+    preferCli: provider === "openai" ? "codex" : provider,
+    cli: async (cliProvider) => {
       const { runCliStructured } = require("../helper/cliAi");
       const out = await runCliStructured({
-        provider: provider === "openai" ? "codex" : provider,
+        provider: cliProvider,
         model: openaiModel || (askedModel && askedModel.id) || "sonnet",
         system: SYSTEM_PROMPT + instructionBlock(instructions),
         prompt: "Yüklənmiş əlavə(lər)dəki bütün sualları çıxar və cavabı yalnız JSON kimi qaytar.",
@@ -1825,10 +1828,11 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     ({ result, usedProvider, fellBack } = await runAi({
       label: "extract-stream",
       capability: "structured",
-      cli: async () => {
+      preferCli: provider === "openai" ? "codex" : provider,
+      cli: async (cliProvider) => {
         const { runCliStructured } = require("../helper/cliAi");
         const out = await runCliStructured({
-          provider: provider === "openai" ? "codex" : provider,
+          provider: cliProvider,
           model: openaiModel || (askedModel && askedModel.id) || "sonnet",
           system: SYSTEM_PROMPT + instructionBlock(instructions),
           prompt: EXTRACT_CLI_PROMPT,
@@ -2537,9 +2541,9 @@ async function runGeneration({ prompt, preset, model, onText, signal, system }) 
   return runAi({
     label: "generate-questions",
     capability: "structured",
-    cli: async () => {
+    preferCli: picked?.provider === "openai" ? "codex" : picked?.provider,
+    cli: async (cliProvider) => {
       const { runCliStructured } = require("../helper/cliAi");
-      const cliProvider = picked?.provider === "openai" ? "codex" : picked?.provider;
       const sys = (system || GEN_SYSTEM_PROMPT) + (presetHint(preset) ? `
 
 ${presetHint(preset)}` : "");
@@ -3343,9 +3347,9 @@ async function runChat(messages) {
   return runAi({
     label: "chat",
     capability: "structured",
-    cli: async () => {
+    cli: async (cliProvider) => {
       const { runCliChat } = require("../helper/cliAi");
-      return runCliChat({ messages, model: process.env.AI_CHAT_CLI_MODEL });
+      return runCliChat({ provider: cliProvider, messages, model: process.env.AI_CHAT_CLI_MODEL });
     },
     api: () => runChatOnApi(messages),
   });

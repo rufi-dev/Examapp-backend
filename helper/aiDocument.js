@@ -597,10 +597,11 @@ async function runDocument({ prompt, parts = [], system, schema, geminiSchema, m
   return runAi({
     label: "document",
     capability: "structured",
-    cli: async () => {
+    preferCli: provider === "openai" ? "codex" : provider,
+    cli: async (cliProvider) => {
       const { runCliStructured } = require("./cliAi");
       const out = await runCliStructured({
-        provider: provider === "openai" ? "codex" : provider,
+        provider: cliProvider,
         model,
         system: typeof system === "string" ? system : JSON.stringify(system || ""),
         prompt,

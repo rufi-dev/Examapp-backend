@@ -9,6 +9,14 @@
  * always going to fail.
  */
 process.env.NODE_ENV = "test";
+/*
+ * This file is about the MODES - which KINDS of route are attempted, in what
+ * order, and on which failures. The CLI route is really as many routes as there
+ * are subscriptions, and the switching between them is tested in
+ * ai-cli-failover, which owns it. Pinning one CLI here keeps these assertions
+ * about the thing they are about.
+ */
+process.env.AI_CLI_ORDER = "claude";
 
 let passed = 0;
 let failed = 0;
@@ -31,8 +39,14 @@ let CURRENT = "api";
 aiExecution.getAiExecution = async () => ({ mode: CURRENT });
 const { runAi } = require("../helper/aiRuntime");
 
+const cliHealth = require("../helper/cliHealth");
+
 const call = async (mode, { cliFails, apiFails, noCli } = {}) => {
   CURRENT = mode;
+  /* A CLI that hit a limit is remembered until its reset time, so each case
+   * starts from a platform that knows nothing - otherwise case two would be
+   * answering for case one. */
+  cliHealth._reset();
   const ran = [];
   const boom = (why) => {
     const e = new Error(why);
