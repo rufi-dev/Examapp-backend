@@ -2,7 +2,6 @@ const asyncHandler = require("express-async-handler");
 const Enrollment = require("../models/enrollmentModel");
 const Class = require("../models/classModel");
 const User = require("../models/userModel");
-const { notifyEnrollment } = require("../helper/telegram");
 const { hasStudentRoom, promoteWaitlisted } = require("../helper/planLimits");
 const { httpError } = require("../utils/appError");
 
@@ -70,11 +69,8 @@ const joinClass = asyncHandler(async (req, res) => {
     status: room ? "approved" : "pending",
   });
   if (room) {
-    notifyEnrollment(cls, req.user, false);
     return res.status(201).json({ status: "approved", classId: cls._id, message: "Sinifə qoşuldunuz" });
   }
-  // Waitlisted — tell the owner someone is waiting (fire-and-forget).
-  notifyEnrollment(cls, req.user, true);
   res.status(201).json({ status: "pending", waitlisted: true, classId: cls._id, message: WAITLIST_MSG });
 });
 

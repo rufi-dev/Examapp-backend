@@ -451,23 +451,6 @@ const userSchema = Schema(
         // Journey welcome. Stamped once via POST /teacher-success/welcome-seen so the
         // welcome shows once automatically yet stays reachable later. Absent = never.
         journeyWelcomeSeenAt: { type: Date, default: null },
-        // Telegram notifications (teachers): when linked, the user gets a bot
-        // message whenever a student starts one of their exams.
-        // telegramChatId = the linked Telegram chat (set via the bot webhook).
-        // telegramLinkCode = one-time deep-link token used to bind the account.
-        telegramChatId: {
-            type: String,
-        },
-        telegramLinkCode: {
-            type: String,
-        },
-        telegramLinkedAt: {
-            type: Date,
-        },
-        // Which Telegram notifications this teacher wants, and the scope.
-        // Event flags default ON. Scope is OPT-OUT: everything notifies unless
-        // its class or exam id is in an excluded list — so a newly created
-        // class/exam is automatically included without any action.
         // Per-PARENT notification switches. The class-level `parentNotify` decides
         // what a teacher sends at all; this lets one parent mute a category without
         // affecting the other parents of the same child. Absent = everything on.
@@ -477,15 +460,6 @@ const userSchema = Schema(
             exam: { type: Boolean, default: true },
             payment: { type: Boolean, default: true },
         },
-        telegramPrefs: {
-            onStart: { type: Boolean, default: true },     // student starts an exam
-            onFinish: { type: Boolean, default: true },    // student finishes -> result
-            onViolation: { type: Boolean, default: true }, // exam terminated for cheating
-            onJoin: { type: Boolean, default: true },      // student joins/requests a class
-            onReport: { type: Boolean, default: true },    // end-of-exam PDF+Excel report
-            excludedClasses: [{ type: Schema.Types.ObjectId, ref: "Class" }],
-            excludedExams: [{ type: Schema.Types.ObjectId, ref: "Exam" }],
-        }
     },
     {
         timestamps: true,

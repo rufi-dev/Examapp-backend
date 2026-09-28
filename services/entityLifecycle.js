@@ -37,7 +37,6 @@ async function archiveUsers(userIds, actorId) {
             phone: "",
             bio: "",
             photo: "https://i.stack.imgur.com/34AD2.jpg",
-            telegramChatId: null,
             whatsappGroupId: "",
             whatsappInviteLink: "",
             exams: [],
@@ -45,8 +44,6 @@ async function archiveUsers(userIds, actorId) {
           $unset: {
             results: "",
             teacherApprovalMeta: "",
-            telegramLinkCode: "",
-            telegramLinkedAt: "",
             _acqMig: "",
           },
           $inc: { sessionVersion: 1 },

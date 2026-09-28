@@ -7,7 +7,6 @@ const cookieParser = require('cookie-parser')
 const userRoute = require('./routes/userRoute')
 const quizRoute = require('./routes/quizRoute')
 const achivementRoute = require('./routes/achivementRoute')
-const telegramRoute = require('./routes/telegramRoute')
 const whatsappRoute = require('./routes/whatsappRoute')
 const videoRoute = require('./routes/videoRoute')
 const materialRoute = require('./routes/materialRoute')
@@ -232,7 +231,6 @@ app.use("/api/track", require("./routes/visitorRoute"))
 // in the builder as a disabled "coming soon" placeholder; price is enforced to 0
 // server-side (addExam/editExam). The defensive Permissions-Policy: payment=()
 // header (securityHeaders) is retained.
-app.use("/api/telegram", telegramRoute)
 app.use("/api/whatsapp", whatsappRoute)
 app.use("/api/videos", videoRoute)
 app.use("/api/materials", materialRoute)
@@ -472,9 +470,8 @@ mongoose
         } catch (e) {
             console.error("[WHATSAPP] init error:", e.message)
         }
-        // End-of-exam Telegram reports: check shortly after boot, then every
-        // 10 minutes. Errors are logged, never fatal. Each tick is wrapped in
-        // beat() so the admin Health page can see last-run/failure per job.
+        // Periodic work. Errors are logged, never fatal. Each tick is wrapped
+        // in beat() so the admin Health page can see last-run/failure per job.
         // AUD-017: mutating periodic work belongs to the dedicated worker
         // process. This explicit compatibility mode is off by default.
         if (process.env.RUN_BACKGROUND_JOBS === "true") {

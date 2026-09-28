@@ -49,6 +49,29 @@ check("deleted frontend question and payment modules stay deleted", () => {
   }
 });
 
+/*
+ * Telegram was removed whole: the bot, its webhook, the teacher settings card,
+ * the end-of-exam report worker and every field that existed to serve them. A
+ * removal that is not enforced comes back one import at a time, so the files
+ * are named here and the API surface is named below.
+ */
+check("the retired Telegram integration stays retired", () => {
+  const gone = [
+    [backend, "helper/telegram.js"],
+    [backend, "controllers/telegramController.js"],
+    [backend, "routes/telegramRoute.js"],
+    [backend, "jobs/examReports.js"],
+    [backend, "helper/examReport.js"],
+    [frontend, "src/components/TelegramNotifications.jsx"],
+  ];
+  for (const [root, relative] of gone) {
+    assert(!fs.existsSync(path.join(root, relative)), `${relative} was reintroduced`);
+  }
+  // The scheduler must not grow the job back either.
+  const jobs = read(path.join(backend, "jobs", "backgroundJobs.js"));
+  assert(!/telegram-reports|runDueExamReports/.test(jobs), "the report job is back in the scheduler");
+});
+
 check("frontend does not call retired question CRUD or Stripe surfaces", () => {
   const roots = [path.join(frontend, "src"), path.join(frontend, "redux")];
   const queue = [...roots];
@@ -57,6 +80,7 @@ check("frontend does not call retired question CRUD or Stripe surfaces", () => {
     /\/deleteQuestion\//,
     /\/getQuestionsByExam\//,
     /\/api\/stripe\//i,
+    /\/api\/telegram\//i,
     /\bpayExam\b/,
     /serviceWorkerRegistration/,
   ];

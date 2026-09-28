@@ -4,7 +4,6 @@ const path = require("path");
 const Material = require("../models/materialModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
-const { notifyEnrollment } = require("../helper/telegram");
 const { hasStudentRoom } = require("../helper/planLimits");
 const { convertOfficeToPdf, isOfficeFile } = require("../utils/officeToPdf");
 const { enqueueConversion } = require("../utils/convertQueue");
@@ -806,7 +805,6 @@ const joinFromShare = asyncHandler(async (req, res) => {
       teacher: cls.owner,
       status: room ? "approved" : "pending",
     });
-    notifyEnrollment(cls, req.user, !room);
     if (!room) {
       return res.json({ joined: false, waitlisted: true, className: cls.name || "" });
     }

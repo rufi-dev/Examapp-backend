@@ -104,24 +104,6 @@ const examSchema = Schema({
     // When enabled, students may attach a photo of their worked solution to each
     // question during the exam (teachers review them per student afterwards).
     studentSolutionPhotos: { type: Boolean, default: false },
-    // Set once the post-endDate Telegram results report (PDF + Excel) has been
-    // sent, so the scheduler never sends it twice for the same exam.
-    reportSentAt: { type: Date },
-    // Bounded recipient/artifact idempotency ledger for the report worker.
-    reportDeliveredKeys: { type: [String], default: undefined, select: false },
-    // AUD-017 durable report claim/retry state. A worker owns a bounded lease;
-    // failed work remains due indefinitely (no 12-hour loss window).
-    reportLeaseOwner: { type: String, default: null, select: false },
-    reportLeaseUntil: { type: Date, default: null, select: false },
-    reportNextAttemptAt: { type: Date, default: null, select: false },
-    reportAttempts: { type: Number, default: 0, select: false },
-    reportDeadLetterAt: { type: Date, default: null, select: false },
-    reportLastFailure: {
-        type: String,
-        enum: ["generation", "delivery", "commit", null],
-        default: null,
-        select: false,
-    },
     // Set once the "new exam" WhatsApp notification has gone out to the class's
     // students, so publishing/editing never double-notifies them.
     studentsNotifiedAt: { type: Date },
@@ -241,13 +223,6 @@ const examSchema = Schema({
         minimize: false,
     });
 
-examSchema.index(
-    { endDate: 1, reportNextAttemptAt: 1, reportLeaseUntil: 1 },
-    {
-        name: "due_exam_report",
-        partialFilterExpression: { reportSentAt: null },
-    }
-);
 examSchema.index(
     { owner: 1, creationKey: 1 },
     {

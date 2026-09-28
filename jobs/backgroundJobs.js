@@ -1,5 +1,4 @@
 const { beat } = require("../utils/heartbeat");
-const { runDueExamReports } = require("./examReports");
 const { sweepExpiredPlans } = require("./planExpiry");
 const { rollUpAndPruneVisitors } = require("./visitorRollup");
 const {
@@ -39,10 +38,6 @@ function startBackgroundJobs({
     positiveMs(env.PLAN_SWEEP_FIRST_MS, 45 * 1000, { allowZero: true }),
     jobs.sweepExpiredPlans || sweepExpiredPlans);
 
-  schedule("telegram-reports",
-    positiveMs(env.REPORT_INTERVAL_MS, 10 * 60 * 1000),
-    positiveMs(env.REPORT_FIRST_MS, 30 * 1000, { allowZero: true }),
-    jobs.runDueExamReports || runDueExamReports);
   schedule("attempt-finalizer",
     positiveMs(env.FINALIZE_INTERVAL_MS, 60 * 1000),
     positiveMs(env.FINALIZE_FIRST_MS, 20 * 1000, { allowZero: true }),

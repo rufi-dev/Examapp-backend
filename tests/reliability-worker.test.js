@@ -8,12 +8,6 @@ const Exam = require("../models/examModel");
 const User = require("../models/userModel");
 const Question = require("../models/questionModel");
 const { finalizeExpiredAttempts } = require("../controllers/quizController");
-const {
-  runDueExamReports,
-  claimDueExam,
-  completeClaim,
-  LEASE_MS,
-} = require("../jobs/examReports");
 const { SPECS } = require("../helper/reliabilityIndexes");
 
 let passed = 0;
@@ -71,66 +65,13 @@ async function main() {
     await Exam.createIndexes();
     const now = new Date();
 
-    const reportExam = await Exam.create({
-      name: "Due report",
-      owner: new mongoose.Types.ObjectId(),
-      duration: 600,
-      price: 0,
-      totalMarks: 100,
-      passingMarks: 50,
-      class: new mongoose.Types.ObjectId(),
-      endDate: new Date(now.getTime() - 8 * 24 * 60 * 60 * 1000),
-    });
-    const [workerA, workerB] = await Promise.all([
-      runDueExamReports({ workerId: "report-a", now, enabled: true, max: 1 }),
-      runDueExamReports({ workerId: "report-b", now, enabled: true, max: 1 }),
-    ]);
-    ok("two report workers claim one logical job",
-      workerA.claimed + workerB.claimed === 1);
-    ok("the one report job completes once",
-      workerA.completed + workerB.completed === 1 &&
-      !!(await Exam.findById(reportExam._id)).reportSentAt);
-
-    const staleExam = await Exam.create({
-      name: "Stale lease",
-      owner: new mongoose.Types.ObjectId(),
-      duration: 600,
-      price: 0,
-      totalMarks: 100,
-      passingMarks: 50,
-      class: new mongoose.Types.ObjectId(),
-      endDate: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000),
-      reportLeaseOwner: "dead-worker",
-      reportLeaseUntil: new Date(now.getTime() - 1),
-    });
-    const stale = await runDueExamReports({
-      workerId: "report-restart",
-      now,
-      enabled: true,
-      max: 1,
-    });
-    ok("stale report lease is reclaimed after process loss",
-      stale.claimed === 1 && stale.completed === 1 &&
-      !!(await Exam.findById(staleExam._id)).reportSentAt);
-
-    const fencedExam = await Exam.create({
-      name: "Lease owner fence",
-      owner: new mongoose.Types.ObjectId(),
-      duration: 600,
-      price: 0,
-      totalMarks: 100,
-      passingMarks: 50,
-      class: new mongoose.Types.ObjectId(),
-      endDate: new Date(now.getTime() - 1_000),
-    });
-    const owned = await claimDueExam({ now, workerId: "owner", leaseMs: LEASE_MS });
-    const staleCompletion = await completeClaim(owned, "not-owner", now);
-    ok("a stale report worker cannot complete another worker's lease",
-      staleCompletion === "stale" &&
-      !(await Exam.findById(fencedExam._id)).reportSentAt);
-    ok("the lease owner can complete the report",
-      (await completeClaim(owned, "owner", now)) === "completed");
-
+    /*
+     * The report worker's lease/fence/retry assertions lived here. They went
+     * with the job itself: the end-of-exam report existed only to be delivered
+     * over Telegram, so when the bot was retired the worker had nothing left to
+     * deliver. The finalizer below exercises the same claim-and-fence pattern,
+     * which is the part worth keeping a test on.
+     */
     const scorable = await makeScorableAttempt(now);
     const [finalA, finalB] = await Promise.all([
       finalizeExpiredAttempts(),

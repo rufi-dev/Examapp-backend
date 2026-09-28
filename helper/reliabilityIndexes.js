@@ -29,15 +29,6 @@ const SPECS = [
       partialFilterExpression: { submitted: false },
     },
   },
-  {
-    collection: "exams",
-    name: "due_exam_report",
-    key: { endDate: 1, reportNextAttemptAt: 1, reportLeaseUntil: 1 },
-    options: {
-      name: "due_exam_report",
-      partialFilterExpression: { reportSentAt: null },
-    },
-  },
 ];
 
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);

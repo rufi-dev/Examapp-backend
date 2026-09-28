@@ -652,25 +652,6 @@ const checkIntegrations = () =>
         : { name: "E-poçt (SMTP)", configured: true, ok: false, code: res.code, detail: res.code };
     };
 
-    // --- Telegram bot — tgApi never throws (returns null on failure).
-    const telegramProbe = async () => {
-      try {
-        const { isTelegramConfigured, tgApi } = require("../helper/telegram");
-        if (!isTelegramConfigured())
-          return { name: "Telegram bot", configured: false, ok: null, detail: "TELEGRAM_BOT_TOKEN qurulmayıb" };
-        const t0 = Date.now();
-        const me = await withTimeout(tgApi("getMe"), 8000, null);
-        return {
-          name: "Telegram bot",
-          configured: true,
-          ok: !!me,
-          detail: me ? `@${me.username || "bot"} aktiv · ${Date.now() - t0}ms` : "getMe cavab vermədi",
-        };
-      } catch (e) {
-        return { name: "Telegram bot", configured: false, ok: null, detail: String(e?.message || e).slice(0, 120) };
-      }
-    };
-
     // Payments (Stripe) removed — no payment integration to probe. All exams free.
 
     // --- WhatsApp Web (no live probe — just count linked Chromium sessions).
@@ -728,7 +709,6 @@ const checkIntegrations = () =>
     // Independent probes → run concurrently; each already self-contained/safe.
     const list = await Promise.all([
       emailProbe(),
-      telegramProbe(),
       whatsappRow(),
       aiRow(),
       googleRow(),

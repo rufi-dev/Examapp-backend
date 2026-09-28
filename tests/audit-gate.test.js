@@ -36,13 +36,6 @@ function runGate(audit, manifest, { rawAudit } = {}) {
 const future = "2999-01-01";
 const ex = (over = {}) => ({ exceptions: [{ package: "evilpkg", severity: "high", ids: ["GHSA-high-1"], paths: ["node_modules/evilpkg"], reason: "r", owner: "o", control: "c", expires: future, ...over }] });
 
-function excelTest() {
-  const { buildResultsExcel, MAX_ROWS, MAX_CELL } = require("../helper/examReport");
-  const bomb = Array.from({ length: MAX_ROWS + 800 }, (_, i) => ({ userId: { name: "X".repeat(MAX_CELL + 900), email: "e".repeat(MAX_CELL + 900), phone: "1" }, earnPoints: i }));
-  return buildResultsExcel({ name: "N".repeat(MAX_CELL + 900) }, bomb, "C".repeat(MAX_CELL + 900), { n: bomb.length, total: 100, avg: 1, high: 1, low: 0, passingMarks: 50, pass: 1 })
-    .then((buf) => ({ ok: Buffer.isBuffer(buf) && buf.length > 0 && buf.length < 5 * 1024 * 1024 }));
-}
-
 async function main() {
   // ── core gate ──
   ok("critical FAILS even with a matching exception (never exceptable)", runGate(auditJson(vuln("critical")), ex()).code === 1);
@@ -67,9 +60,14 @@ async function main() {
   ok("a severity!=high exception FAILS", runGate(auditJson(vuln("high")), ex({ severity: "moderate" })).code === 1);
   ok("a MALFORMED audit JSON FAILS closed", runGate(null, ex(), { rawAudit: "{ not json" }).code === 1);
 
-  // ── ExcelJS bounds (CR-114.5) ──
-  const xl = await excelTest();
-  ok("CR-114.5: a hostile ExcelJS dataset produces a BOUNDED buffer (rows/cells/meta capped)", xl.ok);
+  /*
+   * CR-114.5's ExcelJS row/cell caps were asserted here. The server does not
+   * build spreadsheets any more: the only one it ever made was the end-of-exam
+   * results report, which existed to be delivered over Telegram and went with
+   * it — exceljs is no longer a dependency. A test for a bomb needs something
+   * to bomb. The Excel export teachers use is built in the browser and is not
+   * this code path.
+   */
 
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log(`\n${passed} passed, ${failed} failed`);

@@ -325,7 +325,7 @@ Grounded in the live inventory. Auth truth is `middleware/authMiddleware.js` (`h
 | `data:access:other-owner` | `GET /getUserById/:id` (other students), `GET /class/:classId/students`, `GET /teacher/requests`, `POST /addPhotoToResult/:resultId` |
 | `invite:bulk` / roster mutation | `POST /class/:classId/addStudent`, `PATCH /enrollment/:id`, `GET /class/:classId/assignable` |
 | `mutation:global` | `POST /addExamToUserById/:userId` (grants an exam onto another account) |
-| `messaging:bulk` | `POST /whatsapp/test`, `POST /whatsapp/group/test` (send messages), Telegram automation broadcast |
+| `messaging:bulk` | `POST /whatsapp/test`, `POST /whatsapp/group/test` (send messages) |
 | `export:students:bulk` | large student-data exports (results export surfaces) |
 | `admin:*` | everything under `adminOnly`: `DELETE /deleteUser/:id`, `PATCH /users/bulk`, `POST /upgradeUser`, `PATCH /:id/storage`, `GET /aiUsage`, teacher overview/onboarding reports |
 

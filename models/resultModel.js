@@ -159,13 +159,6 @@ const resultSchema = Schema(
       type: Boolean,
       default: false,
     },
-    // Set once a termination-upgrade notification has been confirmed-delivered, so
-    // a retry (or a crash-recovered pass) never double-sends the staff alert. This
-    // is ONLY the termination marker, not a general "finished notified" gate.
-    terminationNotifiedAt: {
-      type: Date,
-      default: null,
-    },
     // ── Manual grading (MANUAL_GRADING_ENABLED) ──────────────────────────────
     // True while this result still has ≥1 manual question the teacher hasn't
     // graded. `earnPoints` is provisional until it flips false.

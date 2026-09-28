@@ -2,7 +2,6 @@ const asyncHandler = require("express-async-handler");
 const PlanUpgradeRequest = require("../models/planUpgradeRequestModel");
 const User = require("../models/userModel");
 const { PLANS, PLAN_IDS, CREDIT_TOPUPS, STORAGE_PACKS, AI_ACTION_COSTS, paymentInfo } = require("../config/plans");
-const { sendTelegram, esc } = require("../helper/telegram");
 
 // GET /api/plan/catalog — public plan/pricing catalog for the pricing page.
 // (Limits use Infinity → serialize as null = "unlimited" for JSON.)
@@ -40,7 +39,6 @@ const getPaymentInfo = asyncHandler(async (req, res) => {
 
 // POST /api/plan/upgrade-request — teacher asks to move to Pro/Premium, and
 // (when `paid` is set) declares they have transferred the money. Idempotent per
-// {teacher, targetPlan}; best-effort pings linked admins on Telegram.
 const requestUpgrade = asyncHandler(async (req, res) => {
   const targetPlan = String(req.body?.targetPlan || "");
   if (!["pro", "premium"].includes(targetPlan)) {
@@ -69,27 +67,6 @@ const requestUpgrade = asyncHandler(async (req, res) => {
     if (note && note !== request.note) { request.note = note; dirty = true; }
     if (paid && !request.paidClaimed) { request.paidClaimed = true; request.paidClaimedAt = new Date(); dirty = true; }
     if (dirty) await request.save();
-  }
-
-  // Best-effort admin ping (never blocks/breaks the request).
-  try {
-    const admins = await User.find({ role: "admin", telegramChatId: { $nin: [null, ""] } })
-      .select("telegramChatId")
-      .lean();
-    if (admins.length) {
-      const text = [
-        paid ? "✅ <b>Ödəniş bildirişi</b>" : "💳 <b>Paket yüksəltmə istəyi</b>",
-        `👤 ${esc(req.user.name || "Müəllim")}`,
-        `📦 ${esc(PLANS[targetPlan].label)} (${PLANS[targetPlan].priceAzn} ₼/ay)`,
-        paid ? "💰 Ödədim düyməsini basdı — yoxla və təsdiqlə" : null,
-        note ? `📝 ${esc(note)}` : null,
-      ]
-        .filter(Boolean)
-        .join("\n");
-      await Promise.allSettled(admins.map((a) => sendTelegram(a.telegramChatId, text)));
-    }
-  } catch (e) {
-    console.error("[PLAN] upgrade-request notify failed:", e.message);
   }
 
   res.status(201).json({
@@ -138,25 +115,6 @@ const requestStorage = asyncHandler(async (req, res) => {
     await request.save();
   }
 
-  try {
-    const admins = await User.find({ role: "admin", telegramChatId: { $nin: [null, ""] } })
-      .select("telegramChatId")
-      .lean();
-    if (admins.length) {
-      const text = [
-        paid ? "✅ <b>Yaddaş ödənişi</b>" : "💾 <b>Yaddaş alma istəyi</b>",
-        `👤 ${esc(req.user.name || "Müəllim")}`,
-        `💾 +${gb} GB × ${months} ay (${pack.priceAzn * months} ₼)`,
-        paid ? "💰 Ödədim düyməsini basdı — yoxla və yaddaşı əlavə et" : null,
-      ]
-        .filter(Boolean)
-        .join("\n");
-      await Promise.allSettled(admins.map((a) => sendTelegram(a.telegramChatId, text)));
-    }
-  } catch {
-    /* the request stands whether or not the ping lands */
-  }
-
   res.status(201).json({
     request: { _id: request._id, kind: "storage", storageGb: gb, months, status: request.status, paidClaimed: request.paidClaimed },
   });
@@ -191,25 +149,6 @@ const requestCredit = asyncHandler(async (req, res) => {
     request.paidClaimed = true;
     request.paidClaimedAt = new Date();
     await request.save();
-  }
-
-  try {
-    const admins = await User.find({ role: "admin", telegramChatId: { $nin: [null, ""] } })
-      .select("telegramChatId")
-      .lean();
-    if (admins.length) {
-      const text = [
-        paid ? "✅ <b>Kredit ödənişi</b>" : "🪙 <b>Kredit alma istəyi</b>",
-        `👤 ${esc(req.user.name || "Müəllim")}`,
-        `🪙 +${credits} kredit (${pack.priceAzn} ₼)`,
-        paid ? "💰 Ödədim düyməsini basdı — yoxla və krediti əlavə et" : null,
-      ]
-        .filter(Boolean)
-        .join("\n");
-      await Promise.allSettled(admins.map((a) => sendTelegram(a.telegramChatId, text)));
-    }
-  } catch (e) {
-    console.error("[PLAN] credit-request notify failed:", e.message);
   }
 
   res.status(201).json({ ok: true, request: { _id: request._id, credits, status: request.status } });

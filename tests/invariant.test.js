@@ -93,7 +93,9 @@ async function main() {
   ok("terminate-upgrade: still one Result (no dup)", (await Result.countDocuments({ attemptId: attempt._id })) === 1);
   ok("terminate-upgrade: terminated=true, earnPoints=0", rFinal.terminated === true && rFinal.earnPoints === 0);
   ok("terminate-upgrade: violations monotonic (>=2)", (rFinal.violations || 0) >= 2);
-  ok("terminate-upgrade: terminationNotifiedAt set (suppressed)", !!rFinal.terminationNotifiedAt);
+  // terminationNotifiedAt was a send-once marker for the Telegram staff alert.
+  // The alert is gone, so the marker is too — the monotonic guarantees above
+  // are what this case is really about.
 
   // 3b) ANTI-CHEAT: a late client submit must NOT overwrite a finalized Result.
   const attempt2 = await Attempt.create({

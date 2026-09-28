@@ -9,7 +9,6 @@ const Attempt = require("../models/attemptModel");
 const ExamVersion = require("../models/examVersionModel");
 const User = require("../models/userModel");
 const Enrollment = require("../models/enrollmentModel");
-const { notifyExamStarted, notifyExamFinished } = require("../helper/telegram");
 const parentNotify = require("../helper/parentNotify");
 const { notifyStudentsNewExam } = require("../helper/whatsapp");
 const { PRESETS } = require("../helper/examPresets");
@@ -2419,12 +2418,6 @@ const startAttempt = asyncHandler(async (req, res) => {
     throw e;
   }
 
-  // A brand-new attempt was just created (resume/duplicate paths returned
-  // above). Ping the exam owner over Telegram — fire-and-forget so a slow or
-  // failed notification never delays/blocks the student's start. Gating (event
-  // flag + class/exam scope) lives in the helper / the owner's prefs.
-  notifyExamStarted(exam, user);
-
   return res.status(200).json(await payload(attempt));
 });
 
@@ -2848,32 +2841,13 @@ async function linkResult(examId, userId, resultId) {
   void resultId;
 }
 
-// Notify staff of a termination exactly once, gated by the persisted
-// terminationNotifiedAt marker. Sets the marker only on a confirmed-successful
-// send (notifyExamFinished returns true, incl. the no-recipients no-op). When
-// suppressed (migration), still stamp the marker so a later live retry won't alert.
-async function markTerminationNotified(result) {
-  const at = new Date();
-  result.terminationNotifiedAt = at;
-  await Result.updateOne({ _id: result._id }, { $set: { terminationNotifiedAt: at } });
-}
-async function maybeNotifyTermination(exam, user, result, suppress) {
-  if (!result.terminated || result.terminationNotifiedAt) return;
-  if (suppress) {
-    await markTerminationNotified(result);
-    return;
-  }
-  const ok = await notifyExamFinished(exam, user, result);
-  if (ok) await markTerminationNotified(result);
-}
-
 // Reconcile an already-existing Result for this attempt with a (possibly retried
 // or racing) submit: identity assert, MONOTONIC merge (violations never lower,
-// termination one-way), ensure the attempt is submitted, repair links, notify.
+// termination one-way), ensure the attempt is submitted, repair links.
 // Returns the (possibly upgraded) earnPoints. NEVER creates a second Result and
 // NEVER changes selectedAnswers/score — an existing Result is authoritative.
 async function reconcileExistingResult(existing, exam, user, attempt, opts = {}) {
-  const { violations, terminated, suppressNotifications } = opts;
+  const { violations, terminated } = opts;
   // Identity ONLY (not current exam access — ownership removal mid-attempt is
   // allowed). Guards against a foreign/guessed attemptId leaking/altering a result.
   if (
@@ -2910,7 +2884,6 @@ async function reconcileExistingResult(existing, exam, user, attempt, opts = {})
     { _id: attempt._id, submitted: false },
     { $set: { submitted: true } }
   );
-  await maybeNotifyTermination(exam, user, existing, suppressNotifications);
   return existing.earnPoints;
 }
 
@@ -3224,17 +3197,6 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
       Promise.resolve(require("../services/teacherJourneyEvents").onAttemptCompleted(exam.owner, { studentId: user._id, attemptId: attempt._id })).catch(() => {});
     }
   } catch (_) { /* ignore */ }
-
-  // Telegram: normal "finished" alert fires on first creation (unless suppressed
-  // by a migration run). If the result was created already terminated, treat the
-  // finish alert as the termination alert and stamp terminationNotifiedAt on a
-  // confirmed send so a later retry can't re-alert.
-  if (!suppressNotifications) {
-    const ok = await notifyExamFinished(exam, user, newResult);
-    if (isTerminated && ok) await markTerminationNotified(newResult);
-  } else if (isTerminated) {
-    await markTerminationNotified(newResult);
-  }
 
   // Parents (WhatsApp, class-gated): only when the score is FINAL now (auto-graded).
   // Manual-review exams stay pending here and notify later from gradeManualAnswer.
@@ -5493,8 +5455,6 @@ const serverTime = asyncHandler(async (req, res) => {
 const COPY_STRIP = [
   "_id", "createdAt", "updatedAt", "__v", "questions", "creationKey",
   "activeVersionId", "activeVersionNumber", "pdf", "users",
-  "reportSentAt", "reportDeliveredKeys", "reportLeaseOwner", "reportLeaseUntil",
-  "reportNextAttemptAt", "reportAttempts", "reportDeadLetterAt", "reportLastFailure",
   "studentsNotifiedAt", "purging", "purgedAt", "deletedAt", "deletedBy",
   /*
    * A twin is born with its questions in the same breath, so it is never

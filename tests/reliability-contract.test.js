@@ -9,15 +9,16 @@ const ok = (name, condition) => {
   else { failed++; console.log("  ✗ FAIL:", name); }
 };
 const attemptSpec = SPECS.find((x) => x.name === "due_attempt_finalizer");
-const reportSpec = SPECS.find((x) => x.name === "due_exam_report");
+// due_exam_report went with the Telegram report worker: nothing queries exams
+// by report lease any more, so a spec for it would describe an index no code
+// uses. The existing one stays in Mongo as an orphan, which is harmless.
 const createSpec = SPECS.find((x) => x.name === "uniq_exam_creation");
-ok("contract includes all three reliability indexes", !!attemptSpec && !!reportSpec && !!createSpec);
+ok("contract includes both reliability indexes", !!attemptSpec && !!createSpec);
 const modelHas = (schema, spec) => schema.indexes().some(([key, options]) =>
   JSON.stringify(key) === JSON.stringify(spec.key) &&
   options.name === spec.name &&
   shapeReason(spec, { key, ...options }) === null);
 ok("Attempt model matches finalizer contract", modelHas(Attempt.schema, attemptSpec));
-ok("Exam model matches report contract", modelHas(Exam.schema, reportSpec));
 ok("Exam model matches creation contract", modelHas(Exam.schema, createSpec));
 ok("partial drift rejected", shapeReason(attemptSpec, {
   key: attemptSpec.key, partialFilterExpression: { submitted: true },
@@ -33,15 +34,18 @@ const timeouts = [], intervals = [], clearedTimeouts = [], clearedIntervals = []
  * still named five when plan-lapse-sweep had made it six — so the four
  * assertions below had been failing for as long as that: a contract test that
  * fails constantly stops being read, and stops protecting anything.
+ *
+ * It went the other way when Telegram was retired: runDueExamReports existed
+ * only to deliver the end-of-exam report over the bot, so the job and its name
+ * left together. The count is the point of this file — change both or neither.
  */
 const jobs = Object.fromEntries([
-  "sweepExpiredPlans", "runDueExamReports", "finalizeExpiredAttempts", "purgeExpiredArchived",
+  "sweepExpiredPlans", "finalizeExpiredAttempts", "purgeExpiredArchived",
   "purgeOrphanPdfs", "purgeStagedUploads", "rollUpAndPruneVisitors", "purgeAbandonedExams",
 ].map((name) => [name, async () => name]));
-const JOB_COUNT = 8;
+const JOB_COUNT = 7;
 const stop = startBackgroundJobs({
   env: {
-    REPORT_INTERVAL_MS: "101", REPORT_FIRST_MS: "0",
     FINALIZE_INTERVAL_MS: "102", FINALIZE_FIRST_MS: "0",
     TRASH_INTERVAL_MS: "103", TRASH_FIRST_MS: "0",
     PDF_SWEEP_INTERVAL_MS: "104", PDF_SWEEP_FIRST_MS: "0",
@@ -59,7 +63,7 @@ const stop = startBackgroundJobs({
 ok(`scheduler owns exactly ${JOB_COUNT} jobs`, timeouts.length === JOB_COUNT && intervals.length === JOB_COUNT);
 ok("zero first-run delays are honored", timeouts.every((x) => x.ms === 0));
 ok("configured intervals are honored",
-  JSON.stringify(intervals.map((x) => x.ms)) === JSON.stringify([100, 101, 102, 103, 104, 104, 106, 105]));
+  JSON.stringify(intervals.map((x) => x.ms)) === JSON.stringify([100, 102, 103, 104, 104, 106, 105]));
 stop(); stop();
 ok("stop is idempotent", clearedTimeouts.length === JOB_COUNT && clearedIntervals.length === JOB_COUNT);
 ok("invalid durations fall back", positiveMs("NaN", 77) === 77 && positiveMs("-1", 77) === 77);
