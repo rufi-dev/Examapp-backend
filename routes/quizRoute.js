@@ -58,7 +58,7 @@ const {
   deleteResult,
   getPendingReviews,
   gradeManualAnswer, createVariantB, duplicateExam, msoReport } = require("../controllers/quizController");
-const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions, generateQuestionsStream, transcribeAudio, realtimeToken, listAiModels, regenerateQuestion } = require("../controllers/aiController");
+const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions, generateQuestionsStream, transcribeAudio, realtimeToken, regenerateQuestion } = require("../controllers/aiController");
 const { aiRateLimit, aiBudgetGuard } = require("../middleware/aiLimit");
 // Teacher Success Journey — per-teacher AI credit metering (flag-gated; passthrough when off).
 const { chargeAi } = require("../middleware/aiCredit");
@@ -193,7 +193,6 @@ router.post("/variant-b/:examId", protect, requireCapability("ai:use:own"), aiRa
 router.post("/generateQuestionsStream/:examId", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.generate.questions"), generateQuestionsStream);
 
 // Which engines the builder may offer for question generation.
-router.get("/ai/models", protect, requireCapability("ai:use:own"), listAiModels);
 // Rewrite a single question in the builder.
 router.post("/regenerateQuestion/:examId", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.regenerate.question"), regenerateQuestion);
 // Voice → text (Azerbaijani) for the chat assistant.

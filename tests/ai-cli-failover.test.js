@@ -235,6 +235,22 @@ async function main() {
   ok("with both resting and no API route, the one nearest its reset is still tried", r.ran === "cli:claude");
   ok("...and the owner gets the error rather than an invoice", !!r.error);
 
+  /*
+   * What the teacher is told when there is genuinely nothing left.
+   *
+   * In CLI-only mode there is no other route by the owner's choice, so the
+   * honest answer is "the plan is spent until this hour" - and the binaries
+   * state that hour in their refusal. A teacher who knows the subscription
+   * returns at nine tonight can plan around it; one told "AI could not create
+   * questions" can only keep pressing the button.
+   */
+  console.log("\nwhen the plan is spent, the teacher is told WHEN:");
+  ok("the error carries a message meant for a person", !!r.error?.userMessage, String(r.error?.userMessage || ""));
+  ok("...naming the hour it comes back", /\d{1,2}:\d{2}/.test(r.error?.userMessage || ""), r.error?.userMessage);
+  ok("...in Azerbaijani", /yenidən cəhd edin/.test(r.error?.userMessage || ""));
+  ok("...and it is 503, not a generic failure", r.error?.aiStatus === 503);
+  console.log(`    "${r.error?.userMessage}"`);
+
   console.log("\nand a CLI that works again is used again immediately:");
   hush();
   r = await call("cli");

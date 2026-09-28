@@ -1111,11 +1111,15 @@ const streamMessage = asyncHandler(async (req, res) => {
   /*
    * Which model this turn runs on. Sent with the turn rather than read off the
    * document, so a teacher who changes it in the composer gets the change on the
-   * very next message instead of on the one after; validated against the
-   * catalogue, because this string is handed to the provider. Remembered so the
-   * choice sticks without being resent by every client.
+   * The PLATFORM chooses the engine, not the request.
+   *
+   * There was a model picker in the composer, and this took its value. Teachers
+   * do not choose a model any more - the platform is one engine to them - so a
+   * model in the request body is ignored rather than trusted. A document that
+   * already carries a choice from when the picker existed keeps running on it;
+   * everything new takes the platform's own.
    */
-  const model = S.pickModel(String((req.body && req.body.model) || doc.settings?.model || ""));
+  const model = S.pickModel(String(doc.settings?.model || ""));
   if (model !== doc.settings?.model) {
     await LessonDoc.updateOne({ _id: doc._id, owner: doc.owner }, { $set: { "settings.model": model } });
   }

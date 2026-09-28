@@ -1426,16 +1426,17 @@ function assertPdfExtractable(file, res) {
 
 const extractQuestions = asyncHandler(async (req, res) => {
   const parts = extractParts(req, res);
-  // The builder sends the model id it picked. An OpenAI id routes to OpenAI;
-  // "gemini"/"claude" keep working as the plain provider names they always were.
-  const asked = String(req.body?.provider || "").toLowerCase();
-  const askedModel = findAiModel(String(req.body?.model || asked));
-  const provider =
-    askedModel?.provider === "openai"
-      ? "openai"
-      : asked === "gemini" || askedModel?.provider === "gemini"
-      ? "gemini"
-      : "claude";
+  /*
+   * The PLATFORM chooses the engine, not the request.
+   *
+   * A teacher has no way to know whether a paper extracts better on one model
+   * than another, and asking them to decide made the platform look like a
+   * control panel instead of a tool. The picker is gone from every screen, so
+   * anything a client still sends about models is ignored rather than trusted -
+   * a request body is not a place to take instructions about spending from.
+   */
+  const provider = PLATFORM_EXTRACT_PROVIDER;
+  const askedModel = provider === "openai" ? findAiModel(DEFAULT_AI_MODEL) : null;
   const openaiModel = askedModel?.provider === "openai" ? askedModel.id : undefined;
   const instructions = buildInstructions(req.body?.preset, req.body?.instructions);
 
@@ -1459,7 +1460,8 @@ const extractQuestions = asyncHandler(async (req, res) => {
       const { runCliStructured } = require("../helper/cliAi");
       const out = await runCliStructured({
         provider: cliProvider,
-        model: openaiModel || (askedModel && askedModel.id) || "sonnet",
+        // No model named: the runner's "standard" tier picks the right one for
+        // whichever CLI the gateway chose.
         system: SYSTEM_PROMPT + instructionBlock(instructions),
         prompt: "Yüklənmiş əlavə(lər)dəki bütün sualları çıxar və cavabı yalnız JSON kimi qaytar.",
         schema: EXTRACTION_SCHEMA,
@@ -1514,7 +1516,7 @@ const extractQuestions = asyncHandler(async (req, res) => {
     questions: cleanQuestions(questions),
     mode: req.body?.answerMode,
     preset: req.body?.preset,
-    model: req.body?.model,
+    model: PLATFORM_MODEL,
   });
   const finalQuestions = applied.questions;
   const finalCost = sumCost(cost, applied.reviewCost);
@@ -1762,16 +1764,17 @@ async function streamClaude(parts, instructions, onText) {
 
 const extractQuestionsStream = asyncHandler(async (req, res) => {
   const parts = extractParts(req, res);
-  // The builder sends the model id it picked. An OpenAI id routes to OpenAI;
-  // "gemini"/"claude" keep working as the plain provider names they always were.
-  const asked = String(req.body?.provider || "").toLowerCase();
-  const askedModel = findAiModel(String(req.body?.model || asked));
-  const provider =
-    askedModel?.provider === "openai"
-      ? "openai"
-      : asked === "gemini" || askedModel?.provider === "gemini"
-      ? "gemini"
-      : "claude";
+  /*
+   * The PLATFORM chooses the engine, not the request.
+   *
+   * A teacher has no way to know whether a paper extracts better on one model
+   * than another, and asking them to decide made the platform look like a
+   * control panel instead of a tool. The picker is gone from every screen, so
+   * anything a client still sends about models is ignored rather than trusted -
+   * a request body is not a place to take instructions about spending from.
+   */
+  const provider = PLATFORM_EXTRACT_PROVIDER;
+  const askedModel = provider === "openai" ? findAiModel(DEFAULT_AI_MODEL) : null;
   const openaiModel = askedModel?.provider === "openai" ? askedModel.id : undefined;
   const instructions = buildInstructions(req.body?.preset, req.body?.instructions);
 
@@ -1833,7 +1836,8 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
         const { runCliStructured } = require("../helper/cliAi");
         const out = await runCliStructured({
           provider: cliProvider,
-          model: openaiModel || (askedModel && askedModel.id) || "sonnet",
+          // No model named: the runner's "standard" tier picks the right one
+          // for whichever CLI the gateway chose.
           system: SYSTEM_PROMPT + instructionBlock(instructions),
           prompt: EXTRACT_CLI_PROMPT,
           schema: EXTRACTION_SCHEMA,
@@ -1928,7 +1932,7 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     questions: extracted,
     mode: req.body?.answerMode,
     preset: req.body?.preset,
-    model: req.body?.model,
+    model: PLATFORM_MODEL,
     onStatus: (message) => sse("status", { message }),
   });
   const questions = applied.questions;
@@ -2176,7 +2180,7 @@ const AI_MODELS = [
    * It is kept OFF the exam picker for the reason stated just below about the
    * pro tiers: at $10/$50 it is twenty-five times gpt-4.1-mini on input, and a
    * teacher generating an exam should not be one click from that without asking
-   * for it. `studioOnly` is honoured by listAiModels, not by priceFor — so it is
+   * for it. `studioOnly` marked the Studio-only entries when a picker existed; priceFor ignores it — so it is
    * priced everywhere and offered only where it was chosen deliberately.
    */
   {
@@ -2213,6 +2217,29 @@ const AI_MODELS = [
 
 const DEFAULT_AI_MODEL = process.env.OPENAI_GEN_MODEL || "gpt-4.1-mini";
 
+/*
+ * The model every teacher-facing request runs on.
+ *
+ * There is no picker any more: to a teacher the platform is one engine, and a
+ * request body is not a place to take instructions about spending from. This is
+ * that single choice, named once so the admin runtime page can show it and so
+ * no handler is tempted to read one off the wire again.
+ */
+const PLATFORM_MODEL = DEFAULT_AI_MODEL;
+
+/*
+ * Reading a paper is not writing one.
+ *
+ * The generation default is a small, cheap text model - right for turning a
+ * sentence into questions, wrong for reading a scanned worksheet. Extraction
+ * therefore keeps the engine it has always used when a request named none, and
+ * the chain behind it (gemini, then the rest) still catches an outage.
+ */
+const PLATFORM_EXTRACT_PROVIDER = (() => {
+  const asked = String(process.env.AI_EXTRACT_PROVIDER || "claude").toLowerCase();
+  return ["openai", "gemini", "claude"].includes(asked) ? asked : "claude";
+})();
+
 let PRICE_OVERRIDES = {};
 try {
   PRICE_OVERRIDES = JSON.parse(process.env.AI_MODEL_PRICES || "{}");
@@ -2229,28 +2256,14 @@ const priceFor = (id) => {
   return m?.usd || null;
 };
 
-// GET /api/quiz/ai/models — what the picker offers, and which one is preselected.
-const listAiModels = asyncHandler(async (req, res) => {
-  const available = AI_MODELS.filter((m) => {
-    // Priced for Studio, deliberately not offered here — see gpt-6-astra.
-    if (m.studioOnly) return false;
-    if (m.provider === "openai") return !!process.env.OPENAI_API_KEY;
-    if (m.provider === "gemini") return !!process.env.GEMINI_API_KEY;
-    if (m.provider === "claude") return !!process.env.ANTHROPIC_API_KEY;
-    return false;
-  }).map((m) => ({
-    id: m.id,
-    label: m.label,
-    provider: m.provider,
-    note: m.note || "",
-    // Every OpenAI engine on the list carries a real price; the other two
-    // providers price themselves.
-    priceKnown: m.provider !== "openai" ? true : !!priceFor(m.id),
-    usd: m.usd || null,
-  }));
-  const fallback = available.find((m) => m.id === DEFAULT_AI_MODEL) || available[0];
-  res.json({ models: available, default: fallback?.id || DEFAULT_AI_MODEL });
-});
+/*
+ * The model catalogue is no longer offered to clients.
+ *
+ * There was a GET /api/quiz/ai/models here so the builder could draw a picker.
+ * The picker is gone - teachers do not choose an engine - so serving the list
+ * would only invite a client to send a choice the server now ignores. AI_MODELS
+ * itself stays: it is the PRICING table, and the usage pages read it.
+ */
 
 // ── OpenAI: the default engine for prompt-generated questions ────────────
 // Priced per MILLION tokens and overridable without a deploy, so a price change
@@ -2803,19 +2816,19 @@ const generateQuestions = asyncHandler(async (req, res) => {
   try {
     if (passageCount >= 2) {
       // Multi-passage IELTS: one call per passage, merged (see runMultiPassage).
-      const r = await runMultiPassage({ prompt, preset: req.body?.preset, model: req.body?.model, n: passageCount });
+      const r = await runMultiPassage({ prompt, preset: req.body?.preset, model: PLATFORM_MODEL, n: passageCount });
       questions = r.questions;
       cost = r.cost;
       issues = r.issues;
       verified = r.verified;
     } else {
-      const out = await runGeneration({ prompt, preset: req.body?.preset, model: req.body?.model });
+      const out = await runGeneration({ prompt, preset: req.body?.preset, model: PLATFORM_MODEL });
       // Request fidelity: if the model came back short of the teacher's asked count,
       // top the set up to it (best-effort) BEFORE the review — so "20 sual" means 20.
       const topped = await topUpToCount({
         prompt,
         preset: req.body?.preset,
-        model: req.body?.model,
+        model: PLATFORM_MODEL,
         questions: out.questions,
         target: requestedCount,
       });
@@ -2825,7 +2838,7 @@ const generateQuestions = asyncHandler(async (req, res) => {
         questions: topped.questions,
         prompt,
         preset: req.body?.preset,
-        model: req.body?.model,
+        model: PLATFORM_MODEL,
       });
       questions = v.questions;
       cost = sumCost(sumCost(out.cost, topped.cost), v.reviewCost);
@@ -2916,7 +2929,7 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
       const r = await runMultiPassage({
         prompt,
         preset: req.body?.preset,
-        model: req.body?.model,
+        model: PLATFORM_MODEL,
         n: passageCount,
         signal: ac.signal,
         onProvider: (provider) => {
@@ -2937,7 +2950,7 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
         signal: ac.signal,
         prompt,
         preset: req.body?.preset,
-        model: req.body?.model,
+        model: PLATFORM_MODEL,
         onText: (provider) => {
           const streamer = makeQuestionStreamer();
           let announced = false;
@@ -2962,7 +2975,7 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
       const topped = await topUpToCount({
         prompt,
         preset: req.body?.preset,
-        model: req.body?.model,
+        model: PLATFORM_MODEL,
         signal: ac.signal,
         questions: out.questions,
         target,
@@ -2973,7 +2986,7 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
         questions: topped.questions,
         prompt,
         preset: req.body?.preset,
-        model: req.body?.model,
+        model: PLATFORM_MODEL,
         signal: ac.signal,
         onStatus: (message) => sse("status", { message }),
       });
@@ -3067,7 +3080,7 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
 
   let out = null;
   try {
-    out = await runGeneration({ prompt: ask, preset: req.body?.preset, model: req.body?.model });
+    out = await runGeneration({ prompt: ask, preset: req.body?.preset, model: PLATFORM_MODEL });
   } catch (e) {
     res.status(e?.aiStatus || 502);
     throw new Error(e?.userMessage || "Sual yenidən yazıla bilmədi");
@@ -3089,7 +3102,7 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
   let reviewCost = null;
   if (!hasInstr) {
     // Fresh variant: full correctness review (may improve the content freely).
-    const v = await verifyAndFix({ questions: generated, prompt: ask, preset: req.body?.preset, model: req.body?.model });
+    const v = await verifyAndFix({ questions: generated, prompt: ask, preset: req.body?.preset, model: PLATFORM_MODEL });
     fresh = (v.questions || [])[0] || fresh;
     issues = v.issues;
     verified = v.rounds > 0 && v.issues.length === 0;
@@ -3102,7 +3115,7 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     // repair it. This is validity enforcement, not intent-guessing.
     const structIssues = auditQuestions(generated, { requireAnswers: true });
     if (structIssues.length) {
-      const v = await verifyAndFix({ questions: generated, prompt: ask, preset: req.body?.preset, model: req.body?.model });
+      const v = await verifyAndFix({ questions: generated, prompt: ask, preset: req.body?.preset, model: PLATFORM_MODEL });
       fresh = (v.questions || [])[0] || fresh;
       issues = v.issues;
       verified = v.issues.length === 0;
@@ -3782,7 +3795,6 @@ const realtimeToken = asyncHandler(async (req, res) => {
 
 module.exports = {
   regenerateQuestion,
-  listAiModels,
   // exported for tests / benchmarking
   GEN_SYSTEM_PROMPT,
   EXTRACTION_SCHEMA,

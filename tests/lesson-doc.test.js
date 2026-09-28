@@ -1449,7 +1449,18 @@ console.log("\n25. The model writes the document; the schema stops being the cei
    */
   ok("a model that cannot stream progress says so",
     S.DOC_MODELS.filter((m) => m.provider !== "claude").every((m) => /gedişat yoxdur/.test(m.note)));
-  ok("the turn validates what it was sent", /S\.pickModel\(String\(\(req\.body && req\.body\.model\)/.test(ctl5));
+  /*
+   * The turn no longer takes a model from the request.
+   *
+   * It used to validate one against the catalogue, which was the right thing to
+   * do while a picker existed. It does not any more: teachers do not choose an
+   * engine, so a model in the body is ignored rather than checked - validating
+   * it would only make it look like an input the server honours. A document
+   * created while the picker existed keeps the choice stored on it.
+   */
+  ok("the turn takes no model from the request", !/req\.body\s*&&\s*req\.body\.model/.test(ctl5));
+  ok("...but still validates the document's own stored choice",
+    /S\.pickModel\(String\(doc\.settings\?\.model/.test(ctl5));
   ok("and remembers it on the document", /"settings\.model": model/.test(ctl5));
   // The fallback is the catalogue's default, not a second hand-written copy of
   // it — that copy had already drifted a model generation behind the picker.

@@ -379,6 +379,50 @@ async function snapshot(now = Date.now()) {
   });
 }
 
+/*
+ * When the platform expects to have a CLI again, and how to say that to a
+ * teacher.
+ *
+ * "Try again later" is not an answer anyone can act on. The binaries state a
+ * real reset time in their refusal and we already store it, so the teacher can
+ * be told the hour - in their own timezone, because a UTC time is four hours
+ * wrong for everyone reading it in Baku.
+ */
+const AZ_MONTHS = [
+  "yanvar", "fevral", "mart", "aprel", "may", "iyun",
+  "iyul", "avqust", "sentyabr", "oktyabr", "noyabr", "dekabr",
+];
+
+function azWhen(ms, tz = process.env.APP_TZ || "Asia/Baku") {
+  try {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: tz,
+      day: "numeric",
+      month: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    })
+      .formatToParts(new Date(ms))
+      .reduce((acc, p) => Object.assign(acc, { [p.type]: p.value }), {});
+    const month = AZ_MONTHS[Number(parts.month) - 1];
+    if (!month) return "";
+    return `${Number(parts.day)} ${month}, saat ${parts.hour}:${parts.minute}`;
+  } catch {
+    return "";
+  }
+}
+
+/* The first moment any CLI is expected back, or null if one is usable now. */
+async function soonestReturn(now = Date.now()) {
+  const state = await read();
+  const times = order()
+    .map((p) => state[p]?.until || 0)
+    .filter((t) => t > now);
+  if (times.length !== order().length) return null; // at least one is usable
+  return Math.min(...times);
+}
+
 /* Tests drive this without a database. */
 function _reset() {
   cache = blank();
@@ -400,6 +444,8 @@ module.exports = {
   kindOf,
   reasonFrom,
   parseResetAt,
+  azWhen,
+  soonestReturn,
   cooldownUntil,
   markExhausted,
   markRecovered,

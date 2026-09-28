@@ -90,7 +90,7 @@ function buildHistory(messages, adminId) {
 // ChatGPT (OpenAI) — preferred for the support chat: strong, low-hallucination,
 // good conversational quality. Model is env-overridable.
 async function replyWithOpenAI(history) {
-  const model = process.env.CHAT_SUPPORT_MODEL || "gpt-4.1";
+  const model = process.env.CHAT_SUPPORT_MODEL || "gpt-4o-mini";
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {

@@ -313,7 +313,8 @@ const runPlanGeneration = async (req, res, buildPrompt) => {
     system,
     schema: LESSON_PLAN_SCHEMA,
     geminiSchema: LESSON_PLAN_GEMINI_SCHEMA,
-    model: req.body.model,
+    // No model from the request: the platform chooses the engine. Nothing ever
+    // sent one here, and now nothing can.
   });
 
   const normalized = content.normalizeLessonPlan(out.doc, { lessonMinutes: plan.lessonMinutes });

@@ -62,6 +62,39 @@ function modelBelongsTo(provider, model) {
   return true; // an unrecognised name is nobody's to claim
 }
 
+/*
+ * What KIND of model a piece of work needs, per provider.
+ *
+ * Call sites say what the work is, not which model to run, for two reasons.
+ * A name cannot survive the CLI-to-CLI switch - "haiku" means nothing to Codex -
+ * and, more importantly, leaving the choice out is not neutral: asked for no
+ * model at all, `claude` runs **claude-opus-5-5**, the strongest and the fastest
+ * way to spend a subscription's quota. Naming a model is therefore not a
+ * preference but a cost control.
+ *
+ * `light` exists because a chat reply is not an exam. Running conversations on
+ * the same model as a forty-question paper spends the plan on small talk, and
+ * haiku answers a chat perfectly well.
+ */
+const CLI_TIERS = Object.freeze({
+  standard: {
+    claude: () => process.env.CLAUDE_CLI_DEFAULT_MODEL || "sonnet",
+    codex: () => process.env.CODEX_CLI_DEFAULT_MODEL || "",
+  },
+  light: {
+    claude: () => process.env.CLAUDE_CLI_LIGHT_MODEL || "haiku",
+    codex: () => process.env.CODEX_CLI_LIGHT_MODEL || "",
+  },
+});
+
+/* The model for a tier on a provider, or "" to let the binary decide (Codex,
+ * whose model names we have no business guessing - that has cost us once). */
+function tierModel(provider, tier = "standard") {
+  const pick = CLI_TIERS[tier] || CLI_TIERS.standard;
+  const fn = pick[provider];
+  return typeof fn === "function" ? String(fn() || "") : "";
+}
+
 function cliModel(provider, model) {
   const requested = modelBelongsTo(provider, model) ? String(model || "").trim() : "";
   const mapped = requested ? readModelMap()[requested] : null;
@@ -386,9 +419,12 @@ function buildPrompt({ system, prompt, schema, files }) {
   ].filter(Boolean).join("\n\n");
 }
 
-async function runCliStructured({ provider, model, system, prompt, schema, parts = [], signal }) {
+async function runCliStructured({ provider, model, system, prompt, schema, parts = [], signal, tier = "standard" }) {
   const chosen = provider === "openai" ? "codex" : provider;
   if (chosen !== "claude" && chosen !== "codex") throw Object.assign(new Error("cli_provider_unavailable"), { code: "cli_provider_unavailable" });
+  // The tier is resolved AFTER the provider is known, so a failover to the other
+  // CLI asks that binary for its own model of the same kind.
+  const wanted = modelBelongsTo(chosen, model) && String(model || "").trim() ? model : tierModel(chosen, tier);
   await fs.mkdir(ROOT, { recursive: true });
   const job = await fs.mkdtemp(path.join(ROOT, "turn-"));
   try {
@@ -405,7 +441,7 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
     let args;
     if (chosen === "claude") {
       args = claudeArgs({
-        model,
+        model: wanted,
         fileCount: files.length,
         // Read, and only Read: the model may look at the attachments written into
         // this turn's sandbox and at nothing else on the machine.
@@ -414,14 +450,14 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
       });
     } else {
       args = ["exec", "--sandbox", "read-only", "--skip-git-repo-check",
-        ...modelArgs("codex", model), "--output-last-message", answerFile, fullPrompt];
+        ...modelArgs("codex", wanted), "--output-last-message", answerFile, fullPrompt];
     }
     const result = await runProcess(cliBinary(chosen), args, { cwd: job, signal, provider: chosen });
     const raw = chosen === "codex" ? await fs.readFile(answerFile, "utf8").catch(() => result.stdout) : result.stdout;
     const limited = limitFromText(raw, chosen);
     if (limited) throw limited;
     const doc = chosen === "claude" ? claudeResult(raw) : parseJsonText(raw);
-    return { doc, provider: `${chosen}-cli`, cost: { model, cliModel: cliModel(chosen, model), usd: 0, inputTokens: 0, outputTokens: 0, cli: true } };
+    return { doc, provider: `${chosen}-cli`, cost: { model: wanted || model, cliModel: cliModel(chosen, wanted), usd: 0, inputTokens: 0, outputTokens: 0, cli: true } };
   } finally {
     await fs.rm(job, { recursive: true, force: true }).catch(() => {});
   }
@@ -436,11 +472,12 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
  * process handling, the sandbox and the environment scrubbing, and differs only
  * in asking for the answer directly.
  */
-async function runCliChat({ messages = [], model, system, signal, provider = "claude" }) {
+async function runCliChat({ messages = [], model, system, signal, provider = "claude", tier = "light" }) {
   const chosen = provider === "openai" ? "codex" : provider;
   if (chosen !== "claude" && chosen !== "codex") {
     throw Object.assign(new Error("cli_provider_unavailable"), { code: "cli_provider_unavailable" });
   }
+  const wanted = modelBelongsTo(chosen, model) && String(model || "").trim() ? model : tierModel(chosen, tier);
   await fs.mkdir(ROOT, { recursive: true });
   const job = await fs.mkdtemp(path.join(ROOT, "chat-"));
   try {
@@ -454,10 +491,10 @@ async function runCliChat({ messages = [], model, system, signal, provider = "cl
     const answerFile = path.join(job, "answer.txt");
     if (chosen === "claude") {
       // A chat turn reads nothing, so it gets no tools and one turn.
-      args = claudeArgs({ model, extra: ["--tools", ""], prompt: full });
+      args = claudeArgs({ model: wanted, extra: ["--tools", ""], prompt: full });
     } else {
       args = ["exec", "--sandbox", "read-only", "--skip-git-repo-check",
-        ...modelArgs("codex", model), "--output-last-message", answerFile, full];
+        ...modelArgs("codex", wanted), "--output-last-message", answerFile, full];
     }
     const out = await runProcess(cliBinary(chosen), args, { cwd: job, signal, provider: chosen });
     let text;
@@ -472,7 +509,7 @@ async function runCliChat({ messages = [], model, system, signal, provider = "cl
     if (!text) throw Object.assign(new Error("cli_empty_output"), { code: "cli_empty_output" });
     return {
       text,
-      cost: { model: cliModel(chosen, model), usd: 0, inputTokens: 0, outputTokens: 0, cli: true },
+      cost: { model: cliModel(chosen, wanted), usd: 0, inputTokens: 0, outputTokens: 0, cli: true },
       provider: `${chosen}-cli`,
     };
   } finally {
@@ -482,6 +519,8 @@ async function runCliChat({ messages = [], model, system, signal, provider = "cl
 
 module.exports = {
   CLAUDE_BASE_ARGS,
+  CLI_TIERS,
+  tierModel,
   claudeArgs,
   claudeTurns,
   runCliStructured,

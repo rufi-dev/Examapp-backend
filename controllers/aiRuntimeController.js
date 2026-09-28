@@ -2,6 +2,30 @@ const asyncHandler = require("express-async-handler");
 const { getAiExecution, setAiExecution, MODES, MODE_IDS } = require("../config/aiExecution");
 const { CLI_UNSUPPORTED, planSteps } = require("../helper/aiRuntime");
 const cliHealth = require("../helper/cliHealth");
+const { tierModel } = require("../helper/cliAi");
+
+/*
+ * What kind of model each sort of work asks for.
+ *
+ * Teachers no longer choose a model - to them the platform is one engine - so
+ * this page is now the only place the choice is visible. Two tiers, because a
+ * chat reply is not a forty-question paper: running conversations on the
+ * generation model spends a subscription's allowance on small talk.
+ */
+const ENGINES = Object.freeze([
+  {
+    kind: "generation",
+    tier: "standard",
+    label: "İmtahan, dərs materialı, plan",
+    describe: "Sual yazmaq, PDF-dən çıxarmaq, material və plan hazırlamaq.",
+  },
+  {
+    kind: "chat",
+    tier: "light",
+    label: "Söhbət",
+    describe: "Köməkçi və dəstək söhbətləri — yüngül model bəs edir, paketi yormur.",
+  },
+]);
 
 /*
  * The admin page needs four things, and it should not have to know any of them
@@ -36,7 +60,29 @@ const payload = async () => {
       order: cliHealth.order(),
       providers: await cliHealth.snapshot(),
       chain: steps.map((s) => (s.route === "cli" ? `cli:${s.provider}` : "api")),
+      /* When the platform expects to be able to use a CLI again, said the way a
+       * person reads it. Null while any subscription is still usable. */
+      returns: await (async () => {
+        const at = await cliHealth.soonestReturn();
+        return at ? { at: new Date(at).toISOString(), text: cliHealth.azWhen(at) } : null;
+      })(),
     },
+    /*
+     * Which model each kind of work runs on.
+     *
+     * Teachers no longer choose a model - the platform is one engine as far as
+     * they are concerned - so this page is the only place the choice is visible
+     * at all. It matters more than it looks: asked for no model, `claude` runs
+     * Opus, the strongest and the fastest way to spend a subscription. Every
+     * kind of work therefore names a tier, and this shows what that resolves to.
+     */
+    engines: ENGINES.map((e) => ({
+      ...e,
+      models: cliHealth.KNOWN.reduce(
+        (acc, p) => Object.assign(acc, { [p]: tierModel(p, e.tier) || "(CLI-nin öz seçimi)" }),
+        {}
+      ),
+    })),
   };
 };
 

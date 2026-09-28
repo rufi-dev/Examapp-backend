@@ -162,6 +162,46 @@ async function main() {
    */
   ok("and all six CLI-capable features are still there", cliRoutes === 6, `found ${cliRoutes}`);
 
+  // -- the platform chooses the engine, not the client --------------------
+  /*
+   * Teachers no longer pick a model. That has to be true on the SERVER, not
+   * just in the UI: a picker removed from a screen is a picker removed from one
+   * screen, while a handler that still reads req.body.model will happily take a
+   * choice from anything that can post. The platform decides what it spends on.
+   */
+  console.log("\nno handler takes a model from the request:");
+  const SERVER_DIRS = ["controllers", "helper", "services", "routes"];
+  const readsModel = [];
+  for (const dir of SERVER_DIRS) {
+    for (const f of walk(path.join(BE, dir))) {
+      const text = fs.readFileSync(f, "utf8");
+      if (/req\.body\s*(\?\.|\.)\s*model\b|req\.body\s*&&\s*req\.body\.model|req\.query\s*(\?\.|\.)\s*model\b/.test(text)) {
+        readsModel.push(rel(f));
+      }
+    }
+  }
+  ok("none of them do", readsModel.length === 0, readsModel.join(", "));
+
+  const quizRoute = fs.readFileSync(path.join(BE, "routes/quizRoute.js"), "utf8");
+  ok("and the catalogue is not served to clients either", !/["']\/ai\/models["']/.test(quizRoute));
+
+  // -- a chat is not an exam ----------------------------------------------
+  /*
+   * Asked for no model at all, `claude` runs Opus - the strongest model and the
+   * fastest way to spend a subscription's allowance. So every kind of work names
+   * a tier, and a conversation must not be on the same one as a forty-question
+   * paper.
+   */
+  console.log("\nthe chat runs light:");
+  const { tierModel, CLI_TIERS } = require("../helper/cliAi");
+  ok("there is a light tier and a standard one", !!CLI_TIERS.light && !!CLI_TIERS.standard);
+  ok("light is not the same model as standard", tierModel("claude", "light") !== tierModel("claude", "standard"));
+  ok("and neither is empty for Claude", !!tierModel("claude", "light") && !!tierModel("claude", "standard"));
+  console.log(`    standard: ${tierModel("claude", "standard")}   light: ${tierModel("claude", "light")}`);
+
+  const chatSrc = fs.readFileSync(path.join(BE, "services/chatAssistant.js"), "utf8");
+  ok("the support chat is not on a heavyweight model", !/CHAT_SUPPORT_MODEL \|\| "gpt-4\.1"/.test(chatSrc));
+
   // -- what the CLI genuinely cannot do -----------------------------------
   console.log("\ndeclared API-only, with a reason:");
   const { CLI_UNSUPPORTED } = require("../helper/aiRuntime");

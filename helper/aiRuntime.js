@@ -175,7 +175,25 @@ async function runAi({ capability = "structured", api, cli, label = "ai", prefer
       }
       if (isLast || !exhausted) {
         if (attempts.length > 1) console.warn(`[AI] ${label}: all routes failed - ${attempts.join(" | ")}`);
-        throw fatal(error, `${name.replace(":", "_")}_failed`, attempts);
+        const failure = fatal(error, `${name.replace(":", "_")}_failed`, attempts);
+        /*
+         * "Try again later" is not something a teacher can act on, and in
+         * CLI-only mode there IS no later route - the platform is simply out of
+         * plan until a stated hour. The binaries name that hour in their
+         * refusal, so say it: a teacher who knows the subscription returns at
+         * nine tonight can plan around it, where one told "AI could not create
+         * questions" can only keep pressing the button.
+         */
+        if (step.route === "cli" && exhausted && !failure.userMessage) {
+          const back = await cliHealth.soonestReturn().catch(() => null);
+          const when = back ? cliHealth.azWhen(back) : "";
+          failure.userMessage = when
+            ? `AI paketinin limiti bitib. Təxminən ${when} radələrində yenidən cəhd edin.`
+            : "AI paketinin limiti bitib. Bir az sonra yenidən cəhd edin.";
+          failure.aiStatus = 503;
+          failure.resetAt = back || null;
+        }
+        throw failure;
       }
       const next = steps[i + 1];
       console.warn(
