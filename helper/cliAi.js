@@ -6,6 +6,9 @@ const path = require("node:path");
 const CLI_TIMEOUT_MS = Math.max(30_000, Number(process.env.AI_CLI_TIMEOUT_MS) || 15 * 60_000);
 const ROOT = process.env.AI_CLI_WORK_DIR || path.join(os.tmpdir(), "examopia-ai");
 const MAX_OUTPUT_BYTES = Math.max(64 * 1024, Number(process.env.AI_CLI_MAX_OUTPUT_BYTES) || 16 * 1024 * 1024);
+/* How much of a CLI's stderr to keep. The tail, because that is where a
+ * refusal states itself - see the capture in runProcess. */
+const STDERR_KEEP = Math.max(4 * 1024, Number(process.env.AI_CLI_STDERR_KEEP) || 16 * 1024);
 
 const safeModel = (model) => {
   const value = String(model || "").trim();
@@ -314,9 +317,27 @@ function runProcess(command, args, { cwd, signal, provider }) {
       if (stdoutBytes <= MAX_OUTPUT_BYTES) stdout += chunk.toString();
       else outputTooLarge = true;
     });
+    /*
+     * Keep the END of stderr, not the beginning.
+     *
+     * A refusal is the LAST thing a CLI prints. Codex echoes the entire prompt -
+     * system text, JSON schema and all - to stderr before it says anything about
+     * itself, so a real generation puts tens of kilobytes between the banner and
+     * the reason it stopped. Keeping the first 8 KB captured the banner and threw
+     * the reason away, which is how "You've hit your usage limit. Try again at
+     * Oct 3rd" reached the gateway as nothing but "Reading additional input from
+     * stdin...".
+     *
+     * The consequence was the whole feature, silently: with no limit text to
+     * read, isRouteExhausted classified a spent subscription as an ordinary
+     * failure, so the work never moved to the other CLI and the teacher got
+     * "AI suallar yarada bilmədi". The probes missed it because a short test
+     * prompt leaves the refusal inside the first 8 KB.
+     */
     child.stderr.on("data", (chunk) => {
       stderrBytes += chunk.length;
-      if (stderrBytes <= 8 * 1024) stderr += chunk.toString();
+      stderr += chunk.toString();
+      if (stderr.length > STDERR_KEEP) stderr = stderr.slice(-STDERR_KEEP);
     });
     child.on("error", (error) => {
       clearTimeout(timer);
@@ -344,7 +365,7 @@ function runProcess(command, args, { cwd, signal, provider }) {
           code: "cli_failed",
           exitCode: code,
           signal: sig,
-          stderr: stderr.slice(-2000),
+          stderr: stderr.slice(-STDERR_KEEP),
           stdout: stdout.slice(-2000),
         }));
       }

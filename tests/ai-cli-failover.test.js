@@ -53,7 +53,7 @@ const cliHealth = require("../helper/cliHealth");
 const aiExecution = require("../config/aiExecution");
 let CURRENT = "api";
 aiExecution.getAiExecution = async () => ({ mode: CURRENT });
-const { runAi } = require("../helper/aiRuntime");
+const { runAi, isRouteExhausted } = require("../helper/aiRuntime");
 
 /* The refusals the real binaries print, near enough to be the same thing. */
 const CODEX_LIMIT = "ERROR: You've hit your usage limit. Try again at Oct 3rd, 2026 5:19 PM.";
@@ -140,6 +140,41 @@ async function main() {
   ok(
     "and a misread date can never rest a CLI for longer than a week",
     cliHealth.cooldownUntil(err("try again at Oct 3rd, 2099 5:19 PM"), sep28) === sep28 + cliHealth.MAX_COOLDOWN_MS
+  );
+
+  /*
+   * The refusal has to SURVIVE the capture.
+   *
+   * This is the one that got through to production. Codex echoes the entire
+   * prompt - system text, JSON schema and all - to stderr before it says
+   * anything about itself, so on a real generation the reason it stopped sits
+   * tens of kilobytes after the banner. The runner kept the FIRST 8 KB, so the
+   * gateway was handed "Reading additional input from stdin..." and nothing
+   * else: a spent subscription read as an ordinary failure, the work never
+   * moved to the other CLI, and the teacher got "AI suallar yarada bilmədi".
+   *
+   * Every probe missed it because a short test prompt leaves the refusal inside
+   * the first 8 KB. So this asserts on a refusal shaped like a real one.
+   */
+  console.log("\na refusal buried under a real prompt is still a refusal:");
+  const echoed =
+    "Reading additional input from stdin...\nOpenAI Codex v0.159.0\n" +
+    "user\n" +
+    "SƏN STRUCTURED JSON CAVABI VERƏN BACKEND MODELİSƏN. ".repeat(900) + // ~45 KB, as a real one is
+    "\nERROR: You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage " +
+    "to purchase more credits or try again at Oct 3rd, 2026 5:19 PM.";
+  const buried = Object.assign(new Error("cli_failed"), { code: "cli_failed", stderr: echoed });
+  ok("the prompt echo is longer than any fixed head window", echoed.length > 40000);
+  ok("it is recognised as a reason to switch", isRouteExhausted(buried) === true);
+  ok(
+    "...and its reset date still reads",
+    cliHealth.parseResetAt(buried, sep28) === new Date(2026, 9, 3, 17, 19, 0, 0).getTime()
+  );
+  /* The runner keeps the tail for exactly this reason. */
+  const runnerSrc = require("fs").readFileSync(require("path").join(__dirname, "..", "helper", "cliAi.js"), "utf8");
+  ok(
+    "the runner keeps the END of stderr, not the beginning",
+    /stderr = stderr\.slice\(-STDERR_KEEP\)/.test(runnerSrc) && !/if \(stderrBytes <= 8 \* 1024\)/.test(runnerSrc)
   );
 
   // -- the chain ----------------------------------------------------------
