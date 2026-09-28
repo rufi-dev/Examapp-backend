@@ -24,11 +24,20 @@ services:
       # CLI defaults to the subscription login stored in cli_* volumes. Set
       # AI_CLI_USE_API_KEYS=true only when deliberately billing provider keys.
       AI_CLI_USE_API_KEYS: ${AI_CLI_USE_API_KEYS:-false}
-      # Claude Code's subscription login is a LONG-LIVED TOKEN, not a file: the
-      # `claude` config it writes lives at /root/.claude.json, outside the volume
-      # below, so a login inside the container would vanish on the next rebuild.
-      # `claude setup-token` hands back a token instead; it belongs in .env on the
-      # server, where it survives every deploy and never reaches the repository.
+      # Two ways to give the Claude CLI a subscription, and both are made durable
+      # here because a login that vanishes on the next rebuild is worse than no
+      # login: the platform silently reverts to billing the API while the admin
+      # page still says CLI.
+      #
+      #   1. CLAUDE_CONFIG_DIR points BOTH files Claude Code writes - .claude.json
+      #      and .credentials.json - into the mounted volume below. By default the
+      #      config sits at /root/.claude.json, OUTSIDE that volume, which is why
+      #      an in-container `claude login` used to be lost on every deploy. With
+      #      this set, one interactive login survives.
+      #   2. CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token`, needs no file at
+      #      all. It belongs in .env on the server, where it survives every deploy
+      #      and never reaches the repository.
+      CLAUDE_CONFIG_DIR: ${CLAUDE_CONFIG_DIR:-/root/.claude}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
     # tini as PID 1 reaps zombie Chromium processes and forwards signals so the
     # browser shuts down cleanly (avoids stale profile locks on restart).
@@ -72,11 +81,20 @@ services:
       RUN_BACKGROUND_JOBS: "false"
       WHATSAPP_WEB_ENABLED: "false"
       AI_CLI_USE_API_KEYS: ${AI_CLI_USE_API_KEYS:-false}
-      # Claude Code's subscription login is a LONG-LIVED TOKEN, not a file: the
-      # `claude` config it writes lives at /root/.claude.json, outside the volume
-      # below, so a login inside the container would vanish on the next rebuild.
-      # `claude setup-token` hands back a token instead; it belongs in .env on the
-      # server, where it survives every deploy and never reaches the repository.
+      # Two ways to give the Claude CLI a subscription, and both are made durable
+      # here because a login that vanishes on the next rebuild is worse than no
+      # login: the platform silently reverts to billing the API while the admin
+      # page still says CLI.
+      #
+      #   1. CLAUDE_CONFIG_DIR points BOTH files Claude Code writes - .claude.json
+      #      and .credentials.json - into the mounted volume below. By default the
+      #      config sits at /root/.claude.json, OUTSIDE that volume, which is why
+      #      an in-container `claude login` used to be lost on every deploy. With
+      #      this set, one interactive login survives.
+      #   2. CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token`, needs no file at
+      #      all. It belongs in .env on the server, where it survives every deploy
+      #      and never reaches the repository.
+      CLAUDE_CONFIG_DIR: ${CLAUDE_CONFIG_DIR:-/root/.claude}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
     init: true
     depends_on:
