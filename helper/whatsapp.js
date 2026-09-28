@@ -216,6 +216,23 @@ function initFor(ownerId) {
         "--disable-dev-shm-usage",
         "--disable-gpu",
         "--no-zygote",
+        /*
+         * Bound the browser cache, or the volume grows without end.
+         *
+         * Each linked teacher keeps a PERSISTENT Chromium profile, and WhatsApp
+         * Web is a large single-page app that is re-fetched and re-compiled
+         * constantly. Chromium sizes its cache from free disk, so on a 38 GB
+         * server it happily wrote hundreds of megabytes per profile and never
+         * pruned: 8.9 GB in August, 2.3 GB in September, 1.8 GB now - of which
+         * 1.46 GB was Cache + Code Cache and only ~100 MB was the actual login.
+         *
+         * Deleting it by hand every few weeks treats the symptom. These two caps
+         * make Chromium evict its own oldest entries instead, which is what a
+         * cache is supposed to do. The login lives in IndexedDB and Local
+         * Storage and is untouched by either.
+         */
+        `--disk-cache-size=${Number(process.env.WHATSAPP_DISK_CACHE_BYTES) || 64 * 1024 * 1024}`,
+        `--media-cache-size=${Number(process.env.WHATSAPP_MEDIA_CACHE_BYTES) || 32 * 1024 * 1024}`,
       ],
     },
   });
