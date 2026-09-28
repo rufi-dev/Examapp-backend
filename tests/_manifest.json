@@ -121,6 +121,7 @@
   "tests/exam-variant.test.js",
   "tests/mso-report.test.js",
   "tests/answer-key-spread.test.js",
+  "tests/answer-mode-auto.test.js",
   "tests/product-updates.test.js",
   "tests/lesson-doc.test.js",
   "tests/lesson-doc-cas.test.js",

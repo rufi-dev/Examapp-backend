@@ -1325,7 +1325,21 @@ async function topUpToCount({ prompt, preset, model, signal, questions, target }
 //   manual      — extract the questions only; the teacher marks the answers
 //   ai-solve    — the AI solves each question and proposes the answers, run
 //                 through the same audit → critic → audit gate as generation
-const ANSWER_MODES = new Set(["has-answers", "manual", "ai-solve"]);
+const ANSWER_MODES = new Set(["auto", "has-answers", "manual", "ai-solve"]);
+
+/*
+ * Which questions came back without an answer.
+ *
+ * The audit already decides this per type - a choice question needs a marked
+ * `correct`, an open one needs an accepted answer unless it is graded by hand, a
+ * matching one needs its right-hand side - so it is asked rather than
+ * reimplemented. A second copy of these rules would drift from the first, and
+ * the one that drifts is the one nobody is testing.
+ */
+const unansweredCount = (questions) =>
+  auditQuestions(questions, { requireAnswers: true }).filter((i) =>
+    ["no-correct-answer", "no-open-answer", "incomplete-pair"].includes(i.code)
+  ).length;
 /*
  * "Ardıcıl olaraq təkrarlanan düzgün cavablar olmamalıdır" — the brief's rule, and
  * one the model does not reliably keep. The live German paper came back
@@ -1343,7 +1357,43 @@ const spreadKeysIfNeeded = (questions, preset) => {
 };
 
 async function applyAnswerMode({ questions, mode, preset, model, signal, onStatus }) {
-  const m = ANSWER_MODES.has(mode) ? mode : "has-answers";
+  const m = ANSWER_MODES.has(mode) ? mode : "auto";
+
+  /*
+   * AUTO: take the paper's answers, and work out the ones it does not give.
+   *
+   * Teachers were asked this as a question up front - "are the answers on the
+   * sheet, will you mark them yourself, or should the AI solve it?" - before
+   * they had seen a single extracted question, about a PDF the AI had not read
+   * yet. They are the wrong person to ask: the answer is a property of the file,
+   * and the file is right there.
+   *
+   * So it is read instead of asked. Answers printed on the sheet are kept as
+   * they are, which is both cheaper and more faithful than having a model
+   * re-derive what a teacher already wrote. Only when some question comes back
+   * unmarked is the solving pass run at all, and when the paper marks everything
+   * this mode costs nothing beyond the extraction itself.
+   */
+  if (m === "auto") {
+    const missing = unansweredCount(questions);
+    if (!missing) {
+      return { questions: spreadKeysIfNeeded(questions, preset), issues: null, reviewCost: null, rounds: 0, mode: m, solved: 0 };
+    }
+    if (typeof onStatus === "function") {
+      onStatus(`${missing} sualın cavabı vərəqdə yoxdur — AI həll edir…`);
+    }
+    const v = await verifyAndFix({
+      questions,
+      prompt:
+        "Vərəqdə cavabı qeyd olunmuş sualların cavabını OLDUĞU KİMİ saxla. " +
+        "Yalnız cavabı qeyd olunmamış sualları həll et və düzgün cavabı işarələ.",
+      preset,
+      model,
+      signal,
+      onStatus,
+    });
+    return { ...v, questions: spreadKeysIfNeeded(v.questions, preset), mode: m, solved: missing };
+  }
   if (m === "manual") {
     return { questions: stripAnswers(questions), issues: null, reviewCost: null, rounds: 0, mode: m };
   }
@@ -1551,6 +1601,9 @@ const extractQuestions = asyncHandler(async (req, res) => {
     provider: usedProvider,
     fellBack,
     answerMode: applied.mode,
+    // How many answers the sheet did not give and the AI worked out — the ones
+    // worth a teacher's eye.
+    answersSolved: applied.solved || 0,
     issues: applied.issues,
     verified: applied.rounds > 0 && (applied.issues?.length || 0) === 0,
   });
@@ -1965,6 +2018,9 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     provider: usedProvider,
     fellBack,
     answerMode: applied.mode,
+    // How many answers the sheet did not give and the AI worked out — the ones
+    // worth a teacher's eye.
+    answersSolved: applied.solved || 0,
     issues: applied.issues,
     verified: applied.rounds > 0 && (applied.issues?.length || 0) === 0,
   });
