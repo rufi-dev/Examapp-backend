@@ -107,26 +107,36 @@ assert.ok(
 );
 
 /*
- * The prompt is a positional argument behind two variadic options.
+ * The prompt does not travel in argv at all.
  *
- * `--add-dir <directories...>` and `--tools <tools...>` both keep consuming
- * arguments, so a prompt placed after either is read as one more directory or one
- * more tool name. The binary then refuses with "Input must be provided either
- * through stdin or as a prompt argument", which reads like our bug and not an
- * argument-parsing one - it is what made every structured CLI turn fail once the
- * login started working. `--` ends option parsing and must always be the element
- * before the prompt.
+ * It used to be a positional argument behind two VARIADIC options
+ * (`--add-dir <directories...>`, `--tools <tools...>`), which swallowed it and
+ * made the binary refuse with "Input must be provided either through stdin or
+ * as a prompt argument" — a message that reads like our bug rather than an
+ * argument-parsing one. A `--` fence solved that, and left a worse limit in
+ * place: argv caps a single argument at 131,072 bytes on Linux, while the
+ * review pass alone sends up to 60,000 characters of question JSON plus a
+ * schema plus a system prompt. Measured on the server: 200 KB as an argument is
+ * E2BIG, 200 KB on stdin is fine.
+ *
+ * So the prompt goes in on stdin and argv carries only flags. Both problems are
+ * gone at once, and the fence with them.
  */
 const withFiles = claudeArgs({
   model: "claude-sonnet-5",
   fileCount: 2,
   extra: ["--tools", "Read", "--add-dir", "/tmp/job"],
-  prompt: "THE PROMPT",
+  systemPrompt: "be a backend",
 });
-assert.strictEqual(withFiles[withFiles.length - 1], "THE PROMPT");
-assert.strictEqual(withFiles[withFiles.length - 2], "--", "the prompt must be fenced off by --");
-assert.strictEqual(withFiles.indexOf("--"), withFiles.length - 2, "only one -- and it comes last");
-assert.ok(withFiles.indexOf("--add-dir") < withFiles.indexOf("--"), "the variadic option stays on the left of the fence");
+assert.ok(!withFiles.includes("--"), "no fence is needed once nothing positional follows the flags");
+assert.ok(
+  withFiles.every((a2) => typeof a2 === "string" && a2.length < 20000),
+  "argv carries flags only - nothing in it may approach the 128 KB limit"
+);
+assert.strictEqual(withFiles[withFiles.indexOf("--system-prompt") + 1], "be a backend");
+const runnerSrc0 = fs.readFileSync(path.join(__dirname, "..", "helper", "cliAi.js"), "utf8");
+assert.ok(/stdin: fullPrompt/.test(runnerSrc0), "the structured turn must feed its prompt on stdin");
+assert.ok(/stdin: transcript/.test(runnerSrc0), "and so must the chat turn");
 
 /*
  * Turns. A prompt with an attachment needs at least two: one for the model to
@@ -160,8 +170,18 @@ assert.strictEqual(chat[chat.indexOf("--tools") + 1], "", 'tools are switched of
  * those want opposite fixes.
  */
 const runnerText = fs.readFileSync(path.join(__dirname, "..", "helper", "cliAi.js"), "utf8");
-assert.ok(/SUAL VERMƏ/.test(runnerText), "the CLI turn must be told not to ask questions");
+assert.ok(/HEÇ VAXT sual vermə/.test(runnerText), "the CLI turn must be told not to ask questions");
 assert.ok(/ÖNCƏKİ CAVAB JSON DEYİLDİ/.test(runnerText), "the retry must say why it is asking again");
+/*
+ * And the contract rides in the SYSTEM prompt, not buried in the user message.
+ *
+ * `claude -p` is a coding agent by default, and its own system prompt says so —
+ * which is why a vague brief got a thoughtful clarifying question instead of an
+ * exam. Replacing that prompt is the difference between asking a conversational
+ * agent to behave like a backend and telling it that it is one.
+ */
+assert.ok(/buildSystemPrompt/.test(runnerText), "there must be a system prompt builder");
+assert.ok(/"--system-prompt", systemPrompt/.test(runnerText), "and it must be passed as --system-prompt");
 assert.ok(
   /if \(e\?\.code !== "cli_invalid_json" \|\| signal\?\.aborted\) throw e;/.test(runnerText),
   "only unparseable output is retried - never a spent plan, a cancel or a timeout"

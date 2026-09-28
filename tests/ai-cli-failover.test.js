@@ -278,15 +278,51 @@ async function main() {
   speak();
   ok("and rolls on to the second if that one is out too", r.ran === "api -> cli:claude -> cli:codex" && r.got === "codex-result");
 
-  // -- what must NOT cause a switch --------------------------------------
-  console.log("\nan ordinary failure is not a reason to try another CLI:");
+  /*
+   * A CLI that cannot do the job is not the same as a CLI that is out of plan.
+   *
+   * This is the rule that made the platform less reliable when it moved to the
+   * CLI, and the reason a teacher was shown "AI emalı alınmadı" for a paper the
+   * API would have read without complaint. The old rule — "an ordinary failure
+   * fails the same way everywhere, so do not retry" — quietly assumed every
+   * route is equally CAPABLE. The API can REQUIRE a schema; a CLI turn cannot.
+   * So a CLI answering in prose has discovered nothing about the request, only
+   * about itself — and production showed it doing exactly that five times in
+   * three hours.
+   */
+  console.log("\na CLI that cannot do the job hands over to one that can:");
   cliHealth._reset();
   hush();
-  r = await call("cli_then_api", { fail: { claude: () => err("cli_invalid_json") } });
+  r = await call("cli_then_api", { fail: { claude: () => err("prose", { code: "cli_invalid_json" }) } });
   speak();
-  ok("a model that answered badly is not re-run on the other subscription", r.ran === "cli:claude");
-  ok("...nor paid for on the API", !r.ran.includes("api"));
-  ok("...and Claude is NOT stood down for it", (await restingNow()).length === 0, (await restingNow()).join());
+  ok("an unreadable answer moves on instead of failing the teacher", r.ran === "cli:claude -> cli:codex");
+  ok("...and the teacher gets their questions", r.got === "codex-result");
+  ok(
+    "...while the subscription is NOT stood down — the plan is fine, the turn was not",
+    (await restingNow()).length === 0,
+    (await restingNow()).join()
+  );
+
+  /* And when neither CLI can do it, the paid route still answers the teacher. */
+  cliHealth._reset();
+  hush();
+  r = await call("cli_then_api", {
+    fail: {
+      claude: () => err("prose", { code: "cli_invalid_json" }),
+      codex: () => err("nothing came back", { code: "cli_empty_output" }),
+    },
+  });
+  speak();
+  ok("neither CLI able → the API finishes it", r.ran === "cli:claude -> cli:codex -> api" && r.got === "api-result");
+  ok("...and still nothing is stood down", (await restingNow()).length === 0);
+
+  console.log("\nbut a genuinely bad request still stops:");
+  cliHealth._reset();
+  hush();
+  r = await call("cli_then_api", { fail: { claude: () => err("schema validation failed") } });
+  speak();
+  ok("it is not re-run on the other subscription", r.ran === "cli:claude");
+  ok("...nor paid for on the API — the API would refuse it too", !r.ran.includes("api"));
   ok("the teacher gets the error", !!r.error);
 
   console.log("\na cancelled request stops everywhere:");

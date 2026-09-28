@@ -193,15 +193,28 @@ function claudeTurns(fileCount) {
  * argument-parsing one. `--` ends option parsing, so whatever comes after it is
  * the prompt and nothing else.
  */
-function claudeArgs({ model, fileCount = 0, extra = [], prompt }) {
+function claudeArgs({ model, fileCount = 0, extra = [], systemPrompt }) {
   return [
     ...CLAUDE_BASE_ARGS,
     "--max-turns",
     String(claudeTurns(fileCount)),
     ...modelArgs("claude", model),
+    /*
+     * REPLACE the default system prompt, do not append to it.
+     *
+     * `claude -p` is a coding agent by default, and its system prompt says so —
+     * which is why a vague brief got a thoughtful clarifying question instead of
+     * an exam. That is the right instinct for an assistant sitting in a
+     * terminal and the wrong one for something whose entire output contract is
+     * "one JSON object". Production showed it five times in three hours.
+     *
+     * The contract also belongs HERE rather than buried at the end of a long
+     * user message. The model said as much when it refused: "the actual request
+     * buried at the end". A system prompt is the one place an instruction is
+     * not competing with the content it governs.
+     */
+    ...(systemPrompt ? ["--system-prompt", systemPrompt] : []),
     ...extra,
-    "--",
-    prompt,
   ];
 }
 
@@ -320,7 +333,7 @@ function claudeResult(raw) {
   return parsed;
 }
 
-function runProcess(command, args, { cwd, signal, provider, timeoutMs } = {}) {
+function runProcess(command, args, { cwd, signal, provider, timeoutMs, stdin } = {}) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env, CI: "1", NO_COLOR: "1" };
     /*
@@ -362,9 +375,26 @@ function runProcess(command, args, { cwd, signal, provider, timeoutMs } = {}) {
     const child = spawn(command, args, {
       cwd,
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true,
     });
+    /*
+     * The prompt goes IN, not alongside.
+     *
+     * argv is a hard ceiling: 131,072 bytes for a single argument on Linux. The
+     * review pass alone sends up to 60,000 characters of question JSON, plus a
+     * schema, plus a system prompt — so passing the prompt as an argument was
+     * not a crash waiting for a big exam so much as one waiting for a slightly
+     * bigger exam, and it fails as E2BIG before the model is ever reached.
+     * Measured on this server: 200 KB as an argument is E2BIG, 200 KB on stdin
+     * is fine.
+     */
+    if (stdin !== undefined) {
+      child.stdin.on("error", () => {
+        /* the child can exit before it has read everything; that is its business */
+      });
+      child.stdin.end(String(stdin));
+    }
     let stdout = "";
     let stderr = "";
     let stdoutBytes = 0;
@@ -456,18 +486,33 @@ function runProcess(command, args, { cwd, signal, provider, timeoutMs } = {}) {
  * reasonable assumption and a paper the teacher can edit — which is what the
  * API route would have given them, and what they can actually use.
  */
-function buildPrompt({ system, prompt, schema, files, insist }) {
+/*
+ * The output contract, as a SYSTEM prompt.
+ *
+ * It used to be the first three lines of the user message, ahead of the app's
+ * own instructions, a JSON schema and the task — and the model told us plainly
+ * what that felt like from the other side: "the actual request buried at the
+ * end". An instruction competing with the content it governs loses.
+ */
+function buildSystemPrompt({ system, insist }) {
   return [
-    "SƏN STRUCTURED JSON CAVABI VERƏN BACKEND MODELİSƏN.",
-    "YALNIZ bir JSON obyekt qaytar. Markdown, izah, kod çəpəri və əlavə mətn qaytarma.",
-    "SUAL VERMƏ, aydınlaşdırma istəmə, şərh yazma. Tapşırıq qeyri-dəqiqdirsə, ən məntiqli " +
-      "fərziyyəni et və YENƏ DƏ tam JSON qaytar — müəllim nəticəni özü redaktə edəcək.",
+    "SƏN STRUCTURED JSON CAVABI VERƏN BACKEND MODELİSƏN — söhbət yoldaşı deyilsən.",
+    "Cavabın YALNIZ bir JSON obyekt olmalıdır: ilk simvol { , son simvol }. Markdown, izah, " +
+      "kod çəpəri, giriş və ya yekun cümləsi YAZMA.",
+    "HEÇ VAXT sual vermə və aydınlaşdırma istəmə. Tapşırıq qeyri-dəqiqdirsə, ən məntiqli " +
+      "fərziyyəni et və yenə də tam JSON qaytar — müəllim nəticəni özü redaktə edəcək.",
     insist
-      ? "ÖNCƏKİ CAVAB JSON DEYİLDİ. Bu dəfə cavabın İLK simvolu { , SON simvolu } olmalıdır. Başqa heç nə yazma."
+      ? "ÖNCƏKİ CAVAB JSON DEYİLDİ. Bu dəfə yalnız JSON qaytar, başqa heç nə."
       : "",
+    system || "",
+  ].filter(Boolean).join("\n\n");
+}
+
+/* The user turn: the shape asked for, what to read, and the task itself. */
+function buildPrompt({ prompt, schema, files }) {
+  return [
     "JSON bu sxemə uyğun olmalıdır:",
     JSON.stringify(schema || {}),
-    system ? `SYSTEM:\n${system}` : "",
     files.length ? `ƏLAVƏLƏR (iş qovluğunda oxu):\n${files.map((f) => `- ${f}`).join("\n")}` : "",
     `TAPŞIRIQ:\n${prompt}`,
   ].filter(Boolean).join("\n\n");
@@ -493,22 +538,33 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
     const answerFile = path.join(job, "answer.json");
 
     const attempt = async (insist) => {
-      const fullPrompt = buildPrompt({ system, prompt, schema, files, insist });
+      const fullPrompt = buildPrompt({ prompt, schema, files });
+      const systemPrompt = buildSystemPrompt({ system, insist });
       let args;
       if (chosen === "claude") {
         args = claudeArgs({
           model: wanted,
+          systemPrompt,
           fileCount: files.length,
           // Read, and only Read: the model may look at the attachments written into
           // this turn's sandbox and at nothing else on the machine.
           extra: files.length ? ["--tools", "Read", "--add-dir", job] : ["--tools", ""],
-          prompt: fullPrompt,
         });
       } else {
+        // Codex takes no system prompt, so its contract rides in the message.
         args = ["exec", "--sandbox", "read-only", "--skip-git-repo-check",
-          ...modelArgs("codex", wanted), "--output-last-message", answerFile, fullPrompt];
+          ...modelArgs("codex", wanted), "--output-last-message", answerFile,
+          `${systemPrompt}
+
+${fullPrompt}`];
       }
-      const result = await runProcess(cliBinary(chosen), args, { cwd: job, signal, provider: chosen });
+      const result = await runProcess(cliBinary(chosen), args, {
+        cwd: job,
+        signal,
+        provider: chosen,
+        // claude reads the prompt from stdin; codex still takes it as an argument.
+        ...(chosen === "claude" ? { stdin: fullPrompt } : {}),
+      });
       const raw = chosen === "codex" ? await fs.readFile(answerFile, "utf8").catch(() => result.stdout) : result.stdout;
       const limited = limitFromText(raw, chosen);
       if (limited) throw limited;
@@ -570,12 +626,27 @@ async function runCliChat({ messages = [], model, system, signal, provider = "cl
     const answerFile = path.join(job, "answer.txt");
     if (chosen === "claude") {
       // A chat turn reads nothing, so it gets no tools and one turn.
-      args = claudeArgs({ model: wanted, extra: ["--tools", ""], prompt: full });
+      /*
+       * The chat's instructions belong in the system prompt for the same reason
+       * the JSON contract does — and replacing Claude Code's default matters
+       * more here, not less: its default is a CODING agent, and a teacher asking
+       * about their class should not be answered by one.
+       */
+      args = claudeArgs({
+        model: wanted,
+        systemPrompt: system || "",
+        extra: ["--tools", ""],
+      });
     } else {
       args = ["exec", "--sandbox", "read-only", "--skip-git-repo-check",
         ...modelArgs("codex", wanted), "--output-last-message", answerFile, full];
     }
-    const out = await runProcess(cliBinary(chosen), args, { cwd: job, signal, provider: chosen });
+    const out = await runProcess(cliBinary(chosen), args, {
+      cwd: job,
+      signal,
+      provider: chosen,
+      ...(chosen === "claude" ? { stdin: transcript } : {}),
+    });
     let text;
     if (chosen === "codex") {
       text = await fs.readFile(answerFile, "utf8").catch(() => out.stdout);

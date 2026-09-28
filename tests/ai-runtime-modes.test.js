@@ -97,11 +97,16 @@ async function main() {
 
   console.log("\nwhen the first route fails for an ORDINARY reason:");
   /*
-   * A bad prompt or a schema the model will not satisfy fails the same way on
+   * A bad prompt, or a schema the model will not satisfy, fails the same way on
    * the other route. Retrying it there is a minute of the teacher's time for
    * nothing - and on api_then_cli it would have been a minute of paid tokens.
+   *
+   * Note what this case is NOT: a CLI that answers in prose looks like an
+   * ordinary failure and is not one. That is a fault of the ROUTE, not of the
+   * request — the API would have answered it — so it hands over instead, which
+   * ai-cli-failover covers. This case is a request no route can satisfy.
    */
-  const c = await call("cli_then_api", { cliFails: "cli_invalid_json" });
+  const c = await call("cli_then_api", { cliFails: "schema validation failed" });
   ok("it is NOT retried on the other route", c.ran.join() === "cli");
   ok("and the teacher gets the error", !!c.error);
 
@@ -122,7 +127,14 @@ async function main() {
     ["Credit balance is too low", true],
     ["usage limit reached", true],
     ["not logged in", true],
-    ["cli_spawn_failed", true],
+    /*
+     * A process that would not start is NOT a spent plan. It used to count as
+     * exhaustion, so an oversized prompt (E2BIG) or a missing binary stood a
+     * healthy subscription down for ten minutes and pushed every teacher onto
+     * the paid route — punishing the plan for something it had no part in. It
+     * is a route DEFECT: the work still moves on, the plan is left alone.
+     */
+    ["cli_spawn_failed", false],
     ["cli_invalid_json", false],
     ["schema validation failed", false],
     ["prompt too long", false],

@@ -81,8 +81,52 @@ function isRouteExhausted(error) {
     /rate.?limit|too many requests/.test(text) ||
     /quota|credit balance|insufficient.?(credit|quota|funds)|billing/.test(text) ||
     /usage limit|plan limit|limit reached|upgrade your plan/.test(text) ||
-    /cli_unavailable|cli_spawn_failed|cli_provider_unavailable|not logged in|unauthorized|authentication/.test(text)
+    /cli_unavailable|cli_provider_unavailable|not logged in|unauthorized|authentication/.test(text)
   );
+}
+
+/*
+ * Did this route fail at BEING a route, rather than at the request?
+ *
+ * This is the distinction that "ordinary error, do not retry" was missing, and
+ * it is why the platform got less reliable when it moved to the CLI.
+ *
+ * The old rule said: a malformed prompt or an unsatisfiable schema will fail the
+ * same way everywhere, so retrying elsewhere wastes a teacher's minute and real
+ * money. True — but it quietly assumed every route is equally CAPABLE, and that
+ * is exactly what is not true here. The API can REQUIRE a schema; a CLI turn
+ * cannot. So a CLI that answers a perfectly good request in prose, or returns
+ * nothing, or times out, has not discovered anything about the request at all.
+ * It has told us about itself. Production says this is not rare: five prose
+ * answers in three hours, and a teacher shown "AI emalı alınmadı" for a paper
+ * the API would have extracted without complaint.
+ *
+ * These failures therefore move to the next route, without standing the
+ * subscription down — the plan is fine, the turn just did not work.
+ */
+function isRouteDefect(error) {
+  const code = String(error?.code || "");
+  if (code === "cli_cancelled") return false; // nobody is waiting for it any more
+  return [
+    "cli_invalid_json",   // answered in prose, or with JSON we cannot read
+    "cli_empty_output",   // answered with nothing at all
+    "cli_failed",         // exited non-zero for a reason that is not a limit
+    "cli_timeout",        // took longer than a turn is allowed to take
+    "cli_output_too_large",
+    /*
+     * A process that would not start is a defect too, NOT a spent plan. It used
+     * to count as exhaustion, which meant an oversized prompt (E2BIG) or a
+     * missing binary stood a perfectly healthy subscription down for ten
+     * minutes and pushed every teacher onto the paid route — punishing the plan
+     * for something the plan had nothing to do with.
+     */
+    "cli_spawn_failed",
+  ].includes(code);
+}
+
+/* Either reason to move on: the route is unavailable, or it is not up to it. */
+function shouldTryNextRoute(error) {
+  return isRouteExhausted(error) || isRouteDefect(error);
 }
 
 /* A failure the caller should see rather than have retried. */
@@ -170,10 +214,17 @@ async function runAi({ capability = "structured", api, cli, label = "ai", prefer
       const why = error?.code || error?.status || error?.message;
       attempts.push(`${name}: ${why}`);
       const exhausted = isRouteExhausted(error);
+      /*
+       * Only an EXHAUSTED route is stood down. A route that merely failed at
+       * this turn is still perfectly usable for the next one — standing it down
+       * for half an hour over one unparseable answer would push every teacher
+       * onto the paid route for a fault that lasted one request.
+       */
       if (step.route === "cli" && exhausted) {
         await cliHealth.markExhausted(step.provider, error).catch(() => {});
       }
-      if (isLast || !exhausted) {
+      const carryOn = shouldTryNextRoute(error);
+      if (isLast || !carryOn) {
         if (attempts.length > 1) console.warn(`[AI] ${label}: all routes failed - ${attempts.join(" | ")}`);
         const failure = fatal(error, `${name.replace(":", "_")}_failed`, attempts);
         /*
@@ -196,14 +247,24 @@ async function runAi({ capability = "structured", api, cli, label = "ai", prefer
         throw failure;
       }
       const next = steps[i + 1];
+      /*
+       * The REASON, not just the code. "cli_failed" in a log is a fact nobody
+       * can act on; the process almost always said something, and the next
+       * intermittent failure should explain itself here rather than needing another
+       * afternoon of reproducing it by hand.
+       */
+      const detail = String(error?.stderr || error?.sample || error?.stdout || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(-300);
       console.warn(
-        `[AI] ${label}: ${name} is exhausted (${why}); continuing on ${
+        `[AI] ${label}: ${name} ${exhausted ? "is exhausted" : "could not do it"} (${why}); continuing on ${
           next.route === "cli" ? `cli:${next.provider}` : "api"
-        }`
+        }${detail ? ` — ${detail}` : ""}`
       );
     }
   }
   throw fatal(new Error("ai_unavailable"), "ai_unavailable", attempts);
 }
 
-module.exports = { runAi, isRouteExhausted, planSteps, CLI_UNSUPPORTED };
+module.exports = { runAi, isRouteExhausted, isRouteDefect, shouldTryNextRoute, planSteps, CLI_UNSUPPORTED };
