@@ -330,13 +330,31 @@ async function main() {
   hush();
   await cliHealth.markExhausted("codex", err(CODEX_LIMIT));
   speak();
-  const snap = await cliHealth.snapshot();
+  /*
+   * withLogin:false because the login half spawns the real binaries. That is
+   * the right thing on a server and the wrong thing in a unit test, which has
+   * no CLIs installed and no business waiting on processes.
+   */
+  const snap = await cliHealth.snapshot(Date.now(), { withLogin: false });
   const codex = snap.find((p) => p.id === "codex");
   const claude = snap.find((p) => p.id === "claude");
   ok("the resting CLI reports its state", codex.state === "resting");
   ok("...with the time it comes back", !!codex.until && codex.minutes > 0);
   ok("...and the reason it gave", /usage limit/i.test(codex.reason));
-  ok("the working CLI reports ready", claude.state === "ready" && claude.until === null);
+  /*
+   * The point of the state names: a CLI nothing has refused is NOT "ready", it
+   * is UNKNOWN. Saying otherwise is what let this page report a Codex plan that
+   * had been out of quota for days as ready to go. "ready" has to be earned by
+   * a turn that actually worked.
+   */
+  ok("a CLI nothing has refused reports unknown, not ready", claude.state === "unknown" && claude.until === null);
+  hush();
+  await cliHealth.markRecovered("claude");
+  speak();
+  const afterOk = await cliHealth.snapshot(Date.now(), { withLogin: false });
+  ok("...and reports ready once a turn has actually succeeded",
+    afterOk.find((p) => p.id === "claude").state === "ready");
+  ok("...with when that was", !!afterOk.find((p) => p.id === "claude").lastOkAt);
 
   const { planSteps } = require("../helper/aiRuntime");
   const chain = (await planSteps("cli_then_api", undefined, "test")).map((s) => (s.route === "cli" ? `cli:${s.provider}` : "api"));

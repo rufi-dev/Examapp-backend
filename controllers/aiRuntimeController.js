@@ -1,6 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const { getAiExecution, setAiExecution, MODES, MODE_IDS } = require("../config/aiExecution");
-const { CLI_UNSUPPORTED, planSteps } = require("../helper/aiRuntime");
+const { CLI_UNSUPPORTED, planSteps, isRouteExhausted } = require("../helper/aiRuntime");
 const cliHealth = require("../helper/cliHealth");
 const { tierModel } = require("../helper/cliAi");
 
@@ -111,6 +111,51 @@ const update = asyncHandler(async (req, res) => {
  * wait it no longer needs. This forgets what was remembered; the next request
  * finds out the truth by trying.
  */
+/*
+ * "Does this subscription still have allowance?" — asked properly, on request.
+ *
+ * The page can establish for free that a CLI is installed and signed in, and it
+ * says so. It cannot establish that the plan has room left without using some:
+ * there is no endpoint that reports remaining quota, and the only way to ask is
+ * to run a turn. So the expensive question is a button rather than a page load,
+ * and the answer is recorded the same way a real request's answer would be — a
+ * refusal stands the CLI down until the date it names, a success marks it
+ * verified.
+ *
+ * Deliberately NOT a background poll. A checker running every few minutes would
+ * spend the very allowance it is reporting on, all day, to answer a question
+ * nobody asked.
+ */
+const checkProvider = asyncHandler(async (req, res) => {
+  const provider = String(req.params.provider || "");
+  if (!cliHealth.KNOWN.includes(provider)) {
+    res.status(400);
+    throw new Error(`Naməlum CLI. Mümkün olanlar: ${cliHealth.KNOWN.join(", ")}`);
+  }
+
+  const { runCliChat } = require("../helper/cliAi");
+  const started = Date.now();
+  let result;
+  try {
+    // The smallest turn that still proves the plan will serve one.
+    await runCliChat({ provider, messages: [{ role: "user", content: "OK" }], tier: "light" });
+    await cliHealth.markRecovered(provider);
+    result = { ok: true, ms: Date.now() - started };
+    console.log(`[AI] ${provider} checked by admin ${req.user?._id}: works (${result.ms}ms)`);
+  } catch (e) {
+    const exhausted = isRouteExhausted(e);
+    if (exhausted) await cliHealth.markExhausted(provider, e);
+    result = {
+      ok: false,
+      exhausted,
+      ms: Date.now() - started,
+      reason: cliHealth.reasonFrom(e),
+    };
+    console.log(`[AI] ${provider} checked by admin ${req.user?._id}: ${exhausted ? "out of quota" : "failed"} — ${result.reason}`);
+  }
+  res.json({ ...(await payload()), check: { provider, ...result } });
+});
+
 const resetProvider = asyncHandler(async (req, res) => {
   const provider = String(req.params.provider || "");
   if (!cliHealth.KNOWN.includes(provider)) {
@@ -122,4 +167,4 @@ const resetProvider = asyncHandler(async (req, res) => {
   res.json(await payload());
 });
 
-module.exports = { get, update, resetProvider };
+module.exports = { get, update, resetProvider, checkProvider };

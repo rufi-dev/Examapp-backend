@@ -36,6 +36,10 @@ const AUTH_COOLDOWN_MS = Math.max(60_000, Number(process.env.AI_CLI_AUTH_COOLDOW
 /* No parse and no arithmetic may ever take a provider out for longer than this.
  * A cooldown is a memory, and a wrong memory must expire. */
 const MAX_COOLDOWN_MS = 7 * 24 * 60 * 60_000;
+/* How long a successful turn counts as proof the plan still has room. Long
+ * enough to be useful on an admin page, short enough that "ready" never means
+ * "it worked last Tuesday". */
+const VERIFIED_FOR_MS = Math.max(60_000, Number(process.env.AI_CLI_VERIFIED_FOR_MS) || 30 * 60_000);
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
@@ -258,7 +262,13 @@ async function read() {
       const entry = value[p];
       if (!entry || typeof entry !== "object") continue;
       const until = Number(entry.until) || 0;
-      clean[p] = { until, reason: String(entry.reason || ""), code: String(entry.code || ""), at: Number(entry.at) || 0 };
+      clean[p] = {
+        until,
+        reason: String(entry.reason || ""),
+        code: String(entry.code || ""),
+        at: Number(entry.at) || 0,
+        okAt: Number(entry.okAt) || 0,
+      };
     }
     cache = clean;
     cachedAt = now;
@@ -320,11 +330,23 @@ async function markExhausted(provider, error, now = Date.now()) {
 async function markRecovered(provider, now = Date.now()) {
   if (!KNOWN.includes(provider)) return;
   const state = await read();
-  if (!state[provider]) return;
-  const rest = { ...state };
-  delete rest[provider];
-  await write(rest);
-  console.log(`[AI] ${LABEL[provider]} is working again (${new Date(now).toISOString()})`);
+  const entry = state[provider];
+  const wasResting = (entry?.until || 0) > now;
+
+  /*
+   * A success is the only thing that can honestly be called "ready", so it is
+   * recorded — but not on every single turn. Refreshing a timestamp that is
+   * already minutes old buys nothing and would put a database write behind
+   * every AI request the platform serves.
+   */
+  const fresh = (entry?.okAt || 0) > now - VERIFIED_FOR_MS / 2;
+  if (!wasResting && fresh) return;
+
+  const next = { ...state, [provider]: { until: 0, reason: "", code: "", at: now, okAt: now } };
+  await write(next);
+  if (wasResting) {
+    console.log(`[AI] ${LABEL[provider]} is working again (${new Date(now).toISOString()})`);
+  }
 }
 
 /* An admin pressing "check again" - the cooldown is a guess and this clears it. */
@@ -360,21 +382,59 @@ async function plan({ prefer, now = Date.now() } = {}) {
 }
 
 /* What the admin page shows. */
-async function snapshot(now = Date.now()) {
+/*
+ * Say exactly what is known, and no more.
+ *
+ * "Hazırdır" used to mean "nothing has told us otherwise", which is how this
+ * page came to report a Codex plan that had been out of quota for days as
+ * ready. There are three genuinely different states and they deserve three
+ * different words:
+ *
+ *   resting   — it refused, and said when it will be back. Known, and dated.
+ *   unusable  — not installed, or not signed in. Free to establish, since the
+ *               binary answers that itself without contacting anyone.
+ *   unknown   — signed in, nothing refused recently. Whether the subscription
+ *               has allowance left CANNOT be known without spending some of it,
+ *               so this is honest rather than optimistic.
+ *   ready     — it actually worked, recently. Earned, not assumed.
+ *
+ * The login half is checked on every read because it costs nothing. The quota
+ * half is checked only when an admin asks, because asking is spending.
+ */
+async function snapshot(now = Date.now(), { withLogin = true } = {}) {
   const state = await read();
-  return order().map((id) => {
+  const { cliStatus } = require("./cliAi");
+  const ids = order();
+  const logins = withLogin
+    ? await Promise.all(ids.map((id) => cliStatus(id).catch(() => null)))
+    : ids.map(() => null);
+
+  return ids.map((id, i) => {
     const entry = state[id];
     const until = entry?.until || 0;
     const resting = until > now;
+    const login = logins[i];
+    const okAt = entry?.okAt || 0;
+    /* A success is evidence of allowance only while it is fresh. */
+    const verified = okAt > 0 && now - okAt < VERIFIED_FOR_MS;
+
+    let stateName = "unknown";
+    if (resting) stateName = "resting";
+    else if (login && (!login.installed || !login.loggedIn)) stateName = "unusable";
+    else if (verified) stateName = "ready";
+
     return {
       id,
       label: LABEL[id],
-      state: resting ? "resting" : "ready",
+      state: stateName,
       until: resting ? new Date(until).toISOString() : null,
       minutes: resting ? Math.max(1, Math.round((until - now) / 60_000)) : 0,
       reason: resting ? entry.reason : "",
       code: resting ? entry.code : "",
       since: entry?.at ? new Date(entry.at).toISOString() : null,
+      // What the free check established, whatever the quota turns out to be.
+      login: login ? { installed: login.installed, loggedIn: login.loggedIn, method: login.method, detail: login.detail } : null,
+      lastOkAt: okAt ? new Date(okAt).toISOString() : null,
     };
   });
 }

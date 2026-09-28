@@ -288,7 +288,7 @@ function claudeResult(raw) {
   return parsed;
 }
 
-function runProcess(command, args, { cwd, signal, provider }) {
+function runProcess(command, args, { cwd, signal, provider, timeoutMs } = {}) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env, CI: "1", NO_COLOR: "1" };
     /*
@@ -342,7 +342,8 @@ function runProcess(command, args, { cwd, signal, provider }) {
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGKILL");
-    }, CLI_TIMEOUT_MS);
+      // A generation may legitimately take minutes; a status check must not.
+    }, Number(timeoutMs) > 0 ? Number(timeoutMs) : CLI_TIMEOUT_MS);
     const abort = () => child.kill("SIGTERM");
     signal?.addEventListener("abort", abort, { once: true });
     child.stdout.on("data", (chunk) => {
@@ -517,7 +518,73 @@ async function runCliChat({ messages = [], model, system, signal, provider = "cl
   }
 }
 
+/*
+ * Is this CLI installed and signed in? — asked for FREE.
+ *
+ * There are two different questions behind "is Codex usable", and only one of
+ * them is cheap. Whether the binary is there and logged in is answered locally,
+ * by the binary itself, with no request to anyone. Whether the SUBSCRIPTION has
+ * allowance left cannot be answered without spending some of it, because the
+ * only way to ask is to try.
+ *
+ * Reporting the cheap answer as though it were the expensive one is how the
+ * admin page came to say "Hazırdır" about a plan that had been out of quota for
+ * days. So this returns exactly what it knows, and the quota question is asked
+ * separately and only when someone asks for it.
+ *
+ * The environment is scrubbed the way a real turn scrubs it: with an API key in
+ * scope `claude auth status` cheerfully reports a working api_key login, which
+ * is not the credential the platform uses.
+ */
+async function cliStatus(provider) {
+  const chosen = provider === "openai" ? "codex" : provider;
+  if (chosen !== "claude" && chosen !== "codex") {
+    return { installed: false, loggedIn: false, method: "", detail: "unsupported_cli_provider" };
+  }
+  const args = chosen === "claude" ? ["auth", "status"] : ["login", "status"];
+  try {
+    const out = await runProcess(cliBinary(chosen), args, { provider: chosen, timeoutMs: 20_000 });
+    const text = `${out.stdout || ""}${out.stderr || ""}`;
+    if (chosen === "claude") {
+      let parsed = null;
+      try {
+        parsed = JSON.parse(String(out.stdout || "").trim());
+      } catch {
+        /* older builds print prose; fall through to the text test below */
+      }
+      if (parsed && typeof parsed === "object") {
+        const method = String(parsed.authMethod || "");
+        return {
+          installed: true,
+          // An api_key login is not a subscription: CLI mode exists to use the
+          // plan, and the runner strips that key before every turn.
+          loggedIn: !!parsed.loggedIn && method !== "api_key",
+          method,
+          detail: [parsed.email, parsed.subscriptionType].filter(Boolean).join(" · ") || method,
+        };
+      }
+      return { installed: true, loggedIn: /logged in/i.test(text) && !/not logged in/i.test(text), method: "", detail: text.trim().slice(0, 120) };
+    }
+    const loggedIn = /logged in/i.test(text) && !/not logged in/i.test(text);
+    return {
+      installed: true,
+      loggedIn,
+      method: /chatgpt/i.test(text) ? "chatgpt" : /api key/i.test(text) ? "api_key" : "",
+      detail: text.replace(/\s+/g, " ").trim().slice(0, 120),
+    };
+  } catch (e) {
+    const missing = /enoent|not found|spawn/i.test(`${e?.code || ""} ${e?.message || ""}`);
+    return {
+      installed: !missing,
+      loggedIn: false,
+      method: "",
+      detail: missing ? "quraşdırılmayıb" : String(e?.message || e).slice(0, 120),
+    };
+  }
+}
+
 module.exports = {
+  cliStatus,
   CLAUDE_BASE_ARGS,
   CLI_TIERS,
   tierModel,
