@@ -3,6 +3,7 @@ const AnthropicPkg = require("@anthropic-ai/sdk");
 // CJS interop: the constructor is the default export on recent builds.
 const Anthropic = AnthropicPkg.default || AnthropicPkg;
 const AiUsage = require("../models/aiUsageModel");
+const { runAi } = require("../helper/aiRuntime");
 const User = require("../models/userModel");
 const Exam = require("../models/examModel");
 const Class = require("../models/classModel");
@@ -35,6 +36,19 @@ function getClient() {
 // builder, so the extracted output drops straight into it. Strict structured
 // output requires every field present + additionalProperties:false, so the
 // model fills empty strings/arrays where a field doesn't apply.
+/*
+ * The few teacher-facing strings the extraction paths share.
+ *
+ * Named rather than inlined because both the CLI and API routes use them and
+ * they must not drift apart - and because editing Azerbaijani text inline in
+ * this file has twice been mangled by a tooling round-trip.
+ */
+const EXTRACT_CLI_PROMPT =
+  "Yüklənmiş əlavə(lər)dəki bütün sualları çıxar və cavabı yalnız JSON kimi qaytar.";
+const PDF_READING_MSG = "PDF oxunur…";
+const CONTINUING_MSG = "ilə davam edilir…";
+const EXTRACT_FAILED_MSG = "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.";
+
 const EXTRACTION_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -1430,14 +1444,18 @@ const extractQuestions = asyncHandler(async (req, res) => {
   let cost = null;
   let usedProvider = provider;
   let fellBack = false;
-  let cliSucceeded = false;
-  const runtime = await require("../config/aiExecution").getAiExecution().catch(() => ({ mode: "api", fallbackToApi: false }));
-  if (runtime.mode === "cli") {
-    try {
+  /*
+   * The owner's API/CLI choice, applied by the one gateway that applies it
+   * everywhere. This used to be an inline copy of the policy, which is how four
+   * other features ended up not having one.
+   */
+  ({ questions, usage, cost, usedProvider, fellBack } = await runAi({
+    label: "extract-questions",
+    capability: "structured",
+    cli: async () => {
       const { runCliStructured } = require("../helper/cliAi");
-      const cliProvider = provider === "openai" ? "codex" : provider;
       const out = await runCliStructured({
-        provider: cliProvider,
+        provider: provider === "openai" ? "codex" : provider,
         model: openaiModel || (askedModel && askedModel.id) || "sonnet",
         system: SYSTEM_PROMPT + instructionBlock(instructions),
         prompt: "Yüklənmiş əlavə(lər)dəki bütün sualları çıxar və cavabı yalnız JSON kimi qaytar.",
@@ -1445,48 +1463,44 @@ const extractQuestions = asyncHandler(async (req, res) => {
         parts,
         signal: req.signal,
       });
-      questions = Array.isArray(out.doc?.questions) ? out.doc.questions : [];
-      usage = null;
-      cost = out.cost;
-      usedProvider = out.provider;
-      fellBack = false;
-      cliSucceeded = true;
-    } catch (error) {
-      if (!runtime.fallbackToApi) {
-        const e = new Error("CLI xidməti hazır deyil. Administrator CLI-ni yoxlamalıdır.");
-        e.aiStatus = 503;
-        e.userMessage = e.message;
-        throw e;
+      return {
+        questions: Array.isArray(out.doc?.questions) ? out.doc.questions : [],
+        usage: null,
+        cost: out.cost,
+        usedProvider: out.provider,
+        fellBack: false,
+      };
+    },
+    api: async () => {
+      const extractors = {
+        openai: () => extractWithOpenAI(parts, instructions, openaiModel),
+        gemini: () => extractWithGemini(parts, instructions),
+        claude: () => extractWithClaude(parts, instructions),
+      };
+      // Try the picked provider, then fall through the OTHERS on an availability
+      // failure so one engine being down / out of credit does not dead-end the
+      // teacher. Gemini handles PDFs well and is cheap, so it sits right after
+      // the pick; a genuine bad request stops the chain.
+      const order = [provider, "gemini", "openai", "claude"].filter((p, i, a) => a.indexOf(p) === i);
+      let lastErr = null;
+      for (const name of order) {
+        try {
+          const got = await extractors[name]();
+          return { ...got, usedProvider: name, fellBack: name !== provider };
+        } catch (e) {
+          lastErr = e;
+          console.warn(`AI extract via ${name} failed:`, e?.status || e?.aiStatus, e?.userMessage || e?.message);
+          if (!isRetriable(e)) break;
+        }
       }
-      console.error("exam extraction CLI failed; explicit API fallback enabled");
-    }
-  }
-  const extractors = {
-    openai: () => extractWithOpenAI(parts, instructions, openaiModel),
-    gemini: () => extractWithGemini(parts, instructions),
-    claude: () => extractWithClaude(parts, instructions),
-  };
-  // Try the picked provider, then fall through the OTHERS on an availability
-  // failure so one engine being down / out of credit does not dead-end the
-  // teacher. Gemini handles PDFs well and is cheap, so it sits right after the
-  // pick; a genuine bad request stops the chain.
-  const order = runtime.mode === "cli" && cliSucceeded
-    ? []
-    : [provider, "gemini", "openai", "claude"].filter((p, i, a) => a.indexOf(p) === i);
-  let lastErr = null;
-  for (const name of order) {
-    try {
-      ({ questions, usage, cost } = await extractors[name]());
-      usedProvider = name;
-      fellBack = name !== provider;
-      lastErr = null;
-      break;
-    } catch (e) {
-      lastErr = e;
-      console.warn(`AI extract via ${name} failed:`, e?.status || e?.aiStatus, e?.userMessage || e?.message);
-      if (!isRetriable(e)) break;
-    }
-  }
+      throw lastErr || new Error("AI emalı alınmadı");
+    },
+  }).catch((e) => {
+    const err = new Error(e?.userMessage || "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
+    err.aiStatus = e?.aiStatus || 503;
+    err.userMessage = err.message;
+    throw err;
+  }));
   if (lastErr) {
     res.status(lastErr.aiStatus || 503);
     throw new Error(lastErr.userMessage || "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.");
@@ -1801,62 +1815,69 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
   let result = null;
   let usedProvider = provider;
   let fellBack = false;
-  let cliSucceeded = false;
-  const runtime = await require("../config/aiExecution").getAiExecution().catch(() => ({ mode: "api", fallbackToApi: false }));
-  if (runtime.mode === "cli") {
-    try {
-      const { runCliStructured } = require("../helper/cliAi");
-      const cliProvider = provider === "openai" ? "codex" : provider;
-      const out = await runCliStructured({
-        provider: cliProvider,
-        model: openaiModel || (askedModel && askedModel.id) || "sonnet",
-        system: SYSTEM_PROMPT + instructionBlock(instructions),
-        prompt: "Yüklənmiş əlavə(lər)dəki bütün sualları çıxar və cavabı yalnız JSON kimi qaytar.",
-        schema: EXTRACTION_SCHEMA,
-        parts,
-        signal: req.signal,
-      });
-      result = { full: JSON.stringify({ questions: out.doc?.questions || [] }), usage: null, cliCost: out.cost, model: out.cost?.model };
-      usedProvider = out.provider;
-      cliSucceeded = true;
-    } catch (error) {
-      if (!runtime.fallbackToApi) {
-        clearInterval(hb);
-        sse("error", { message: "CLI xidməti hazır deyil. Administrator CLI-ni yoxlamalıdır." });
-        return res.end();
-      }
-      console.error("streaming extraction CLI failed; explicit API fallback enabled");
-    }
-  }
-  const label = { openai: "OpenAI", gemini: "Gemini", claude: "Claude" };
-  const runners = {
-    // OpenAI's Responses API returns the whole paper at once (no token stream) —
-    // the loader still animates, questions just don't land one by one.
-    openai: async () => {
-      const one = await extractWithOpenAI(parts, instructions, openaiModel);
-      return { full: JSON.stringify({ questions: one.questions }), usage: one.usage, model: one.cost?.model, openaiCost: one.cost };
-    },
-    gemini: () => streamGemini(parts, instructions, mkOnText()),
-    claude: () => streamClaude(parts, instructions, mkOnText()),
-  };
-  // Try the picked provider, then fall through the others on an availability
-  // failure (Gemini right after the pick — cheap + good at PDFs) so one engine
-  // being down or out of credit never dead-ends the extraction.
-  const order = cliSucceeded ? [] : [provider, "gemini", "openai", "claude"].filter((p, i, a) => a.indexOf(p) === i);
-  let lastErr = null;
-  for (const name of order) {
-    try {
-      sse("status", { message: name === provider ? "PDF oxunur…" : `${label[name]} ilə davam edilir…` });
-      result = await runners[name]();
-      usedProvider = name;
-      fellBack = name !== provider;
-      lastErr = null;
-      break;
-    } catch (e) {
-      lastErr = e;
-      console.error(`AI extract (${name}) failed:`, e?.status || e?.aiStatus, e?.message);
-      if (!isRetriable(e)) break;
-    }
+  /*
+   * The same gateway as everywhere else. The CLI cannot stream tokens, so on the
+   * CLI route the questions arrive in one piece at the end rather than appearing
+   * one by one - the loader still runs, it just has nothing to report until the
+   * answer lands. That is the truth about the route, not a defect to hide.
+   */
+  try {
+    ({ result, usedProvider, fellBack } = await runAi({
+      label: "extract-stream",
+      capability: "structured",
+      cli: async () => {
+        const { runCliStructured } = require("../helper/cliAi");
+        const out = await runCliStructured({
+          provider: provider === "openai" ? "codex" : provider,
+          model: openaiModel || (askedModel && askedModel.id) || "sonnet",
+          system: SYSTEM_PROMPT + instructionBlock(instructions),
+          prompt: EXTRACT_CLI_PROMPT,
+          schema: EXTRACTION_SCHEMA,
+          parts,
+          signal: req.signal,
+        });
+        return {
+          result: { full: JSON.stringify({ questions: out.doc?.questions || [] }), usage: null, cliCost: out.cost, model: out.cost?.model },
+          usedProvider: out.provider,
+          fellBack: false,
+        };
+      },
+      api: async () => {
+        const label = { openai: "OpenAI", gemini: "Gemini", claude: "Claude" };
+        const runners = {
+          // OpenAI's Responses API returns the whole paper at once (no token
+          // stream) - the loader still animates, questions just don't land one
+          // by one.
+          openai: async () => {
+            const one = await extractWithOpenAI(parts, instructions, openaiModel);
+            return { full: JSON.stringify({ questions: one.questions }), usage: one.usage, model: one.cost?.model, openaiCost: one.cost };
+          },
+          gemini: () => streamGemini(parts, instructions, mkOnText()),
+          claude: () => streamClaude(parts, instructions, mkOnText()),
+        };
+        // Try the picked provider, then fall through the others on an
+        // availability failure (Gemini right after the pick - cheap + good at
+        // PDFs) so one engine being down never dead-ends the extraction.
+        const order = [provider, "gemini", "openai", "claude"].filter((p, i, a) => a.indexOf(p) === i);
+        let lastErr = null;
+        for (const name of order) {
+          try {
+            sse("status", { message: name === provider ? PDF_READING_MSG : `${label[name]} ${CONTINUING_MSG}` });
+            const got = await runners[name]();
+            return { result: got, usedProvider: name, fellBack: name !== provider };
+          } catch (e) {
+            lastErr = e;
+            console.error(`AI extract (${name}) failed:`, e?.status || e?.aiStatus, e?.message);
+            if (!isRetriable(e)) break;
+          }
+        }
+        throw lastErr || new Error("extract_failed");
+      },
+    }));
+  } catch (e) {
+    clearInterval(hb);
+    sse("error", { message: e?.userMessage || EXTRACT_FAILED_MSG });
+    return res.end();
   }
   if (!result) {
     clearInterval(hb);
@@ -2508,12 +2529,20 @@ async function runGeneration({ prompt, preset, model, onText, signal, system }) 
   // installed in the application image. CLI mode is deliberately explicit:
   // when it is selected, an unavailable CLI fails rather than silently creating
   // an unexpected provider bill. The existing API chain remains untouched.
-  const runtime = await require("../config/aiExecution").getAiExecution().catch(() => ({ mode: "api", fallbackToApi: false }));
-  if (runtime.mode === "cli") {
-    try {
+  /*
+   * The gateway, so exam generation obeys the same setting as everything else.
+   * The whole API provider chain below becomes this call's `api` route, which is
+   * what lets one mode change move every feature at once.
+   */
+  return runAi({
+    label: "generate-questions",
+    capability: "structured",
+    cli: async () => {
       const { runCliStructured } = require("../helper/cliAi");
       const cliProvider = picked?.provider === "openai" ? "codex" : picked?.provider;
-      const sys = (system || GEN_SYSTEM_PROMPT) + (presetHint(preset) ? `\n\n${presetHint(preset)}` : "");
+      const sys = (system || GEN_SYSTEM_PROMPT) + (presetHint(preset) ? `
+
+${presetHint(preset)}` : "");
       const out = await runCliStructured({
         provider: cliProvider,
         model: picked?.id || model,
@@ -2525,16 +2554,12 @@ async function runGeneration({ prompt, preset, model, onText, signal, system }) 
       const questions = Array.isArray(out.doc?.questions) ? out.doc.questions : [];
       if (onText) onText(cliProvider)(JSON.stringify({ questions }));
       return { questions, cost: out.cost };
-    } catch (error) {
-      if (!runtime.fallbackToApi) {
-        const e = aiError(503, "CLI xidməti hazır deyil. Administrator CLI-ni yoxlamalıdır.");
-        e.code = error?.code || "cli_unavailable";
-        throw e;
-      }
-      console.error("exam generation CLI failed; explicit API fallback enabled");
-    }
-  }
+    },
+    api: () => runGenerationOnApi({ prompt, preset, model, onText, signal, system, picked }),
+  });
+}
 
+async function runGenerationOnApi({ prompt, preset, model, onText, signal, system, picked }) {
   // `system` swaps the generator's prompt for a different one (the reviewer),
   // reusing the same provider chain, schema and fallback for the critic pass.
   const runners = {
@@ -3310,6 +3335,23 @@ async function chatWithOpenAI(messages) {
 // set), then the rest as fallbacks. Unconfigured providers are skipped; a
 // transient error (aiFallback) rolls on to the next provider.
 async function runChat(messages) {
+  /*
+   * The chat obeys the setting too. It was the clearest omission in the first
+   * version: an admin could set CLI, watch the chat keep answering, and have no
+   * idea it was still on the API the whole time.
+   */
+  return runAi({
+    label: "chat",
+    capability: "structured",
+    cli: async () => {
+      const { runCliChat } = require("../helper/cliAi");
+      return runCliChat({ messages, model: process.env.AI_CHAT_CLI_MODEL });
+    },
+    api: () => runChatOnApi(messages),
+  });
+}
+
+async function runChatOnApi(messages) {
   const order = [];
   if (process.env.AI_CHAT_PROVIDER) order.push(process.env.AI_CHAT_PROVIDER);
   ["openai", "gemini", "claude"].forEach((p) => order.includes(p) || order.push(p));
@@ -3529,6 +3571,19 @@ async function execTool(name, args, user) {
 // exams). Returns the final text + accumulated cost. `changed` flags whether any
 // exam was mutated (so the client can refresh).
 async function runChatAgent(messages, user, tz) {
+  /*
+   * The agent calls OUR tools between turns - the same reason the lesson-document
+   * agent is API-only. Declared, not skipped: the setting is applied here, and
+   * the capability says why the answer is always the API.
+   */
+  return runAi({
+    label: "chat-agent",
+    capability: "tools",
+    api: () => runChatAgentOnApi(messages, user, tz),
+  });
+}
+
+async function runChatAgentOnApi(messages, user, tz) {
   const model = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
   const convo = [{ role: "system", content: `${CHAT_SYSTEM_PROMPT}\n\n${azDateHint(tz)}` }, ...messages];
   let inTok = 0;

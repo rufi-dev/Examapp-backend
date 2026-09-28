@@ -146,6 +146,32 @@ async function generateSupportReply(messages, adminId) {
   const history = buildHistory(messages, adminId);
   if (!history.length || history[history.length - 1].role !== "user") return null;
 
+  /*
+   * The support chat obeys the platform's API/CLI setting like everything else.
+   * It sits in its own service and was missed entirely by the first version of
+   * the switch, which is exactly why the choice now lives in one gateway rather
+   * than being remembered at each call site.
+   */
+  const { runAi } = require("../helper/aiRuntime");
+  const text = await runAi({
+    label: "support-chat",
+    capability: "structured",
+    cli: async () => {
+      const { runCliChat } = require("../helper/cliAi");
+      const out = await runCliChat({ messages: history, system: SYSTEM_PROMPT });
+      return out.text;
+    },
+    api: () => replyOnApi(history),
+  }).catch((e) => {
+    console.error("[CHAT-AI] reply failed:", e?.message);
+    return "";
+  });
+
+  const clean = toPlainText(text);
+  return clean || null;
+}
+
+async function replyOnApi(history) {
   let text = "";
   if (process.env.OPENAI_API_KEY) {
     try {
@@ -163,8 +189,7 @@ async function generateSupportReply(messages, adminId) {
   } else {
     text = await replyWithAnthropic(history);
   }
-  const clean = toPlainText(text);
-  return clean || null;
+  return text;
 }
 
 module.exports = { isChatAiEnabled, generateSupportReply, SYSTEM_PROMPT };

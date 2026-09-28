@@ -126,6 +126,41 @@ async function documentWithTools({
   provider = "claude",
   effort = "high",
 }) {
+  /*
+   * Through the gateway like everything else, even though the answer is always
+   * the API: `tools` is declared CLI-unsupported, so this is the setting being
+   * APPLIED rather than this path being forgotten. The distinction matters -
+   * the last switch missed this function entirely and the admin page said CLI
+   * while lesson documents carried on billing.
+   */
+  const { runAi } = require("./aiRuntime");
+  return runAi({
+    label: "document-tools",
+    capability: "tools",
+    api: () =>
+      documentWithToolsOnApi({
+        prompt, parts, system, tools, signal, maxTokens, onText, validate,
+        fetchSource, look, gridOf, model, provider, effort,
+      }),
+  });
+}
+
+async function documentWithToolsOnApi({
+  prompt,
+  parts = [],
+  system,
+  tools,
+  signal,
+  maxTokens = DOC_MAX_TOKENS_STREAMING,
+  onText,
+  validate,
+  fetchSource,
+  look,
+  gridOf,
+  model,
+  provider = "claude",
+  effort = "high",
+}) {
   const { runToolLoop } = require("./aiDocDrivers");
   const { claudeAdapter, openaiAdapter, geminiAdapter } = require("./aiDocAdapters");
 
@@ -552,14 +587,20 @@ async function documentWithGemini({ prompt, parts = [], system, schema, signal, 
  * billing two more providers for output nobody is waiting for.
  */
 async function runDocument({ prompt, parts = [], system, schema, geminiSchema, model, provider, signal, maxTokens, onText, effort }) {
-  const { getAiExecution } = require("../config/aiExecution");
-  const runtime = await getAiExecution().catch(() => ({ mode: "api", fallbackToApi: false }));
-  if (runtime.mode === "cli") {
-    try {
+  /*
+   * Every document - a lesson, a plan, a curriculum proposal, an exam variant -
+   * comes through here, so this is where the owner's API/CLI choice is applied
+   * for all of them. The gateway owns the policy; this only says what the two
+   * routes are.
+   */
+  const { runAi } = require("./aiRuntime");
+  return runAi({
+    label: "document",
+    capability: "structured",
+    cli: async () => {
       const { runCliStructured } = require("./cliAi");
-      const cliProvider = provider === "openai" ? "codex" : provider;
       const out = await runCliStructured({
-        provider: cliProvider,
+        provider: provider === "openai" ? "codex" : provider,
         model,
         system: typeof system === "string" ? system : JSON.stringify(system || ""),
         prompt,
@@ -568,16 +609,12 @@ async function runDocument({ prompt, parts = [], system, schema, geminiSchema, m
         signal,
       });
       return { doc: out.doc, provider: out.provider, cost: out.cost, usage: null, truncated: false };
-    } catch (error) {
-      if (!runtime.fallbackToApi) {
-        const e = docError(503, "CLI xidməti hazır deyil. Administrator CLI-ni yoxlamalıdır.");
-        e.provider = provider;
-        e.code = error?.code || "cli_unavailable";
-        throw e;
-      }
-      console.error("document CLI failed; explicit API fallback enabled");
-    }
-  }
+    },
+    api: () => runDocumentOnApi({ prompt, parts, system, schema, geminiSchema, model, provider, signal, maxTokens, onText, effort }),
+  });
+}
+
+async function runDocumentOnApi({ prompt, parts = [], system, schema, geminiSchema, model, provider, signal, maxTokens, onText, effort }) {
   const { findAiModel, DEFAULT_AI_MODEL } = require("../controllers/aiController");
   const picked = findAiModel(String(model || "")) || findAiModel(DEFAULT_AI_MODEL);
   const runners = {

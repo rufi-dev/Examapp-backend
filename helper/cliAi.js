@@ -192,4 +192,66 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
   }
 }
 
-module.exports = { runCliStructured, parseJsonText, cliModel };
+/*
+ * A plain-text turn, for the chat.
+ *
+ * The structured runner above forces a JSON object, which is right for an exam
+ * or a lesson and wrong for a conversation: a chat reply is prose, and asking
+ * the model to wrap prose in JSON only gives it a way to fail. This shares the
+ * process handling, the sandbox and the environment scrubbing, and differs only
+ * in asking for the answer directly.
+ */
+async function runCliChat({ messages = [], model, system, signal, provider = "claude" }) {
+  const chosen = provider === "openai" ? "codex" : provider;
+  if (chosen !== "claude" && chosen !== "codex") {
+    throw Object.assign(new Error("cli_provider_unavailable"), { code: "cli_provider_unavailable" });
+  }
+  await fs.mkdir(ROOT, { recursive: true });
+  const job = await fs.mkdtemp(path.join(ROOT, "chat-"));
+  try {
+    const transcript = (Array.isArray(messages) ? messages : [])
+      .map((m) => `${String(m?.role || "user").toUpperCase()}: ${String(m?.content ?? m?.text ?? "")}`)
+      .filter((l) => l.trim().length > 6)
+      .join("\n\n");
+    const full = [system ? `SYSTEM:\n${system}` : "", transcript].filter(Boolean).join("\n\n");
+
+    let args;
+    const answerFile = path.join(job, "answer.txt");
+    if (chosen === "claude") {
+      args = [
+        "-p", "--output-format", "json", "--max-turns", "1",
+        "--model", cliModel("claude", model),
+        "--permission-mode", "dontAsk", "--permission-prompts", "none",
+        "--no-session-persistence", "--bare",
+        full,
+      ];
+    } else {
+      args = ["exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check",
+        "--model", cliModel("codex", model), "--output-last-message", answerFile, full];
+    }
+    const out = await runProcess(cliBinary(chosen), args, { cwd: job, signal, provider: chosen });
+    let text;
+    if (chosen === "codex") {
+      text = await fs.readFile(answerFile, "utf8").catch(() => out.stdout);
+    } else {
+      // Claude's -p --output-format json wraps the reply in { result: "..." }.
+      try {
+        const parsed = JSON.parse(String(out.stdout || "").trim());
+        text = typeof parsed?.result === "string" ? parsed.result : String(out.stdout || "");
+      } catch {
+        text = String(out.stdout || "");
+      }
+    }
+    text = String(text || "").trim();
+    if (!text) throw Object.assign(new Error("cli_empty_output"), { code: "cli_empty_output" });
+    return {
+      text,
+      cost: { model: cliModel(chosen, model), usd: 0, inputTokens: 0, outputTokens: 0, cli: true },
+      provider: `${chosen}-cli`,
+    };
+  } finally {
+    await fs.rm(job, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+module.exports = { runCliStructured, runCliChat, parseJsonText, cliModel };

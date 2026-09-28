@@ -98,6 +98,8 @@
   "tests/journey-preview-guard.test.js",
   "tests/question-type-matrix.test.js",
   "tests/question-flags-persistence.test.js",
+  "tests/ai-runtime-modes.test.js",
+  "tests/ai-runtime-coverage.test.js",
   "tests/ai-operations-config.test.js",
   "tests/curriculum-schema.test.js",
   "tests/curriculum-geometry.test.js",
