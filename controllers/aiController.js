@@ -3357,6 +3357,131 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
 // one. The model is allowed to change the question's TYPE: "make this multiple
 // choice" is a normal thing to ask, and forcing the old type would make half
 // the useful instructions impossible.
+/*
+ * "Cavabları tap" — solve this paper's answer key, looking at its pictures.
+ *
+ * The teacher already has the questions on screen: extracted from a PDF, written
+ * by the AI, typed by hand, or any mixture. What they do not have is the key, and
+ * for a paper built out of diagrams they cannot get it from the text alone —
+ * neither can a model. So this gathers what there IS to look at and hands the
+ * whole lot over together:
+ *
+ *   - every picture attached to a question or an answer option, and
+ *   - the source PDF, when the exam still has one.
+ *
+ * Scope is the teacher's call, and the default is the conservative one. "missing"
+ * fills only the blanks and never touches an answer that is already there,
+ * because most of those were typed by a person and overwriting them would be us
+ * destroying their work to impose our own. "all" re-checks the paper end to end,
+ * which is what you want after a bad key has been written into it.
+ */
+const solveAnswers = asyncHandler(async (req, res) => {
+  const { questions, preset, scope } = req.body || {};
+  const list = cleanQuestions(Array.isArray(questions) ? questions : []);
+  if (!list.length) {
+    res.status(400);
+    throw new Error("Sual göndərilmədi");
+  }
+  const scorable = list.filter((q) => q && q.type !== "reading");
+  if (!scorable.length) {
+    res.status(400);
+    throw new Error("Cavab tələb edən sual yoxdur");
+  }
+
+  const redoAll = String(scope || "missing") === "all";
+  const blanks = unansweredCount(list);
+  if (!redoAll && !blanks) {
+    // Nothing to find. Say so rather than spending a turn to confirm it.
+    return res.json({
+      questions: list,
+      solved: 0,
+      blanks: 0,
+      figures: 0,
+      message: "Bütün sualların cavabı artıq var.",
+    });
+  }
+
+  /* The pictures on the questions themselves — the ones a teacher attached. */
+  const { collectFigures } = require("../helper/questionFigures");
+  const { parts: figures, labels, missing: unreachable } = await collectFigures(list, { signal: req.signal });
+
+  /* ...and the source paper, when one is still attached to the exam. */
+  const parts = [...figures];
+  let usedPdf = false;
+  try {
+    const examId = req.params?.examId;
+    if (examId && require("mongoose").isValidObjectId(examId)) {
+      const exam = await Exam.findOne(
+        req.user.role === "admin" ? { _id: examId } : { _id: examId, owner: req.user._id }
+      ).select("pdf").lean();
+      if (exam?.pdf) {
+        const Pdf = require("../models/pdfModel");
+        const doc = await Pdf.findById(exam.pdf).select("key size").lean();
+        const { pathForKey, isValidKey } = require("../helper/examPdfStorage");
+        const { CLI_READ_MAX_BYTES } = require("../helper/cliAi");
+        if (doc?.key && isValidKey(doc.key) && Number(doc.size || 0) <= CLI_READ_MAX_BYTES) {
+          const buf = await require("node:fs/promises").readFile(pathForKey(doc.key));
+          parts.push({ name: "imtahan.pdf", data: buf.toString("base64"), mime: "application/pdf", isPdf: true });
+          usedPdf = true;
+        }
+      }
+    }
+  } catch (e) {
+    // A missing or unreadable source PDF is not a reason to refuse: the figures
+    // on the questions may be enough on their own.
+    console.warn("solveAnswers: source PDF unavailable —", e?.message);
+  }
+
+  const ask = [
+    redoAll
+      ? "Aşağıdakı imtahan suallarının HAMISINI həll et və hər biri üçün düzgün cavabı işarələ. Mövcud cavabları yoxla — səhv olanı düzəlt."
+      : "Aşağıdakı imtahan suallarından YALNIZ cavabı işarələnməmiş olanları həll et və düzgün cavabı işarələ. Cavabı artıq olan sualları OLDUĞU KİMİ saxla.",
+    parts.length
+      ? "Suala aid şəkil/diaqram ƏLAVƏ EDİLİB — cavabı tapmaq üçün şəkilə BAX. Diaqramdakı rəqəmləri oxu və onlara əsasən hesabla; təxmin etmə."
+      : "",
+    labels.length ? `Şəkillərin sual nömrələri:\n${labels.join("\n")}` : "",
+    usedPdf ? "İmtahanın mənbə PDF-i də əlavə olunub." : "",
+    "Sualların sayını, mətnini, variantlarını və sırasını DƏYİŞMƏ — yalnız düzgün cavabları doldur.",
+    "Şəkilə baxa bilmədiyin və mətndən həll oluna bilməyən sualın cavabını UYDURMA — onu boş burax.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  let out;
+  try {
+    out = await applyAnswerMode({
+      questions: list,
+      mode: redoAll ? "ai-solve" : "auto",
+      preset,
+      model: PLATFORM_SOLVE_MODEL,
+      parts,
+      signal: req.signal,
+    });
+  } catch (e) {
+    res.status(e?.aiStatus || 502);
+    throw new Error(e?.userMessage || "Cavablar tapılmadı. Bir az sonra yenidən cəhd edin.");
+  }
+
+  const answered = out.questions || list;
+  const left = unansweredCount(answered);
+  await logGenerationUsage(req, { cost: out.reviewCost, questions: answered }).catch(() => {});
+
+  res.json({
+    questions: answered,
+    // What actually changed, so the panel can say it plainly instead of claiming
+    // success over a paper it did not manage to finish.
+    solved: Math.max(0, (redoAll ? scorable.length : blanks) - left),
+    blanks: left,
+    figures: parts.length,
+    usedPdf,
+    unreachableFigures: unreachable,
+    message:
+      left === 0
+        ? "Bütün cavablar tapıldı."
+        : `${left} sualın cavabı tapılmadı — şəkil olmadan həll oluna bilmir, özünüz işarələyin.`,
+  });
+});
+
 const regenerateQuestion = asyncHandler(async (req, res) => {
   const { question, instructions, examPrompt } = req.body || {};
   if (!question || typeof question !== "object") {
@@ -4124,6 +4249,7 @@ const realtimeToken = asyncHandler(async (req, res) => {
 
 module.exports = {
   regenerateQuestion,
+  solveAnswers,
   // exported for tests / benchmarking
   GEN_SYSTEM_PROMPT,
   SYSTEM_PROMPT,

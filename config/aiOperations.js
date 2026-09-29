@@ -33,6 +33,10 @@ const AI_OPERATIONS = {
   "ai.extract.questions": { cost: 10, ledgerWeight: 5, confirmBefore: true, active: true, display: "generateExam" },
   "ai.generate.questions": { cost: 10, ledgerWeight: 5, confirmBefore: true, active: true, display: "generateExam" },
   "ai.regenerate.question": { cost: 2, ledgerWeight: 1, confirmBefore: false, active: true, display: "rewriteQuestion" },
+  // Solving a paper's answer key. Priced between a single rewrite and a whole
+  // exam: it is one pass over an existing paper, not a new one, but it reads
+  // every attached figure and the source PDF to do it.
+  "ai.solve.answers": { cost: 4, ledgerWeight: 2, confirmBefore: false, active: true, display: "solveAnswers" },
   "ai.chat.message": { cost: 0, ledgerWeight: 1, confirmBefore: false, active: true, display: "supportChat" },
   "ai.transcribe.audio": { cost: 0, ledgerWeight: 2, confirmBefore: false, active: true, display: null },
   "ai.realtime.session": { cost: 0, ledgerWeight: 5, confirmBefore: true, active: true, display: null },

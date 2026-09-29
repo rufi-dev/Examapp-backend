@@ -81,13 +81,17 @@ eq("the operation set is exactly what is declared here", Object.keys(reg.costTab
   "ai.models.list",
   "ai.realtime.session",
   "ai.regenerate.question",
+  // "Cavabları tap": one solving pass over an existing paper, reading every
+  // attached figure and the source PDF. Priced between a single rewrite and a
+  // whole exam because that is the work it does.
+  "ai.solve.answers",
   "ai.transcribe.audio",
 ]);
 // Priced on the owner's decision of 2026-09-13; they were 0 by the earlier one.
 ok("Lesson Studio's operations are priced", reg.costFor("ai.generate.material") === 6 && reg.costFor("ai.edit.material") === 2);
 ok("and published, so a teacher can learn the price before spending it", reg.operationConfig("ai.generate.material").display === "generateMaterial" && reg.operationConfig("ai.edit.material").display === "editMaterial");
 ok("but not confirm-before — a chat turn must not pop a dialog", !reg.operationConfig("ai.generate.material").confirmBefore && !reg.operationConfig("ai.edit.material").confirmBefore);
-eq("AI_ACTION_COSTS projection", AI_ACTION_COSTS, { generateExam: 10, rewriteQuestion: 2, supportChat: 0, generateLessonPlan: 6, generateMaterial: 6, editMaterial: 2 });
+eq("AI_ACTION_COSTS projection", AI_ACTION_COSTS, { generateExam: 10, rewriteQuestion: 2, solveAnswers: 4, supportChat: 0, generateLessonPlan: 6, generateMaterial: 6, editMaterial: 2 });
 eq("CONFIRM_BEFORE projection", [...CONFIRM_BEFORE].sort(), [
   "ai.extract.questions",
   "ai.generate.lessonplan",

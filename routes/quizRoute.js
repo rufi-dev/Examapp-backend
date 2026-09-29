@@ -58,7 +58,7 @@ const {
   deleteResult,
   getPendingReviews,
   gradeManualAnswer, createVariantB, duplicateExam, msoReport } = require("../controllers/quizController");
-const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions, generateQuestionsStream, transcribeAudio, realtimeToken, regenerateQuestion } = require("../controllers/aiController");
+const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions, generateQuestionsStream, transcribeAudio, realtimeToken, regenerateQuestion, solveAnswers } = require("../controllers/aiController");
 const { aiRateLimit, aiBudgetGuard } = require("../middleware/aiLimit");
 // Teacher Success Journey — per-teacher AI credit metering (flag-gated; passthrough when off).
 const { chargeAi } = require("../middleware/aiCredit");
@@ -195,6 +195,12 @@ router.post("/generateQuestionsStream/:examId", protect, requireCapability("ai:u
 // Which engines the builder may offer for question generation.
 // Rewrite a single question in the builder.
 router.post("/regenerateQuestion/:examId", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.regenerate.question"), regenerateQuestion);
+// "Cavabları tap" — solve this paper's answer key, looking at the figures the
+// teacher attached and at the source PDF when the exam still has one. Two
+// routes so a paper still being composed (examId "new") can use it too; only the
+// one with a real id can reach the stored PDF.
+router.post("/solveAnswers", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.solve.answers"), solveAnswers);
+router.post("/solveAnswers/:examId", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.solve.answers"), solveAnswers);
 // Voice → text (Azerbaijani) for the chat assistant.
 router.post("/transcribe", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, memUpload.single("audio"), chargeAi("ai.transcribe.audio"), transcribeAudio);
 // Ephemeral token for OpenAI Realtime live transcription (browser → OpenAI direct).

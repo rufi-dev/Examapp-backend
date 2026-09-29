@@ -61,9 +61,25 @@ function main() {
   console.log("\nthe engine that READ the paper also answers it:");
   ok("the answer pass no longer uses the cheap generation model",
     !/model: PLATFORM_MODEL,\s*(\/\/[^\n]*\n\s*)*parts,/s.test(src));
-  ok("both answer-key call sites use the solve model",
-    (src.match(/model: PLATFORM_SOLVE_MODEL,/g) || []).length === 2,
-    String((src.match(/model: PLATFORM_SOLVE_MODEL,/g) || []).length));
+  /*
+   * EVERY call site, not a count of them. The count broke the moment the
+   * "Cavabları tap" endpoint added a third, which is the wrong reason for a test
+   * to fail: the rule is "no answer key is decided on the cheap model", and it
+   * should hold however many places decide one.
+   */
+  /* Split rather than match: a call spans several lines with varying indentation,
+   * and the 600 characters after each opening covers every one of them. */
+  /* `await` so the function's own DEFINITION is not counted as a call site of
+   * itself - it has a `model` parameter and would have passed for the wrong
+   * reason. Split rather than match, because a call spans several lines at
+   * varying indentation and 600 characters covers all of them. */
+  const answerCalls = src.split("await applyAnswerMode({").slice(1).map((c) => c.slice(0, 600));
+  ok("there are answer-key call sites to check", answerCalls.length >= 3, String(answerCalls.length));
+  ok("...and every one of them uses the solve model",
+    answerCalls.every((c) => /model: PLATFORM_SOLVE_MODEL/.test(c)),
+    answerCalls.filter((c) => !/model: PLATFORM_SOLVE_MODEL/.test(c)).join(" | ").slice(0, 200));
+  ok("...and none of them uses the cheap one",
+    answerCalls.every((c) => !/model: PLATFORM_MODEL/.test(c)));
   ok("which is not gpt-4.1-mini", ai.PLATFORM_SOLVE_MODEL !== "gpt-4.1-mini", ai.PLATFORM_SOLVE_MODEL);
 
   console.log("\nand on the CLI it is the SAME model the extraction ran on:");
