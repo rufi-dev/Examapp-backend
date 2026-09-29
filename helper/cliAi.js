@@ -175,12 +175,38 @@ const CLAUDE_BASE_ARGS = Object.freeze([
  * partial answer, an empty string. Every PDF extraction on the CLI route would
  * have come back empty, and an empty extraction looks exactly like a PDF the
  * model could not read.
+ *
+ * Those minimums were right and still too tight, which cost a day of the CLI
+ * route being quietly dead. Production kept printing `error_max_turns` — "Reached
+ * maximum number of turns (1)" having used 2, "(3)" having used 4 — on every
+ * generate and every extraction, so each one exited non-zero, handed over, and
+ * the platform ran on the paid API while the admin page said CLI.
+ *
+ * The minimum is not the budget. A model that needs one extra turn to re-read a
+ * page or finish a long answer is doing the job, not misbehaving, and the ceiling
+ * is not what keeps a turn affordable — the prompt and the model do that. It is
+ * only a stop for a runaway loop, so it is set where a runaway is unmistakable.
+ *
+ * Measured on this box before changing it: an unused allowance costs nothing.
+ * The same generate ran in 15s at a cap of 1 and 16s at 6; the same extraction
+ * in 37s at 3 and 31s at 12. The cap is free until it bites, and when it bites
+ * it takes the whole route down.
  */
+const TURNS_NO_FILES = 4;
+const TURNS_PER_FILE = 2;
+const TURNS_MAX = 20;
+
+/*
+ * The ceiling the CLI's Read tool puts on a single file. Not ours to choose, and
+ * not something it fails loudly about - see the refusal in runCliStructured.
+ */
+const CLI_READ_MAX_BYTES = Number(process.env.AI_CLI_READ_MAX_BYTES) || 20 * 1024 * 1024;
+
 function claudeTurns(fileCount) {
-  if (!fileCount) return 1;
   const configured = Number(process.env.AI_CLI_MAX_TURNS);
-  if (Number.isFinite(configured) && configured >= 2) return Math.min(configured, 20);
-  return Math.min(2 + fileCount, 10);
+  if (Number.isFinite(configured) && configured >= 1) return Math.min(configured, TURNS_MAX);
+  if (!fileCount) return TURNS_NO_FILES;
+  return Math.min(TURNS_NO_FILES + TURNS_PER_FILE * fileCount, TURNS_MAX);
 }
 
 /*
@@ -532,7 +558,28 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
       const part = parts[i];
       if (!part?.data) continue;
       const file = safeName(part.name, i);
-      await fs.writeFile(path.join(job, file), Buffer.from(String(part.data), "base64"), { mode: 0o600 });
+      const bytes = Buffer.from(String(part.data), "base64");
+      /*
+       * The CLI's Read tool refuses a PDF over 20MB — "PDF file exceeds maximum
+       * allowed size of 20MB" — and that refusal reaches the model as a tool
+       * error, not a crash. The model then does the sane thing and reports no
+       * questions, the run exits 0, and the teacher is told their paper is empty.
+       *
+       * We accept uploads up to 100MB, so this is a gap we opened ourselves, and
+       * it is silent in the one direction that matters. Refuse the route here
+       * instead: `cli_input_too_large` is a DEFECT, so the gateway hands the work
+       * to the API — which reads the file as a document and has no such ceiling —
+       * without standing the subscription down for a file it never saw.
+       */
+      if (chosen === "claude" && bytes.length > CLI_READ_MAX_BYTES) {
+        throw Object.assign(
+          new Error(
+            `attachment ${file} is ${Math.round(bytes.length / 1024 / 1024)}MB; the CLI Read tool stops at ${Math.round(CLI_READ_MAX_BYTES / 1024 / 1024)}MB`
+          ),
+          { code: "cli_input_too_large" }
+        );
+      }
+      await fs.writeFile(path.join(job, file), bytes, { mode: 0o600 });
       files.push(file);
     }
     const answerFile = path.join(job, "answer.json");
@@ -736,6 +783,7 @@ module.exports = {
   cliStatus,
   CLAUDE_BASE_ARGS,
   CLI_TIERS,
+  CLI_READ_MAX_BYTES,
   tierModel,
   claudeArgs,
   claudeTurns,

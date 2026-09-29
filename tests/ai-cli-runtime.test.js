@@ -143,11 +143,27 @@ assert.ok(/stdin: transcript/.test(runnerSrc0), "and so must the chat turn");
  * call Read, one to answer with. At --max-turns 1 the binary exits with NO result
  * at all - not an error, an empty string - so every CLI PDF extraction came back
  * empty, which is indistinguishable from a PDF that could not be read.
+ *
+ * Those minimums were necessary and not sufficient, and this file used to assert
+ * the exact minimum, which is how the CLI route stayed dead for a day with a
+ * green suite. Production printed `error_max_turns` on generate after generate -
+ * "Reached maximum number of turns (1)" having used 2, "(3)" having used 4 - so
+ * every call exited non-zero, handed over, and ran on the paid API while the
+ * admin page said CLI.
+ *
+ * So the rule is headroom, not the minimum. It is safe to be generous because an
+ * unused turn is free: measured on the server, the same generate took 15s at a
+ * cap of 1 and 16s at 6, the same extraction 37s at 3 and 31s at 12. The cap
+ * costs nothing until it bites, and when it bites it takes the route down.
  */
-assert.strictEqual(claudeTurns(0), 1, "no attachment is a one-turn request");
-assert.ok(claudeTurns(1) >= 2, "an attachment needs a turn to read it and a turn to answer");
+assert.ok(claudeTurns(0) >= 2, "a plain prompt must not be pinned to its minimum of one turn");
+assert.ok(claudeTurns(1) > claudeTurns(0), "an attachment needs room to read it AND to answer");
 assert.ok(claudeTurns(40) <= 20, "and it is still bounded");
-assert.strictEqual(claudeArgs({ prompt: "P" })[CLAUDE_BASE_ARGS.length + 1], "1");
+assert.strictEqual(
+  claudeArgs({ prompt: "P" })[CLAUDE_BASE_ARGS.length + 1],
+  String(claudeTurns(0)),
+  "the args must carry the budget the policy decided, not a hard-coded one"
+);
 
 // A chat turn reads nothing and must therefore carry nothing: without --bare the
 // default tool set is available, and a conversation has no business running Bash

@@ -44,7 +44,11 @@ function getClient() {
  * this file has twice been mangled by a tooling round-trip.
  */
 const EXTRACT_CLI_PROMPT =
-  "Yüklənmiş əlavə(lər)dəki bütün sualları çıxar və cavabı yalnız JSON kimi qaytar.";
+  "Yüklənmiş əlavə(lər)i oxu. Sənəddə hazır suallar varsa, hamısını olduğu kimi çıxar. " +
+  "Hazır sual yoxdursa (qrammatika qaydası, mövzu izahı, nəzəriyyə, lüğət, nümunələr) — " +
+  "həmin materiala əsasən imtahan suallarını ÖZÜN qur və düzgün cavabları da yaz. " +
+  "Sənədi ümumiyyətlə oxuya bilmirsənsə, sual uydurma: documentKind=\"unreadable\" qaytar. " +
+  "Cavab yalnız JSON olmalıdır.";
 const PDF_READING_MSG = "PDF oxunur…";
 const CONTINUING_MSG = "ilə davam edilir…";
 const EXTRACT_FAILED_MSG = "AI emalı alınmadı. Bir az sonra yenidən cəhd edin.";
@@ -126,7 +130,49 @@ const EXTRACTION_SCHEMA = {
   required: ["questions"],
 };
 
-const SYSTEM_PROMPT = `You extract exam questions from a PDF into structured data for an exam platform used for ANY school subject (maths, physics, chemistry, biology, history, geography, IT, literature, languages, …). The exam content is in Azerbaijani; keep all text in its original language.
+/*
+ * The shape for work that starts from a DOCUMENT, as opposed to a prompt.
+ *
+ * Same questions, one field more. It is deliberately not folded into the schema
+ * above, because that one is also what a generate-from-a-prompt turn must
+ * satisfy, and asking a model that was handed no document at all to classify one
+ * is a question with no honest answer.
+ *
+ * `documentKind` decides whether the questions below were COPIED or WRITTEN. A
+ * teacher does not only upload finished papers - they upload the grammar page,
+ * the topic summary, the worked examples, and expect an exam out of it. Refusing
+ * those with "no questions found" was us enforcing a shape they never agreed to.
+ *
+ * The third value is the one that protects them. A model that cannot see the
+ * page must say so, because the alternative is that it concludes the document
+ * has no questions and helpfully invents twenty - handing back a fabricated
+ * paper where the teacher's own test should have been. Unreadable is a failure
+ * to pass on, never a licence to write.
+ */
+const DOCUMENT_SCHEMA = {
+  ...EXTRACTION_SCHEMA,
+  properties: {
+    documentKind: { type: "string", enum: ["questions", "material", "unreadable"] },
+    ...EXTRACTION_SCHEMA.properties,
+  },
+  /* Both listed: OpenAI's strict mode requires every property to be. */
+  required: ["documentKind", "questions"],
+};
+
+const SYSTEM_PROMPT = `You turn a teacher's uploaded document into an exam, for a platform used for ANY school subject (maths, physics, chemistry, biology, history, geography, IT, literature, languages, …). The content is in Azerbaijani; keep all text in its original language.
+
+FIRST decide what the document is, and set "documentKind" to say so. This decides everything that follows:
+
+- "questions" — the document ALREADY contains exam questions (a test paper, a question bank, a past paper, an exercise set). COPY them. This is the normal case and the rest of this prompt is about doing it faithfully. Never rewrite, improve, reorder or invent anything; if the paper has 21 questions, return 21.
+
+- "material" — the document is TEACHING CONTENT with no ready questions: grammar rules, a topic summary, a theory page, a vocabulary list, worked examples, a textbook section, notes. Then WRITE the exam yourself FROM THAT CONTENT. Only from that content: every question must be answerable by someone who has read this document, and must test what the document actually teaches — not the general subject. Follow the document's own examples and level. Produce a sensible paper (about 10–15 questions unless the teacher asked otherwise), mostly "Cm" with 4–5 plausible options, and because YOU wrote them you DO know the answers, so fill "correct" / "openAnswer" properly. Cover the document's main points rather than one paragraph of it.
+
+- "unreadable" — you could NOT see the content: the Read tool errored, the file was refused for its size, the pages came back blank, or the scan is too poor to make out. Then set documentKind to "unreadable" and return an EMPTY questions array.
+  THIS IS IMPORTANT AND NOT OPTIONAL: when you cannot read the document you must NOT fall back to writing questions about what you guess the topic might be, and you must NOT report it as "material". A teacher who uploaded their own test and received twenty invented questions instead has been given something worse than an error. Say you could not read it and stop.
+
+A page whose questions are PICTURES — a scan, a photograph, a screenshot, an image-only PDF — is still "questions". Read the text out of the image and copy it. Only genuine illegibility is "unreadable".
+
+Everything below describes how to write each question. It applies to BOTH copied and written questions, except where it says the PDF must state something (an answer key, a marked option) — those rules exist to stop you inventing answers for a paper you are copying, and they do not apply when documentKind is "material", where the answers are yours to give.
 
 Output one item per question, in document order, using these types:
 - "Cm": single correct answer among options.
@@ -487,7 +533,7 @@ async function extractWithClaude(parts, instructions = "") {
         system,
         output_config: {
           effort: "high",
-          format: { type: "json_schema", schema: EXTRACTION_SCHEMA },
+          format: { type: "json_schema", schema: DOCUMENT_SCHEMA },
         },
         messages: [
           {
@@ -586,7 +632,7 @@ async function extractWithOpenAI(parts, instructions = "", modelId) {
             type: "json_schema",
             name: "exam_questions",
             strict: true,
-            schema: EXTRACTION_SCHEMA,
+            schema: DOCUMENT_SCHEMA,
           },
         },
         max_output_tokens: 32000,
@@ -636,6 +682,9 @@ async function extractWithOpenAI(parts, instructions = "", modelId) {
   };
   return {
     questions: Array.isArray(parsed.questions) ? parsed.questions : [],
+    // Carried through, not dropped: it is the difference between "your file did
+    // not open" and "your file had nothing to build from".
+    documentKind: parsed.documentKind || "questions",
     usage,
     cost: computeOpenAIGenCost(usage, data?.model, model),
   };
@@ -1514,7 +1563,7 @@ const extractQuestions = asyncHandler(async (req, res) => {
         // whichever CLI the gateway chose.
         system: SYSTEM_PROMPT + instructionBlock(instructions),
         prompt: "Yüklənmiş əlavə(lər)dəki bütün sualları çıxar və cavabı yalnız JSON kimi qaytar.",
-        schema: EXTRACTION_SCHEMA,
+        schema: DOCUMENT_SCHEMA,
         parts,
         signal: req.signal,
       });
@@ -1794,7 +1843,7 @@ async function streamClaude(parts, instructions, onText) {
     max_tokens: 32000,
     thinking: { type: "adaptive" },
     system,
-    output_config: { effort: "high", format: { type: "json_schema", schema: EXTRACTION_SCHEMA } },
+    output_config: { effort: "high", format: { type: "json_schema", schema: DOCUMENT_SCHEMA } },
     messages: [
       {
         role: "user",
@@ -1893,12 +1942,52 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
           // for whichever CLI the gateway chose.
           system: SYSTEM_PROMPT + instructionBlock(instructions),
           prompt: EXTRACT_CLI_PROMPT,
-          schema: EXTRACTION_SCHEMA,
+          schema: DOCUMENT_SCHEMA,
           parts,
           signal: req.signal,
         });
+        /*
+         * An empty extraction is a FAILURE of this route, not an answer.
+         *
+         * A teacher uploads a paper in order to get the questions out of it. Zero
+         * questions is never the result they were asking about — and the CLI
+         * reaches it for reasons that have nothing to do with the paper: the Read
+         * tool refused the file, the turn budget ran out mid-read, or the retry
+         * after a prose answer emitted a bare `{"questions":[]}` to satisfy the
+         * schema. All three exit 0, so this looked like success and the gateway
+         * never handed over.
+         *
+         * That is exactly what happened on 2026-09-29: two runs at 10:01 and
+         * 10:04 returned `{"questions":[]}` and the teacher was told her paper
+         * had no questions in it, while the very same paper went through the API
+         * fifty minutes later without complaint. Treat it as the defect it is and
+         * let the next engine try.
+         */
+        const got = out.doc?.questions || [];
+        /*
+         * "I could not see the page" is a different thing from "this page has
+         * nothing on it", and only the model can tell us which. Both hand over —
+         * another engine may well read what this one could not — but they are
+         * kept apart so the teacher is never told their paper was empty when the
+         * truth is that nothing ever managed to open it.
+         */
+        if (out.doc?.documentKind === "unreadable") {
+          throw Object.assign(new Error("the CLI could not read the document at all"), {
+            code: "cli_unreadable_document",
+          });
+        }
+        if (!got.length) {
+          throw Object.assign(new Error("the CLI read the document and returned no questions"), {
+            code: "cli_no_questions",
+          });
+        }
         return {
-          result: { full: JSON.stringify({ questions: out.doc?.questions || [] }), usage: null, cliCost: out.cost, model: out.cost?.model },
+          result: {
+            full: JSON.stringify({ documentKind: out.doc?.documentKind || "questions", questions: got }),
+            usage: null,
+            cliCost: out.cost,
+            model: out.cost?.model,
+          },
           usedProvider: out.provider,
           fellBack: false,
         };
@@ -1911,7 +2000,12 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
           // by one.
           openai: async () => {
             const one = await extractWithOpenAI(parts, instructions, openaiModel);
-            return { full: JSON.stringify({ questions: one.questions }), usage: one.usage, model: one.cost?.model, openaiCost: one.cost };
+            return {
+              full: JSON.stringify({ documentKind: one.documentKind, questions: one.questions }),
+              usage: one.usage,
+              model: one.cost?.model,
+              openaiCost: one.cost,
+            };
           },
           gemini: () => streamGemini(parts, instructions, mkOnText()),
           claude: () => streamClaude(parts, instructions, mkOnText()),
@@ -1920,11 +2014,37 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
         // availability failure (Gemini right after the pick - cheap + good at
         // PDFs) so one engine being down never dead-ends the extraction.
         const order = [provider, "gemini", "openai", "claude"].filter((p, i, a) => a.indexOf(p) === i);
+        /* How many questions an engine actually found, from its own answer. */
+        const found = (got) => {
+          try {
+            return (JSON.parse(got?.full || "{}").questions || []).length;
+          } catch {
+            return 0;
+          }
+        };
         let lastErr = null;
-        for (const name of order) {
+        let lastEmpty = null;
+        for (let i = 0; i < order.length; i += 1) {
+          const name = order[i];
           try {
             sse("status", { message: name === provider ? PDF_READING_MSG : `${label[name]} ${CONTINUING_MSG}` });
             const got = await runners[name]();
+            /*
+             * An engine that found nothing must not end the search while others
+             * are still untried - the same rule the CLI branch above now follows.
+             * A paper does not become empty because one reader came back empty
+             * handed, and the teacher is the one who pays for the difference:
+             * "bu sənəddə sual tapılmadı" about a document that is full of them.
+             *
+             * The LAST engine's empty answer is still returned rather than
+             * thrown, because by then it is the honest one: every reader we have
+             * looked and none of them saw a question.
+             */
+            if (!found(got) && i < order.length - 1) {
+              lastEmpty = got;
+              console.warn(`AI extract (${name}) found no questions; trying ${order[i + 1]}`);
+              continue;
+            }
             return { result: got, usedProvider: name, fellBack: name !== provider };
           } catch (e) {
             lastErr = e;
@@ -1932,6 +2052,8 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
             if (!isRetriable(e)) break;
           }
         }
+        /* Every engine that ran found nothing: report that, not a failure. */
+        if (lastEmpty) return { result: lastEmpty, usedProvider: order[order.length - 1], fellBack: true };
         throw lastErr || new Error("extract_failed");
       },
     }));
@@ -1961,9 +2083,31 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
   const extracted = cleanQuestions(parsed.questions);
   if (!extracted.length) {
     console.warn(
-      `AI extract (${usedProvider}) returned 0 questions; full length=${(result.full || "").length}, head=`,
+      `AI extract (${usedProvider}) returned 0 questions (kind=${parsed.documentKind || "?"}); full length=${(result.full || "").length}, head=`,
       (result.full || "").slice(0, 200)
     );
+    /*
+     * Say which of the two happened, because the teacher's next move differs.
+     * "We could not open your file" means rescan it or send a smaller one;
+     * "there was nothing in it to build from" means send a different page. The
+     * old single message - "bu sənəddə sual tapılmadı" - sent everyone down the
+     * second road, including the ones whose file simply never opened.
+     */
+    sse("error", {
+      message:
+        parsed.documentKind === "unreadable"
+          ? "Sənəd oxunmadı. Şəkil çox keyfiyyətsizdirsə və ya fayl çox böyükdürsə, daha aydın və ya daha kiçik bir fayl yükləyin."
+          : "Bu sənəddən sual qurmaq alınmadı. Faylda sual və ya mövzu izahı olduğundan əmin olun.",
+    });
+    return res.end();
+  }
+  /*
+   * The questions were WRITTEN from the teacher's material, not copied out of a
+   * paper. They should know that before they publish: these are the AI's
+   * questions about their content, and its answer key is its own.
+   */
+  if (parsed.documentKind === "material") {
+    sse("status", { message: "Sənəddə hazır sual yox idi — materiala əsasən suallar quruldu. Yoxlayın." });
   }
   // If nothing streamed during extraction (the OpenAI runner returns the whole
   // paper at once), push the extracted questions NOW so the teacher sees them
@@ -2823,6 +2967,16 @@ async function runMultiPassage({ prompt, preset, model, n, signal, onProvider, o
 const rememberExamPrompt = async (req, prompt) => {
   const text = String(prompt || "").trim();
   if (!text || !req.params?.examId) return;
+  /*
+   * An exam being composed for the first time has no id yet - the route carries
+   * the literal "new" until the teacher saves. Handing that to updateOne threw a
+   * CastError on EVERY generation from the composer, which the catch below
+   * swallowed into one noisy line per turn; the log for 29 September is mostly
+   * this. Nothing broke, but nothing was recorded either: the prompt behind a
+   * newly created exam was never saved, so a later single-question rewrite lost
+   * the context this function exists to keep.
+   */
+  if (!require("mongoose").isValidObjectId(req.params.examId)) return;
   try {
     // NB: the exam's creator is `owner`. Scoped on `user` this matched nothing
     // and silently saved nothing — updateOne reports success on zero matches.
@@ -3853,7 +4007,10 @@ module.exports = {
   regenerateQuestion,
   // exported for tests / benchmarking
   GEN_SYSTEM_PROMPT,
+  SYSTEM_PROMPT,
+  EXTRACT_CLI_PROMPT,
   EXTRACTION_SCHEMA,
+  DOCUMENT_SCHEMA,
   runGeneration,
   runMultiPassage,
   detectPassageCount,

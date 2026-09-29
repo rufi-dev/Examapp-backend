@@ -114,6 +114,25 @@ function isRouteDefect(error) {
     "cli_timeout",        // took longer than a turn is allowed to take
     "cli_output_too_large",
     /*
+     * Answered in the right SHAPE with nothing in it — a paper full of questions
+     * extracted as `{"questions":[]}`. The most dangerous kind of failure here,
+     * because it exits 0 and reads as a finished job: a teacher was told her
+     * paper was empty while another engine read it fine minutes later.
+     */
+    "cli_no_questions",
+    /*
+     * It could not see the document. Another engine may manage it - a different
+     * reader, a different size ceiling - so this moves on, but it is kept apart
+     * from an empty answer because the two mean opposite things to the teacher.
+     */
+    "cli_unreadable_document",
+    /*
+     * We handed it a file its Read tool will not open (over 20MB). Nothing about
+     * the plan, and nothing the other CLI would do better — but the API takes
+     * the document directly and has no such ceiling, so move on.
+     */
+    "cli_input_too_large",
+    /*
      * A process that would not start is a defect too, NOT a spent plan. It used
      * to count as exhaustion, which meant an oversized prompt (E2BIG) or a
      * missing binary stood a perfectly healthy subscription down for ten
