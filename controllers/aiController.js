@@ -1223,7 +1223,105 @@ const AI_VERIFY_ROUNDS = Number.isFinite(AI_VERIFY_ROUNDS_RAW)
 const aiVerifyDisabled = () =>
   ["off", "false", "0", "no"].includes(String(process.env.AI_VERIFY || "").trim().toLowerCase());
 
-async function verifyAndFix({ questions, prompt, preset, model, signal, onStatus, parts }) {
+/*
+ * The prompt for ANSWERING a paper, as opposed to improving one.
+ *
+ * The review prompt above is written for questions the AI wrote itself, and its
+ * rules 6a/6b tell it to turn an open question into multiple choice whenever the
+ * answer can be written more than one way. That is a sound rule for a paper the
+ * model is authoring. It is the wrong rule for "Cavabları tap" on a teacher's
+ * paper: a shaded-region question ("Ştrixlənmiş hissəni müəyyən edin") has an
+ * answer like (A∩B)∪(B∩C), so the reviewer dutifully converted it to Cm and
+ * pointed `correct` at a fifth option that did not exist. The picture had been
+ * read; the answer had nowhere to land.
+ *
+ * This prompt has one job and says so. The question is the teacher's.
+ */
+const SOLVE_SYSTEM_PROMPT = `Sən imtahan suallarının CAVABINI tapan sistemsən. Sualları müəllim yazıb — sən yalnız düzgün cavabı müəyyən edirsən.
+
+QƏTİ QAYDALAR:
+- Sualın TİPİNİ ("type"), MƏTNİNİ ("text"), VARİANTLARINI ("choices"), onların sırasını və sualların SAYINI DƏYİŞMƏ. Heç bir sualı başqa tipə çevirmə, yeni variant əlavə etmə, variant silmə.
+- Yalnız cavab sahələrini doldur:
+  • Tək seçim (Cm): "correct" = düzgün variantın indeksi (0-dan başlayır), bir element.
+  • Çox seçim (Cs): "correct" = BÜTÜN düzgün variantların indeksləri.
+  • Açıq sual (Co / Cd): "openAnswers" = düzgün cavabın şagirdin yaza biləcəyi BÜTÜN ekvivalent formaları (məs. çoxluq ifadəsi üçün həm "(A∩B)∪(B∩C)", həm "(A∩B)∪(C∩B)", həm "B∩(A∪C)" — hansılar riyazi olaraq eynidirsə); "openAnswer" = əsas forma. Açıq sualı HEÇ VAXT Cm-ə çevirmə, "correct"-ə indeks YAZMA.
+  • Bir neçə boşluqlu sual ("blanks" > 1): "openAnswers" massivinə HƏR BOŞLUQ ÜÇÜN BİR cavab yaz, boşluqların sırası ilə — mətndə [[1]] birinci, [[2]] ikinci…; cədvəldə ___1___, ___2___… Artıq doldurulmuş boşluğun cavabını OLDUĞU KİMİ saxla. Bu halda "openAnswers" alternativlər deyil — hər element bir boşluğun cavabıdır, sayı "blanks"-a bərabər olsun.
+  • Uyğunluq (Cma): hər nömrə üçün "pairs[i].right"-a düzgün hərf(lər)i yaz (bir neçədirsə vergüllə: "a, d"). Yalnız "letters" sahəsində verilən hərflərdən istifadə et; "left"-i dəyişmə.
+- ŞƏKİLLƏR: suala aid şəkil/diaqram/qrafik əlavə olunubsa, ona BAX. Qrafikdəki rəqəmləri oxu, diaqramdakı ştrixlənmiş/rənglənmiş hissəni hərflərlə (A, B, C…) çoxluq ifadəsi kimi yaz. Təxmin etmə — hesabla və ya şəkildən oxu.
+- Riyazi sualları ÖZÜN addım-addım həll et və cavabı yoxla.
+- Şəkil lazımdırsa, amma əlavə olunmayıbsa və ya oxunmursa, həmin sualın cavab sahələrini BOŞ burax — cavab uydurma.
+- "latex" sahəsi həmişə "" olsun; riyaziyyat mətnin içində $...$ arasındadır.
+
+Cavab yalnız JSON olsun və bütün sualları eyni sıra ilə qaytarsın.`;
+
+/*
+ * Only the ANSWER of `got`, laid onto the teacher's own question.
+ *
+ * The prompt above asks for this; this makes it true whatever the model did.
+ * The type, text, options and picture are always the original ones. When the
+ * model answered in a different SHAPE — an open question returned as multiple
+ * choice, or the reverse — the answer is carried across by its text where that
+ * is possible, and dropped where it is not, rather than stored as an index into
+ * options the teacher never wrote.
+ */
+function answerOnly(orig, got) {
+  if (!orig || typeof orig !== "object" || orig.type === "reading") return orig;
+  const g = got && typeof got === "object" ? got : {};
+  const out = { ...orig };
+  const norm = (s) => String(s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  const choices = Array.isArray(orig.choices) ? orig.choices : [];
+  const openList = [...(Array.isArray(g.openAnswers) ? g.openAnswers : []), g.openAnswer]
+    .map((a) => String(a ?? "").trim())
+    .filter(Boolean);
+  const pickedTexts = (Array.isArray(g.correct) ? g.correct : [])
+    .map((i) => (Array.isArray(g.choices) ? g.choices[i]?.text : undefined))
+    .map((t) => String(t ?? "").trim())
+    .filter(Boolean);
+
+  if (orig.type === "Cm" || orig.type === "Cs") {
+    const sameShape =
+      g.type === orig.type &&
+      (!Array.isArray(g.choices) || !g.choices.length || g.choices.length === choices.length);
+    let idx;
+    if (sameShape && Array.isArray(g.correct)) {
+      idx = g.correct.map(Number).filter((i) => Number.isInteger(i) && i >= 0 && i < choices.length);
+    } else {
+      // Answered in words, or against different options: find the teacher's
+      // option that says the same thing.
+      const want = new Set([...pickedTexts, ...openList].map(norm));
+      idx = choices.map((c, i) => (want.has(norm(c?.text)) ? i : -1)).filter((i) => i >= 0);
+    }
+    out.correct = orig.type === "Cm" ? idx.slice(0, 1) : [...new Set(idx)];
+    return out;
+  }
+  if (orig.type === "Co" || orig.type === "Cd") {
+    /*
+     * Several boxes: the list is POSITIONAL — element k is box k's answer. The
+     * de-duplication below would collapse two boxes that happen to share an
+     * answer and shift every later box into the wrong slot, so it is skipped.
+     */
+    const boxes = Number(orig.blanks) || 1;
+    if (boxes > 1) {
+      const pos = (Array.isArray(g.openAnswers) ? g.openAnswers : []).map((a) => String(a ?? "").trim());
+      out.openAnswers = Array.from({ length: boxes }, (_, k) => pos[k] || "");
+      out.openAnswer = out.openAnswers[0];
+      return out;
+    }
+    const answers = [...new Set(openList.length ? openList : pickedTexts)];
+    out.openAnswers = answers;
+    out.openAnswer = answers[0] || "";
+    return out;
+  }
+  if (orig.type === "Cma") {
+    if (Array.isArray(g.pairs) && Array.isArray(orig.pairs) && g.pairs.length === orig.pairs.length) {
+      out.pairs = g.pairs;
+    }
+    return out;
+  }
+  return out;
+}
+
+async function verifyAndFix({ questions, prompt, preset, model, signal, onStatus, parts, system }) {
   let best = cleanQuestions(questions);
   let bestIssues = auditQuestions(best, { requireAnswers: true });
   let reviewCost = null;
@@ -1267,7 +1365,7 @@ async function verifyAndFix({ questions, prompt, preset, model, signal, onStatus
         preset,
         model: process.env.AI_VERIFY_MODEL || model,
         signal,
-        system: REVIEW_SYSTEM_PROMPT,
+        system: system || REVIEW_SYSTEM_PROMPT,
         // The original pages, so the reviewer can LOOK at a diagram rather than
         // pick one of its five options and sound certain.
         parts,
@@ -1446,7 +1544,7 @@ const spreadKeysIfNeeded = (questions, preset) => {
   return spreadAnswerKeys(questions).items;
 };
 
-async function applyAnswerMode({ questions, mode, preset, model, signal, onStatus, parts }) {
+async function applyAnswerMode({ questions, mode, preset, model, signal, onStatus, parts, system, prompt }) {
   const m = ANSWER_MODES.has(mode) ? mode : "auto";
 
   /*
@@ -1479,8 +1577,10 @@ async function applyAnswerMode({ questions, mode, preset, model, signal, onStatu
     const v = await verifyAndFix({
       questions,
       prompt:
+        prompt ||
         "Vərəqdə cavabı qeyd olunmuş sualların cavabını OLDUĞU KİMİ saxla. " +
-        "Yalnız cavabı qeyd olunmamış sualları həll et və düzgün cavabı işarələ.",
+          "Yalnız cavabı qeyd olunmamış sualları həll et və düzgün cavabı işarələ.",
+      system,
       preset,
       model,
       signal,
@@ -1501,7 +1601,8 @@ async function applyAnswerMode({ questions, mode, preset, model, signal, onStatu
     // and checked — no separate solver needed.
     const v = await verifyAndFix({
       questions,
-      prompt: "PDF-dən çıxarılmış sualları həll et və düzgün cavabları qeyd et.",
+      prompt: prompt || "PDF-dən çıxarılmış sualları həll et və düzgün cavabları qeyd et.",
+      system,
       preset,
       model,
       signal,
@@ -3432,8 +3533,22 @@ const solveAnswers = asyncHandler(async (req, res) => {
   }
 
   const redoAll = String(scope || "missing") === "all";
+  /*
+   * WHICH questions to solve is the builder's call when it makes one. It knows
+   * its own question shapes — a gap-fill keeps its answers inside the text, a
+   * table inside its cells — and this side sees a flattened copy. Re-deriving
+   * "empty" here is how a paper with one blank got told it had five. The list is
+   * still checked: in range, a real question, no repeats.
+   */
+  const asked = Array.isArray(req.body?.targets) ? req.body.targets : null;
   const blankSet = unansweredIndexes(list);
-  const targets = redoAll ? scorableIdx : scorableIdx.filter((i) => blankSet.has(i));
+  const targets = asked
+    ? [...new Set(asked.map(Number))]
+        .filter((i) => Number.isInteger(i) && i >= 0 && i < list.length && list[i]?.type !== "reading")
+        .sort((a, c) => a - c)
+    : redoAll
+      ? scorableIdx
+      : scorableIdx.filter((i) => blankSet.has(i));
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -3534,12 +3649,36 @@ const solveAnswers = asyncHandler(async (req, res) => {
 
       let out;
       try {
+        /*
+         * Which picture is which question, in THIS sub-paper's numbering. On the
+         * CLI the files are named after the question, but in the full paper's
+         * numbering, which is not the list the model is looking at; on the API
+         * the pictures arrive in order with no names at all. Either way the model
+         * would otherwise have to guess the pairing.
+         */
+        const pictureMap = parts
+          .filter((p) => !p.isPdf)
+          .map((p, k) => {
+            const pos = origin.indexOf(p.forQuestion - 1) + 1;
+            return pos > 0 ? `${k + 1}-ci şəkil (${p.name}) → siyahıdakı №${pos} sual` : null;
+          })
+          .filter(Boolean);
+        const ask = [
+          "Aşağıdakı sualların DÜZGÜN CAVABINI tap. Sualları dəyişmə — yalnız cavab sahələrini doldur.",
+          pictureMap.length ? `Əlavə olunmuş şəkillər:\n${pictureMap.join("\n")}` : "",
+          pdfPart ? "İmtahanın mənbə PDF-i də əlavə olunub." : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n");
+
         out = await applyAnswerMode({
           questions: sub,
           mode: "ai-solve",
           preset,
           model: PLATFORM_SOLVE_MODEL,
           parts,
+          system: SOLVE_SYSTEM_PROMPT,
+          prompt: ask,
           signal: req.signal,
           onStatus: () => sse("phase", { key: "checking", batch: b + 1 }),
         });
@@ -3561,8 +3700,16 @@ const solveAnswers = asyncHandler(async (req, res) => {
       const inBatch = new Set(batch);
       origin.forEach((orig, pos) => {
         if (!inBatch.has(orig)) return; // a passage carried only as context
-        const q = got[pos];
-        const found = !unansweredIndexes([q]).size;
+        // The teacher's question with only the answer laid on it. Whatever
+        // shape the model answered in, the card keeps the type they chose.
+        const q = answerOnly(sub[pos], got[pos]);
+        // Every box filled, for a question with several; otherwise the usual
+        // audit. (The builder makes its own call for the card; this one decides
+        // whether anything usable was produced — and so whether it is billed.)
+        const found =
+          (Number(q?.blanks) || 1) > 1
+            ? (q.openAnswers || []).every((a) => String(a || "").trim())
+            : !unansweredIndexes([q]).size;
         if (found) solved += 1;
         sse("answer", { index: orig, question: q, found });
       });
@@ -4359,6 +4506,8 @@ module.exports = {
   regenerateQuestion,
   solveAnswers,
   planSolveBatches,
+  answerOnly,
+  SOLVE_SYSTEM_PROMPT,
   batchSubPaper,
   // exported for tests / benchmarking
   GEN_SYSTEM_PROMPT,

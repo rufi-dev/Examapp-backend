@@ -46,7 +46,11 @@ function main() {
 
   console.log("\nthe pages reach the solver:");
   ok("verifyAndFix takes them", /async function verifyAndFix\(\{[^}]*parts[^}]*\}\)/s.test(src));
-  ok("...and hands them to the generation call", /system: REVIEW_SYSTEM_PROMPT,\s*(\/\/[^\n]*\n\s*)*parts,/s.test(src));
+  /* The system prompt is now the caller's to choose — "Cavabları tap" answers on
+   * its own solver prompt, everything else still reviews — so this asserts the
+   * pages travel whichever prompt is in force. */
+  ok("...and hands them to the generation call",
+    /system: system \|\| REVIEW_SYSTEM_PROMPT,\s*(\/\/[^\n]*\n\s*)*parts,/s.test(src));
   ok("applyAnswerMode takes them", /async function applyAnswerMode\(\{[^}]*parts[^}]*\}\)/s.test(src));
   ok("runGeneration takes them", /async function runGeneration\(\{[^}]*parts[^}]*\}\)/s.test(src));
   ok("...and the CLI turn carries them", /schema: EXTRACTION_SCHEMA,\s*(\/\/[^\n]*\n\s*)*parts: Array\.isArray\(parts\)/s.test(src));

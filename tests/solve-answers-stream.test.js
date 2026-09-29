@@ -89,6 +89,67 @@ function main() {
   ok("the reservation commits on a usable result", /req\.aiCredit\.usable\(\);/.test(src.slice(src.indexOf("const solveAnswers"))));
   ok("...only once a question was actually answered", /if \(solved > 0 && !charged && req\.aiCredit\)/.test(src));
 
+  console.log("\nthe teacher's question keeps its shape — only the ANSWER is taken:");
+  /*
+   * The live failure: question 18, a short-answer "Ştrixlənmiş hissəni müəyyən
+   * edin". The picture was read, but the solver ran on the review prompt, whose
+   * rules 6a/6b turn an open question into multiple choice whenever the answer
+   * can be written more than one way. It came back as Cm with correct: [4] and no
+   * options at all. The builder rightly refused to change the type, so the
+   * answer had nowhere to land and the teacher saw "Tapılmadı".
+   */
+  const q18 = { type: "Co", text: "Ştrixlənmiş hissəni müəyyən edin.", choices: [], image: "pic", openAnswer: "", openAnswers: [] };
+  const bogus = ai.answerOnly(q18, { type: "Cm", correct: [4], choices: [] });
+  ok("an index into options that do not exist is never stored", bogus.type === "Co" && bogus.openAnswers.length === 0);
+  ok("...and the picture and wording stay the teacher's", bogus.image === "pic" && bogus.text === q18.text);
+  const recovered = ai.answerOnly(q18, { type: "Cm", correct: [1], choices: [{ text: "A∩B" }, { text: "(A∩B)∪(B∩C)" }] });
+  /* Question 14 did exactly this live, after the fix: the model still converted
+   * it, and the merge carried the answer across by its text. */
+  ok("an answer given as a choice is carried across by its text", JSON.stringify(recovered.openAnswers) === '["(A∩B)∪(B∩C)"]');
+  ok("...and the question stays short-answer", recovered.type === "Co");
+  const right = ai.answerOnly(q18, { type: "Co", openAnswers: ["(A∩B)∪(B∩C)", "B∩(A∪C)"] });
+  ok("equivalent forms are all kept, so a student writing it differently is not marked wrong",
+    right.openAnswers.length === 2 && right.openAnswer === "(A∩B)∪(B∩C)");
+
+  const mc = { type: "Cm", text: "n(A)?", choices: [{ text: "5" }, { text: "8" }, { text: "2" }], correct: [] };
+  ok("multiple choice keeps its index when the options match", JSON.stringify(ai.answerOnly(mc, { type: "Cm", correct: [0], choices: mc.choices }).correct) === "[0]");
+  ok("...an out-of-range index is dropped", ai.answerOnly(mc, { type: "Cm", correct: [9], choices: mc.choices }).correct.length === 0);
+  ok("...an answer given in WORDS is matched to the teacher's option", JSON.stringify(ai.answerOnly(mc, { type: "Co", openAnswers: ["5"] }).correct) === "[0]");
+  ok("...and Cm never ends up with two answers", ai.answerOnly(mc, { type: "Cm", correct: [0, 1], choices: mc.choices }).correct.length === 1);
+  ok("a reading passage passes through untouched", ai.answerOnly({ type: "reading", text: "p" }, { type: "Cm", correct: [0] }).correct === undefined);
+
+  console.log("\nseveral boxes keep their order:");
+  /*
+   * Element k of openAnswers is box k's answer. De-duplicating would collapse
+   * two boxes that share an answer and shift every later box into the wrong slot.
+   */
+  const boxes = { type: "Co", text: "[[1]] və [[2]] və [[3]]", blanks: 3, choices: [], openAnswers: ["", "", ""] };
+  const filledBoxes = ai.answerOnly(boxes, { type: "Co", openAnswers: ["2", "2", "5"] });
+  ok("two boxes with the same answer both keep it", JSON.stringify(filledBoxes.openAnswers) === '["2","2","5"]');
+  ok("a short reply leaves the missing box empty, not shifted", JSON.stringify(ai.answerOnly(boxes, { openAnswers: ["x"] }).openAnswers) === '["x","",""]');
+  ok("the prompt explains one answer per box, in order", /HƏR BOŞLUQ ÜÇÜN BİR cavab/.test(ai.SOLVE_SYSTEM_PROMPT));
+  ok("...including table blanks", /___1___/.test(ai.SOLVE_SYSTEM_PROMPT));
+  ok("...and matching grids use only the letters offered", /"letters" sahəsində verilən hərflərdən/.test(ai.SOLVE_SYSTEM_PROMPT));
+
+  console.log("\nthe builder decides which questions are empty:");
+  /*
+   * "5 boş" on a paper with one blank: the server re-derived emptiness from a
+   * flattened copy and disagreed with the builder. Now the builder's list wins,
+   * checked for range, passages and repeats.
+   */
+  ok("the builder's targets are used when sent", /const asked = Array\.isArray\(req\.body\?\.targets\)/.test(src));
+  ok("...kept in range, never a passage, never twice",
+    /i < list\.length && list\[i\]\?\.type !== "reading"/.test(src) && /new Set\(asked\.map\(Number\)\)/.test(src));
+
+  console.log("\nthe solver runs on its own prompt, not the reviewer's:");
+  ok("it forbids changing the type", /Sualın TİPİNİ \("type"\)[^\n]*DƏYİŞMƏ/.test(ai.SOLVE_SYSTEM_PROMPT));
+  ok("...says an open question is never turned into Cm", /Açıq sualı HEÇ VAXT Cm-ə çevirmə/.test(ai.SOLVE_SYSTEM_PROMPT));
+  ok("...asks for every equivalent written form", /BÜTÜN ekvivalent formaları/.test(ai.SOLVE_SYSTEM_PROMPT));
+  ok("...and to read the shaded region off the picture", /ştrixlənmiş\/rənglənmiş hissəni/.test(ai.SOLVE_SYSTEM_PROMPT));
+  ok("the stream passes it", /system: SOLVE_SYSTEM_PROMPT,/.test(src));
+  ok("...and merges answer-only before reporting found", /const q = answerOnly\(sub\[pos\], got\[pos\]\);/.test(src));
+  ok("each picture is named with its number in THIS batch", /siyahıdakı №\$\{pos\} sual/.test(src));
+
   console.log("\na dropped connection is never shown as a finished paper:");
   const fe = fs.readFileSync(path.join(__dirname, "..", "..", "Frontend", "src", "pages", "admin", "StructuredBuilder.jsx"), "utf8");
   ok("the builder notices a stream that ended without `done`", /if \(!finished\) \{/.test(fe));
