@@ -8,8 +8,23 @@ const { PRESETS } = require("./examPresets");
 
 const EVALUATOR_VERSION = "1";
 
-// Legacy 18/55-45 split (total 100) for custom/no-preset exams.
-function questionPoints(count) {
+/*
+ * The 18/55-45 ladder: the first 18 questions share 55 points, the rest share 45.
+ *
+ * This is the DİM Buraxılış shape, where the paper really is two parts and the
+ * closing tasks really are worth more. It belongs to the presets that say so —
+ * see `buraxilis` in examPresets, which now names it explicitly.
+ *
+ * It used to be the fallback for EVERY exam with no preset, which is a different
+ * claim entirely, and a wrong one. A teacher building their own paper has not
+ * asked for a ladder, and at ordinary sizes the result is indefensible: at 20
+ * questions the last two are worth 22.5 each against 3.06 for the other
+ * eighteen, so two questions carry 45% of the grade. At 21 it is 3.06 against
+ * 15. On production, 101 of 365 custom exams are over 18 questions and 62 of
+ * those mix written with multiple-choice — the case a teacher wrote in about,
+ * asking how to make "yazılı" and "test" worth the same.
+ */
+function ladderPoints(count) {
   const FIRST = 18;
   const SP = 45;
   const n = Number(count) || 0;
@@ -22,6 +37,21 @@ function questionPoints(count) {
   const pts = new Array(n);
   for (let i = 0; i < n; i++) pts[i] = i < a ? firstEach : secondEach;
   return pts;
+}
+
+/*
+ * The default when no preset is chosen: every scored question is worth the same.
+ *
+ * Nothing about "I am building my own exam" implies that question 19 should be
+ * worth five times question 3, or that a written answer should be worth less
+ * than a multiple-choice one because of where it happens to sit. Equal is the
+ * only split that needs no explanation, and a teacher who wants something else
+ * has the per-type editor and the presets.
+ */
+function questionPoints(count) {
+  const n = Number(count) || 0;
+  if (n <= 0) return [];
+  return new Array(n).fill(100 / n);
 }
 
 // A plain passage (reading, not gap-fill) is not scored.
@@ -47,4 +77,4 @@ function computePointsPlan(correct, { preset, typePoints } = {}) {
   });
 }
 
-module.exports = { EVALUATOR_VERSION, questionPoints, computePointsPlan, isRead };
+module.exports = { EVALUATOR_VERSION, questionPoints, ladderPoints, computePointsPlan, isRead };

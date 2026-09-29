@@ -117,15 +117,20 @@ const PRESETS = {
     id: "buraxilis",
     label: "Buraxılış (11-ci sinif)",
     totalMarks: 100,
-    // Seeded structure for the builder (teacher can adjust). Scoring stays the
-    // legacy one (pointsPlan null -> quizController falls back to questionPoints:
-    // first 18 share 55 pts, the rest share 45 — total 100), unchanged.
+    // Seeded structure for the builder (teacher can adjust). Scoring is the
+    // 18/55-45 ladder — first 18 share 55 points, the rest share 45, total 100 —
+    // which is this paper's real shape: the closing Cd tasks are worth more.
+    //
+    // It used to get that by leaving pointsPlan null and inheriting the
+    // no-preset fallback. That fallback is now flat (a teacher's own exam should
+    // not have a hidden ladder in it), so this preset states what it wants
+    // instead of depending on someone else's default. Scoring here is unchanged.
     slots: [
       { type: "Cm", count: 13 },
       { type: "Co", count: 5 },
       { type: "Cd", count: 7 },
     ],
-    pointsPlan: null,
+    pointsPlan: (n) => require("./scoring").ladderPoints(n),
     negativeMarking: null,
   },
 

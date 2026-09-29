@@ -97,6 +97,7 @@
   "tests/http/register-referral.test.js",
   "tests/journey-preview-guard.test.js",
   "tests/question-type-matrix.test.js",
+  "tests/scoring-default.test.js",
   "tests/question-flags-persistence.test.js",
   "tests/ai-cli-runtime.test.js",
   "tests/ai-runtime-modes.test.js",
