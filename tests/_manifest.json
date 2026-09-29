@@ -104,6 +104,7 @@
   "tests/ai-runtime-coverage.test.js",
   "tests/ai-cli-failover.test.js",
   "tests/ai-cli-silent-failure.test.js",
+  "tests/answer-key-vision.test.js",
   "tests/ai-operations-config.test.js",
   "tests/curriculum-schema.test.js",
   "tests/curriculum-geometry.test.js",

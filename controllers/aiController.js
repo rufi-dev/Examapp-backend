@@ -1223,7 +1223,7 @@ const AI_VERIFY_ROUNDS = Number.isFinite(AI_VERIFY_ROUNDS_RAW)
 const aiVerifyDisabled = () =>
   ["off", "false", "0", "no"].includes(String(process.env.AI_VERIFY || "").trim().toLowerCase());
 
-async function verifyAndFix({ questions, prompt, preset, model, signal, onStatus }) {
+async function verifyAndFix({ questions, prompt, preset, model, signal, onStatus, parts }) {
   let best = cleanQuestions(questions);
   let bestIssues = auditQuestions(best, { requireAnswers: true });
   let reviewCost = null;
@@ -1268,6 +1268,9 @@ async function verifyAndFix({ questions, prompt, preset, model, signal, onStatus
         model: process.env.AI_VERIFY_MODEL || model,
         signal,
         system: REVIEW_SYSTEM_PROMPT,
+        // The original pages, so the reviewer can LOOK at a diagram rather than
+        // pick one of its five options and sound certain.
+        parts,
       });
     } catch (e) {
       if (signal?.aborted) throw e;
@@ -1389,6 +1392,44 @@ const unansweredCount = (questions) =>
   auditQuestions(questions, { requireAnswers: true }).filter((i) =>
     ["no-correct-answer", "no-open-answer", "incomplete-pair"].includes(i.code)
   ).length;
+
+/* WHICH ones are unanswered, not just how many — so an answer the AI supplies
+ * can be told apart from one the paper already carried. */
+const unansweredIndexes = (questions) =>
+  new Set(
+    auditQuestions(questions, { requireAnswers: true })
+      .filter((i) => ["no-correct-answer", "no-open-answer", "incomplete-pair"].includes(i.code))
+      .map((i) => i.index)
+  );
+
+/*
+ * A question whose data is in a PICTURE cannot be solved from its text, and must
+ * not be answered as if it could.
+ *
+ * "Diaqrama əsasən A çoxluğunun elementlərinin sayını tapın" carries none of the
+ * numbers — they are in the bar chart. Handed that and five options, a model does
+ * not fail; it picks one and marks it, and the teacher gets an answer key with
+ * nothing to distinguish the guess from the arithmetic. On the 29 September
+ * ÇOXLUQLAR paper there were two such questions: one guess landed, one did not,
+ * and question 9 went out marked 6 where the chart gives 5.
+ *
+ * So when the solver had no eyes on the page, a figure question it filled in is
+ * put back to blank. A blank costs the teacher a minute. A confident wrong key
+ * costs their students the marks, and nobody checks a key that looks finished.
+ */
+function unguessFigures(solved, wasUnanswered, sawPages) {
+  if (sawPages) return solved;
+  let cleared = 0;
+  const out = (Array.isArray(solved) ? solved : []).map((q, i) => {
+    if (!q || q.type === "reading" || !q.hasFigure || !wasUnanswered.has(i)) return q;
+    cleared += 1;
+    return { ...q, correct: [], openAnswer: "", openAnswers: [] };
+  });
+  if (cleared) {
+    console.warn(`[AI] ${cleared} figure question(s) left unmarked: the solver never saw the page`);
+  }
+  return out;
+}
 /*
  * "Ardıcıl olaraq təkrarlanan düzgün cavablar olmamalıdır" — the brief's rule, and
  * one the model does not reliably keep. The live German paper came back
@@ -1405,7 +1446,7 @@ const spreadKeysIfNeeded = (questions, preset) => {
   return spreadAnswerKeys(questions).items;
 };
 
-async function applyAnswerMode({ questions, mode, preset, model, signal, onStatus }) {
+async function applyAnswerMode({ questions, mode, preset, model, signal, onStatus, parts }) {
   const m = ANSWER_MODES.has(mode) ? mode : "auto";
 
   /*
@@ -1425,6 +1466,10 @@ async function applyAnswerMode({ questions, mode, preset, model, signal, onStatu
    */
   if (m === "auto") {
     const missing = unansweredCount(questions);
+    /* Recorded BEFORE solving, so an answer the AI supplies can be told apart
+     * from one the paper already carried. */
+    const wasUnanswered = unansweredIndexes(questions);
+    const sawPages = Array.isArray(parts) && parts.length > 0;
     if (!missing) {
       return { questions: spreadKeysIfNeeded(questions, preset), issues: null, reviewCost: null, rounds: 0, mode: m, solved: 0 };
     }
@@ -1440,13 +1485,17 @@ async function applyAnswerMode({ questions, mode, preset, model, signal, onStatu
       model,
       signal,
       onStatus,
+      parts,
     });
-    return { ...v, questions: spreadKeysIfNeeded(v.questions, preset), mode: m, solved: missing };
+    const safe = unguessFigures(v.questions, wasUnanswered, sawPages);
+    return { ...v, questions: spreadKeysIfNeeded(safe, preset), mode: m, solved: missing };
   }
   if (m === "manual") {
     return { questions: stripAnswers(questions), issues: null, reviewCost: null, rounds: 0, mode: m };
   }
   if (m === "ai-solve") {
+    const wasUnanswered = unansweredIndexes(questions);
+    const sawPages = Array.isArray(parts) && parts.length > 0;
     // verifyAndFix already audits for unmarked answers and the critic prompt
     // solves them, so an extracted set with empty `correct` comes back solved
     // and checked — no separate solver needed.
@@ -1457,8 +1506,10 @@ async function applyAnswerMode({ questions, mode, preset, model, signal, onStatu
       model,
       signal,
       onStatus,
+      parts,
     });
-    return { ...v, questions: spreadKeysIfNeeded(v.questions, preset), mode: m };
+    const safe = unguessFigures(v.questions, wasUnanswered, sawPages);
+    return { ...v, questions: spreadKeysIfNeeded(safe, preset), mode: m };
   }
   return {
     questions: spreadKeysIfNeeded(questions, preset),
@@ -1615,7 +1666,11 @@ const extractQuestions = asyncHandler(async (req, res) => {
     questions: cleanQuestions(questions),
     mode: req.body?.answerMode,
     preset: req.body?.preset,
-    model: PLATFORM_MODEL,
+    // The engine that READ the paper, not the cheap one that drafts from a
+    // sentence — and the pages with it, so a diagram question is looked at
+    // rather than guessed.
+    model: PLATFORM_SOLVE_MODEL,
+    parts,
   });
   const finalQuestions = applied.questions;
   const finalCost = sumCost(cost, applied.reviewCost);
@@ -2129,7 +2184,8 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     questions: extracted,
     mode: req.body?.answerMode,
     preset: req.body?.preset,
-    model: PLATFORM_MODEL,
+    model: PLATFORM_SOLVE_MODEL,
+    parts,
     onStatus: (message) => sse("status", { message }),
   });
   const questions = applied.questions;
@@ -2440,6 +2496,28 @@ const PLATFORM_EXTRACT_PROVIDER = (() => {
   return ["openai", "gemini", "claude"].includes(asked) ? asked : "claude";
 })();
 
+/*
+ * ANSWERING a paper is not writing one either — it is the hardest thing we ask.
+ *
+ * The answer key ran on PLATFORM_MODEL, which is `gpt-4.1-mini`: a small, cheap
+ * text model, set as the default for turning a sentence into questions. It was
+ * then also used as its own reviewer, so the pass whose whole job is catching a
+ * wrong answer was the same cheap model that produced it.
+ *
+ * A teacher's ÇOXLUQLAR paper on 29 September is what this cost. Fifteen answers
+ * were right, one was wrong (question 9: n(A) = 10 + 2 - 7 = 5, marked 6) and
+ * five open questions came back with no answer at all. Those are the marks her
+ * students would have been graded against.
+ *
+ * So solving uses the engine that READ the paper. It is the stronger model, and
+ * on the CLI route it is free — the subscription is already paid for.
+ */
+const PLATFORM_SOLVE_MODEL = (() => {
+  const asked = String(process.env.AI_SOLVE_MODEL || "").trim();
+  if (asked) return asked;
+  return PLATFORM_EXTRACT_PROVIDER === "openai" ? "gpt-4.1" : PLATFORM_EXTRACT_PROVIDER;
+})();
+
 let PRICE_OVERRIDES = {};
 try {
   PRICE_OVERRIDES = JSON.parse(process.env.AI_MODEL_PRICES || "{}");
@@ -2500,7 +2578,7 @@ const computeOpenAIGenCost = (usage, model, askedId) => {
 // `onText` opts into token streaming: it receives the whole output so far after
 // every chunk, which is what lets the builder show questions as they are
 // written. The parsed result is identical either way.
-async function generateWithOpenAI(prompt, presetId, modelId, onText, signal, systemOverride) {
+async function generateWithOpenAI(prompt, presetId, modelId, onText, signal, systemOverride, parts = []) {
   const useModel = modelId || OPENAI_GEN_MODEL;
   if (!process.env.OPENAI_API_KEY)
     throw aiError(503, "AI konfiqurasiya olunmayib (OPENAI_API_KEY)", true);
@@ -2517,9 +2595,26 @@ async function generateWithOpenAI(prompt, presetId, modelId, onText, signal, sys
       },
       body: JSON.stringify({
         model: useModel,
+        /*
+         * Images ride along when there are any. This endpoint is Chat
+         * Completions, which takes pictures but not PDFs — a PDF page therefore
+         * still arrives as text here, and `hasFigure` questions are left unmarked
+         * rather than guessed (see solveNeedsFigures). The CLI and the Claude and
+         * Gemini routes all take the document whole.
+         */
         messages: [
           { role: "system", content: sys },
-          { role: "user", content: prompt },
+          {
+            role: "user",
+            content: (Array.isArray(parts) ? parts : []).some((p) => !p.isPdf)
+              ? [
+                  ...parts
+                    .filter((p) => !p.isPdf)
+                    .map((p) => ({ type: "image_url", image_url: { url: `data:${p.mime};base64,${p.data}` } })),
+                  { type: "text", text: prompt },
+                ]
+              : prompt,
+          },
         ],
         // Structured Outputs: the model cannot return anything but this shape,
         // so the SAME schema the other providers use applies here and the
@@ -2590,7 +2685,7 @@ async function generateWithOpenAI(prompt, presetId, modelId, onText, signal, sys
   };
 }
 
-async function generateWithGemini(prompt, presetId, onText, signal, systemOverride) {
+async function generateWithGemini(prompt, presetId, onText, signal, systemOverride, parts = []) {
   if (!process.env.GEMINI_API_KEY)
     throw aiError(503, "AI konfiqurasiya olunmayıb (GEMINI_API_KEY)", true);
   const sys = (systemOverride || GEN_SYSTEM_PROMPT) + (presetHint(presetId) ? "\n\n" + presetHint(presetId) : "");
@@ -2598,7 +2693,10 @@ async function generateWithGemini(prompt, presetId, onText, signal, systemOverri
   const buildBody = (model) =>
     JSON.stringify({
       systemInstruction: { parts: [{ text: sys }] },
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      contents: [{
+        role: "user",
+        parts: [...geminiContentParts(Array.isArray(parts) ? parts : []), { text: prompt }],
+      }],
       generationConfig: {
         responseMimeType: "application/json",
         responseSchema: GEMINI_SCHEMA,
@@ -2680,7 +2778,7 @@ async function generateWithGemini(prompt, presetId, onText, signal, systemOverri
   throw aiError(502, "AI suallar yarada bilmədi, yenidən cəhd et", true);
 }
 
-async function generateWithClaude(prompt, presetId, onText, signal, systemOverride) {
+async function generateWithClaude(prompt, presetId, onText, signal, systemOverride, parts = []) {
   const client = getClient();
   if (!client) throw aiError(503, "AI konfiqurasiya olunmayıb (ANTHROPIC_API_KEY)");
   const sys = [
@@ -2695,7 +2793,12 @@ async function generateWithClaude(prompt, presetId, onText, signal, systemOverri
       thinking: { type: "adaptive" },
       system: sys,
       output_config: { effort: "high", format: { type: "json_schema", schema: EXTRACTION_SCHEMA } },
-      messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+      // The pages first, then the instruction: a question about a diagram is
+      // answerable only if the diagram came with it.
+      messages: [{
+        role: "user",
+        content: [...claudeContentParts(Array.isArray(parts) ? parts : []), { type: "text", text: prompt }],
+      }],
     }, { signal });
     if (onText) {
       let acc = "";
@@ -2736,7 +2839,17 @@ async function generateWithClaude(prompt, presetId, onText, signal, systemOverri
 //
 // Shared by the plain and the streaming generate endpoints so the two cannot
 // drift: the only difference between them is that `onText` is supplied.
-async function runGeneration({ prompt, preset, model, onText, signal, system }) {
+/*
+ * `parts` — the ORIGINAL pages, when there were any.
+ *
+ * Generation from a prompt has none. Solving an extracted paper does, and
+ * withholding them is why an answer key could be guessed: the verify pass was
+ * handed the extracted TEXT only, and a question whose text reads "Diaqrama
+ * əsasən A çoxluğunun elementlərinin sayını tapın" carries none of the numbers —
+ * they are in the bar chart. The model could not solve it. It could only pick
+ * one of five options and sound certain, which is exactly what it did.
+ */
+async function runGeneration({ prompt, preset, model, onText, signal, system, parts }) {
   // The teacher's choice wins, but only from the allow-list: the id arrives
   // from a browser, and an unchecked one could name a pro tier at many times
   // the price. Anything unrecognised silently falls back to the default.
@@ -2766,24 +2879,30 @@ ${presetHint(preset)}` : "");
         system: sys,
         prompt,
         schema: EXTRACTION_SCHEMA,
+        // The pages, so a question about a diagram can be answered by LOOKING at
+        // the diagram instead of guessing between its options.
+        parts: Array.isArray(parts) ? parts : [],
         signal,
       });
       const questions = Array.isArray(out.doc?.questions) ? out.doc.questions : [];
       if (onText) onText(cliProvider)(JSON.stringify({ questions }));
       return { questions, cost: out.cost };
     },
-    api: () => runGenerationOnApi({ prompt, preset, model, onText, signal, system, picked }),
+    api: () => runGenerationOnApi({ prompt, preset, model, onText, signal, system, picked, parts }),
   });
 }
 
-async function runGenerationOnApi({ prompt, preset, model, onText, signal, system, picked }) {
+async function runGenerationOnApi({ prompt, preset, model, onText, signal, system, picked, parts }) {
   // `system` swaps the generator's prompt for a different one (the reviewer),
   // reusing the same provider chain, schema and fallback for the critic pass.
+  /* The pages travel down the API chain too — otherwise a CLI outage silently
+   * puts the answer key back to guessing at every figure question. */
+  const files = Array.isArray(parts) ? parts : [];
   const runners = {
     openai: (pr, ps, cb) =>
-      generateWithOpenAI(pr, ps, picked?.provider === "openai" ? picked.id : undefined, cb, signal, system),
-    gemini: (pr, ps, cb) => generateWithGemini(pr, ps, cb, signal, system),
-    claude: (pr, ps, cb) => generateWithClaude(pr, ps, cb, signal, system),
+      generateWithOpenAI(pr, ps, picked?.provider === "openai" ? picked.id : undefined, cb, signal, system, files),
+    gemini: (pr, ps, cb) => generateWithGemini(pr, ps, cb, signal, system, files),
+    claude: (pr, ps, cb) => generateWithClaude(pr, ps, cb, signal, system, files),
   };
   const keyFor = {
     openai: process.env.OPENAI_API_KEY,
@@ -4011,6 +4130,8 @@ module.exports = {
   EXTRACT_CLI_PROMPT,
   EXTRACTION_SCHEMA,
   DOCUMENT_SCHEMA,
+  PLATFORM_SOLVE_MODEL,
+  unguessFigures,
   runGeneration,
   runMultiPassage,
   detectPassageCount,

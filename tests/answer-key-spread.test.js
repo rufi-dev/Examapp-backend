@@ -108,7 +108,18 @@ console.log("\n6. Wired into the summative preset only:");
   const ai = fs.readFileSync(path.join(__dirname, "../controllers/aiController.js"), "utf8");
   ok("the spread is applied", /spreadKeysIfNeeded/.test(ai));
   ok("only for mso-15", /preset !== "mso-15"\) return questions/.test(ai));
-  ok("on the ai-solve path", /\.\.\.v, questions: spreadKeysIfNeeded\(v\.questions, preset\)/.test(ai));
+  /*
+   * On the solving paths the spread is applied to the SOLVED set. It used to be
+   * `v.questions` directly; a figure question the solver answered without ever
+   * seeing the page is now put back to blank first, so the spread runs over
+   * that de-guessed set instead. Asserting the old variable name pinned the
+   * plumbing rather than the rule, so this asserts the rule: both solving paths
+   * spread, and the backstop happens before it.
+   */
+  ok("on the solving paths",
+    (ai.match(/\.\.\.v, questions: spreadKeysIfNeeded\(safe, preset\)/g) || []).length === 2);
+  ok("...over the set the figure backstop already cleaned",
+    /const safe = unguessFigures\(v\.questions, wasUnanswered, sawPages\);\s*\n\s*return \{ \.\.\.v, questions: spreadKeysIfNeeded\(safe, preset\)/.test(ai));
   ok("and on the has-answers path", /questions: spreadKeysIfNeeded\(questions, preset\)/.test(ai));
   // The manual path strips answers, so there is no key to spread.
   ok("the prompt still asks for it too", /Ardıcıl tapşırıqlarda eyni hərfli düzgün cavab təkrarlanmasın/.test(ai));
