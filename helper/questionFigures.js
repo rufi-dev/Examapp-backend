@@ -121,6 +121,9 @@ async function collectFigures(questions, { signal } = {}) {
       data: r.buf.toString("base64"),
       mime: r.mime,
       isPdf: false,
+      /* 1-based position in the paper, so a caller that solves in batches can
+       * hand each batch only its own pictures. Providers ignore the field. */
+      forQuestion: n,
     });
     labels.push(`${parts.length}-ci şəkil → ${n}-ci sual`);
   });

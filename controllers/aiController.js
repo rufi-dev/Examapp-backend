@@ -3358,23 +3358,66 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
 // choice" is a normal thing to ask, and forcing the old type would make half
 // the useful instructions impossible.
 /*
- * "Cavabları tap" — solve this paper's answer key, looking at its pictures.
+ * "Cavabları tap" — solve this paper's answer key, looking at its pictures, and
+ * SHOW the work while it happens.
  *
  * The teacher already has the questions on screen: extracted from a PDF, written
  * by the AI, typed by hand, or any mixture. What they do not have is the key, and
- * for a paper built out of diagrams they cannot get it from the text alone —
- * neither can a model. So this gathers what there IS to look at and hands the
- * whole lot over together:
+ * for a paper built out of diagrams neither they nor a model can get it from the
+ * text alone. So this gathers what there IS to look at — every picture attached
+ * to a question or an option, and the source PDF when the exam still has one —
+ * and hands it over with the questions.
  *
- *   - every picture attached to a question or an answer option, and
- *   - the source PDF, when the exam still has one.
+ * WHY IN BATCHES. A teacher watching a spinner for a minute cannot tell whether
+ * anything is happening, and the obvious fix — a highlight marching down the
+ * list — would be a lie: the whole paper went to the model in one turn and the
+ * CLI cannot stream, so there was no true "now checking question 7" to show.
+ * Solving a few questions per turn makes that status TRUE. The cost is time
+ * (one turn per batch), which is why a short paper still goes in one.
  *
- * Scope is the teacher's call, and the default is the conservative one. "missing"
- * fills only the blanks and never touches an answer that is already there,
- * because most of those were typed by a person and overwriting them would be us
- * destroying their work to impose our own. "all" re-checks the paper end to end,
- * which is what you want after a bad key has been written into it.
+ * WHY EACH BATCH CARRIES ITS PASSAGE. A reading-comprehension question batched
+ * without the text it asks about is unanswerable, and a model handed one will
+ * answer it anyway. So every batch includes the passage its questions belong to,
+ * as context, and only the batch's own questions are taken back.
+ *
+ * Scope is the teacher's call and the default is the careful one: "missing"
+ * never touches an answer that is already there, because most of those were
+ * typed by a person. "all" re-checks the paper end to end.
+ *
+ * The stream carries STRUCTURE, not sentences: indexes, not "Sual 7". The
+ * builder numbers questions its own way (passages are not counted), so it
+ * composes the words itself and the number on the status always matches the
+ * number on the card.
  */
+const SOLVE_BATCH = Math.max(1, Number(process.env.AI_SOLVE_BATCH) || 6);
+const SOLVE_SINGLE_BELOW = Math.max(1, Number(process.env.AI_SOLVE_SINGLE_BELOW) || 8);
+
+/* The reading passage a question belongs to: the last passage before it. */
+const ownerPassage = (list, i) => {
+  for (let k = i - 1; k >= 0; k -= 1) if (list[k]?.type === "reading") return k;
+  return -1;
+};
+
+/* Split the questions to solve into turns. Pure, so the batching is testable. */
+function planSolveBatches(targets) {
+  const size = targets.length <= SOLVE_SINGLE_BELOW ? targets.length : SOLVE_BATCH;
+  const out = [];
+  for (let k = 0; k < targets.length; k += size) out.push(targets.slice(k, k + size));
+  return out;
+}
+
+/* One batch's sub-paper: its questions plus the passages they belong to, in the
+ * original order, with each position's original index. */
+function batchSubPaper(list, batch) {
+  const include = new Set(batch);
+  for (const i of batch) {
+    const p = ownerPassage(list, i);
+    if (p >= 0) include.add(p);
+  }
+  const origin = [...include].sort((a, c) => a - c);
+  return { origin, sub: origin.map((i) => list[i]) };
+}
+
 const solveAnswers = asyncHandler(async (req, res) => {
   const { questions, preset, scope } = req.body || {};
   const list = cleanQuestions(Array.isArray(questions) ? questions : []);
@@ -3382,104 +3425,169 @@ const solveAnswers = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("Sual göndərilmədi");
   }
-  const scorable = list.filter((q) => q && q.type !== "reading");
-  if (!scorable.length) {
+  const scorableIdx = list.map((q, i) => (q && q.type !== "reading" ? i : -1)).filter((i) => i >= 0);
+  if (!scorableIdx.length) {
     res.status(400);
     throw new Error("Cavab tələb edən sual yoxdur");
   }
 
   const redoAll = String(scope || "missing") === "all";
-  const blanks = unansweredCount(list);
-  if (!redoAll && !blanks) {
+  const blankSet = unansweredIndexes(list);
+  const targets = redoAll ? scorableIdx : scorableIdx.filter((i) => blankSet.has(i));
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders?.();
+  const sse = (event, data) => {
+    try {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      /* client gone */
+    }
+  };
+  res.write(": ok\n\n");
+  const hb = setInterval(() => {
+    try {
+      res.write(": ping\n\n");
+    } catch {
+      /* ignore */
+    }
+  }, 7000);
+  const finish = () => {
+    clearInterval(hb);
+    try {
+      res.end();
+    } catch {
+      /* already closed */
+    }
+  };
+
+  if (!targets.length) {
     // Nothing to find. Say so rather than spending a turn to confirm it.
-    return res.json({
-      questions: list,
-      solved: 0,
-      blanks: 0,
-      figures: 0,
-      message: "Bütün sualların cavabı artıq var.",
-    });
+    sse("done", { solved: 0, blanks: 0, figures: 0, usedPdf: false, nothingToDo: true });
+    return finish();
   }
 
-  /* The pictures on the questions themselves — the ones a teacher attached. */
-  const { collectFigures } = require("../helper/questionFigures");
-  const { parts: figures, labels, missing: unreachable } = await collectFigures(list, { signal: req.signal });
-
-  /* ...and the source paper, when one is still attached to the exam. */
-  const parts = [...figures];
-  let usedPdf = false;
   try {
-    const examId = req.params?.examId;
-    if (examId && require("mongoose").isValidObjectId(examId)) {
-      const exam = await Exam.findOne(
-        req.user.role === "admin" ? { _id: examId } : { _id: examId, owner: req.user._id }
-      ).select("pdf").lean();
-      if (exam?.pdf) {
-        const Pdf = require("../models/pdfModel");
-        const doc = await Pdf.findById(exam.pdf).select("key size").lean();
-        const { pathForKey, isValidKey } = require("../helper/examPdfStorage");
-        const { CLI_READ_MAX_BYTES } = require("../helper/cliAi");
-        if (doc?.key && isValidKey(doc.key) && Number(doc.size || 0) <= CLI_READ_MAX_BYTES) {
-          const buf = await require("node:fs/promises").readFile(pathForKey(doc.key));
-          parts.push({ name: "imtahan.pdf", data: buf.toString("base64"), mime: "application/pdf", isPdf: true });
-          usedPdf = true;
+    /* 1. The pictures on the questions — the ones a teacher attached. */
+    const { collectFigures } = require("../helper/questionFigures");
+    const withPictures = list.filter(
+      (q) => q && (q.image || (q.images || []).length || (q.choices || []).some((c) => c?.image))
+    ).length;
+    if (withPictures) sse("phase", { key: "figures", count: withPictures });
+    const { parts: figures, missing: unreachable } = await collectFigures(list, { signal: req.signal });
+
+    /* 2. ...and the source paper, when one is still attached to the exam. */
+    let pdfPart = null;
+    try {
+      const examId = req.params?.examId;
+      if (examId && require("mongoose").isValidObjectId(examId)) {
+        const exam = await Exam.findOne(
+          req.user.role === "admin" ? { _id: examId } : { _id: examId, owner: req.user._id }
+        )
+          .select("pdf")
+          .lean();
+        if (exam?.pdf) {
+          const Pdf = require("../models/pdfModel");
+          const doc = await Pdf.findById(exam.pdf).select("key size").lean();
+          const { pathForKey, isValidKey } = require("../helper/examPdfStorage");
+          const { CLI_READ_MAX_BYTES } = require("../helper/cliAi");
+          if (doc?.key && isValidKey(doc.key) && Number(doc.size || 0) <= CLI_READ_MAX_BYTES) {
+            sse("phase", { key: "pdf" });
+            const buf = await require("node:fs/promises").readFile(pathForKey(doc.key));
+            pdfPart = { name: "imtahan.pdf", data: buf.toString("base64"), mime: "application/pdf", isPdf: true };
+          }
         }
       }
+    } catch (e) {
+      // A missing or unreadable source PDF is not a reason to refuse: the
+      // figures on the questions may be enough on their own.
+      console.warn("solveAnswers: source PDF unavailable —", e?.message);
     }
-  } catch (e) {
-    // A missing or unreadable source PDF is not a reason to refuse: the figures
-    // on the questions may be enough on their own.
-    console.warn("solveAnswers: source PDF unavailable —", e?.message);
-  }
 
-  const ask = [
-    redoAll
-      ? "Aşağıdakı imtahan suallarının HAMISINI həll et və hər biri üçün düzgün cavabı işarələ. Mövcud cavabları yoxla — səhv olanı düzəlt."
-      : "Aşağıdakı imtahan suallarından YALNIZ cavabı işarələnməmiş olanları həll et və düzgün cavabı işarələ. Cavabı artıq olan sualları OLDUĞU KİMİ saxla.",
-    parts.length
-      ? "Suala aid şəkil/diaqram ƏLAVƏ EDİLİB — cavabı tapmaq üçün şəkilə BAX. Diaqramdakı rəqəmləri oxu və onlara əsasən hesabla; təxmin etmə."
-      : "",
-    labels.length ? `Şəkillərin sual nömrələri:\n${labels.join("\n")}` : "",
-    usedPdf ? "İmtahanın mənbə PDF-i də əlavə olunub." : "",
-    "Sualların sayını, mətnini, variantlarını və sırasını DƏYİŞMƏ — yalnız düzgün cavabları doldur.",
-    "Şəkilə baxa bilmədiyin və mətndən həll oluna bilməyən sualın cavabını UYDURMA — onu boş burax.",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+    /* 3. Batches. A short paper goes in one turn; the status is only worth the
+     *    extra turns when there is a wait long enough to need it. */
+    const batches = planSolveBatches(targets);
+    /* The whole plan up front, from the one place that decides it. The builder
+     * draws its progress bar from THIS — one segment per question the server
+     * will actually solve — rather than guessing which ones it thinks are blank
+     * and finding out otherwise halfway through. */
+    sse("plan", { targets, batches });
 
-  let out;
-  try {
-    out = await applyAnswerMode({
-      questions: list,
-      mode: redoAll ? "ai-solve" : "auto",
-      preset,
-      model: PLATFORM_SOLVE_MODEL,
-      parts,
-      signal: req.signal,
+    let solved = 0;
+    let charged = false;
+    for (let b = 0; b < batches.length; b += 1) {
+      if (req.signal?.aborted) break;
+      const batch = batches[b];
+      sse("batch", { batch: b + 1, batches: batches.length, indexes: batch, total: targets.length });
+
+      const { origin, sub } = batchSubPaper(list, batch);
+
+      // Only this batch's pictures: a model handed twenty loose images for five
+      // questions has to guess which is whose.
+      const own = new Set(origin.map((i) => i + 1));
+      const parts = [...figures.filter((f) => own.has(f.forQuestion)), ...(pdfPart ? [pdfPart] : [])];
+
+      let out;
+      try {
+        out = await applyAnswerMode({
+          questions: sub,
+          mode: "ai-solve",
+          preset,
+          model: PLATFORM_SOLVE_MODEL,
+          parts,
+          signal: req.signal,
+          onStatus: () => sse("phase", { key: "checking", batch: b + 1 }),
+        });
+      } catch (e) {
+        if (req.signal?.aborted) break;
+        // One bad batch must not throw away the batches that worked — report it
+        // and carry on with the rest of the paper.
+        sse("batchError", { batch: b + 1, indexes: batch, message: e?.userMessage || "Bu hissənin cavabları tapılmadı" });
+        continue;
+      }
+
+      const got = out?.questions || [];
+      if (got.length !== sub.length) {
+        // A reply that dropped or added a question is not an answer key for THIS
+        // paper; mapping it back by position would scramble the answers.
+        sse("batchError", { batch: b + 1, indexes: batch, message: "AI sualların sayını dəyişdi — bu hissə tətbiq edilmədi" });
+        continue;
+      }
+      const inBatch = new Set(batch);
+      origin.forEach((orig, pos) => {
+        if (!inBatch.has(orig)) return; // a passage carried only as context
+        const q = got[pos];
+        const found = !unansweredIndexes([q]).size;
+        if (found) solved += 1;
+        sse("answer", { index: orig, question: q, found });
+      });
+      // CR-122: a usable result is the ONLY point the reservation commits, so a
+      // run that found nothing is free — and one that found something is not.
+      if (solved > 0 && !charged && req.aiCredit) {
+        req.aiCredit.usable();
+        charged = true;
+      }
+    }
+
+    await logGenerationUsage(req, { cost: null, questions: list }).catch(() => {});
+    sse("done", {
+      solved,
+      blanks: Math.max(0, targets.length - solved),
+      figures: figures.length,
+      usedPdf: !!pdfPart,
+      unreachableFigures: unreachable,
     });
   } catch (e) {
-    res.status(e?.aiStatus || 502);
-    throw new Error(e?.userMessage || "Cavablar tapılmadı. Bir az sonra yenidən cəhd edin.");
+    console.error("solveAnswers failed:", e?.message);
+    sse("error", { message: e?.userMessage || "Cavablar tapılmadı. Bir az sonra yenidən cəhd edin." });
+  } finally {
+    finish();
   }
-
-  const answered = out.questions || list;
-  const left = unansweredCount(answered);
-  await logGenerationUsage(req, { cost: out.reviewCost, questions: answered }).catch(() => {});
-
-  res.json({
-    questions: answered,
-    // What actually changed, so the panel can say it plainly instead of claiming
-    // success over a paper it did not manage to finish.
-    solved: Math.max(0, (redoAll ? scorable.length : blanks) - left),
-    blanks: left,
-    figures: parts.length,
-    usedPdf,
-    unreachableFigures: unreachable,
-    message:
-      left === 0
-        ? "Bütün cavablar tapıldı."
-        : `${left} sualın cavabı tapılmadı — şəkil olmadan həll oluna bilmir, özünüz işarələyin.`,
-  });
 });
 
 const regenerateQuestion = asyncHandler(async (req, res) => {
@@ -4250,6 +4358,8 @@ const realtimeToken = asyncHandler(async (req, res) => {
 module.exports = {
   regenerateQuestion,
   solveAnswers,
+  planSolveBatches,
+  batchSubPaper,
   // exported for tests / benchmarking
   GEN_SYSTEM_PROMPT,
   SYSTEM_PROMPT,
