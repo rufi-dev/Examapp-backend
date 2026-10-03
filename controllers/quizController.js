@@ -14,6 +14,7 @@ const { notifyStudentsNewExam } = require("../helper/whatsapp");
 const { PRESETS } = require("../helper/examPresets");
 const { publishExam, resolveActiveVersionForStart, verifyIntegrity, VersionIntegrityError } = require("../helper/examVersion");
 const { computePointsPlan } = require("../helper/scoring");
+const { attemptTiming, timingForResults } = require("../helper/attemptTiming");
 const { assertUnderClassCap, assertExamCreate, consumeExamCreate } = require("../helper/planLimits");
 const mongoose = require("mongoose");
 const crypto = require("crypto");
@@ -3764,7 +3765,7 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   // (cards stay on the board until the page is closed). Ordered oldest→newest so
   // each student's attempts can be numbered 1..N. ──
   const resultRows = await Result.find({ examId })
-    .select("attemptId userId earnPoints pendingReview terminated violations createdAt")
+    .select("attemptId userId earnPoints pendingReview terminated autoSubmitted violations createdAt")
     .populate("userId", "name email grade")
     .sort({ createdAt: 1 })
     .lean();
@@ -3788,13 +3789,16 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   const attById = new Map(
     (finAttemptIds.length
       ? await Attempt.find({ _id: { $in: finAttemptIds } })
-          .select("answers answeredCount violations startedAt")
+          .select("answers answeredCount violations startedAt expiresAt")
           .lean()
       : []
     ).map((a) => [String(a._id), a])
   );
   const finishedStudents = finList.map((r) => {
     const a = r.attemptId ? attById.get(String(r.attemptId)) : null;
+    // Same rule as the results list and the review: a time-out ends at the
+    // deadline, not whenever the finalizer sweep came round to write it.
+    const timing = attemptTiming(r, a);
     return {
       attemptId: r.attemptId || r._id,
       name: r.userId?.name || "—",
@@ -3806,12 +3810,13 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
       total,
       violations: (r.violations != null ? r.violations : a?.violations) || 0,
       terminated: !!r.terminated,
-      startedAt: a?.startedAt || null,
+      startedAt: timing.startedAt,
       expiresAt: null,
       lastSeenAt: null,
       active: false,
       finished: true,
-      finishedAt: r.createdAt,
+      finishedAt: timing.endedAt,
+      endedBy: timing.endedBy,
       score: typeof r.earnPoints === "number" ? r.earnPoints : null,
       resultId: r._id,
       pendingReview: !!r.pendingReview,
@@ -4287,6 +4292,8 @@ const getResultsByExam = asyncHandler(async (req, res) => {
   // AUD-001 (defense in depth): the populated exam carries the exam access
   // password, AI prompt, and PDF path. This staff endpoint stays visible for
   // legacy ownerless exams, so strip those sensitive exam fields before sending.
+  // When each student started and finished, for the teacher reading the list.
+  const timings = await timingForResults(results, Attempt);
   const safe = results.map((r) => {
     const o = r.toObject();
     if (o.examId && typeof o.examId === "object") {
@@ -4294,6 +4301,7 @@ const getResultsByExam = asyncHandler(async (req, res) => {
       delete o.examId.aiPrompt;
       delete o.examId.pdf;
     }
+    o.timing = timings.get(String(r._id)) || null;
     return o;
   });
 
@@ -4430,6 +4438,15 @@ const reviewByResult = asyncHandler(async (req, res) => {
   }
   // Observability: which revision was graded and whether this is a legacy result.
   view.gradedRevision = result.gradedRevision == null ? null : result.gradedRevision;
+  /* When this paper was started and handed in. Not answer-revealing — a student
+   * may always see when they sat their own exam — so it is outside the
+   * visibility rules above. */
+  {
+    const att = result.attemptId
+      ? await Attempt.findById(result.attemptId).select("startedAt expiresAt").lean().catch(() => null)
+      : null;
+    view.timing = attemptTiming(result, att);
+  }
   view.legacyUnversioned = !!result.legacyUnversioned;
   res.status(200).json(view);
 });

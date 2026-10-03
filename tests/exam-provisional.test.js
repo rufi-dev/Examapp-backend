@@ -28,7 +28,14 @@ const ok = (label, cond, extra = "") => {
   }
 };
 
-const read = (rel) => fs.readFileSync(path.join(__dirname, rel), "utf8");
+/*
+ * Line endings normalised on the way in. These assertions match source text
+ * across lines with `\n`, and this repo has core.autocrlf=true, so on a Windows
+ * checkout every file arrives with `\r\n` and they would all fail on a clean
+ * clone. It surfaced on 2026-10-03 when an edit rewrote quizController.js with
+ * CRLF; the test, not the file, was the thing that was wrong.
+ */
+const read = (rel) => fs.readFileSync(path.join(__dirname, rel), "utf8").replace(/\r\n/g, "\n");
 const ctl = read("../controllers/quizController.js");
 const model = read("../models/examModel.js");
 const jobs = read("../jobs/backgroundJobs.js");
