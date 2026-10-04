@@ -100,6 +100,11 @@ const addChunk = asyncHandler(async (req, res) => {
   res.status(204).end();
 });
 
+// Still going: not closed by the browser, and a slice arrived in the last
+// 90 seconds (the browser sends one every few seconds while anything happens).
+const LIVE_MS = 90 * 1000;
+const isLive = (r, now = Date.now()) => !r.endedAt && !!r.lastChunkAt && now - new Date(r.lastChunkAt).getTime() < LIVE_MS;
+
 const listDto = (r) => ({
   _id: r._id,
   user: r.user && typeof r.user === "object" ? { _id: r.user._id, name: r.user.name, email: r.user.email, role: r.user.role, createdAt: r.user.createdAt } : r.user,
@@ -118,6 +123,7 @@ const listDto = (r) => ({
   bytes: r.bytes,
   userAgent: r.userAgent,
   screen: r.screen,
+  live: isLive(r),
 });
 
 // GET /api/rec?user=&problems=1&stuck=1 — admin: the recordings, newest first.
@@ -147,8 +153,20 @@ const getRecording = asyncHandler(async (req, res) => {
   if (!store.isId(rid)) return res.status(404).json({ message: "Tapılmadı" });
   const rec = await SessionRecording.findById(rid).populate("user", "name email role createdAt phone").lean();
   if (!rec) return res.status(404).json({ message: "Tapılmadı" });
-  const events = await store.readEvents(rid);
-  res.json({ recording: { ...listDto(rec), pageList: rec.pages || [] }, events });
+  const { events, lastSeq } = await store.readEventsAfter(rid, -1);
+  res.json({ recording: { ...listDto(rec), pageList: rec.pages || [] }, events, lastSeq });
+});
+
+// GET /api/rec/:rid/live?after=N — admin: what arrived since chunk N, and
+// whether the visit is still going, for watching it live without reloading.
+const liveEvents = asyncHandler(async (req, res) => {
+  const { rid } = req.params;
+  if (!store.isId(rid)) return res.status(404).json({ message: "Tapılmadı" });
+  const rec = await SessionRecording.findById(rid).select("endedAt lastChunkAt clicks jsErrors apiErrors toasts pages firstEventAt lastEventAt").lean();
+  if (!rec) return res.status(404).json({ message: "Tapılmadı" });
+  const after = Number.isInteger(Number(req.query.after)) ? Number(req.query.after) : -1;
+  const { events, lastSeq } = await store.readEventsAfter(rid, after);
+  res.json({ events, lastSeq, live: isLive(rec), endedAt: rec.endedAt || null });
 });
 
 // DELETE /api/rec/:rid — admin.
@@ -157,4 +175,4 @@ const deleteRecording = asyncHandler(async (req, res) => {
   res.status(204).end();
 });
 
-module.exports = { startRecording, addChunk, listRecordings, getRecording, deleteRecording, eligible };
+module.exports = { startRecording, addChunk, listRecordings, getRecording, liveEvents, deleteRecording, eligible, isLive };

@@ -14,6 +14,7 @@ router.post("/:rid/chunk", express.raw({ type: () => true, limit: "3mb" }), c.ad
 // Admin: browse and watch.
 router.get("/", protect, adminOnly, c.listRecordings);
 router.get("/:rid", protect, adminOnly, c.getRecording);
+router.get("/:rid/live", protect, adminOnly, c.liveEvents);
 router.delete("/:rid", protect, adminOnly, c.deleteRecording);
 
 module.exports = router;

@@ -112,6 +112,27 @@ async function main() {
   const one = await (await fetch(`${base}/${rid}`, { headers: auth(admin) })).json();
   ok("watching returns every event in order", one.events?.map((e) => e.timestamp).join(",") === "1000,1001,5000,9000", JSON.stringify(one.events?.map((e) => e.timestamp)));
   ok("a teacher cannot watch", (await fetch(`${base}/${rid}`, { headers: auth(fresh) })).status !== 200);
+  ok("the closed visit is not live", one.recording?.live === false && one.lastSeq === 1, JSON.stringify({ live: one.recording?.live, lastSeq: one.lastSeq }));
+
+  // ── watching a visit live ──
+  const sl = await (await start(fresh, { t0: 100 })).json();
+  await chunk(sl.rid, sl.token, 0, [{ type: 4, timestamp: 100 }, { type: 2, timestamp: 101 }]);
+  const first = await (await fetch(`${base}/${sl.rid}`, { headers: auth(admin) })).json();
+  ok("a visit still sending is live", first.recording?.live === true && first.lastSeq === 0, JSON.stringify(first.recording));
+  await chunk(sl.rid, sl.token, 1, [{ type: 3, timestamp: 200 }]);
+  await chunk(sl.rid, sl.token, 2, [{ type: 3, timestamp: 300 }]);
+  const more = await (await fetch(`${base}/${sl.rid}/live?after=0`, { headers: auth(admin) })).json();
+  ok("asking for what is new returns only what arrived since", more.events?.map((e) => e.timestamp).join(",") === "200,300" && more.lastSeq === 2 && more.live === true, JSON.stringify(more));
+  const none = await (await fetch(`${base}/${sl.rid}/live?after=2`, { headers: auth(admin) })).json();
+  ok("and nothing when nothing is new", none.events?.length === 0 && none.lastSeq === 2, JSON.stringify(none));
+  await chunk(sl.rid, sl.token, 3, [{ type: 3, timestamp: 400 }], { final: true });
+  const ended = await (await fetch(`${base}/${sl.rid}/live?after=2`, { headers: auth(admin) })).json();
+  ok("when they leave, it stops being live", ended.live === false && !!ended.endedAt && ended.events?.length === 1, JSON.stringify(ended));
+  ok("a teacher cannot watch live either", (await fetch(`${base}/${sl.rid}/live`, { headers: auth(fresh) })).status !== 200);
+  await SessionRecording.updateOne({ _id: sl.rid }, { $set: { endedAt: null, lastChunkAt: new Date(Date.now() - 5 * 60000) } });
+  const quiet = await (await fetch(`${base}/${sl.rid}/live?after=3`, { headers: auth(admin) })).json();
+  ok("a visit silent for minutes is not live (the tab was simply closed)", quiet.live === false);
+  await store.removeRecording(sl.rid);
 
   // ── temporary ──
   const s2 = await (await start(fresh)).json();

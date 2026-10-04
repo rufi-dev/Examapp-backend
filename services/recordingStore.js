@@ -55,15 +55,25 @@ async function writeChunk(rid, seq, body) {
   return data.length;
 }
 
-/* Every event of a recording, in order. */
-async function readEvents(rid) {
-  const dir = folder(rid);
-  let names = [];
+const seqOf = (name) => Number(String(name).split(".")[0]);
+
+/* The chunk numbers stored so far, ascending. */
+async function chunkNames(rid) {
   try {
-    names = (await fsp.readdir(dir)).filter((n) => n.endsWith(".json.gz")).sort();
+    return (await fsp.readdir(folder(rid))).filter((n) => n.endsWith(".json.gz")).sort();
   } catch {
     return [];
   }
+}
+
+/*
+ * Every event of a recording, in order, and the last chunk number read. With
+ * `after`, only chunks numbered above it: what arrived since the last look,
+ * for watching a visit live.
+ */
+async function readEventsAfter(rid, after = -1) {
+  const dir = folder(rid);
+  const names = (await chunkNames(rid)).filter((n) => seqOf(n) > after);
   const events = [];
   let unpacked = 0;
   for (const name of names) {
@@ -84,7 +94,12 @@ async function readEvents(rid) {
     }
   }
   events.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-  return events;
+  const lastSeq = names.length ? seqOf(names[names.length - 1]) : after;
+  return { events, lastSeq };
+}
+
+async function readEvents(rid) {
+  return (await readEventsAfter(rid, -1)).events;
 }
 
 async function removeRecording(rid) {
@@ -138,4 +153,4 @@ function maybeSweep() {
   sweep().catch(() => {});
 }
 
-module.exports = { newId, isId, issueToken, checkToken, writeChunk, readEvents, removeRecording, sweep, maybeSweep, KEEP_DAYS };
+module.exports = { newId, isId, issueToken, checkToken, writeChunk, readEvents, readEventsAfter, removeRecording, sweep, maybeSweep, KEEP_DAYS };
