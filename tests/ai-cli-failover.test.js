@@ -57,6 +57,24 @@ const { runAi, isRouteExhausted } = require("../helper/aiRuntime");
 
 /* The refusals the real binaries print, near enough to be the same thing. */
 const CODEX_LIMIT = "ERROR: You've hit your usage limit. Try again at Oct 3rd, 2026 5:19 PM.";
+/*
+ * The same refusal, but always dated in the FUTURE.
+ *
+ * The runtime cases below run on the real clock, and a fixed date in a test is a
+ * test that expires: they used the literal above, and on 4 October 2026 the
+ * "resting" CLI's reset time quietly passed and four of them started failing.
+ * The literal stays for the PARSER tests, which pin their own clock and are
+ * checking the exact words the real binary printed.
+ */
+const codexProse = (d) => {
+  const M = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const day = d.getDate();
+  const teen = day % 100 >= 11 && day % 100 <= 13;
+  const suf = teen ? "th" : ["th", "st", "nd", "rd"][day % 10] || "th";
+  const h = d.getHours() % 12 || 12;
+  return `${M[d.getMonth()]} ${day}${suf}, ${d.getFullYear()} ${h}:${String(d.getMinutes()).padStart(2, "0")} ${d.getHours() < 12 ? "AM" : "PM"}`;
+};
+const CODEX_LIMIT_LIVE = `ERROR: You've hit your usage limit. Try again at ${codexProse(new Date(Date.now() + 5 * 86400e3))}.`;
 const claudeLimit = (epochSeconds) => `Claude AI usage limit reached|${epochSeconds}`;
 
 const err = (message, extra = {}) => Object.assign(new Error(message), extra);
@@ -200,7 +218,7 @@ async function main() {
   console.log("\nthe other direction is the same:");
   cliHealth._reset();
   hush();
-  r = await call("cli", { fail: { codex: () => err(CODEX_LIMIT) }, prefer: "codex" });
+  r = await call("cli", { fail: { codex: () => err(CODEX_LIMIT_LIVE) }, prefer: "codex" });
   speak();
   ok("Codex out of quota moves the work to Claude", r.ran === "cli:codex -> cli:claude" && r.got === "claude-result");
   ok("...and Codex rests until the date it named", (await restingNow()).join() === "codex");
@@ -209,7 +227,7 @@ async function main() {
   console.log("\nthe API is reached only when every subscription is out:");
   cliHealth._reset();
   hush();
-  r = await call("cli_then_api", { fail: { claude: () => err("usage limit reached"), codex: () => err(CODEX_LIMIT) } });
+  r = await call("cli_then_api", { fail: { claude: () => err("usage limit reached"), codex: () => err(CODEX_LIMIT_LIVE) } });
   speak();
   ok(
     "both CLIs are tried before a single token is paid for",
@@ -227,7 +245,7 @@ async function main() {
 
   console.log("\nbut CLI-only mode never silently starts billing:");
   hush();
-  r = await call("cli", { fail: { claude: () => err("usage limit reached"), codex: () => err(CODEX_LIMIT) } });
+  r = await call("cli", { fail: { claude: () => err("usage limit reached"), codex: () => err(CODEX_LIMIT_LIVE) } });
   speak();
   /* Claude's refusal named no reset time, so it took the default half hour;
    * Codex named a date days away. The one nearest coming back is the only one
@@ -348,7 +366,7 @@ async function main() {
   process.env.AI_CLI_ORDER = "codex";
   cliHealth._reset();
   hush();
-  r = await call("cli_then_api", { fail: { codex: () => err(CODEX_LIMIT) } });
+  r = await call("cli_then_api", { fail: { codex: () => err(CODEX_LIMIT_LIVE) } });
   speak();
   ok("an owner with one CLI is not made to wait for a CLI they do not have", r.ran === "cli:codex -> api");
   process.env.AI_CLI_ORDER = "claude,codex";
@@ -364,7 +382,7 @@ async function main() {
   console.log("\nwhat the admin page can show:");
   cliHealth._reset();
   hush();
-  await cliHealth.markExhausted("codex", err(CODEX_LIMIT));
+  await cliHealth.markExhausted("codex", err(CODEX_LIMIT_LIVE));
   speak();
   /*
    * withLogin:false because the login half spawns the real binaries. That is

@@ -4410,20 +4410,46 @@ const reviewByResult = asyncHandler(async (req, res) => {
     throw new Error("Bu nəticəyə icazəniz yoxdur");
   }
 
-  // ── Visibility (CR-036): a versioned result uses the FROZEN reveal policy +
-  // FROZEN end timestamp, so a later edit/toggle can't reveal answers earlier than
-  // the student was originally promised. A legacy result uses the live exam.
-  const vis = frozen
-    ? resultVisibility(
-        {
-          showScore: frozen.reveal && frozen.reveal.showScore,
-          showCorrectAnswers: frozen.reveal && frozen.reveal.showCorrectAnswers,
-          revealAfterEnd: frozen.reveal && frozen.reveal.revealAfterEnd,
-          endDate: (frozen.reveal && frozen.reveal.endDate) || null,
-        },
-        user
-      )
-    : resultVisibility(result.examId, user);
+  /*
+   * ── Visibility follows the teacher's CURRENT settings, for every result.
+   *
+   * CR-036 froze the reveal policy into the version a student sat, so that a
+   * later toggle could not reveal answers "earlier than the student was
+   * promised". In practice it meant the opposite of what teachers expect: a
+   * teacher who opens a finished exam and turns on "show score" or "show correct
+   * answers" did it FOR the students who already sat it, and none of them saw the
+   * change — only students who started afterwards did. The rest of the result
+   * screens (the results list, the result page, the rank) already read the live
+   * exam, so the review page was the one place out of step, and showed a student
+   * a different answer to "can I see this?" than the page that linked to it.
+   *
+   * Reveal is a disclosure decision, not part of the grading, so it is the
+   * teacher's to change at any time. What a version freezes — the questions, the
+   * answer key, the points — is still frozen: the answers shown below are the
+   * version's, exactly the ones the paper was graded against.
+   *
+   * The one protection CR-036 was really about is kept, and made stronger: with
+   * "reveal after the end" on, answers stay hidden until the exam window closes —
+   * measured against the LIVE end date. If the teacher extends the exam, the
+   * reveal moves with it; the frozen date would have opened the answers to
+   * finished students while others were still writing.
+   *
+   * The frozen policy is used only when the exam itself no longer exists.
+   */
+  const liveExam = result.examId && typeof result.examId === "object" ? result.examId : null;
+  const vis = liveExam
+    ? resultVisibility(liveExam, user)
+    : frozen
+      ? resultVisibility(
+          {
+            showScore: frozen.reveal && frozen.reveal.showScore,
+            showCorrectAnswers: frozen.reveal && frozen.reveal.showCorrectAnswers,
+            revealAfterEnd: frozen.reveal && frozen.reveal.revealAfterEnd,
+            endDate: (frozen.reveal && frozen.reveal.endDate) || null,
+          },
+          user
+        )
+      : resultVisibility(null, user);
 
   const view = applyResultVisibility(result, vis);
   if (frozen) {

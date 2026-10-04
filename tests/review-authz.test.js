@@ -1,6 +1,8 @@
 /*
  * AUD-003 CR-036 (+ CR-039 resume) — reviewByResult authorization matrix and
- * frozen reveal policy, and the startAttempt resume revision floor.
+ * reveal policy, and the startAttempt resume revision floor. The reveal policy
+ * now follows the LIVE exam for every result (a teacher's toggle reaches students
+ * who already finished); only a deleted exam falls back to the version's copy.
  * Authz matrix: student owner, other student, exam-owner teacher, other teacher,
  * admin, soft-deleted exam, hard-deleted live exam, pre-end vs post-end reveal.
  */
@@ -106,6 +108,75 @@ async function main() {
     const res2 = await Result.create({ userId: student2._id, examId: exam2._id, examVersionId: v2._id, gradingSnapshotHash: v2.contentHash, earnPoints: 100, attemptId: at2._id, correctAnswers: [{ type: "Cm", answer: 0 }], selectedAnswers: [{ type: "Cm", answer: 0 }] });
     const post = await call(reviewByResult, { params: { resultId: String(res2._id) }, userId: student2._id });
     ok("post-end: answers revealed to the student (frozen policy)", Array.isArray(post.res.body.correctAnswers));
+  }
+
+  /*
+   * ── A teacher's change reaches the students who ALREADY finished ──
+   *
+   * Teachers open a finished exam and turn on "show score" / "show correct
+   * answers" for the students who sat it. CR-036 had frozen the reveal policy
+   * into the version each student took, so none of them saw the change — only
+   * students who started afterwards. Reveal is a disclosure decision, not
+   * grading, so it now follows the live exam; the answer KEY shown is still the
+   * version's, the one the paper was graded against.
+   */
+  {
+    const teacher = await mkUser("teacher");
+    const student = await mkUser("student");
+    const exam = await mkExam(teacher, { showScore: false, showCorrectAnswers: false, revealAfterEnd: false });
+    const { result } = await takeExam(exam, student);
+    ok("the result is bound to a published version (the path that was frozen)", !!result.examVersionId);
+    const review = () => call(reviewByResult, { params: { resultId: String(result._id) }, userId: student._id });
+
+    const before = await review();
+    ok("before: the student sees no score", before.res.body.earnPoints === null);
+    ok("before: ...and no answers", before.res.body.correctAnswers === null);
+
+    // The teacher edits the live exam. No new version is published, no new attempt.
+    await Exam.updateOne({ _id: exam._id }, { $set: { showScore: true, showCorrectAnswers: true } });
+    const after = await review();
+    ok("after the teacher turns it on: the finished student sees the score", typeof after.res.body.earnPoints === "number");
+    ok("...and the correct answers", Array.isArray(after.res.body.correctAnswers));
+    ok("...from the version they were graded against", after.res.body.gradedVersion && after.res.body.gradedVersion.number >= 1);
+
+    // ...and it is the teacher's current decision in both directions.
+    await Exam.updateOne({ _id: exam._id }, { $set: { showCorrectAnswers: false } });
+    const hiddenAgain = await review();
+    ok("turned back off: answers are hidden again", hiddenAgain.res.body.correctAnswers === null);
+    ok("...while the score stays visible", typeof hiddenAgain.res.body.earnPoints === "number");
+
+    // The teacher always sees everything, whatever the students are shown.
+    const asTeacher = await call(reviewByResult, { params: { resultId: String(result._id) }, userId: teacher._id });
+    ok("the teacher still sees the answers", Array.isArray(asTeacher.res.body.correctAnswers));
+  }
+
+  /*
+   * ── "Reveal after the end" still holds — against the LIVE end date ──
+   *
+   * The protection CR-036 was about: answers must not reach a finished student
+   * while others are still writing. The frozen end date got this wrong in one
+   * direction — extend the exam and the old date would open the answers early.
+   */
+  {
+    const teacher = await mkUser("teacher");
+    const student = await mkUser("student");
+    const exam = await mkExam(teacher, { showCorrectAnswers: true, revealAfterEnd: true, endDate: new Date(Date.now() - 3600e3) });
+    const pop = await Exam.findById(exam._id).populate("questions");
+    const v = await publishExam(pop, pop.questions, ExamVersion, Exam);
+    const at = await Attempt.create({ userId: student._id, examId: exam._id, examVersionId: v._id, startedAt: new Date(Date.now() - 7200e3), expiresAt: new Date(Date.now() - 3600e3), submitted: true });
+    const res = await Result.create({ userId: student._id, examId: exam._id, examVersionId: v._id, gradingSnapshotHash: v.contentHash, earnPoints: 100, attemptId: at._id, correctAnswers: [{ type: "Cm", answer: 0 }], selectedAnswers: [{ type: "Cm", answer: 0 }] });
+    const review = () => call(reviewByResult, { params: { resultId: String(res._id) }, userId: student._id });
+
+    ok("ended exam, reveal after end: answers shown", Array.isArray((await review()).res.body.correctAnswers));
+
+    // The teacher reopens the exam for another day. Others may now be writing.
+    await Exam.updateOne({ _id: exam._id }, { $set: { endDate: new Date(Date.now() + 86400e3) } });
+    ok("exam extended: answers hidden again until the NEW end (the frozen date would have leaked them)",
+      (await review()).res.body.correctAnswers === null);
+
+    // Hard-deleted exam: nothing live to read, so the frozen policy governs.
+    await Exam.findByIdAndDelete(exam._id);
+    ok("exam deleted: falls back to the version's own policy", Array.isArray((await review()).res.body.correctAnswers));
   }
 
   // ── CR-039: resume returns the acknowledged revision floor + saved answers ──
