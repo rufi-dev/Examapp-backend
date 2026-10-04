@@ -120,8 +120,12 @@ async function main() {
     const me = await request(server, { method: "GET", path: "/api/users/me", token: ref1.body.token });
     ok("protected route: valid access token ⇒ 200", me.status === 200 && me.body.id === String(u._id));
 
+    await User.updateOne({ _id: u._id }, { $set: { trustedDevices: [{ tokenHash: "h", createdAt: new Date(), expiresAt: new Date(Date.now() + 864e5) }] } });
     const la = await request(server, { method: "POST", path: "/api/users/logoutAll", token: ref1.body.token });
     ok("logoutAll: authenticated ⇒ 204", la.status === 204);
+    const afterAll = await User.findById(u._id).select("+trustedDevices").lean();
+    ok("logoutAll: forgets every password-free trusted device too", Array.isArray(afterAll.trustedDevices) && afterAll.trustedDevices.length === 0);
+    ok("logoutAll: clears the trust cookie", la.setCookie.some((s) => /exq_trust=/.test(s)));
   }
 
   // Emergency mode — a rollback token is rejected on a protected route

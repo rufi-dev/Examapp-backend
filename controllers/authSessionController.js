@@ -197,7 +197,12 @@ const refreshHandler = asyncHandler(async (req, res) => {
 // POST /api/users/logoutAll — bump the epoch fence, revoke every session.
 const logoutAllHandler = asyncHandler(async (req, res) => {
   await svc.revokeAllForUser(req.user._id, "logout-all");
+  // "Every device" includes the ones trusted to sign in without a password;
+  // left alone, any of them could tap its way straight back in.
+  const User = require("../models/userModel");
+  await User.updateOne({ _id: req.user._id }, { $set: { trustedDevices: [] } });
   clearAuthCookies(res);
+  clearTrustCookie(res);
   return res.status(204).end();
 });
 
