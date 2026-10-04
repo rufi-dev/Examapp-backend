@@ -9,7 +9,7 @@ const Result = require("../models/resultModel");
 const Attendance = require("../models/attendanceModel");
 const Payment = require("../models/paymentModel");
 const Attempt = require("../models/attemptModel");
-const bcrypt = require("bcryptjs");
+const svc = require("../services/sessionService");
 const { validatePassword, normalizeEmail } = require("../utils/index");
 
 // Compact child DTO — never leak more of a student's account than a parent needs.
@@ -102,7 +102,10 @@ const createParentAccount = asyncHandler(async (req, res) => {
     parent = await User.create({
       name,
       email,
-      password: await bcrypt.hash(password, 10),
+      // Plain on purpose: the user model hashes the password on save. Hashing it
+      // here as well stored a hash of the hash, so a parent created this way
+      // could never sign in with the password they were given.
+      password,
       role: "parent",
       isVerified: true, // created by someone who already knows the family
       phone: String(req.body?.phone || "").trim() || undefined,
@@ -223,8 +226,14 @@ const setManagedPassword = asyncHandler(async (req, res) => {
     res.status(403);
     throw new Error("İcazə yoxdur");
   }
-  target.password = await bcrypt.hash(password, 10);
+  // Plain on purpose: the model hashes it on save (hashing here too locked the
+  // account, as the stored value became a hash of the hash).
+  target.password = password;
   await target.save();
+  // A new password closes what the old one opened: every signed-in session, and
+  // every device trusted to sign in without a password.
+  await svc.revokeAllForUser(target._id, "managed-password-reset");
+  await User.updateOne({ _id: target._id }, { $set: { trustedDevices: [] } });
   res.json({ ok: true });
 });
 

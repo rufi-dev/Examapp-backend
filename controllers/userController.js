@@ -6,6 +6,7 @@ const Enrollment = require("../models/enrollmentModel");
 const Class = require("../models/classModel");
 const Exam = require("../models/examModel");
 const Result = require("../models/resultModel");
+const ParentLink = require("../models/parentLinkModel");
 const bcrypt = require("bcryptjs");
 const { generateToken, hashToken, getToken, validatePassword, normalizeEmail } = require("../utils/index");
 const { recordDebug } = require("../utils/debugLog");
@@ -1019,6 +1020,27 @@ const getUsers = asyncHandler(async (req, res) => {
         ? [...ids].map((id) => ({ _id: id, name: nameOf.get(id) || "—" }))
         : [];
     });
+
+    // And each parent's children, so the directory can say which parents follow
+    // nobody: an account like that signed up but never linked a child, and its
+    // portal is empty.
+    const parentIds = users.filter((u) => u.role === "parent").map((u) => u._id);
+    if (parentIds.length) {
+      const links = await ParentLink.find({ parent: { $in: parentIds } })
+        .populate("student", "name")
+        .select("parent student status")
+        .lean();
+      const byParent = new Map();
+      links.forEach((l) => {
+        if (!l.student) return;
+        const key = String(l.parent);
+        if (!byParent.has(key)) byParent.set(key, []);
+        byParent.get(key).push({ _id: l.student._id, name: l.student.name || "", status: l.status });
+      });
+      users.forEach((u) => {
+        if (u.role === "parent") u.children = byParent.get(String(u._id)) || [];
+      });
+    }
   }
 
   // "Came from" — link each account to its earliest tagged visitor session with
