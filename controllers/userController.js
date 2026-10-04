@@ -824,6 +824,13 @@ const updateUser = asyncHandler(async (req, res) => {
       user.onboarded = true;
       user.teacherApproval = next.teacherApproval;
       user.teacherApprovalMeta = next.teacherApprovalMeta || undefined;
+      // A Google sign-up picks its role here, not on the register form, so this
+      // is where a new teacher gets the welcome credits the form gives everyone
+      // else. It used to be missing: 37 teachers started with 0 and were told
+      // to buy credits on their first AI question. Runs once (onboarded).
+      if (next.role === "teacher") {
+        user.aiCredits = (user.aiCredits || 0) + (planDef("free").credits?.welcome || 0);
+      }
     }
 
     const updatedUser = await user.save();
@@ -842,6 +849,7 @@ const updateUser = asyncHandler(async (req, res) => {
       grade: updatedUser.grade,
       hideAssistant: updatedUser.hideAssistant,
       assistantEnabled: updatedUser.assistantEnabled,
+      aiCredits: updatedUser.aiCredits || 0, // the header's credit chip, right after the role choice
     });
   } else {
     res.status(404);

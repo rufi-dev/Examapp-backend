@@ -81,6 +81,29 @@ async function main() {
   const set = await User.findById(user._id).lean();
   ok("a new bio and photo save, trimmed", c.status === 200 && set.bio === "Yeni bio" && set.photo.endsWith("/b.jpg"), JSON.stringify({ bio: set.bio, photo: set.photo }));
 
+  // ── a Google sign-up picks "teacher" on the next screen: the welcome credits come then, once ──
+  const google = await User.create({ name: "Google Müəllim", email: "g@profile-update.test", password: "xxxxxxxxxxxx", isVerified: true });
+  const gTok = generateToken(google._id, google.sessionVersion);
+  const as = (tok) => async (body) => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/users/updateUser`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${tok}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  };
+  const gPatch = as(gTok);
+  ok("a Google sign-up starts with no credits", ((await User.findById(google._id).lean()).aiCredits || 0) === 0);
+  const chose = await gPatch({ role: "teacher", phone: "+994501112244" });
+  const afterChoice = await User.findById(google._id).lean();
+  ok("choosing teacher grants the welcome credits", chose.status === 200 && afterChoice.role === "teacher" && afterChoice.aiCredits === 60, JSON.stringify({ s: chose.status, role: afterChoice.role, c: afterChoice.aiCredits }));
+  ok("and the reply carries them for the header", chose.body.aiCredits === 60);
+  await gPatch({ role: "teacher", name: "Google Müəllim 2" });
+  ok("saving again never grants them twice", (await User.findById(google._id).lean()).aiCredits === 60);
+  const gStudent = await User.create({ name: "Google Şagird", email: "gs@profile-update.test", password: "xxxxxxxxxxxx", isVerified: true });
+  await as(generateToken(gStudent._id, gStudent.sessionVersion))({ role: "student", phone: "+994501112255", grade: "9" });
+  ok("a student who signs up the same way gets none", ((await User.findById(gStudent._id).lean()).aiCredits || 0) === 0);
+
   await new Promise((r) => server.close(r));
   await mongoose.disconnect();
   await mem.stop();
