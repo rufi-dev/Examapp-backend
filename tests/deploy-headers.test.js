@@ -86,6 +86,17 @@ async function main() {
     ok("CSP is enforcing, not report-only", !/Content-Security-Policy-Report-Only:/i.test(headersFile));
     ok("CSP includes a report-uri", /report-uri https:\/\/api\.examopia\.com\/api\/csp-report/.test(headersFile));
     ok("CSP forbids object content and unsafe eval", /object-src 'none'/.test(headersFile) && !/'unsafe-eval'/.test(headersFile));
+    /*
+     * ...but allows WebAssembly to compile. The results-page PDF export lays its
+     * pages out with yoga, which runs as WebAssembly and has no fallback; without
+     * this the browser refused it ("violates the following Content Security
+     * policy directive because 'unsafe-eval' is not an allowed source"), the PDF
+     * never built, and the export button silently did nothing. 'wasm-unsafe-eval'
+     * permits WebAssembly compilation ONLY — not eval(), new Function() or string
+     * timers, which stay forbidden by the check above.
+     */
+    ok("CSP lets the PDF export compile WebAssembly (and nothing broader)",
+      /script-src[^;]*'wasm-unsafe-eval'/.test(headersFile));
     ok("removed payment provider is not allow-listed", !/stripe\.com/i.test(headersFile));
     ok("nosniff is exact", /X-Content-Type-Options:\s*nosniff/i.test(headersFile));
   }
