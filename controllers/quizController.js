@@ -1736,14 +1736,33 @@ const getExams = asyncHandler(async (req, res) => {
           sumPoints: { $sum: { $cond: [{ $and: [{ $ne: ["$terminated", true] }, { $ne: ["$earnPoints", null] }] }, "$earnPoints", 0] } },
           topPoints: { $max: { $cond: [{ $and: [{ $ne: ["$terminated", true] }, { $ne: ["$earnPoints", null] }] }, "$earnPoints", null] } },
           passCount: { $sum: { $cond: [{ $and: [{ $ne: ["$terminated", true] }, { $ne: ["$earnPoints", null] }, { $gte: ["$earnPoints", "$_exam.passingMarks"] }] }, 1, 0] } },
+          // The graded scores themselves, folded into ten buckets below, so the
+          // list can draw how the class actually spread rather than one average.
+          points: { $push: { $cond: [{ $and: [{ $ne: ["$terminated", true] }, { $ne: ["$earnPoints", null] }] }, "$earnPoints", "$$REMOVE"] } },
+          lastAt: { $max: "$createdAt" },
         },
       },
     ]);
     const byExam = new Map(grouped.map((g) => [String(g._id), g]));
+    // The class each exam belongs to, by name, as its own field: `class` stays
+    // the plain id every other reader of this list expects.
+    const classIds = [...new Set(exams.map((e) => e.class && String(e.class)).filter(Boolean))];
+    const classNames = classIds.length
+      ? new Map((await Class.find({ _id: { $in: classIds } }).select("name").lean()).map((c) => [String(c._id), c.name]))
+      : new Map();
     for (const e of exams) {
       const summary = byExam.get(String(e._id)) || {};
       const tm = e.totalMarks || 0;
       const graded = summary.graded || 0;
+      // Ten bands of the total: 0–9%, 10–19%, … 90–100% (a full score in the last).
+      const buckets = new Array(10).fill(0);
+      if (tm > 0) {
+        for (const p of summary.points || []) {
+          const pct = Math.max(0, (Number(p) || 0) / tm) * 100;
+          buckets[Math.min(9, Math.floor(pct / 10))] += 1;
+        }
+      }
+      e.className = e.class ? classNames.get(String(e.class)) || "" : "";
       e.stats = {
         count: summary.count || 0, // participants (incl. terminated)
         passingPct: tm > 0 ? Math.round(((e.passingMarks || 0) / tm) * 100) : null,
@@ -1751,6 +1770,8 @@ const getExams = asyncHandler(async (req, res) => {
         averagePct: graded && tm > 0 ? Math.round(((summary.sumPoints || 0) / graded / tm) * 100) : null,
         topPct: graded && tm > 0 ? Math.round(((summary.topPoints || 0) / tm) * 100) : null,
         passRatePct: graded ? Math.round(((summary.passCount || 0) / graded) * 100) : null,
+        buckets,
+        lastAt: summary.lastAt || null,
       };
     }
   }
