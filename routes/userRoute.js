@@ -1,5 +1,6 @@
 const express = require('express')
 const { registerUser, loginUser, deviceLogin, forgetDevice, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserStorageAddon, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush, getOutreachStatus, toggleOutreach, getSetupFunnel, getParentCode } = require('../controllers/userController')
+const { getProfileStats } = require('../controllers/profileStatsController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
 const { refreshHandler, logoutAllHandler, requireSessionFlag } = require('../controllers/authSessionController')
 const { csrfProtect } = require('../middleware/csrf')
@@ -40,6 +41,8 @@ router.post('/push/unsubscribe', protect, unsubscribePush)
 router.get('/parent-code', protect, getParentCode)
 
 router.get('/getUser', protect, getUser)
+// The signed-in user's own numbers and year of activity, for the profile page.
+router.get('/profile-stats', protect, getProfileStats)
 router.get('/getUserById/:id', protect, teacherOnly, getUserById)
 router.patch('/updateUser', protect, updateUser)
 router.delete('/deleteUser/:id', protect, adminOnly, deleteUser)

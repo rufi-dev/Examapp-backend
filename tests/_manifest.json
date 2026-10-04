@@ -124,6 +124,8 @@
   "tests/storage-quota.test.js",
   "tests/http/exam-create-flow.test.js",
   "tests/http/exam-results-list.test.js",
+  "tests/http/profile-stats.test.js",
+  "tests/http/profile-update.test.js",
   "tests/exam-provisional.test.js",
   "tests/exam-variant.test.js",
   "tests/mso-report.test.js",

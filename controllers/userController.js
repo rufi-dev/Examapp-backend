@@ -782,8 +782,16 @@ const updateUser = asyncHandler(async (req, res) => {
     user.name = req.body.name || name;
     user.phone = req.body.phone || phone;
     user.name = req.body.name || name;
-    user.bio = req.body.bio || bio;
-    user.photo = req.body.photo || photo;
+    // Sent as a string, these are what the profile form holds, so an emptied
+    // field clears them. (They used to fall back to the old value, so "remove
+    // photo" and an emptied bio never saved.) A removed photo goes back to the
+    // schema's placeholder, which every client reads as "no photo".
+    user.bio = typeof req.body.bio === "string" ? req.body.bio.trim() : bio;
+    if (typeof req.body.photo === "string") {
+      user.photo = req.body.photo.trim() || User.schema.path("photo").defaultValue;
+    } else {
+      user.photo = photo;
+    }
     // WhatsApp notification opt-in (boolean). Only change it when the client
     // actually sends the field, so other profile edits don't reset it.
     if (typeof req.body.whatsappOptIn === "boolean") {
