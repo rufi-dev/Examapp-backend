@@ -266,6 +266,22 @@ const getTag = asyncHandler(async (req, res) => {
   res.status(200).json(tag);
 });
 
+/*
+ * A form/JSON boolean, with a fallback for when the client did not send it.
+ *
+ * The result-visibility switches used to read "not sent" as false. On create
+ * that hid scores and answers from students of every exam whose client forgot a
+ * field; on edit, a save that named only a few fields (the builder's follow-up
+ * after creating) silently reset all three. Now a missing value means the
+ * default on create and "leave it as it is" on edit.
+ */
+const flag = (v, fallback) =>
+  v === undefined || v === null || v === "" ? fallback : v === true || v === "true";
+
+// What students see after submitting, unless the teacher chooses otherwise:
+// their score and the correct/wrong answers, straight away.
+const REVEAL_DEFAULTS = { showScore: true, showCorrectAnswers: true, revealAfterEnd: false };
+
 const addExam = asyncHandler(async (req, res) => {
   const {
     name,
@@ -393,9 +409,9 @@ const addExam = asyncHandler(async (req, res) => {
       passingMarks,
       maxTry,
       mode: isStructured ? "structured" : "pdf",
-      showScore: showScore === "true" || showScore === true,
-      showCorrectAnswers: showCorrectAnswers === "true" || showCorrectAnswers === true,
-      revealAfterEnd: revealAfterEnd === "true" || revealAfterEnd === true,
+      showScore: flag(showScore, REVEAL_DEFAULTS.showScore),
+      showCorrectAnswers: flag(showCorrectAnswers, REVEAL_DEFAULTS.showCorrectAnswers),
+      revealAfterEnd: flag(revealAfterEnd, REVEAL_DEFAULTS.revealAfterEnd),
       password: typeof password === "string" ? password : "",
       negativeMarking: negativeMarking === "true" || negativeMarking === true,
       wrongPerPenalty: Math.max(1, Number(wrongPerPenalty) || 3),
@@ -4801,9 +4817,9 @@ const editExam = asyncHandler(async (req, res) => {
       totalMarks,
       passingMarks,
       maxTry,
-      showScore: showScore === true || showScore === "true",
-      showCorrectAnswers: showCorrectAnswers === true || showCorrectAnswers === "true",
-      revealAfterEnd: revealAfterEnd === true || revealAfterEnd === "true",
+      showScore: flag(showScore, examExists.showScore !== false),
+      showCorrectAnswers: flag(showCorrectAnswers, !!examExists.showCorrectAnswers),
+      revealAfterEnd: flag(revealAfterEnd, !!examExists.revealAfterEnd),
       negativeMarking: negativeMarking === true || negativeMarking === "true",
       wrongPerPenalty: Math.max(1, Number(wrongPerPenalty) || 3),
       correctPerPenalty: Math.max(1, Number(correctPerPenalty) || 1),

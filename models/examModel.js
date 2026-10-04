@@ -146,11 +146,14 @@ const examSchema = Schema({
     // this tombstone so historical Results/Attempts/ExamVersions never dangle.
     purgedAt: { type: Date, default: null, index: true },
     // Result visibility for students:
+    // By default a student sees their score and the correct/wrong answers as
+    // soon as they submit. (Every stored exam carries all three, so these only
+    // apply to new ones.)
     showScore: { type: Boolean, default: true },
-    showCorrectAnswers: { type: Boolean, default: false },
-    // If true (default), the above only take effect after endDate (prevents
-    // answer sharing during the exam window).
-    revealAfterEnd: { type: Boolean, default: true },
+    showCorrectAnswers: { type: Boolean, default: true },
+    // If true, the above only take effect after endDate (prevents answer
+    // sharing during the exam window). Opt-in.
+    revealAfterEnd: { type: Boolean, default: false },
     // "pdf" = questions live in an uploaded PDF (answer key only). "structured"
     // = native questions (text/options/images/latex) built in-app. Default pdf
     // keeps every existing exam unchanged.

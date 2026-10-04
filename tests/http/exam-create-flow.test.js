@@ -196,6 +196,35 @@ async function main() {
   ok("it HAS the question they wrote", (qdoc?.correctAnswers || []).length === 1);
   ok("and it is the one they wrote", qdoc?.correctAnswers?.[0]?.text === QUESTION.text);
   ok("one exam, not several", (await owned()) === 1);
+  /*
+   * The details save above names only a few fields. It used to reset the
+   * result-visibility switches it did not name to false, so every exam made in
+   * the builder hid the score from its students.
+   */
+  ok("a details save that leaves out the visibility switches keeps them",
+    row.showScore === true && row.showCorrectAnswers === false && row.revealAfterEnd === false,
+    JSON.stringify({ showScore: row.showScore, showCorrectAnswers: row.showCorrectAnswers, revealAfterEnd: row.revealAfterEnd }));
+
+  // -- what students see by default ---------------------------------------
+  console.log("\nwhat students see by default:");
+  const bare = new FormData();
+  Object.entries(EXAM_FIELDS)
+    .filter(([k]) => !["showScore", "showCorrectAnswers", "revealAfterEnd"].includes(k))
+    .forEach(([k, v]) => bare.append(k, String(v)));
+  bare.append("clientMutationId", `${KEY}-defaults`);
+  bare.set("name", "Defolt");
+  const dflt = await fetch(`${base}/addExam/${cls._id}`, { method: "POST", headers: auth, body: bare });
+  const dfltId = (await read(dflt))?.data?._id;
+  const dfltRow = dfltId ? await Exam.findById(dfltId).lean() : null;
+  ok("an exam created without visibility settings shows the score", dfltRow?.showScore === true);
+  ok("...and the correct/wrong answers", dfltRow?.showCorrectAnswers === true);
+  ok("...straight away, not after the end date", dfltRow?.revealAfterEnd === false);
+  const off = await jsonReq("PATCH", `${base}/editExam/${dfltId}`, { name: "Defolt", duration: 3600, publish: false, showCorrectAnswers: false });
+  const offRow = await Exam.findById(dfltId).lean();
+  ok("a teacher can still turn answers off", off.status === 200 && offRow.showCorrectAnswers === false, `got ${off.status}`);
+  ok("...without touching the score switch", offRow.showScore === true);
+  await Exam.deleteOne({ _id: dfltId });
+  await Class.updateOne({ _id: cls._id }, { $inc: { examCount: -1 } });
 
   /*
    * Pressing save twice must not make a second paper. This is the other half of
