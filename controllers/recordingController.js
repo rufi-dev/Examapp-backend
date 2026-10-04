@@ -154,7 +154,28 @@ const getRecording = asyncHandler(async (req, res) => {
   const rec = await SessionRecording.findById(rid).populate("user", "name email role createdAt phone").lean();
   if (!rec) return res.status(404).json({ message: "Tapılmadı" });
   const { events, lastSeq } = await store.readEventsAfter(rid, -1);
-  res.json({ recording: { ...listDto(rec), pageList: rec.pages || [] }, events, lastSeq });
+  // The same person's visit right before or after this one: a page that
+  // reloads (a new version of the site, say) ends one recording and starts the
+  // next within seconds, and the admin should be able to step across.
+  const end = rec.endedAt || rec.lastChunkAt || rec.startedAt;
+  const userId = rec.user?._id || rec.user;
+  const [next, prev] = await Promise.all([
+    SessionRecording.findOne({ user: userId, _id: { $ne: rid }, startedAt: { $gte: new Date(new Date(rec.startedAt).getTime()), $lte: new Date(new Date(end).getTime() + 60 * 1000) } })
+      .sort({ startedAt: 1 })
+      .select("_id startedAt endedAt lastChunkAt")
+      .lean(),
+    SessionRecording.findOne({ user: userId, _id: { $ne: rid }, startedAt: { $lt: rec.startedAt }, $or: [{ endedAt: { $gte: new Date(new Date(rec.startedAt).getTime() - 60 * 1000) } }, { lastChunkAt: { $gte: new Date(new Date(rec.startedAt).getTime() - 60 * 1000) } }] })
+      .sort({ startedAt: -1 })
+      .select("_id startedAt")
+      .lean(),
+  ]);
+  res.json({
+    recording: { ...listDto(rec), pageList: rec.pages || [] },
+    events,
+    lastSeq,
+    next: next && next.startedAt > rec.startedAt ? { _id: next._id, startedAt: next.startedAt, live: isLive(next) } : null,
+    prev: prev ? { _id: prev._id, startedAt: prev.startedAt } : null,
+  });
 });
 
 // GET /api/rec/:rid/live?after=N — admin: what arrived since chunk N, and

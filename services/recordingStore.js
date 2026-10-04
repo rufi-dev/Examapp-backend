@@ -57,6 +57,23 @@ async function writeChunk(rid, seq, body) {
 
 const seqOf = (name) => Number(String(name).split(".")[0]);
 
+/*
+ * The same event twice: a slice whose request reached the server while the
+ * page was closing, so the browser never saw the reply and sent it again on
+ * its way out. Two genuine events never match in time, type and content, so an
+ * exact repeat is dropped. (A full snapshot is keyed by its moment alone: it
+ * is large, and there is one at a time.)
+ */
+function dedupe(events) {
+  const seen = new Set();
+  return events.filter((e) => {
+    const key = e?.type === 2 ? `${e.timestamp}|2` : `${e?.timestamp}|${e?.type}|${JSON.stringify(e?.data)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 /* The chunk numbers stored so far, ascending. */
 async function chunkNames(rid) {
   try {
@@ -95,7 +112,7 @@ async function readEventsAfter(rid, after = -1) {
   }
   events.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
   const lastSeq = names.length ? seqOf(names[names.length - 1]) : after;
-  return { events, lastSeq };
+  return { events: dedupe(events), lastSeq };
 }
 
 async function readEvents(rid) {

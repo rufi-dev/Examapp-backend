@@ -134,6 +134,24 @@ async function main() {
   ok("a visit silent for minutes is not live (the tab was simply closed)", quiet.live === false);
   await store.removeRecording(sl.rid);
 
+  // ── a reload ends one recording and starts the next: the two are linked ──
+  const ra = await (await start(fresh, { t0: 1 })).json();
+  await chunk(ra.rid, ra.token, 0, [{ type: 4, timestamp: 1 }, { type: 2, timestamp: 2 }]);
+  // the closing slice arrives twice (sent, reply lost to the reload, sent again)
+  await chunk(ra.rid, ra.token, 1, [{ type: 3, timestamp: 5, data: { source: 2, id: 7 } }]);
+  await chunk(ra.rid, ra.token, 2, [{ type: 3, timestamp: 5, data: { source: 2, id: 7 } }, { type: 3, timestamp: 6, data: { source: 2, id: 8 } }], { final: true });
+  await new Promise((r) => setTimeout(r, 20));
+  const rb = await (await start(fresh, { t0: 10 })).json();
+  await chunk(rb.rid, rb.token, 0, [{ type: 4, timestamp: 10 }, { type: 2, timestamp: 11 }]);
+  const a = await (await fetch(`${base}/${ra.rid}`, { headers: auth(admin) })).json();
+  const b = await (await fetch(`${base}/${rb.rid}`, { headers: auth(admin) })).json();
+  ok("a slice sent twice is replayed once", a.events?.map((e) => e.timestamp).join(",") === "1,2,5,6", JSON.stringify(a.events?.map((e) => e.timestamp)));
+  ok("the visit that ended in a reload points to its continuation", a.next?._id === rb.rid, JSON.stringify(a.next));
+  ok("and the continuation points back", b.prev?._id === ra.rid && !b.next, JSON.stringify({ prev: b.prev, next: b.next }));
+  ok("a live continuation says it is live", a.next?.live === true);
+  await store.removeRecording(ra.rid);
+  await store.removeRecording(rb.rid);
+
   // ── temporary ──
   const s2 = await (await start(fresh)).json();
   await chunk(s2.rid, s2.token, 0, [{ type: 4, timestamp: 1 }]);
