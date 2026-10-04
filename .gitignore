@@ -27,3 +27,5 @@ live-journal/
 # other people's copyrighted material, sometimes hundreds of MB, and the bytes every
 # published citation is pinned to. It belongs on a volume, never in the repo.
 lessonAssets/
+# Session recordings written by a local or test server (RECORDINGS_DIR unset)
+recordings/
