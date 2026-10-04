@@ -262,6 +262,8 @@ app.use("/api/lesson-docs", require("./routes/lessonDocRoute"))
 // Admin-only runtime switch for API-backed versus on-server CLI execution.
 app.use("/api/admin/ai-runtime", require("./routes/aiRuntimeRoute"))
 app.use("/api/health", healthRoute)
+// Session recordings of new teachers (what they did before giving up), admin-viewed.
+app.use("/api/rec", require("./routes/recordingRoute"))
 // Public step-by-step "how to use the platform" guide videos (self-hosted help
 // content, NO auth — nothing sensitive). express.static gives byte-range support so
 // <video> can seek/stream. Files live in a persistent volume (guide-videos/); a

@@ -127,6 +127,7 @@
   "tests/http/profile-stats.test.js",
   "tests/http/profile-update.test.js",
   "tests/http/parent-accounts-flow.test.js",
+  "tests/http/session-recording.test.js",
   "tests/exam-provisional.test.js",
   "tests/exam-variant.test.js",
   "tests/mso-report.test.js",
