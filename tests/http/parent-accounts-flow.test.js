@@ -111,6 +111,11 @@ async function main() {
   ok("nor a teacher's password", staff.status === 403, `status ${staff.status}`);
   const weak = await call("PATCH", `/api/parent/managed/${student._id}/password`, teacher, { password: "123" });
   ok("a weak password is refused", weak.status === 400, `status ${weak.status}`);
+  const adminTeacher = await call("PATCH", `/api/parent/managed/${other._id}/password`, admin, { password: "Muellim2026" });
+  ok("an admin can set a teacher's password", adminTeacher.status === 200 && (await login("t2@pf.test", "Muellim2026")).status === 200, `status ${adminTeacher.status}`);
+  const otherAdmin = await mk({ name: "A2", email: "a2@pf.test", role: "admin" });
+  const adminAdmin = await call("PATCH", `/api/parent/managed/${otherAdmin._id}/password`, admin, { password: "Admin2026y" });
+  ok("but never another admin's", adminAdmin.status === 403, `status ${adminAdmin.status}`);
   const byAdmin = await call("PATCH", `/api/parent/managed/${foreign._id}/password`, admin, { password: "Admin2026x" });
   ok("an admin can reset any student", byAdmin.status === 200 && (await login("s2@pf.test", "Admin2026x")).status === 200, `status ${byAdmin.status}`);
 

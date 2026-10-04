@@ -212,7 +212,14 @@ const setManagedPassword = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("İstifadəçi tapılmadı");
   }
-  if (!["student", "parent"].includes(target.role)) {
+  // An admin may also set a teacher's password (a teacher locked out of their
+  // own account has nobody else to ask). Never another admin's, never one's own.
+  if (req.user.role === "admin" && target.role === "teacher") {
+    if (String(target._id) === String(req.user._id)) {
+      res.status(403);
+      throw new Error("Öz şifrənizi profil səhifəsindən dəyişin");
+    }
+  } else if (!["student", "parent"].includes(target.role)) {
     res.status(403);
     throw new Error("Yalnız şagird və valideyn şifrəsini dəyişmək olar");
   }
