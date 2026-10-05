@@ -66,9 +66,9 @@ async function main() {
   ok("an unlinked number lists nothing", (await wa.listGroupsFor("g-off")).length === 0);
 
   // ── the dialog can name the linked number ──
-  wa._injectSessionForTests("g-me", { ready: true, client: { info: { wid: { user: "994505440307" }, pushname: "Rufi" } } });
+  wa._injectSessionForTests("g-me", { ready: true, client: { info: { wid: { user: "994501234567" }, pushname: "Rufi" } } });
   const st = wa.getStatusFor("g-me");
-  ok("status names the linked number and its WhatsApp name", st.phone === "994505440307" && st.name === "Rufi");
+  ok("status names the linked number and its WhatsApp name", st.phone === "994501234567" && st.name === "Rufi");
   ok("an unlinked status names nothing", wa.getStatusFor("g-off").phone === "");
 
   console.log(`\n${passed} passed, ${failed} failed`);
