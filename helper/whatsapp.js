@@ -385,6 +385,8 @@ function restartFor(ownerId) {
 
 const getStatusFor = (ownerId) => {
   const s = getSession(ownerId);
+  // Which number is linked, and the name it goes by on WhatsApp.
+  const info = s.ready && s.client ? s.client.info : null;
   return {
     enabled: ENABLED,
     ready: s.ready,
@@ -392,6 +394,8 @@ const getStatusFor = (ownerId) => {
     connecting: !!s.connecting && !s.ready,
     loadingPct: s.loadingPct || 0,
     error: !!s.lastError,
+    phone: info?.wid?.user || "",
+    name: info?.pushname || "",
   };
 };
 const getQrFor = (ownerId) => getSession(ownerId).lastQrDataUrl;
@@ -520,19 +524,84 @@ async function sendOutreachFor(ownerId, phone, text) {
   return ok ? "sent" : "failed";
 }
 
-// List a teacher's WhatsApp groups so they can pick a notify group.
-async function listGroupsFor(ownerId) {
+/*
+ * A teacher's WhatsApp groups, for the notify-group picker.
+ *
+ * Read straight from WhatsApp Web's own chat list in the page. The library's
+ * getChats() serialises EVERY chat and asks WhatsApp's servers for each group's
+ * metadata, all in one Promise.all; on a real account one of those requests
+ * never answers and the whole call hangs with no reply and no error (seen in
+ * prod 2026-10-05: "listGroups ... ready=true" and then nothing), so the picker
+ * stayed empty. The in-page read needs no network and answers at once; the old
+ * call is kept only as a fallback, and both are time-boxed.
+ */
+const GROUPS_TIMEOUT_MS = 15000;
+
+const timeBoxed = (promise, ms, what) =>
+  new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+    Promise.resolve(promise).then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
+    );
+  });
+
+// Runs INSIDE WhatsApp Web (puppeteer serialises it), so it may only use the page.
+function readGroupsInPage() {
+  const C = window.require("WAWebCollections");
+  const size = (p) => {
+    if (!p) return null;
+    if (typeof p.length === "number") return p.length;
+    return typeof p.getModelsArray === "function" ? p.getModelsArray().length : null;
+  };
+  return C.Chat.getModelsArray()
+    .filter((c) => c && c.id && (c.id.server === "g.us" || c.isGroup))
+    .map((c) => {
+      const m = c.groupMetadata;
+      return {
+        id: c.id._serialized,
+        name: c.formattedTitle || c.name || (m && m.subject) || "",
+        size: size(m && m.participants),
+        readOnly: !!c.isReadOnly,
+        community: !!(m && m.isParentGroup),
+        t: Number(c.t) || 0,
+      };
+    });
+}
+
+// Groups a message can go to, the ones written in recently first. A community's
+// parent can't take messages; a group the number left (or may not write in)
+// stays listed but marked, so the teacher sees why it can't be picked.
+function shapeGroups(raw) {
+  return (Array.isArray(raw) ? raw : [])
+    .filter((g) => g && typeof g.id === "string" && g.id.endsWith("@g.us") && !g.community)
+    .map((g) => ({
+      id: g.id,
+      name: String(g.name || "").trim() || "Adsız qrup",
+      size: Number.isFinite(g.size) && g.size > 0 ? g.size : null,
+      readOnly: !!g.readOnly,
+      t: Number(g.t) || 0,
+    }))
+    .sort((a, b) => a.readOnly - b.readOnly || b.t - a.t || a.name.localeCompare(b.name, "az"))
+    .map((g) => ({ id: g.id, name: g.name, size: g.size, readOnly: g.readOnly }));
+}
+
+async function listGroupsFor(ownerId, { timeoutMs = GROUPS_TIMEOUT_MS } = {}) {
   const s = getSession(ownerId);
-  console.log(`[WHATSAPP][DEBUG] listGroups ${ownerId} ready=${s.ready} hasClient=${!!s.client}`);
   if (!s.ready || !s.client) return [];
   try {
-    const chats = await s.client.getChats();
-    const groups = chats.filter((c) => c.isGroup);
-    console.log(`[WHATSAPP][DEBUG] listGroups ${ownerId} chats=${chats.length} groups=${groups.length}`);
-    return groups.map((c) => ({ id: c.id._serialized, name: c.name || "(qrup)" }));
+    if (!s.client.pupPage) throw new Error("no page");
+    return shapeGroups(await timeBoxed(s.client.pupPage.evaluate(readGroupsInPage), timeoutMs, "in-page group read"));
+  } catch (e) {
+    console.warn(`[WHATSAPP] ${ownerId} in-page group read failed (${e.message}); trying getChats`);
+  }
+  try {
+    const chats = await timeBoxed(s.client.getChats(), timeoutMs, "getChats");
+    return shapeGroups(
+      chats.filter((c) => c.isGroup).map((c) => ({ id: c.id._serialized, name: c.name, size: c.participants?.length, readOnly: c.isReadOnly, t: c.timestamp }))
+    );
   } catch (e) {
     console.error(`[WHATSAPP] ${ownerId} listGroups failed:`, e.message);
-    console.error(e.stack);
     return [];
   }
 }
@@ -698,6 +767,7 @@ module.exports = {
   readyOwners,
   nextReadyOwner,
   listGroupsFor,
+  shapeGroups,
   notifyStudentsNewExam,
   toDigits,
 };

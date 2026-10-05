@@ -72,6 +72,7 @@
   "tests/audit-gate.test.js",
   "tests/http/mail-redaction.test.js",
   "tests/whatsapp-shutdown.test.js",
+  "tests/whatsapp-groups.test.js",
   "tests/process-guards.test.js",
   "tests/health-backups.test.js",
   "tests/http/admin-whatsapp-message.test.js",
