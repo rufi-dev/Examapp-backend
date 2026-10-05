@@ -2974,6 +2974,12 @@ async function runGeneration({ prompt, preset, model, onText, signal, system, pa
       const sys = (system || GEN_SYSTEM_PROMPT) + (presetHint(preset) ? `
 
 ${presetHint(preset)}` : "");
+      /*
+       * ONE listener for the whole run: it remembers how many questions it has
+       * already sent, so the streamed text and the final answer below can both
+       * pass through it without a question reaching the teacher twice.
+       */
+      const emit = onText ? onText(cliProvider) : null;
       const out = await runCliStructured({
         provider: cliProvider,
         model: picked?.id || model,
@@ -2984,9 +2990,12 @@ ${presetHint(preset)}` : "");
         // the diagram instead of guessing between its options.
         parts: Array.isArray(parts) ? parts : [],
         signal,
+        // Questions reach the screen as they are written, not all at the end.
+        onText: emit || undefined,
       });
       const questions = Array.isArray(out.doc?.questions) ? out.doc.questions : [];
-      if (onText) onText(cliProvider)(JSON.stringify({ questions }));
+      // Anything the stream did not already show (Codex, which cannot stream, shows it all here).
+      if (emit) emit(JSON.stringify({ questions }));
       return { questions, cost: out.cost };
     },
     api: () => runGenerationOnApi({ prompt, preset, model, onText, signal, system, picked, parts }),

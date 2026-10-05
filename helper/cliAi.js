@@ -219,6 +219,76 @@ function claudeTurns(fileCount) {
  * argument-parsing one. `--` ends option parsing, so whatever comes after it is
  * the prompt and nothing else.
  */
+/*
+ * The streamed shape of the same answer, for a caller that shows the work as it
+ * is written (question generation). `json` prints one envelope when the turn is
+ * over, so a teacher watched nothing for a minute and then saw twenty-five
+ * questions at once; `stream-json` with partial messages prints every text
+ * delta as it arrives and ends with the same `result` envelope `json` would
+ * have printed, which is what the answer is still read from.
+ */
+const streamedArgs = (args) => {
+  const out = [...args];
+  const at = out.indexOf("--output-format");
+  if (at >= 0) out[at + 1] = "stream-json";
+  return [...out, "--verbose", "--include-partial-messages"];
+};
+
+/*
+ * Reads `claude -p --output-format stream-json` as it arrives: hands the text
+ * written so far to `onText` after every delta, and keeps the closing `result`
+ * line, which carries the same envelope `--output-format json` prints.
+ */
+function claudeStreamReader(onText) {
+  let pending = "";
+  let text = "";
+  let result = "";
+  const line = (raw) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    let j;
+    try {
+      j = JSON.parse(trimmed);
+    } catch {
+      return; // not one of the CLI's lines; the envelope check below catches a real failure
+    }
+    if (j?.type === "result") {
+      result = trimmed;
+      return;
+    }
+    const e = j?.type === "stream_event" ? j.event : null;
+    if (e?.type === "content_block_delta" && e.delta?.type === "text_delta" && typeof e.delta.text === "string") {
+      text += e.delta.text;
+      try {
+        onText(text);
+      } catch {
+        /* a slow or broken listener must never stop the turn */
+      }
+    }
+  };
+  return {
+    push(chunk) {
+      pending += chunk;
+      let nl = pending.indexOf("\n");
+      while (nl >= 0) {
+        line(pending.slice(0, nl));
+        pending = pending.slice(nl + 1);
+        nl = pending.indexOf("\n");
+      }
+    },
+    // What to parse as the answer: the result envelope, or (if the CLI never
+    // printed one) the text it streamed, which then fails or succeeds as JSON.
+    finish() {
+      if (pending) line(pending);
+      pending = "";
+      return result || text;
+    },
+    get text() {
+      return text;
+    },
+  };
+}
+
 function claudeArgs({ model, fileCount = 0, extra = [], systemPrompt }) {
   return [
     ...CLAUDE_BASE_ARGS,
@@ -359,7 +429,7 @@ function claudeResult(raw) {
   return parsed;
 }
 
-function runProcess(command, args, { cwd, signal, provider, timeoutMs, stdin } = {}) {
+function runProcess(command, args, { cwd, signal, provider, timeoutMs, stdin, onStdout } = {}) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env, CI: "1", NO_COLOR: "1" };
     /*
@@ -438,6 +508,13 @@ function runProcess(command, args, { cwd, signal, provider, timeoutMs, stdin } =
       stdoutBytes += chunk.length;
       if (stdoutBytes <= MAX_OUTPUT_BYTES) stdout += chunk.toString();
       else outputTooLarge = true;
+      if (onStdout) {
+        try {
+          onStdout(chunk.toString());
+        } catch {
+          /* the listener's trouble is not the turn's */
+        }
+      }
     });
     /*
      * Keep the END of stderr, not the beginning.
@@ -544,7 +621,7 @@ function buildPrompt({ prompt, schema, files }) {
   ].filter(Boolean).join("\n\n");
 }
 
-async function runCliStructured({ provider, model, system, prompt, schema, parts = [], signal, tier = "standard" }) {
+async function runCliStructured({ provider, model, system, prompt, schema, parts = [], signal, tier = "standard", onText }) {
   const chosen = provider === "openai" ? "codex" : provider;
   if (chosen !== "claude" && chosen !== "codex") throw Object.assign(new Error("cli_provider_unavailable"), { code: "cli_provider_unavailable" });
   // The tier is resolved AFTER the provider is known, so a failover to the other
@@ -588,6 +665,8 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
       const fullPrompt = buildPrompt({ prompt, schema, files });
       const systemPrompt = buildSystemPrompt({ system, insist });
       let args;
+      // Only Claude can stream here; Codex writes its answer to a file at the end.
+      const reader = chosen === "claude" && typeof onText === "function" ? claudeStreamReader(onText) : null;
       if (chosen === "claude") {
         args = claudeArgs({
           model: wanted,
@@ -597,6 +676,7 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
           // this turn's sandbox and at nothing else on the machine.
           extra: files.length ? ["--tools", "Read", "--add-dir", job] : ["--tools", ""],
         });
+        if (reader) args = streamedArgs(args);
       } else {
         // Codex takes no system prompt, so its contract rides in the message.
         args = ["exec", "--sandbox", "read-only", "--skip-git-repo-check",
@@ -611,8 +691,14 @@ ${fullPrompt}`];
         provider: chosen,
         // claude reads the prompt from stdin; codex still takes it as an argument.
         ...(chosen === "claude" ? { stdin: fullPrompt } : {}),
+        ...(reader ? { onStdout: (chunk) => reader.push(chunk) } : {}),
       });
-      const raw = chosen === "codex" ? await fs.readFile(answerFile, "utf8").catch(() => result.stdout) : result.stdout;
+      const raw =
+        chosen === "codex"
+          ? await fs.readFile(answerFile, "utf8").catch(() => result.stdout)
+          : reader
+            ? reader.finish()
+            : result.stdout;
       const limited = limitFromText(raw, chosen);
       if (limited) throw limited;
       return chosen === "claude" ? claudeResult(raw) : parseJsonText(raw);
@@ -795,4 +881,7 @@ module.exports = {
   modelBelongsTo,
   limitFromText,
   claudeEnvelope,
+  claudeStreamReader,
+  claudeResult,
+  streamedArgs,
 };

@@ -105,6 +105,7 @@
   "tests/ai-runtime-coverage.test.js",
   "tests/ai-cli-failover.test.js",
   "tests/ai-cli-silent-failure.test.js",
+  "tests/ai-cli-stream.test.js",
   "tests/answer-key-vision.test.js",
   "tests/question-figures.test.js",
   "tests/solve-answers-stream.test.js",
