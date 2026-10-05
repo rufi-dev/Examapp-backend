@@ -22,7 +22,7 @@ const ok = (label, cond, extra = "") => {
   }
 };
 
-const { claudeStreamReader, streamedArgs, claudeArgs, claudeResult, claudeEnvelope } = require("../helper/cliAi");
+const { claudeStreamReader, streamedArgs, claudeArgs, claudeResult, claudeEnvelope, codexTurnReader, limitFromText } = require("../helper/cliAi");
 
 const delta = (text) => JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text } } });
 const ANSWER = '{"questions":[{"text":"1+1=?"},{"text":"2+2=?"}]}';
@@ -83,6 +83,36 @@ function main() {
   ok("the streamed call asks for stream-json", streamed[streamed.indexOf("--output-format") + 1] === "stream-json");
   ok("with the two flags stream-json needs for partial text", streamed.includes("--verbose") && streamed.includes("--include-partial-messages"));
   ok("and nothing else changes", streamed.length === base.length + 2 && streamed.includes("--system-prompt"));
+
+  console.log("\ncodex, through its app-server (shapes the deployed 0.162 printed):");
+  const cseen = [];
+  const turn = codexTurnReader((t) => cseen.push(t));
+  const note = (method, params) => ({ method, params });
+  const msgs = [
+    note("turn/started", {}),
+    note("item/completed", { item: { type: "userMessage", text: "" } }),
+    note("item/agentMessage/delta", { itemId: "m1", delta: '{"' }),
+    note("item/agentMessage/delta", { itemId: "m1", delta: 'questions":[{"text":"1+1=?"},' }),
+    note("item/agentMessage/delta", { itemId: "m1", delta: '{"text":"2+2=?"}]}' }),
+    note("item/completed", { item: { type: "agentMessage", text: ANSWER } }),
+  ];
+  let ended = null;
+  for (const m of msgs) ended = turn.handle(m) || ended;
+  ok("the text reaches the listener piece by piece", cseen.length === 3 && cseen[2] === ANSWER, JSON.stringify(cseen));
+  ok("nothing ends before turn/completed", ended === null);
+  const end = turn.handle(note("turn/completed", { turn: { status: "completed", error: null } }));
+  ok("the finished message is the answer", end && end.result === ANSWER);
+
+  const second = codexTurnReader(() => {});
+  second.handle(note("item/agentMessage/delta", { itemId: "a", delta: "Thinking about it" }));
+  second.handle(note("item/agentMessage/delta", { itemId: "b", delta: '{"questions":[]}' }));
+  ok("a new message starts its text over", second.text === '{"questions":[]}');
+
+  const spent = codexTurnReader(() => {});
+  spent.handle(note("error", { error: { message: "You've hit your usage limit. Try again later." }, willRetry: false }));
+  const failedTurn = spent.handle(note("turn/completed", { turn: { status: "failed", error: null } }));
+  ok("a failed turn reports the reason it was given", failedTurn && /usage limit/.test(failedTurn.error));
+  ok("...which reads as a spent plan, so the gateway switches route", limitFromText(failedTurn.error, "codex")?.code === "cli_limit_reached");
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

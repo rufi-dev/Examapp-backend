@@ -289,6 +289,188 @@ function claudeStreamReader(onText) {
   };
 }
 
+/*
+ * Reads one Codex app-server turn: hands the agent's text so far to `onText`
+ * after every `item/agentMessage/delta`, remembers the finished message, and
+ * says how the turn ended. `handle` returns null while the turn runs, then
+ * { result } or { error }.
+ */
+function codexTurnReader(onText) {
+  let text = "";
+  let itemId = null;
+  let finalText = "";
+  let lastError = "";
+  return {
+    handle(m) {
+      const p = (m && m.params) || {};
+      switch (m && m.method) {
+        case "item/agentMessage/delta":
+          // A new message starts over; the question streamer dedupes by position.
+          if (p.itemId !== itemId) {
+            itemId = p.itemId;
+            text = "";
+          }
+          text += String(p.delta || "");
+          try {
+            onText(text);
+          } catch {
+            /* a broken listener must never stop the turn */
+          }
+          return null;
+        case "item/completed":
+          if (p.item && p.item.type === "agentMessage") finalText = String(p.item.text || "");
+          return null;
+        case "error":
+          if (p.error && p.error.message) lastError = String(p.error.message);
+          return null;
+        case "turn/completed": {
+          const turn = p.turn || {};
+          if (turn.status === "completed" && !turn.error) return { result: finalText || text };
+          return { error: String((turn.error && turn.error.message) || lastError || `turn ${turn.status || "failed"}`) };
+        }
+        default:
+          return null;
+      }
+    },
+    get text() {
+      return text;
+    },
+  };
+}
+
+/*
+ * Codex, streamed.
+ *
+ * `codex exec` gives its answer only when the turn is over - `--json` prints the
+ * agent message once, finished - so on the Codex route questions appeared all at
+ * once. Its app-server (the JSON-RPC protocol the editor extensions speak, over
+ * stdio) sends `item/agentMessage/delta` as the model writes: measured on this
+ * server, a small turn arrived in 51 pieces. One thread, one turn, then the
+ * process is closed.
+ *
+ * Upstream marks the app-server experimental. Anything wrong with the PROTOCOL
+ * (a renamed method, a refused handshake, an early exit) is reported as
+ * `codex_stream_unavailable`, and the caller runs `codex exec` instead, so an
+ * update can only cost the streaming, never the answer. A failure of the TURN
+ * (a spent plan, a refusal) is reported as what it is.
+ */
+function runCodexStreamed({ cwd, model, prompt, onText, signal, timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const reader = codexTurnReader(onText);
+    let child;
+    try {
+      child = spawn(cliBinary("codex"), ["app-server"], { cwd, env: childEnv("codex"), stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    } catch (e) {
+      reject(Object.assign(new Error(`codex app-server: ${e.message}`), { code: "codex_stream_unavailable" }));
+      return;
+    }
+    let buf = "";
+    let stderr = "";
+    let nextId = 0;
+    let started = false;
+    let settled = false;
+    const waiting = new Map();
+    const protocolError = (why) =>
+      Object.assign(new Error(`codex app-server: ${String(why).slice(0, 300)}`), { code: "codex_stream_unavailable", stderr: stderr.slice(-STDERR_KEEP) });
+    const timer = setTimeout(
+      () => finish(Object.assign(new Error("cli_timeout"), { code: "cli_timeout" })),
+      Number(timeoutMs) > 0 ? Number(timeoutMs) : CLI_TIMEOUT_MS
+    );
+    const abort = () => finish(Object.assign(new Error("cli_cancelled"), { code: "cli_cancelled" }));
+    function finish(err, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* already gone */
+      }
+      if (err) reject(err);
+      else resolve(value);
+    }
+    if (signal?.aborted) return abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    const write = (obj) => {
+      try {
+        child.stdin.write(`${JSON.stringify(obj)}\n`);
+      } catch {
+        /* the close handler reports it */
+      }
+    };
+    const call = (method, params) =>
+      new Promise((res, rej) => {
+        nextId += 1;
+        waiting.set(nextId, { res, rej });
+        write({ id: nextId, method, params });
+      });
+
+    child.stdin.on("error", () => {});
+    child.stderr.on("data", (c) => {
+      stderr += c.toString();
+      if (stderr.length > STDERR_KEEP) stderr = stderr.slice(-STDERR_KEEP);
+    });
+    child.on("error", (e) => finish(started ? Object.assign(e, { code: e.code || "cli_spawn_failed" }) : protocolError(e.message)));
+    child.on("close", (code) => {
+      if (settled) return;
+      if (!started) return finish(protocolError(`exited ${code} before the turn began`));
+      const limited = limitFromText(stderr.slice(-600), "codex");
+      finish(limited || Object.assign(new Error("cli_failed"), { code: "cli_failed", exitCode: code, stderr: stderr.slice(-STDERR_KEEP), stdout: reader.text.slice(-2000) }));
+    });
+    child.stdout.on("data", (chunk) => {
+      buf += chunk.toString();
+      let nl = buf.indexOf("\n");
+      while (nl >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        nl = buf.indexOf("\n");
+        if (!line) continue;
+        let m;
+        try {
+          m = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (m.id != null && !m.method) {
+          const w = waiting.get(m.id);
+          if (w) {
+            waiting.delete(m.id);
+            if (m.error) w.rej(new Error(m.error.message || JSON.stringify(m.error)));
+            else w.res(m.result);
+          }
+          continue;
+        }
+        // The server asking us something (an approval): never granted.
+        if (m.id != null && m.method) {
+          write({ id: m.id, error: { code: -32601, message: "not supported by this client" } });
+          continue;
+        }
+        const end = reader.handle(m);
+        if (end && end.error) {
+          const limited = limitFromText(end.error, "codex");
+          return finish(limited || Object.assign(new Error(end.error.slice(0, 400)), { code: "cli_failed", stderr: end.error, stdout: end.error.slice(0, 600) }));
+        }
+        if (end) return finish(null, end.result);
+      }
+    });
+
+    (async () => {
+      try {
+        await call("initialize", { clientInfo: { name: "examopia", version: "1" } });
+        write({ method: "initialized", params: {} });
+        const th = await call("thread/start", { cwd, sandbox: "read-only", approvalPolicy: "never", ephemeral: true, model: model || null });
+        const threadId = th && th.thread && th.thread.id;
+        if (!threadId) throw new Error("thread/start returned no thread");
+        await call("turn/start", { threadId, input: [{ type: "text", text: prompt, text_elements: [] }] });
+        started = true;
+      } catch (e) {
+        finish(protocolError(e && e.message));
+      }
+    })();
+  });
+}
+
 function claudeArgs({ model, fileCount = 0, extra = [], systemPrompt }) {
   return [
     ...CLAUDE_BASE_ARGS,
@@ -429,45 +611,51 @@ function claudeResult(raw) {
   return parsed;
 }
 
+/* What a CLI child may see: its own credentials, never another provider's. */
+function childEnv(provider) {
+  const env = { ...process.env, CI: "1", NO_COLOR: "1" };
+  /*
+   * A variable that is defined but empty is not a credential, and compose
+   * defines CLAUDE_CODE_OAUTH_TOKEN as "" whenever the owner has not set one.
+   * A CLI that keys off "is this variable present" would then pick the token
+   * path and find nothing there, which fails as "not logged in" - true, and
+   * impossible to explain. Absent is clearer than empty.
+   */
+  for (const key of [
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "CODEX_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  ]) {
+    if (env[key] !== undefined && String(env[key]).trim() === "") delete env[key];
+  }
+  const useProviderApiKeys = String(process.env.AI_CLI_USE_API_KEYS || "").toLowerCase() === "true";
+  // Do not let one provider's secret accidentally select another provider's
+  // authentication path. The relevant CLI login volume or provider key is
+  // preserved; unrelated keys are removed from the child environment.
+  if (provider === "claude") {
+    delete env.OPENAI_API_KEY;
+    delete env.GEMINI_API_KEY;
+    delete env.CODEX_API_KEY;
+    if (!useProviderApiKeys) delete env.ANTHROPIC_API_KEY;
+  } else if (provider === "codex") {
+    delete env.ANTHROPIC_API_KEY;
+    // Claude's subscription token is a credential like any other: Codex's
+    // process has no use for it and should never be handed it.
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete env.GEMINI_API_KEY;
+    if (!useProviderApiKeys) {
+      delete env.OPENAI_API_KEY;
+      delete env.CODEX_API_KEY;
+    }
+  }
+  return env;
+}
+
 function runProcess(command, args, { cwd, signal, provider, timeoutMs, stdin, onStdout } = {}) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, CI: "1", NO_COLOR: "1" };
-    /*
-     * A variable that is defined but empty is not a credential, and compose
-     * defines CLAUDE_CODE_OAUTH_TOKEN as "" whenever the owner has not set one.
-     * A CLI that keys off "is this variable present" would then pick the token
-     * path and find nothing there, which fails as "not logged in" - true, and
-     * impossible to explain. Absent is clearer than empty.
-     */
-    for (const key of [
-      "ANTHROPIC_API_KEY",
-      "OPENAI_API_KEY",
-      "GEMINI_API_KEY",
-      "CODEX_API_KEY",
-      "CLAUDE_CODE_OAUTH_TOKEN",
-    ]) {
-      if (env[key] !== undefined && String(env[key]).trim() === "") delete env[key];
-    }
-    const useProviderApiKeys = String(process.env.AI_CLI_USE_API_KEYS || "").toLowerCase() === "true";
-    // Do not let one provider's secret accidentally select another provider's
-    // authentication path. The relevant CLI login volume or provider key is
-    // preserved; unrelated keys are removed from the child environment.
-    if (provider === "claude") {
-      delete env.OPENAI_API_KEY;
-      delete env.GEMINI_API_KEY;
-      delete env.CODEX_API_KEY;
-      if (!useProviderApiKeys) delete env.ANTHROPIC_API_KEY;
-    } else if (provider === "codex") {
-      delete env.ANTHROPIC_API_KEY;
-      // Claude's subscription token is a credential like any other: Codex's
-      // process has no use for it and should never be handed it.
-      delete env.CLAUDE_CODE_OAUTH_TOKEN;
-      delete env.GEMINI_API_KEY;
-      if (!useProviderApiKeys) {
-        delete env.OPENAI_API_KEY;
-        delete env.CODEX_API_KEY;
-      }
-    }
+    const env = childEnv(provider);
     const child = spawn(command, args, {
       cwd,
       env,
@@ -685,20 +873,33 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
 
 ${fullPrompt}`];
       }
-      const result = await runProcess(cliBinary(chosen), args, {
-        cwd: job,
-        signal,
-        provider: chosen,
-        // claude reads the prompt from stdin; codex still takes it as an argument.
-        ...(chosen === "claude" ? { stdin: fullPrompt } : {}),
-        ...(reader ? { onStdout: (chunk) => reader.push(chunk) } : {}),
-      });
-      const raw =
-        chosen === "codex"
-          ? await fs.readFile(answerFile, "utf8").catch(() => result.stdout)
-          : reader
-            ? reader.finish()
-            : result.stdout;
+      // Codex streams through its app-server; if that route is unavailable, exec.
+      let streamed = null;
+      if (chosen === "codex" && typeof onText === "function") {
+        try {
+          streamed = await runCodexStreamed({ cwd: job, model: cliModel("codex", wanted), prompt: `${systemPrompt}\n\n${fullPrompt}`, onText, signal });
+        } catch (e) {
+          if (e.code !== "codex_stream_unavailable") throw e;
+          console.warn(`[cli] codex streaming unavailable, using exec: ${e.message}`);
+        }
+      }
+      let raw = streamed;
+      if (raw == null) {
+        const result = await runProcess(cliBinary(chosen), args, {
+          cwd: job,
+          signal,
+          provider: chosen,
+          // claude reads the prompt from stdin; codex still takes it as an argument.
+          ...(chosen === "claude" ? { stdin: fullPrompt } : {}),
+          ...(reader ? { onStdout: (chunk) => reader.push(chunk) } : {}),
+        });
+        raw =
+          chosen === "codex"
+            ? await fs.readFile(answerFile, "utf8").catch(() => result.stdout)
+            : reader
+              ? reader.finish()
+              : result.stdout;
+      }
       const limited = limitFromText(raw, chosen);
       if (limited) throw limited;
       return chosen === "claude" ? claudeResult(raw) : parseJsonText(raw);
@@ -883,5 +1084,6 @@ module.exports = {
   claudeEnvelope,
   claudeStreamReader,
   claudeResult,
+  codexTurnReader,
   streamedArgs,
 };
