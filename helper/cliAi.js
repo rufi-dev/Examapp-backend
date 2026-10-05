@@ -239,7 +239,7 @@ const streamedArgs = (args) => {
  * written so far to `onText` after every delta, and keeps the closing `result`
  * line, which carries the same envelope `--output-format json` prints.
  */
-function claudeStreamReader(onText) {
+function claudeStreamReader(onText, onThinking) {
   let pending = "";
   let text = "";
   let result = "";
@@ -257,6 +257,15 @@ function claudeStreamReader(onText) {
       return;
     }
     const e = j?.type === "stream_event" ? j.event : null;
+    // The model planning before it writes: not text, but proof of work.
+    if (e?.type === "content_block_delta" && e.delta?.type === "thinking_delta" && typeof onThinking === "function") {
+      try {
+        onThinking();
+      } catch {
+        /* a broken listener must never stop the turn */
+      }
+      return;
+    }
     if (e?.type === "content_block_delta" && e.delta?.type === "text_delta" && typeof e.delta.text === "string") {
       text += e.delta.text;
       try {
@@ -295,7 +304,7 @@ function claudeStreamReader(onText) {
  * says how the turn ended. `handle` returns null while the turn runs, then
  * { result } or { error }.
  */
-function codexTurnReader(onText) {
+function codexTurnReader(onText, onThinking) {
   let text = "";
   let itemId = null;
   let finalText = "";
@@ -315,6 +324,16 @@ function codexTurnReader(onText) {
             onText(text);
           } catch {
             /* a broken listener must never stop the turn */
+          }
+          return null;
+        case "item/reasoning/textDelta":
+        case "item/reasoning/summaryTextDelta":
+          if (typeof onThinking === "function") {
+            try {
+              onThinking();
+            } catch {
+              /* a broken listener must never stop the turn */
+            }
           }
           return null;
         case "item/completed":
@@ -354,9 +373,9 @@ function codexTurnReader(onText) {
  * update can only cost the streaming, never the answer. A failure of the TURN
  * (a spent plan, a refusal) is reported as what it is.
  */
-function runCodexStreamed({ cwd, model, prompt, onText, signal, timeoutMs }) {
+function runCodexStreamed({ cwd, model, prompt, onText, onThinking, signal, timeoutMs }) {
   return new Promise((resolve, reject) => {
-    const reader = codexTurnReader(onText);
+    const reader = codexTurnReader(onText, onThinking);
     let child;
     try {
       child = spawn(cliBinary("codex"), ["app-server"], { cwd, env: childEnv("codex"), stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
@@ -809,7 +828,7 @@ function buildPrompt({ prompt, schema, files }) {
   ].filter(Boolean).join("\n\n");
 }
 
-async function runCliStructured({ provider, model, system, prompt, schema, parts = [], signal, tier = "standard", onText }) {
+async function runCliStructured({ provider, model, system, prompt, schema, parts = [], signal, tier = "standard", onText, onThinking }) {
   const chosen = provider === "openai" ? "codex" : provider;
   if (chosen !== "claude" && chosen !== "codex") throw Object.assign(new Error("cli_provider_unavailable"), { code: "cli_provider_unavailable" });
   // The tier is resolved AFTER the provider is known, so a failover to the other
@@ -854,7 +873,7 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
       const systemPrompt = buildSystemPrompt({ system, insist });
       let args;
       // Only Claude can stream here; Codex writes its answer to a file at the end.
-      const reader = chosen === "claude" && typeof onText === "function" ? claudeStreamReader(onText) : null;
+      const reader = chosen === "claude" && typeof onText === "function" ? claudeStreamReader(onText, onThinking) : null;
       if (chosen === "claude") {
         args = claudeArgs({
           model: wanted,
@@ -877,7 +896,7 @@ ${fullPrompt}`];
       let streamed = null;
       if (chosen === "codex" && typeof onText === "function") {
         try {
-          streamed = await runCodexStreamed({ cwd: job, model: cliModel("codex", wanted), prompt: `${systemPrompt}\n\n${fullPrompt}`, onText, signal });
+          streamed = await runCodexStreamed({ cwd: job, model: cliModel("codex", wanted), prompt: `${systemPrompt}\n\n${fullPrompt}`, onText, onThinking, signal });
         } catch (e) {
           if (e.code !== "codex_stream_unavailable") throw e;
           console.warn(`[cli] codex streaming unavailable, using exec: ${e.message}`);

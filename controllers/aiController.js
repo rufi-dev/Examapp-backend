@@ -1824,6 +1824,8 @@ const extractQuestions = asyncHandler(async (req, res) => {
 // re-scans from the array start each call (cheap at this size) and tracks how
 // many it has handed out, respecting JSON strings/escapes so LaTeX braces and
 // quotes inside values don't confuse the brace counter.
+const { currentQuestionDraft } = require("../helper/questionDraft");
+
 const makeQuestionStreamer = () => {
   let emitted = 0;
   return (buf) => {
@@ -2950,7 +2952,7 @@ async function generateWithClaude(prompt, presetId, onText, signal, systemOverri
  * they are in the bar chart. The model could not solve it. It could only pick
  * one of five options and sound certain, which is exactly what it did.
  */
-async function runGeneration({ prompt, preset, model, onText, signal, system, parts }) {
+async function runGeneration({ prompt, preset, model, onText, onThinking, signal, system, parts }) {
   // The teacher's choice wins, but only from the allow-list: the id arrives
   // from a browser, and an unchecked one could name a pro tier at many times
   // the price. Anything unrecognised silently falls back to the default.
@@ -2992,6 +2994,7 @@ ${presetHint(preset)}` : "");
         signal,
         // Questions reach the screen as they are written, not all at the end.
         onText: emit || undefined,
+        onThinking: onThinking || undefined,
       });
       const questions = Array.isArray(out.doc?.questions) ? out.doc.questions : [];
       // Anything the stream did not already show (Codex, which cannot stream, shows it all here).
@@ -3335,13 +3338,28 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
   // Keepalive: immediate flush + frequent ping so mobile networks don't drop the
   // stream mid-generation ("Failed to fetch" on the client).
   res.write(": ok\n\n");
+  /*
+   * A run can take minutes, and a screen that says "0 questions" for all of
+   * them reads as broken. So the page is told, as it happens, that work is
+   * going on: `alive` with the heartbeat (even a route that cannot stream
+   * sends it), `thinking` while the model plans, and `writing` with the
+   * question it is part-way through.
+   */
   const hb = setInterval(() => {
     try {
       res.write(": ping\n\n");
     } catch {
       /* ignore */
     }
+    sse("alive", {});
   }, 7000);
+  let lastThinking = 0;
+  const onThinking = () => {
+    const now = Date.now();
+    if (now - lastThinking < 1000) return;
+    lastThinking = now;
+    sse("activity", { kind: "thinking" });
+  };
 
   // Cancelling in the browser only closed the socket; the provider kept
   // generating and kept billing for output nobody would read. The upstream
@@ -3393,14 +3411,28 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
         onText: (provider) => {
           const streamer = makeQuestionStreamer();
           let announced = false;
+          let lastDraft = "";
+          let lastDraftAt = 0;
           return (full) => {
             if (!announced) {
               announced = true;
               sse("provider", { provider });
             }
             for (const q of streamer(full)) sse("question", q);
+            // The one still being written, a few times a second at most.
+            const draft = currentQuestionDraft(full);
+            const now = Date.now();
+            if (draft && now - lastDraftAt > 350) {
+              const key = `${draft.n}:${draft.text}`;
+              if (key !== lastDraft) {
+                lastDraft = key;
+                lastDraftAt = now;
+                sse("writing", { n: draft.n, text: draft.text.slice(0, 240) });
+              }
+            }
           };
         },
+        onThinking,
       });
       if (clientGone) {
         clearInterval(hb);

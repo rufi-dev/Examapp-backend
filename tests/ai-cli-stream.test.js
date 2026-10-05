@@ -114,6 +114,18 @@ function main() {
   ok("a failed turn reports the reason it was given", failedTurn && /usage limit/.test(failedTurn.error));
   ok("...which reads as a spent plan, so the gateway switches route", limitFromText(failedTurn.error, "codex")?.code === "cli_limit_reached");
 
+  console.log("\nthinking is a sign of life, not text:");
+  let claudeThinks = 0;
+  const thinking = claudeStreamReader(() => {}, () => (claudeThinks += 1));
+  thinking.push(LINES.join("\n") + "\n");
+  ok("claude's thinking deltas reach the activity listener", claudeThinks === 1, String(claudeThinks));
+  ok("...and never the answer text", !thinking.text.includes("hmm"));
+  let codexThinks = 0;
+  const reasoning = codexTurnReader(() => {}, () => (codexThinks += 1));
+  reasoning.handle({ method: "item/reasoning/summaryTextDelta", params: { delta: "planning" } });
+  reasoning.handle({ method: "item/reasoning/textDelta", params: { delta: "more" } });
+  ok("codex's reasoning deltas reach it too", codexThinks === 2 && reasoning.text === "", String(codexThinks));
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 }
