@@ -56,6 +56,12 @@ RUN npm ci --omit=dev --no-audit --no-fund
 # image or repository.
 RUN npm install --global --no-audit --no-fund @anthropic-ai/claude-code @openai/codex@alpha
 
+# poppler-utils: the Claude CLI's Read tool draws PDF pages with `pdftoppm`.
+# Without it every page read failed with "pdftoppm is not installed", the model
+# reported the paper unreadable, and each upload fell through to the paid API.
+# Its own layer AFTER the CLIs, so adding it did not reinstall them.
+RUN apk add --no-cache poppler-utils
+
 # Copy the rest of the source
 COPY . .
 

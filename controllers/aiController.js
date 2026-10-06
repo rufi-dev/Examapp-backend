@@ -1216,10 +1216,10 @@ Cavabında bütün sualları (düzəldilmiş və toxunulmamış) tam qaytar.`;
 // never worse than the un-reviewed result: a review that fails, changes the
 // question count, or increases the defect count is discarded. `onStatus` lets
 // the streaming endpoint tell the teacher a check is running.
-const AI_VERIFY_ROUNDS_RAW = Number(process.env.AI_VERIFY_ROUNDS ?? 2);
+const AI_VERIFY_ROUNDS_RAW = Number(process.env.AI_VERIFY_ROUNDS ?? 1);
 const AI_VERIFY_ROUNDS = Number.isFinite(AI_VERIFY_ROUNDS_RAW)
   ? Math.max(0, Math.floor(AI_VERIFY_ROUNDS_RAW))
-  : 2;
+  : 1;
 const aiVerifyDisabled = () =>
   ["off", "false", "0", "no"].includes(String(process.env.AI_VERIFY || "").trim().toLowerCase());
 
@@ -1321,32 +1321,60 @@ function answerOnly(orig, got) {
   return out;
 }
 
-async function verifyAndFix({ questions, prompt, preset, model, signal, onStatus, parts, system }) {
+/*
+ * The AI checks its own work only when something IS wrong with it.
+ *
+ * Every set used to get a full review pass even when the audit found nothing,
+ * and that pass wrote the whole paper out again: twenty-five finished questions
+ * rewritten to change none of them, while the teacher watched "Suallar
+ * yoxlanılır…" for another half minute or more. They called it what it was,
+ * waiting for nothing. The preview opens on the answer key, so the teacher
+ * checks it there anyway.
+ *
+ * So a clean set goes straight through, and a set with defects sends only the
+ * questions that HAVE them, merged back in place. `force` keeps the full pass
+ * for callers that ask for a check by name ("Cavabları tap"), and
+ * AI_VERIFY_CLEAN=on brings the pass on clean sets back platform-wide.
+ */
+const verifyCleanSets = () =>
+  ["on", "true", "1", "yes"].includes(String(process.env.AI_VERIFY_CLEAN || "").trim().toLowerCase());
+
+async function verifyAndFix({ questions, prompt, preset, model, signal, onStatus, parts, system, force = false, maxRounds }) {
   let best = cleanQuestions(questions);
   let bestIssues = auditQuestions(best, { requireAnswers: true });
   let reviewCost = null;
   let rounds = 0;
+  const whole = force || verifyCleanSets();
+  const limit = Number.isInteger(maxRounds) && maxRounds >= 0 ? Math.min(maxRounds, AI_VERIFY_ROUNDS) : AI_VERIFY_ROUNDS;
 
-  if (aiVerifyDisabled() || AI_VERIFY_ROUNDS === 0) {
+  if (aiVerifyDisabled() || limit === 0) {
     return { questions: best, issues: bestIssues, reviewCost: null, rounds: 0 };
   }
+  // A passage's questions are read against the passage, so such a set goes whole.
+  const hasPassage = best.some((q) => q && (q.type === "reading" || q.type === "listening"));
 
-  for (let round = 0; round < AI_VERIFY_ROUNDS; round++) {
-    // Round 0 always runs (a correctness pass even on a structurally clean set);
-    // later rounds only if defects remain.
-    if (round > 0 && bestIssues.length === 0) break;
+  for (let round = 0; round < limit; round++) {
+    if (bestIssues.length === 0 && (round > 0 || !whole)) break;
     if (signal?.aborted) break;
     onStatus?.(round === 0 ? "Suallar yoxlanılır…" : "Düzəlişlər aparılır…");
 
+    const flagged = [...new Set(bestIssues.map((x) => x.index))]
+      .filter((i) => Number.isInteger(i) && i >= 0 && i < best.length)
+      .sort((a, c) => a - c);
+    const scope = !whole && !hasPassage && flagged.length && flagged.length < best.length ? flagged : best.map((_, i) => i);
+    const at = new Map(scope.map((orig, k) => [orig, k]));
+    const sub = scope.map((i) => best[i]);
+
     const findings = bestIssues
+      .filter((x) => at.has(x.index))
       .slice(0, 40)
-      .map((x) => `#${x.index + 1} ${x.code}: ${x.detail}`)
+      .map((x) => `#${at.get(x.index) + 1} ${x.code}: ${x.detail}`)
       .join("\n");
     const payload = [
       prompt ? `İLK TAPŞIRIQ: ${String(prompt).slice(0, 1500)}` : "",
       "",
       "YOXLANACAQ SUALLAR (JSON):",
-      JSON.stringify({ questions: best }).slice(0, 60000),
+      JSON.stringify({ questions: sub }).slice(0, 60000),
       "",
       findings
         ? `AVTOMATİK YOXLAMANIN TAPDIĞI PROBLEMLƏR (mütləq düzəlt):\n${findings}`
@@ -1381,10 +1409,14 @@ async function verifyAndFix({ questions, prompt, preset, model, signal, onStatus
     const candidate = cleanQuestions(out.questions);
     // A review that drops or adds questions is not trustworthy — discard it and
     // keep what we had.
-    if (!Array.isArray(candidate) || candidate.length !== best.length) break;
-    const candIssues = auditQuestions(candidate, { requireAnswers: true });
+    if (!Array.isArray(candidate) || candidate.length !== sub.length) break;
+    const merged = best.slice();
+    scope.forEach((orig, k) => {
+      merged[orig] = candidate[k];
+    });
+    const candIssues = auditQuestions(merged, { requireAnswers: true });
     if (candIssues.length <= bestIssues.length) {
-      best = candidate;
+      best = merged;
       bestIssues = candIssues;
     } else {
       // The reviewer made it worse — reject and stop.
@@ -1544,6 +1576,87 @@ const spreadKeysIfNeeded = (questions, preset) => {
   return spreadAnswerKeys(questions).items;
 };
 
+/*
+ * The answers a paper does not give, worked out in parallel, and only those.
+ *
+ * This used to be one review pass over the WHOLE paper: forty-four questions
+ * sent and forty-four written back for the sake of their answers, while the
+ * teacher looked at finished questions for another half minute or more. Now
+ * only the unanswered questions go, in a few batches that run at the same time,
+ * each with the pages to look at, and only the ANSWER is taken back, laid onto
+ * the teacher's own question, so the paper's wording cannot change.
+ */
+const SOLVE_PARALLEL = Math.max(1, Number(process.env.AI_SOLVE_PARALLEL) || 4);
+
+/* Split the questions to solve so the batches run side by side. Pure, so testable. */
+function planParallelSolve(targets) {
+  if (!targets.length) return [];
+  if (targets.length <= SOLVE_SINGLE_BELOW) return [targets.slice()];
+  const size = Math.max(4, Math.ceil(targets.length / SOLVE_PARALLEL));
+  const out = [];
+  for (let k = 0; k < targets.length; k += size) out.push(targets.slice(k, k + size));
+  return out;
+}
+
+async function solveUnanswered({ questions, targets, preset, model, signal, onStatus, parts }) {
+  const list = Array.isArray(questions) ? questions.slice() : [];
+  const batches = planParallelSolve(targets);
+  // Each question's number on the paper (a passage has none), to find it there.
+  const number = [];
+  let n = 0;
+  list.forEach((q, i) => {
+    if (q?.type !== "reading") n += 1;
+    number[i] = n;
+  });
+  let reviewCost = null;
+  let rounds = 0;
+  let done = 0;
+  const runBatch = async (batch) => {
+    const { origin, sub } = batchSubPaper(questions, batch);
+    const ask = [
+      "Aşağıdakı sualların DÜZGÜN CAVABINI tap. Sualları dəyişmə — yalnız cavab sahələrini doldur.",
+      `Əlavə olunmuş sənəddə bunlar ${batch.map((i) => number[i]).join(", ")} nömrəli suallardır (nömrə fərqlidirsə, mətnə görə tap).`,
+    ].join("\n\n");
+    const v = await verifyAndFix({
+      questions: sub,
+      prompt: ask,
+      system: SOLVE_SYSTEM_PROMPT,
+      preset,
+      model,
+      signal,
+      parts,
+      force: true,
+      maxRounds: 1,
+    });
+    rounds += v.rounds;
+    reviewCost = sumCost(reviewCost, v.reviewCost);
+    // A reply that dropped or added a question cannot be mapped back by position.
+    if (v.questions.length !== sub.length) return;
+    const own = new Set(batch);
+    origin.forEach((orig, k) => {
+      if (own.has(orig)) list[orig] = answerOnly(sub[k], v.questions[k]);
+    });
+    done += batch.length;
+    onStatus?.(`Cavablar tapılır… ${Math.min(done, targets.length)}/${targets.length}`);
+  };
+  // A few batches at a time; one that fails leaves its questions for the teacher.
+  let next = 0;
+  const worker = async () => {
+    while (next < batches.length && !signal?.aborted) {
+      const batch = batches[next];
+      next += 1;
+      try {
+        await runBatch(batch);
+      } catch (e) {
+        if (signal?.aborted) throw e;
+        console.error("solve batch failed (left for the teacher):", e?.message);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(SOLVE_PARALLEL, batches.length) }, worker));
+  return { questions: list, reviewCost, rounds };
+}
+
 async function applyAnswerMode({ questions, mode, preset, model, signal, onStatus, parts, system, prompt }) {
   const m = ANSWER_MODES.has(mode) ? mode : "auto";
 
@@ -1574,21 +1687,24 @@ async function applyAnswerMode({ questions, mode, preset, model, signal, onStatu
     if (typeof onStatus === "function") {
       onStatus(`${missing} sualın cavabı vərəqdə yoxdur — AI həll edir…`);
     }
-    const v = await verifyAndFix({
+    const s = await solveUnanswered({
       questions,
-      prompt:
-        prompt ||
-        "Vərəqdə cavabı qeyd olunmuş sualların cavabını OLDUĞU KİMİ saxla. " +
-          "Yalnız cavabı qeyd olunmamış sualları həll et və düzgün cavabı işarələ.",
-      system,
+      targets: [...wasUnanswered].sort((a, c) => a - c),
       preset,
       model,
       signal,
       onStatus,
       parts,
     });
-    const safe = unguessFigures(v.questions, wasUnanswered, sawPages);
-    return { ...v, questions: spreadKeysIfNeeded(safe, preset), mode: m, solved: missing };
+    const safe = unguessFigures(s.questions, wasUnanswered, sawPages);
+    return {
+      questions: spreadKeysIfNeeded(safe, preset),
+      issues: auditQuestions(safe, { requireAnswers: true }),
+      reviewCost: s.reviewCost,
+      rounds: s.rounds,
+      mode: m,
+      solved: missing,
+    };
   }
   if (m === "manual") {
     return { questions: stripAnswers(questions), issues: null, reviewCost: null, rounds: 0, mode: m };
@@ -1608,6 +1724,7 @@ async function applyAnswerMode({ questions, mode, preset, model, signal, onStatu
       signal,
       onStatus,
       parts,
+      force: true,
     });
     const safe = unguessFigures(v.questions, wasUnanswered, sawPages);
     return { ...v, questions: spreadKeysIfNeeded(safe, preset), mode: m };
@@ -1655,6 +1772,7 @@ function extractParts(req, res) {
     }
     assertPdfExtractable(f, res); // the size ceiling applies to images too
     return {
+      name: f.originalname || "",
       // heic/heif are not accepted by the vision APIs; send them as jpeg, which is
       // what phones actually produce behind that container in practice.
       mime: mime === "image/heic" || mime === "image/heif" ? "image/jpeg" : mime || "application/pdf",
@@ -2059,21 +2177,53 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
   // ping keeps mobile networks/proxies from dropping the connection during a long
   // non-streaming (OpenAI) wait — a drop surfaced to the client as "Failed to fetch".
   res.write(": ok\n\n");
+  // `alive` with the heartbeat: the page shows work going on even before the
+  // first question is whole, on every route, streaming or not.
   const hb = setInterval(() => {
     try {
       res.write(": ping\n\n");
     } catch {
       /* ignore */
     }
+    sse("alive", {});
   }, 7000);
+  let lastThinking = 0;
+  const onThinking = () => {
+    const now = Date.now();
+    if (now - lastThinking < 1000) return;
+    lastThinking = now;
+    sse("activity", { kind: "thinking" });
+  };
 
   let streamedCount = 0;
+  /*
+   * A route that showed some questions and then failed hands the paper to the
+   * next one, which starts again from question 1. The page is told to clear
+   * what it was shown, or the teacher would watch every question twice.
+   */
+  const freshStart = () => {
+    if (streamedCount > 0) sse("reset", {});
+    streamedCount = 0;
+  };
   const mkOnText = () => {
     const streamer = makeQuestionStreamer();
+    let lastDraft = "";
+    let lastDraftAt = 0;
     return (full) => {
       for (const q of streamer(full)) {
         sse("question", q);
         streamedCount += 1;
+      }
+      // The question being copied right now, a few times a second at most.
+      const draft = currentQuestionDraft(full);
+      const now = Date.now();
+      if (draft && now - lastDraftAt > 350) {
+        const key = `${draft.n}:${draft.text}`;
+        if (key !== lastDraft) {
+          lastDraft = key;
+          lastDraftAt = now;
+          sse("writing", { n: draft.n, text: draft.text.slice(0, 240) });
+        }
       }
     };
   };
@@ -2082,10 +2232,9 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
   let usedProvider = provider;
   let fellBack = false;
   /*
-   * The same gateway as everywhere else. The CLI cannot stream tokens, so on the
-   * CLI route the questions arrive in one piece at the end rather than appearing
-   * one by one - the loader still runs, it just has nothing to report until the
-   * answer lands. That is the truth about the route, not a defect to hide.
+   * The same gateway as everywhere else. Both CLIs stream now (Claude's
+   * stream-json, Codex's app-server), so the questions appear one by one on the
+   * CLI route too, the way they do on the streaming APIs.
    */
   try {
     ({ result, usedProvider, fellBack } = await runAi({
@@ -2094,6 +2243,8 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
       preferCli: provider === "openai" ? "codex" : provider,
       cli: async (cliProvider) => {
         const { runCliStructured } = require("../helper/cliAi");
+        freshStart();
+        const emit = mkOnText();
         const out = await runCliStructured({
           provider: cliProvider,
           // No model named: the runner's "standard" tier picks the right one
@@ -2103,6 +2254,9 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
           schema: DOCUMENT_SCHEMA,
           parts,
           signal: req.signal,
+          // Each question reaches the screen as it is copied, not all at the end.
+          onText: emit,
+          onThinking,
         });
         /*
          * An empty extraction is a FAILURE of this route, not an answer.
@@ -2139,6 +2293,8 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
             code: "cli_no_questions",
           });
         }
+        // Anything the stream did not already show.
+        emit(JSON.stringify({ questions: got }));
         return {
           result: {
             full: JSON.stringify({ documentKind: out.doc?.documentKind || "questions", questions: got }),
@@ -2185,6 +2341,8 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
         for (let i = 0; i < order.length; i += 1) {
           const name = order[i];
           try {
+            // Cleared first: the page's reset also clears the status line.
+            freshStart();
             sse("status", { message: name === provider ? PDF_READING_MSG : `${label[name]} ${CONTINUING_MSG}` });
             const got = await runners[name]();
             /*
@@ -3373,6 +3531,7 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
   });
 
   const passageCount = detectPassageCount(prompt, req.body?.preset);
+  let shown = 0;
   let questions = [];
   let cost = null;
   let issues = [];
@@ -3409,6 +3568,9 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
         preset: req.body?.preset,
         model: PLATFORM_MODEL,
         onText: (provider) => {
+          // A second route starting after the first showed questions: clear them.
+          if (shown > 0) sse("reset", {});
+          shown = 0;
           const streamer = makeQuestionStreamer();
           let announced = false;
           let lastDraft = "";
@@ -3418,7 +3580,10 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
               announced = true;
               sse("provider", { provider });
             }
-            for (const q of streamer(full)) sse("question", q);
+            for (const q of streamer(full)) {
+              sse("question", q);
+              shown += 1;
+            }
             // The one still being written, a few times a second at most.
             const draft = currentQuestionDraft(full);
             const now = Date.now();
@@ -4582,6 +4747,7 @@ module.exports = {
   stripAnswers,
   applyAnswerMode,
   verifyAndFix,
+  planParallelSolve,
   sumCost,
   extractQuestions,
   extractQuestionsStream,

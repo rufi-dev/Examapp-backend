@@ -107,6 +107,7 @@
   "tests/ai-cli-silent-failure.test.js",
   "tests/ai-cli-stream.test.js",
   "tests/question-draft.test.js",
+  "tests/cli-uploads-and-light-check.test.js",
   "tests/answer-key-vision.test.js",
   "tests/question-figures.test.js",
   "tests/solve-answers-stream.test.js",

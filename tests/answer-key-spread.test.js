@@ -116,8 +116,11 @@ console.log("\n6. Wired into the summative preset only:");
    * plumbing rather than the rule, so this asserts the rule: both solving paths
    * spread, and the backstop happens before it.
    */
+  // The auto path builds its result from the parallel solver, not `...v`.
   ok("on the solving paths",
-    (ai.match(/\.\.\.v, questions: spreadKeysIfNeeded\(safe, preset\)/g) || []).length === 2);
+    (ai.match(/questions: spreadKeysIfNeeded\(safe, preset\)/g) || []).length === 2);
+  ok("...the auto path over its de-guessed set too",
+    /const safe = unguessFigures\(s\.questions, wasUnanswered, sawPages\);\s*\n\s*return \{\s*\n\s*questions: spreadKeysIfNeeded\(safe, preset\)/.test(ai));
   ok("...over the set the figure backstop already cleaned",
     /const safe = unguessFigures\(v\.questions, wasUnanswered, sawPages\);\s*\n\s*return \{ \.\.\.v, questions: spreadKeysIfNeeded\(safe, preset\)/.test(ai));
   ok("and on the has-answers path", /questions: spreadKeysIfNeeded\(questions, preset\)/.test(ai));

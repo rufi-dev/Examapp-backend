@@ -1,4 +1,4 @@
-const { spawn } = require("node:child_process");
+const { spawn, execFile } = require("node:child_process");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
@@ -16,10 +16,76 @@ const safeModel = (model) => {
   return value;
 };
 
-const safeName = (name, i) => {
-  const ext = path.extname(String(name || "")).toLowerCase().replace(/[^a-z0-9.]/g, "").slice(0, 8) || ".bin";
+/*
+ * The extension is what tells a CLI's reader what it is holding.
+ *
+ * An uploaded paper arrives with a MIME type and, on some routes, no file name
+ * at all. It used to be written as `attachment-1.bin` then, and a `.bin` is not
+ * a PDF or a photo to either CLI: both answered "unreadable" for every paper a
+ * teacher uploaded, and the API (which reads by MIME type) did the work instead.
+ * So a name without an extension takes one from the MIME type.
+ */
+const EXT_BY_MIME = Object.freeze({
+  "application/pdf": ".pdf",
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+  "image/heic": ".heic",
+  "image/heif": ".heif",
+});
+const safeName = (name, i, mime) => {
+  const fromName = path.extname(String(name || "")).toLowerCase().replace(/[^a-z0-9.]/g, "").slice(0, 8);
+  const ext = (fromName && fromName !== "." ? fromName : "") || EXT_BY_MIME[String(mime || "").toLowerCase()] || ".bin";
   return `attachment-${i + 1}${ext}`;
 };
+
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i;
+
+/*
+ * Codex sees pictures only when they are ATTACHED to the message.
+ *
+ * Its sandbox cannot run a command on this box (bubblewrap needs user
+ * namespaces the container does not grant), so a PDF that is merely named in
+ * the prompt is a file it can never open: every upload came back "unreadable".
+ * Attached as an image, the same page is read at once. So the pages are drawn
+ * to PNG here, with Ghostscript, which the image already carries.
+ */
+const CODEX_MAX_PAGES = Math.max(1, Number(process.env.AI_CLI_CODEX_MAX_PAGES) || 20);
+const CODEX_PAGE_DPI = Math.max(72, Number(process.env.AI_CLI_CODEX_PAGE_DPI) || 130);
+
+function pdfToPages(pdfFile, dir, prefix, signal) {
+  return new Promise((resolve) => {
+    execFile(
+      process.env.GS_BIN || "gs",
+      [
+        "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE",
+        "-sDEVICE=png16m", `-r${CODEX_PAGE_DPI}`,
+        "-dTextAlphaBits=4", "-dGraphicsAlphaBits=4",
+        "-dFirstPage=1", `-dLastPage=${CODEX_MAX_PAGES}`,
+        `-sOutputFile=${path.join(dir, `${prefix}-%02d.png`)}`,
+        pdfFile,
+      ],
+      { timeout: 90_000, signal, windowsHide: true },
+      async () => {
+        // Whatever pages were drawn are used, even if a later page failed.
+        const names = await fs.readdir(dir).catch(() => []);
+        resolve(names.filter((n) => n.startsWith(`${prefix}-`) && n.endsWith(".png")).sort());
+      }
+    );
+  });
+}
+
+/* The files Codex is shown, as pictures: photos as they are, PDFs page by page. */
+async function codexImages(job, files, signal) {
+  const out = [];
+  for (const file of files) {
+    if (IMAGE_EXT.test(file)) out.push(file);
+    else if (/\.pdf$/i.test(file)) out.push(...(await pdfToPages(path.join(job, file), job, file.replace(/\.pdf$/i, ""), signal)));
+  }
+  return out;
+}
 
 function cliBinary(provider) {
   if (provider === "claude") return process.env.CLAUDE_CLI_BIN || "claude";
@@ -52,6 +118,9 @@ const MODEL_OWNER = [
   [/^(claude|sonnet|opus|haiku|fable)/i, "claude"],
   [/^(gpt|o[0-9]|codex|chatgpt)/i, "codex"],
 ];
+
+/* The model names Codex accepts on a subscription login: its own families. */
+const CODEX_OWN_MODEL = /^(gpt-5|codex)/i;
 
 function modelBelongsTo(provider, model) {
   const name = String(model || "").trim();
@@ -122,6 +191,17 @@ function cliModel(provider, model) {
    * owner never chose (or one that does not exist). Returning null makes the
    * caller omit the flag, and the CLI uses whatever it is configured with.
    */
+  /*
+   * An OpenAI API model name is not a Codex model. The platform model is an API
+   * name (gpt-4.1-mini), and handed to `codex --model` on a ChatGPT account it
+   * fails: "The 'gpt-4.1-mini' model is not supported when using Codex with a
+   * ChatGPT account". That cost every generation a whole failed attempt before
+   * Claude took over. Only Codex's own families are passed through; anything
+   * else lets the binary use its configured model.
+   */
+  if (requested && provider === "codex" && !CODEX_OWN_MODEL.test(requested)) {
+    return process.env.CODEX_CLI_DEFAULT_MODEL ? safeModel(process.env.CODEX_CLI_DEFAULT_MODEL) : null;
+  }
   if (requested) return safeModel(requested);
   if (provider === "claude") return safeModel(process.env.CLAUDE_CLI_DEFAULT_MODEL || "sonnet");
   return process.env.CODEX_CLI_DEFAULT_MODEL ? safeModel(process.env.CODEX_CLI_DEFAULT_MODEL) : null;
@@ -163,6 +243,12 @@ const CLAUDE_BASE_ARGS = Object.freeze([
   "--permission-prompts",
   "none",
   "--no-session-persistence",
+  /*
+   * No MCP servers. Without this the CLI loads the ACCOUNT's claude.ai
+   * connectors (Google Drive, Docs) into every exam turn: tools a teacher's
+   * paper has no business reaching, and a connection made on every run.
+   */
+  "--strict-mcp-config",
 ]);
 
 /*
@@ -373,7 +459,7 @@ function codexTurnReader(onText, onThinking) {
  * update can only cost the streaming, never the answer. A failure of the TURN
  * (a spent plan, a refusal) is reported as what it is.
  */
-function runCodexStreamed({ cwd, model, prompt, onText, onThinking, signal, timeoutMs }) {
+function runCodexStreamed({ cwd, model, prompt, images = [], onText, onThinking, signal, timeoutMs }) {
   return new Promise((resolve, reject) => {
     const reader = codexTurnReader(onText, onThinking);
     let child;
@@ -481,7 +567,13 @@ function runCodexStreamed({ cwd, model, prompt, onText, onThinking, signal, time
         const th = await call("thread/start", { cwd, sandbox: "read-only", approvalPolicy: "never", ephemeral: true, model: model || null });
         const threadId = th && th.thread && th.thread.id;
         if (!threadId) throw new Error("thread/start returned no thread");
-        await call("turn/start", { threadId, input: [{ type: "text", text: prompt, text_elements: [] }] });
+        await call("turn/start", {
+          threadId,
+          input: [
+            { type: "text", text: prompt, text_elements: [] },
+            ...images.map((f) => ({ type: "localImage", path: path.resolve(cwd, f) })),
+          ],
+        });
         started = true;
       } catch (e) {
         finish(protocolError(e && e.message));
@@ -819,11 +911,15 @@ function buildSystemPrompt({ system, insist }) {
 }
 
 /* The user turn: the shape asked for, what to read, and the task itself. */
-function buildPrompt({ prompt, schema, files }) {
+function buildPrompt({ prompt, schema, files, attached = false }) {
   return [
     "JSON bu sxemə uyğun olmalıdır:",
     JSON.stringify(schema || {}),
-    files.length ? `ƏLAVƏLƏR (iş qovluğunda oxu):\n${files.map((f) => `- ${f}`).join("\n")}` : "",
+    files.length
+      ? attached
+        ? `ƏLAVƏLƏR: səhifələr bu mesaja ŞƏKİL kimi əlavə olunub, sırası ilə:\n${files.map((f) => `- ${f}`).join("\n")}`
+        : `ƏLAVƏLƏR (iş qovluğunda oxu):\n${files.map((f) => `- ${f}`).join("\n")}`
+      : "",
     `TAPŞIRIQ:\n${prompt}`,
   ].filter(Boolean).join("\n\n");
 }
@@ -841,7 +937,7 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
     for (let i = 0; i < parts.length; i += 1) {
       const part = parts[i];
       if (!part?.data) continue;
-      const file = safeName(part.name, i);
+      const file = safeName(part.name, i, part.mime);
       const bytes = Buffer.from(String(part.data), "base64");
       /*
        * The CLI's Read tool refuses a PDF over 20MB — "PDF file exceeds maximum
@@ -867,9 +963,15 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
       files.push(file);
     }
     const answerFile = path.join(job, "answer.json");
+    // Codex is shown the pages as pictures (see codexImages); nothing to show
+    // means nothing it could read, which another engine may still manage.
+    const images = chosen === "codex" && files.length ? await codexImages(job, files, signal) : [];
+    if (chosen === "codex" && files.length && !images.length) {
+      throw Object.assign(new Error("no page of the attachment could be drawn for codex"), { code: "cli_unreadable_document" });
+    }
 
     const attempt = async (insist) => {
-      const fullPrompt = buildPrompt({ prompt, schema, files });
+      const fullPrompt = buildPrompt({ prompt, schema, files: chosen === "codex" ? images : files, attached: chosen === "codex" });
       const systemPrompt = buildSystemPrompt({ system, insist });
       let args;
       // Only Claude can stream here; Codex writes its answer to a file at the end.
@@ -886,7 +988,10 @@ async function runCliStructured({ provider, model, system, prompt, schema, parts
         if (reader) args = streamedArgs(args);
       } else {
         // Codex takes no system prompt, so its contract rides in the message.
-        args = ["exec", "--sandbox", "read-only", "--skip-git-repo-check",
+        // `--image` takes several values, so it goes first: the next flag ends it,
+        // where the prompt after it would have been swallowed as one more image.
+        args = ["exec", ...(images.length ? ["--image", images.join(",")] : []),
+          "--sandbox", "read-only", "--skip-git-repo-check",
           ...modelArgs("codex", wanted), "--output-last-message", answerFile,
           `${systemPrompt}
 
@@ -896,7 +1001,7 @@ ${fullPrompt}`];
       let streamed = null;
       if (chosen === "codex" && typeof onText === "function") {
         try {
-          streamed = await runCodexStreamed({ cwd: job, model: cliModel("codex", wanted), prompt: `${systemPrompt}\n\n${fullPrompt}`, onText, onThinking, signal });
+          streamed = await runCodexStreamed({ cwd: job, model: cliModel("codex", wanted), prompt: `${systemPrompt}\n\n${fullPrompt}`, images, onText, onThinking, signal });
         } catch (e) {
           if (e.code !== "codex_stream_unavailable") throw e;
           console.warn(`[cli] codex streaming unavailable, using exec: ${e.message}`);
@@ -1105,4 +1210,6 @@ module.exports = {
   claudeResult,
   codexTurnReader,
   streamedArgs,
+  safeName,
+  codexImages,
 };
