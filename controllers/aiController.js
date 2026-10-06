@@ -1139,9 +1139,13 @@ const auditQuestions = (list, { requireAnswers = false } = {}) => {
         .map(AUDIT_STRIP)
         .filter(Boolean);
       if (AUDIT_STRIP(q.openAnswer)) answers.push(AUDIT_STRIP(q.openAnswer));
-      // A manually-graded open question is answerless BY DESIGN (the teacher marks
-      // it), so it is exempt from the "needs an answer key" and "open-ended" checks.
+      // A manually-graded open question has no answer KEY (the teacher marks it),
+      // so it is exempt from "needs an answer key" and "open-ended". It still needs
+      // a SAMPLE: the preview showed "Düzgün cavab: təyin edilməyib" under every
+      // "write a sentence with…" task, and the teacher had nothing to mark against.
       if (requireAnswers && !answers.length && !q.manualGrade) add(i, "no-open-answer", "no accepted answer");
+      if (requireAnswers && !answers.length && q.manualGrade)
+        add(i, "no-sample-answer", "əl ilə yoxlanan sual — müəllimin müqayisə edəcəyi 1-2 NÜMUNƏ cavab yaz (openAnswers), manualGrade=true saxla");
       if (choices.length) add(i, "open-with-choices", "open question should have no choices");
       // A subjective / multi-answer short-answer can never be matched exactly by a
       // student — flag it so verify converts it to single-choice (Cm).
@@ -1203,7 +1207,7 @@ DİQQƏTLƏ YOXLA VƏ DÜZƏLT:
 6. AÇIQ suallar (Co/Cd): "openAnswers" düzgün və tam olmalıdır — şagirdin yaza biləcəyi bütün formalar. Cavab səhvdirsə düzəlt.
 6a. ⛔ AÇIQ-UÇLU AÇIQ SUALI DÜZƏLT: Əgər bir açıq (Co) sualın ÇOX SAYDA fərqli düzgün cavabı ola bilərsə (məs. «bir yer bildirən isim yaz», «şəxs bildirən söz yaz», «bir nümunə göstər»), bu SƏHVDİR — sadalanan 3-4 cavabdan başqasını yazan şagird haqsız yerə səhv sayılır. Bunu DÜZƏLT: tipi «Cm» et, sualı saxla və 4-5 variant qur (biri düzgün — mövcud openAnswers-dən birini götür), "correct"-ə düzgün indeksi yaz, "openAnswers"-i boşalt. (Sualın cavabı əslən yeganədirsə — hesablanmış ədəd, konkret termin — Co qalsın.)
 6b. ⛔ TƏSVİR/MÜNASİBƏT CAVABLI AÇIQ SUALI DÜZƏLT: Əgər bir açıq (Co) sualın cavabı bir ANLAYIŞ, MÜNASİBƏT, BƏRABƏRSİZLİK və ya CÜMLƏdirsə (məs. openAnswers = ["diskriminant < 0","diskriminant mənfidir","D<0","mənfi"], ya da sual «...necədir?», «nə baş verir?», «necə dəyişir?» şəklindədir), bu SƏHVDİR — şagird eyni fikri onlarla cür yazır və hərfbəhərf uyğun gəlmir. Bunu DÜZƏLT: tipi «Cm» et, mövcud cavabı düzgün variant kimi saxla və məntiqli 4-5 variant qur (məs. «Mənfi (D<0)», «Sıfır (D=0)», «Müsbət (D>0)», «Müəyyən deyil»), "correct"-ə düzgün indeksi yaz, "openAnswers"-i boşalt. Co yalnız hamının EYNİ yazacağı ədəd/tək termin/tarix/yığcam düstur üçün qalır.
-6c. ƏL İLƏ YOXLAMA (manualGrade): əgər İLK TAPŞIRIQ müəllimin AÇIQ/yazılı/inşa/geniş cavablı sual istədiyini göstərirsə və cavab avtomatik yoxlana bilmirsə — 6a/6b-dəki kimi Cm-ə çevirmək əvəzinə sualı açıq (Co/Cd) saxla və manualGrade=true qoy (müəllim əl ilə yoxlayacaq). Müəllim açıq sual istəməyibsə, 6a/6b qaydası qalır: Cm-ə çevir, manualGrade=false.
+6c. ƏL İLƏ YOXLAMA (manualGrade): əgər İLK TAPŞIRIQ müəllimin AÇIQ/yazılı/inşa/geniş cavablı sual istədiyini göstərirsə və cavab avtomatik yoxlana bilmirsə — 6a/6b-dəki kimi Cm-ə çevirmək əvəzinə sualı açıq (Co/Cd) saxla, manualGrade=true qoy (müəllim əl ilə yoxlayacaq) və openAnswers-də 1-2 NÜMUNƏ cavab olsun. Müəllim açıq sual istəməyibsə, 6a/6b qaydası qalır: Cm-ə çevir, manualGrade=false.
 7. UYĞUNLUQ (Cma): hər nömrənin düzgün hərfi olmalıdır; nömrələnmiş və hərflənmiş siyahılar sualın "text" hissəsində tam görünməlidir.
 8. DİL və AYDINLIQ: sual birmənalı olmalıdır. İki cür başa düşülən sualı dəqiqləşdir.
 9. RİYAZİYYAT DELİMİTERLƏRİ: mətndə və seçimlərdə HƏR düstur/ifadə tək dollar işarələri arasında olmalıdır — $...$ (məs. "$\\\\frac{5}{7}$", "$x^2+1$"). Əgər $...$-siz açıq LaTeX görürsənsə (\\\\frac, \\\\sqrt, x^2 və s.) onu $...$ içinə al; açıq qalan/balanssız $ varsa (bağlayan $ yoxdursa) düzəlt. "latex" sahəsi həmişə "" olmalıdır — riyaziyyat mətnin içindədir. Adi rəqəm/aralıq (20–30) $ ilə YAZILMIR.
@@ -2599,7 +2603,7 @@ QAYDALAR:
   HƏRFLƏR: yalnız ingilis əlifbasının hərflərini işlət — a, b, c, d, e. Azərbaycan əlifbasına məxsus ç, ə, ğ, ı, ö, ş, ü hərflərini uyğunluq etiketi kimi İSTİFADƏ ETMƏ (proqram onları tanımır).
 - Uyğunluq sualından SONRA gələn suallarda "1 nömrəli səs", "2-ci variant" kimi əvvəlki sualın nömrələrinə İSTİNAD ETMƏ — hər sual öz-özünə tam başa düşülən olmalıdır.
 - Açıq sualı (Co) YALNIZ şagirdin əslən yazdığı cavablar üçün işlət: rəqəm, söz, düstur. Seçim və ya uyğunluq cavabını heç vaxt mətn kimi yazma.
-- "manualGrade" (əl ilə yoxlama): standart olaraq HƏMİŞƏ false. YALNIZ bir halda true et: müəllim açıq/yazılı/inşa/geniş cavablı suallar XÜSUSİ istəyibsə VƏ cavab avtomatik dəqiq yoxlana bilmirsə (izahlı, çoxcavablı, "izah et", "nümunələr göstər"). O zaman sualı Co/Cd saxla, manualGrade=true qoy — openAnswer/openAnswers boş qala bilər (müəllim əl ilə yoxlayacaq). Müəllim açıq sual İSTƏMƏYİBSƏ, avtomatik yoxlana bilməyən açıq sualı yuxarıdakı qaydaya görə «Cm»-ə çevir və manualGrade=false saxla.
+- "manualGrade" (əl ilə yoxlama): standart olaraq HƏMİŞƏ false. YALNIZ bir halda true et: müəllim açıq/yazılı/inşa/geniş cavablı suallar XÜSUSİ istəyibsə VƏ cavab avtomatik dəqiq yoxlana bilmirsə (izahlı, çoxcavablı, "izah et", "nümunələr göstər"). O zaman sualı Co/Cd saxla, manualGrade=true qoy və openAnswers-ə yenə də 1-2 NÜMUNƏ (istinad) cavab yaz — müəllim yoxlayarkən müqayisə edəcək; BOŞ BURAXMA. Müəllim açıq sual İSTƏMƏYİBSƏ, avtomatik yoxlana bilməyən açıq sualı yuxarıdakı qaydaya görə «Cm»-ə çevir və manualGrade=false saxla.
 - RİYAZİYYAT (VACİB): hər düsturu/ifadəni mətnin İÇİNDƏ, öz yerində, tək dollar işarələri arasında LaTeX kimi yaz — $...$. Nümunələr: "3500-ün $\\\\frac{5}{7}$ hissəsini tapın.", "$x^{2}+1=0$ tənliyini həll et", "$\\\\sqrt{540}$ ədədi". "latex" sahəsini HEÇ VAXT işlətmə — həmişə "" saxla; bütün riyaziyyat mətnin içində $...$ ilə olur. QADAĞAN: $...$-siz açıq LaTeX yazma (məs. \\\\frac, \\\\sqrt, x^2 kimi) — belə yazsan şagird xam kodu görür. Açdığın hər $ üçün mütləq BAĞLAYAN $ qoy (balanslı olsun). Bütöv cümləni $...$ içinə ALMA — yalnız həqiqi düsturu. Adi rəqəm/aralıq/faiz/tarix riyaziyyat deyil ("20–30 arası" — $ ilə YOX). Seçim mətnində də riyaziyyatı $...$ ilə yaz, seçimin "latex"-i "" olsun.
 - Dırnaq işarəsi lazımdırsa adi " işlət — \\" kimi qaçış simvolu YAZMA.
 - Şəkil/qrafik tələb edən sual YARATMA (hasFigure həmişə false). Mümkün qədər mətnlə həll olunan suallar yarat.

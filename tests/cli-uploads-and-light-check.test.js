@@ -95,6 +95,14 @@ async function main() {
   ok("nothing to solve is no turn", sizes(0) === "");
   ok("only the answer is laid back onto the teacher's question", /list\[orig\] = answerOnly\(sub\[k\], v\.questions\[k\]\)/.test(src));
 
+  console.log("\na teacher-marked question still comes with a sample answer");
+  const codes = (q) => ai.auditQuestions([q], { requireAnswers: true }).map((x) => x.code);
+  const sentence = { type: "Cd", text: "Hobby sözü ilə cümlə qurun.", manualGrade: true };
+  ok("no sample is flagged, so the light check fills it", codes(sentence).includes("no-sample-answer"));
+  ok("...but it is not called a missing answer KEY", !codes(sentence).includes("no-open-answer"));
+  ok("with a sample it is clean", codes({ ...sentence, openAnswers: ["Mein Hobby ist Lesen."] }).length === 0);
+  ok("the prompt no longer lets the sample stay empty", !/openAnswer\/openAnswers boş qala bilər/.test(src));
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 }
