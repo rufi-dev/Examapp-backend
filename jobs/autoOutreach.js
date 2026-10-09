@@ -380,6 +380,23 @@ async function reengageEmailWaitingCount() {
   return User.countDocuments(reengageEmailQuery());
 }
 
+/*
+ * How many teachers the email WILL reach: the ones already due (the WhatsApp step
+ * ran for them) plus everyone the second wave has still to reach, among those
+ * with an address who have not unsubscribed. The admin's badge shows this; the
+ * due-now count alone read as "it will only send to 2".
+ */
+async function reengageEmailAudienceCount(now = new Date()) {
+  const upcoming = {
+    ...reengageQuery(now),
+    email: { $nin: [null, ""] },
+    emailOptOut: { $ne: true },
+    reengageEmailStatus: { $in: [null] },
+  };
+  const [due, later] = await Promise.all([reengageEmailWaitingCount(), User.countDocuments(upcoming)]);
+  return due + later;
+}
+
 // Base query for "still waiting": a teacher registered longer than the grace
 // window, with a phone, not yet given a terminal status.
 function waitingQuery(now) {
@@ -521,6 +538,7 @@ module.exports = {
   reengageEmailQuery,
   reengageEmailSubject,
   reengageEmailWaitingCount,
+  reengageEmailAudienceCount,
   emailsSentToday,
   EMAIL_DAILY_MAX,
   reengageMessage,

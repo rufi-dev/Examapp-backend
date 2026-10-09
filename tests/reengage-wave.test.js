@@ -169,6 +169,13 @@ async function main() {
   ok("never a second email", to(quiet).length === 1 && to(dead).length === 1);
   ok("marked sent", (await User.findById(quiet._id).lean()).reengageEmailStatus === "sent");
 
+  console.log("\n6b. The badge counts everyone the email will reach");
+  const before = await job.reengageEmailAudienceCount(new Date(mailT));
+  await teacher({ lastActiveAt: ago(10) });
+  ok("a teacher the second wave has still to reach is counted", (await job.reengageEmailAudienceCount(new Date(mailT))) === before + 1);
+  await teacher({ lastActiveAt: ago(10), emailOptOut: true });
+  ok("one who unsubscribed is not", (await job.reengageEmailAudienceCount(new Date(mailT))) === before + 1);
+
   console.log("\n7. The unsubscribe link cannot be forged");
   ok("its own token passes", checkUnsubscribeToken(String(quiet._id), unsubscribeToken(String(quiet._id))));
   ok("another teacher's token fails", !checkUnsubscribeToken(String(quiet._id), unsubscribeToken(String(dead._id))));

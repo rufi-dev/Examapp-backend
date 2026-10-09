@@ -2024,7 +2024,7 @@ const unsubscribePush = asyncHandler(async (req, res) => {
 // ── Auto-outreach watcher (admin) ────────────────────────────────────────────
 // The second wave's part of every status reply: its switch and its queue.
 async function reengageStatusPart() {
-  const { getSettings, reengageWaitingCount, reengageEmailWaitingCount, emailsSentToday, EMAIL_DAILY_MAX, INACTIVE_DAYS } = require("../jobs/autoOutreach");
+  const { getSettings, reengageWaitingCount, reengageEmailWaitingCount, reengageEmailAudienceCount, emailsSentToday, EMAIL_DAILY_MAX, INACTIVE_DAYS } = require("../jobs/autoOutreach");
   const settings = await getSettings();
   const safe = async (fn) => {
     try {
@@ -2039,7 +2039,9 @@ async function reengageStatusPart() {
     inactiveDays: INACTIVE_DAYS,
     email: {
       enabled: settings.reengageEmailEnabled,
-      waiting: await safe(reengageEmailWaitingCount),
+      // Everyone it will reach; `dueNow` is the part whose WhatsApp already went.
+      waiting: await safe(reengageEmailAudienceCount),
+      dueNow: await safe(reengageEmailWaitingCount),
       sentToday: await safe(emailsSentToday),
       dailyMax: EMAIL_DAILY_MAX,
     },
