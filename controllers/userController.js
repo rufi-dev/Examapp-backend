@@ -2024,16 +2024,49 @@ const unsubscribePush = asyncHandler(async (req, res) => {
 // ── Auto-outreach watcher (admin) ────────────────────────────────────────────
 // The second wave's part of every status reply: its switch and its queue.
 async function reengageStatusPart() {
-  const { getSettings, reengageWaitingCount, INACTIVE_DAYS } = require("../jobs/autoOutreach");
+  const { getSettings, reengageWaitingCount, reengageEmailWaitingCount, emailsSentToday, EMAIL_DAILY_MAX, INACTIVE_DAYS } = require("../jobs/autoOutreach");
   const settings = await getSettings();
-  let waiting = null;
-  try {
-    waiting = await reengageWaitingCount();
-  } catch {
-    waiting = null;
-  }
-  return { enabled: settings.reengageEnabled, waiting, inactiveDays: INACTIVE_DAYS };
+  const safe = async (fn) => {
+    try {
+      return await fn();
+    } catch {
+      return null;
+    }
+  };
+  return {
+    enabled: settings.reengageEnabled,
+    waiting: await safe(reengageWaitingCount),
+    inactiveDays: INACTIVE_DAYS,
+    email: {
+      enabled: settings.reengageEmailEnabled,
+      waiting: await safe(reengageEmailWaitingCount),
+      sentToday: await safe(emailsSentToday),
+      dailyMax: EMAIL_DAILY_MAX,
+    },
+  };
 }
+
+// POST /api/users/outreach/reengage/email/toggle — the second wave's email on/off.
+const toggleReengageEmail = asyncHandler(async (req, res) => {
+  const { getSettings, setReengageEmailEnabled } = require("../jobs/autoOutreach");
+  const current = await getSettings();
+  const next = typeof req.body?.enabled === "boolean" ? req.body.enabled : !current.reengageEmailEnabled;
+  await setReengageEmailEnabled(next);
+  res.json({ reengage: await reengageStatusPart() });
+});
+
+// POST /api/users/unsubscribe — "buradan imtina edin" from an outreach email.
+// No login: the link is signed for that one teacher (helper/unsubscribe.js).
+const unsubscribeEmail = asyncHandler(async (req, res) => {
+  const { u, t } = req.body || {};
+  const { checkUnsubscribeToken } = require("../helper/unsubscribe");
+  if (!require("mongoose").isValidObjectId(u) || !checkUnsubscribeToken(u, t)) {
+    res.status(400);
+    throw new Error("Keçid etibarsızdır");
+  }
+  await User.updateOne({ _id: u }, { $set: { emailOptOut: true, emailOptOutAt: new Date() } });
+  res.json({ ok: true });
+});
 
 // GET /api/users/outreach/status — is the watcher on, since when, and is there a
 // linked+ready admin WhatsApp session to actually send from?
@@ -2274,4 +2307,6 @@ module.exports = {
   getOutreachStatus,
   toggleOutreach,
   toggleReengage,
+  toggleReengageEmail,
+  unsubscribeEmail,
 };

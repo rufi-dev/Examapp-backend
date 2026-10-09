@@ -400,6 +400,18 @@ const userSchema = Schema(
         reengageAt: { type: Date, default: null },
         reengageReason: { type: String, default: null }, // sent | no_whatsapp | failed
         reengageAttempts: { type: Number, default: 0 },
+        // The same second wave by EMAIL: sent once, right after the WhatsApp
+        // step has run for this teacher (sent, or no WhatsApp, or failed).
+        reengageEmailStatus: {
+            type: String,
+            enum: ["sent", "failed", "skipped", null],
+            default: null,
+        },
+        reengageEmailAt: { type: Date, default: null },
+        reengageEmailAttempts: { type: Number, default: 0 },
+        // "Buradan imtina edin" in an outreach email: no more outreach email, ever.
+        emailOptOut: { type: Boolean, default: false },
+        emailOptOutAt: { type: Date, default: null },
 
         // ── Teacher Success Journey (ADR Backend/docs/adr/Teacher-Success-Journey.md) ──
         // Minimal, bounded fields only (D15 — no unbounded arrays on User).

@@ -36,6 +36,12 @@ const LAST_SENT_KEY = "autoOutreachLastSentAt";
 const SINCE_KEY = "autoOutreachSince";
 // The second wave's own switch (see "Second wave" below).
 const REENGAGE_KEY = "reengageEnabled";
+// The second wave's email, its own switch and its own (gentler) daily cap: the
+// same mailbox delivers login codes and password resets, which must never be
+// crowded out or put at risk by outreach volume.
+const REENGAGE_EMAIL_KEY = "reengageEmailEnabled";
+const EMAIL_DAILY_MAX = Number(process.env.OUTREACH_EMAIL_DAILY_MAX) || 100;
+const EMAILS_PER_SWEEP = Number(process.env.OUTREACH_EMAILS_PER_SWEEP) || 5;
 const INACTIVE_DAYS = Number(process.env.OUTREACH_INACTIVE_DAYS) || 7;
 
 const WATCH_MINUTES = Number(process.env.OUTREACH_WATCH_MINUTES) || 10; // new-signup grace
@@ -84,15 +90,17 @@ async function sentTodayCount(now = new Date()) {
 }
 
 async function getSettings() {
-  const [enabled, lastSent, since, reengage] = await Promise.all([
+  const [enabled, lastSent, since, reengage, reengageEmail] = await Promise.all([
     AppSetting.findOne({ key: ENABLED_KEY }).lean(),
     AppSetting.findOne({ key: LAST_SENT_KEY }).lean(),
     AppSetting.findOne({ key: SINCE_KEY }).lean(),
     AppSetting.findOne({ key: REENGAGE_KEY }).lean(),
+    AppSetting.findOne({ key: REENGAGE_EMAIL_KEY }).lean(),
   ]);
   return {
     enabled: !!(enabled && enabled.value),
     reengageEnabled: !!(reengage && reengage.value),
+    reengageEmailEnabled: !!(reengageEmail && reengageEmail.value),
     lastSentAt: lastSent && lastSent.value ? new Date(lastSent.value) : null,
     since: since && since.value ? new Date(since.value) : null,
   };
@@ -107,6 +115,11 @@ async function setEnabled(on, now = new Date()) {
       await AppSetting.updateOne({ key: SINCE_KEY }, { $set: { value: now } }, { upsert: true });
     }
   }
+  return getSettings();
+}
+
+async function setReengageEmailEnabled(on) {
+  await AppSetting.updateOne({ key: REENGAGE_EMAIL_KEY }, { $set: { value: !!on } }, { upsert: true });
   return getSettings();
 }
 
@@ -288,6 +301,85 @@ async function secondWave(now, senderKeys) {
   return { wave: 2, sent: 0, cleared };
 }
 
+// ── Second wave by email ─────────────────────────────────────────────────────
+// Follows the WhatsApp step: a teacher becomes due for the email the moment the
+// second wave has run for them (whether the WhatsApp went out, the number is not
+// on WhatsApp, or it failed), so the two arrive together. Once per teacher, never
+// to anyone who unsubscribed, and only to teachers still on no paid plan.
+function reengageEmailQuery() {
+  return {
+    role: "teacher",
+    deletedAt: null,
+    email: { $nin: [null, ""] },
+    emailOptOut: { $ne: true },
+    plan: { $nin: ["pro", "premium"] },
+    reengageStatus: { $in: ["sent", "skipped", "failed"] },
+    reengageEmailStatus: { $in: [null] },
+  };
+}
+
+const reengageEmailSubject = (u) => {
+  const fn = firstName(u.name);
+  return `${fn ? `${fn} müəllim` : "Hörmətli müəllim"}, qeydiyyatdan keçdiniz, amma başlamadınız 🙂`;
+};
+
+async function emailsSentToday(now = new Date()) {
+  return User.countDocuments({ reengageEmailStatus: "sent", reengageEmailAt: { $gte: bakuMidnight(now) } });
+}
+
+async function sendReengageEmail(u, now = new Date()) {
+  const { sendNotification } = require("../utils/sendEmail");
+  const { unsubscribePath } = require("../helper/unsubscribe");
+  const guard = { _id: u._id, reengageEmailStatus: { $in: [null] } };
+  try {
+    const info = await sendNotification({
+      kind: "reengage",
+      to: u.email,
+      subject: reengageEmailSubject(u),
+      name: firstName(u.name),
+      link: unsubscribePath(u._id),
+    });
+    // Mail is switched off on this server: nothing was sent, try again later.
+    if (info && info.skipped) return "not_ready";
+    await User.updateOne(guard, { $set: { reengageEmailStatus: "sent", reengageEmailAt: now }, $inc: { reengageEmailAttempts: 1 } });
+    return "sent";
+  } catch (e) {
+    const next = (u.reengageEmailAttempts || 0) + 1;
+    await User.updateOne(
+      guard,
+      next >= MAX_RETRIES
+        ? { $set: { reengageEmailStatus: "failed", reengageEmailAt: now, reengageEmailAttempts: next } }
+        : { $inc: { reengageEmailAttempts: 1 } }
+    );
+    console.warn("[OUTREACH] email failed:", e && e.code ? e.code : "error");
+    return "failed";
+  }
+}
+
+async function emailSweep(now = new Date()) {
+  const { reengageEmailEnabled } = await getSettings();
+  if (!reengageEmailEnabled || !withinHours(now)) return null;
+  const today = await emailsSentToday(now);
+  if (today >= EMAIL_DAILY_MAX) return { email: "daily_cap" };
+  const due = await User.find(reengageEmailQuery())
+    .select("_id name email reengageEmailAttempts")
+    .sort({ reengageAt: 1 })
+    .limit(Math.min(EMAILS_PER_SWEEP, EMAIL_DAILY_MAX - today))
+    .lean();
+  if (!due.length) return null;
+  let emailed = 0;
+  for (const u of due) {
+    const r = await sendReengageEmail(u, now);
+    if (r === "not_ready") return { email: "mail_disabled" };
+    if (r === "sent") emailed += 1;
+  }
+  return { emailed };
+}
+
+async function reengageEmailWaitingCount() {
+  return User.countDocuments(reengageEmailQuery());
+}
+
 // Base query for "still waiting": a teacher registered longer than the grace
 // window, with a phone, not yet given a terminal status.
 function waitingQuery(now) {
@@ -324,7 +416,16 @@ function note(res) {
 }
 
 async function runOutreachSweep(now = new Date()) {
-  return note(await sweepInner(now));
+  const res = await sweepInner(now);
+  // The email follows the WhatsApp step, on its own limits, every tick.
+  let mail = null;
+  try {
+    mail = await emailSweep(now);
+  } catch (e) {
+    mail = { email: "error" };
+    console.warn("[OUTREACH] email sweep error:", e && e.message);
+  }
+  return note(mail ? { ...res, ...mail } : res);
 }
 
 // One sweep. Idempotent, bounded, safe on an interval.
@@ -416,6 +517,12 @@ module.exports = {
   getSettings,
   setEnabled,
   setReengageEnabled,
+  setReengageEmailEnabled,
+  reengageEmailQuery,
+  reengageEmailSubject,
+  reengageEmailWaitingCount,
+  emailsSentToday,
+  EMAIL_DAILY_MAX,
   reengageMessage,
   reengageQuery,
   reengageWaitingCount,

@@ -51,12 +51,16 @@ async function sendNotification({ kind, to, subject, replyTo, name, link, code }
 
   try {
     const info = await transporter.sendMail({
-      from: { name: process.env.EMAIL_FROM_NAME || "Examopia", address: from },
+      from: { name: spec.fromName || process.env.EMAIL_FROM_NAME || "Examopia", address: from },
       to,
       replyTo: replyTo || from,
       subject,
       template: spec.template,
       context,
+      // A mail client's own "unsubscribe" button, pointing where the footer does.
+      ...(spec.unsubscribe
+        ? { list: { unsubscribe: [{ url: context.link, comment: "Abunəlikdən çıx" }, `${from}?subject=unsubscribe`] } }
+        : {}),
       disableFileAccess: true,
       disableUrlAccess: true,
     });

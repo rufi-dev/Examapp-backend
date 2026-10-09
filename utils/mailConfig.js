@@ -19,6 +19,9 @@ const NOTIFICATION_KINDS = Object.freeze({
   forgotPassword: { template: "forgotPassword", link: "url" },
   passwordChanged: { template: "changePassword", link: "none" },
   roleChanged: { template: "changeRole", link: "url" },
+  // Second-wave outreach (jobs/autoOutreach.js). `link` is the unsubscribe page;
+  // it is sent from a person's name and carries a List-Unsubscribe header.
+  reengage: { template: "reengageEmail", link: "url", fromName: "Rufi · Examopia", unsubscribe: true },
 });
 // Only these basenames may ever reach the Handlebars view engine.
 const ALLOWED_TEMPLATES = new Set(Object.values(NOTIFICATION_KINDS).map((k) => k.template));

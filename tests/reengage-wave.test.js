@@ -39,6 +39,15 @@ const fakeWa = {
 };
 const waPath = require.resolve(path.join(__dirname, "..", "helper", "whatsapp"));
 require.cache[waPath] = { id: waPath, filename: waPath, loaded: true, exports: fakeWa };
+// The mailer, recorded the same way.
+const mails = [];
+const mailPath = require.resolve(path.join(__dirname, "..", "utils", "sendEmail"));
+require.cache[mailPath] = {
+  id: mailPath,
+  filename: mailPath,
+  loaded: true,
+  exports: { sendNotification: async (m) => (mails.push(m), { messageId: "test" }) },
+};
 
 const User = require("../models/userModel");
 const AppSetting = require("../models/appSettingModel");
@@ -138,6 +147,32 @@ async function main() {
   const night = new Date("2026-10-09T19:00:00Z"); // 23:00 in Baku
   const r5 = await job.runOutreachSweep(night);
   ok("nothing at night", r5.skipped === "outside_hours", JSON.stringify(r5));
+
+  console.log("\n6. The email follows the WhatsApp step, once");
+  const { unsubscribePath, checkUnsubscribeToken, unsubscribeToken } = require("../helper/unsubscribe");
+  ok("no email while its switch is off", mails.length === 0, mails.length);
+  await AppSetting.updateOne({ key: "reengageEmailEnabled" }, { $set: { value: true } }, { upsert: true });
+  const optedOut = await teacher({ lastActiveAt: ago(10), reengageStatus: "sent", reengageAt: ago(1), emailOptOut: true });
+  const mailT = t + 2 * 60 * 60 * 1000; // still inside hours
+  await job.runOutreachSweep(new Date(mailT));
+  const to = (u) => mails.filter((m) => m.to === u.email);
+  ok("the teacher who got the WhatsApp gets the email", to(quiet).length === 1);
+  ok("...and so does the one with no WhatsApp", to(dead).length === 1);
+  ok("not before the WhatsApp step ran for them", to(active).length === 0 && to(fresh).length === 0);
+  ok("never to someone who unsubscribed", to(optedOut).length === 0);
+  const m = to(quiet)[0] || {};
+  ok("the reengage template", m.kind === "reengage");
+  ok("subject greets by first name", /^Aysel\d+ müəllim, qeydiyyatdan keçdiniz/.test(m.subject || ""), m.subject);
+  ok("the footer link is this teacher's unsubscribe page", m.link === unsubscribePath(quiet._id));
+  await job.runOutreachSweep(new Date(mailT + 10 * 60 * 1000));
+  await job.runOutreachSweep(new Date(mailT + 20 * 60 * 1000));
+  ok("never a second email", to(quiet).length === 1 && to(dead).length === 1);
+  ok("marked sent", (await User.findById(quiet._id).lean()).reengageEmailStatus === "sent");
+
+  console.log("\n7. The unsubscribe link cannot be forged");
+  ok("its own token passes", checkUnsubscribeToken(String(quiet._id), unsubscribeToken(String(quiet._id))));
+  ok("another teacher's token fails", !checkUnsubscribeToken(String(quiet._id), unsubscribeToken(String(dead._id))));
+  ok("a made-up one fails", !checkUnsubscribeToken(String(quiet._id), "0".repeat(32)));
 
   await mongoose.disconnect();
   await mem.stop();
