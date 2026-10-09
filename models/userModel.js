@@ -388,6 +388,18 @@ const userSchema = Schema(
         // terminally "failed", so a momentary glitch never silently drops a
         // teacher from the waiting list.
         outreachAttempts: { type: Number, default: 0 },
+        // ── Second wave (jobs/autoOutreach.js, re-engagement) ──
+        // A teacher on no paid plan who has not opened the site for a week gets
+        // ONE reminder of what Examopia does. Same shape as the first wave's
+        // fields, kept apart so each wave messages a teacher at most once.
+        reengageStatus: {
+            type: String,
+            enum: ["sent", "failed", "skipped", null], // null = not yet contacted
+            default: null,
+        },
+        reengageAt: { type: Date, default: null },
+        reengageReason: { type: String, default: null }, // sent | no_whatsapp | failed
+        reengageAttempts: { type: Number, default: 0 },
 
         // ── Teacher Success Journey (ADR Backend/docs/adr/Teacher-Success-Journey.md) ──
         // Minimal, bounded fields only (D15 — no unbounded arrays on User).

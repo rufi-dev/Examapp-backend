@@ -2022,6 +2022,19 @@ const unsubscribePush = asyncHandler(async (req, res) => {
 });
 
 // ── Auto-outreach watcher (admin) ────────────────────────────────────────────
+// The second wave's part of every status reply: its switch and its queue.
+async function reengageStatusPart() {
+  const { getSettings, reengageWaitingCount, INACTIVE_DAYS } = require("../jobs/autoOutreach");
+  const settings = await getSettings();
+  let waiting = null;
+  try {
+    waiting = await reengageWaitingCount();
+  } catch {
+    waiting = null;
+  }
+  return { enabled: settings.reengageEnabled, waiting, inactiveDays: INACTIVE_DAYS };
+}
+
 // GET /api/users/outreach/status — is the watcher on, since when, and is there a
 // linked+ready admin WhatsApp session to actually send from?
 const getOutreachStatus = asyncHandler(async (req, res) => {
@@ -2055,6 +2068,37 @@ const getOutreachStatus = asyncHandler(async (req, res) => {
     sentToday,
     lastSentAt: settings.lastSentAt,
     waiting,
+    reengage: await reengageStatusPart(),
+  });
+});
+
+// POST /api/users/outreach/reengage/toggle — the second wave on/off. It shares
+// the first wave's numbers, hours, gap and daily cap (jobs/autoOutreach.js).
+const toggleReengage = asyncHandler(async (req, res) => {
+  const { getSettings, setReengageEnabled, sentTodayCount, withinHours, GAP_MIN, DAILY_MAX, DAY_START, DAY_END } = require("../jobs/autoOutreach");
+  const wa = require("../helper/whatsapp");
+  const current = await getSettings();
+  const next = typeof req.body?.enabled === "boolean" ? req.body.enabled : !current.reengageEnabled;
+  const settings = await setReengageEnabled(next);
+  const admins = await User.find({ role: "admin" }).select("_id").lean();
+  const senderId = wa.firstReadyOwner(admins.map((a) => a._id));
+  let sentToday = null;
+  try {
+    sentToday = await sentTodayCount();
+  } catch {
+    sentToday = null;
+  }
+  res.json({
+    enabled: settings.enabled,
+    whatsappLinked: !!senderId,
+    withinHours: withinHours(new Date()),
+    dayStart: DAY_START,
+    dayEnd: DAY_END,
+    gapMin: GAP_MIN,
+    dailyMax: DAILY_MAX,
+    sentToday,
+    lastSentAt: settings.lastSentAt,
+    reengage: await reengageStatusPart(),
   });
 });
 
@@ -2229,4 +2273,5 @@ module.exports = {
   teacherOverviewExamDto,
   getOutreachStatus,
   toggleOutreach,
+  toggleReengage,
 };

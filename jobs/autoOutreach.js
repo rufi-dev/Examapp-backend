@@ -34,6 +34,9 @@ const LAST_SENT_KEY = "autoOutreachLastSentAt";
 // watcher is first switched on. Registered AFTER it = a new signup we started
 // watching live; BEFORE it = pre-existing backlog.
 const SINCE_KEY = "autoOutreachSince";
+// The second wave's own switch (see "Second wave" below).
+const REENGAGE_KEY = "reengageEnabled";
+const INACTIVE_DAYS = Number(process.env.OUTREACH_INACTIVE_DAYS) || 7;
 
 const WATCH_MINUTES = Number(process.env.OUTREACH_WATCH_MINUTES) || 10; // new-signup grace
 const GAP_MIN = Number(process.env.OUTREACH_GAP_MIN) || 30; // minutes between sends (gentle, ban-safe)
@@ -68,19 +71,28 @@ function bakuMidnight(now) {
   return new Date(d.getTime() - 4 * 3600 * 1000);
 }
 
-// Real sends already made today (Baku) — for the daily cap + the admin status.
+// Real sends already made today (Baku), BOTH waves — for the daily cap + the
+// admin status. The cap protects the numbers, so it counts every message they sent.
 async function sentTodayCount(now = new Date()) {
-  return User.countDocuments({ outreachStatus: "sent", outreachAt: { $gte: bakuMidnight(now) } });
+  const since = bakuMidnight(now);
+  return User.countDocuments({
+    $or: [
+      { outreachStatus: "sent", outreachAt: { $gte: since } },
+      { reengageStatus: "sent", reengageAt: { $gte: since } },
+    ],
+  });
 }
 
 async function getSettings() {
-  const [enabled, lastSent, since] = await Promise.all([
+  const [enabled, lastSent, since, reengage] = await Promise.all([
     AppSetting.findOne({ key: ENABLED_KEY }).lean(),
     AppSetting.findOne({ key: LAST_SENT_KEY }).lean(),
     AppSetting.findOne({ key: SINCE_KEY }).lean(),
+    AppSetting.findOne({ key: REENGAGE_KEY }).lean(),
   ]);
   return {
     enabled: !!(enabled && enabled.value),
+    reengageEnabled: !!(reengage && reengage.value),
     lastSentAt: lastSent && lastSent.value ? new Date(lastSent.value) : null,
     since: since && since.value ? new Date(since.value) : null,
   };
@@ -95,6 +107,11 @@ async function setEnabled(on, now = new Date()) {
       await AppSetting.updateOne({ key: SINCE_KEY }, { $set: { value: now } }, { upsert: true });
     }
   }
+  return getSettings();
+}
+
+async function setReengageEnabled(on) {
+  await AppSetting.updateOne({ key: REENGAGE_KEY }, { $set: { value: !!on } }, { upsert: true });
   return getSettings();
 }
 
@@ -159,6 +176,118 @@ async function contact(senderId, u, stuck) {
   return status;
 }
 
+// ── Second wave: re-engagement ───────────────────────────────────────────────
+// A teacher on no paid plan who has not opened the site for INACTIVE_DAYS gets
+// ONE message reminding them what Examopia does. It is re-checked on every
+// sweep, so a teacher who crosses the line today is queued today. It shares the
+// first wave's numbers, hours, gap and daily cap, so the two together never send
+// more than the numbers can safely carry, and the first wave (new signups, which
+// cannot wait a week) gets the slot whenever both have someone waiting.
+// Newest registrations first: they are the likeliest to come back.
+function reengageMessage(u) {
+  const fn = firstName(u.name);
+  const n = fn ? ` ${fn} müəllim` : " müəllim";
+  return `Salam${n} 😊 Bir müddət əvvəl *Examopia*-da qeydiyyatdan keçmişdiniz, amma platformadan istifadə etmədiniz. Yəqin platforma da yadınızdan çıxıb 🙂 Nə mane oldu?
+
+Qısaca xatırladım, Examopia nə edir:
+
+🤖 *AI ilə imtahan*: mövzunu yazırsınız, AI dəqiqələr içində hazır imtahan qurur
+🔴 *Canlı imtahan*: şagirdlər yazarkən kimin hansı sualda olduğunu və doğru-səhvini canlı izləyirsiniz, köçürmək üçün səhifədən çıxan dərhal görünür
+👨‍👩‍👧 *Valideynlər*: nəticələri öz telefonundan görür, WhatsApp-a avtomatik bildiriş alır
+👥 *Bütün şagirdlər bir yerdə*: siniflər, nəticələr, ev tapşırıqları bir paneldə
+📚 *Ev tapşırığı*: onlayn verin, onlayn yoxlayın
+🎓 *Dərs hazırlığı*: AI ilə dərs planı və dərs materialı hazırlayın
+✅ *Kağız yoxlamağa son*: nəticə imtahan bitən kimi hazırdır
+
+Hesabınız artıq hazırdır, pulsuz başlaya bilərsiniz 👇
+https://examopia.com/login
+
+Sualınız olsa, elə bura yazın 😊`;
+}
+
+/*
+ * Who the second wave is for, as one query: a teacher with a phone, on no paid
+ * plan, not deleted, not yet given a second-wave outcome, whose last visit (or,
+ * never having come back, whose registration) is older than INACTIVE_DAYS, and
+ * who has had nothing from the first wave in that time either.
+ */
+function reengageQuery(now = new Date()) {
+  const cut = new Date(now.getTime() - INACTIVE_DAYS * 24 * 60 * 60 * 1000);
+  return {
+    role: "teacher",
+    deletedAt: null,
+    // "+994" alone is the schema default: a teacher who never gave a number.
+    phone: { $nin: [null, "", "+994"] },
+    plan: { $nin: ["pro", "premium"] },
+    reengageStatus: { $in: [null] },
+    $and: [
+      { $or: [{ lastActiveAt: { $lt: cut } }, { lastActiveAt: null, createdAt: { $lt: cut } }] },
+      { $or: [{ outreachAt: null }, { outreachAt: { $lt: cut } }] },
+    ],
+  };
+}
+
+async function reengageWaitingCount(now = new Date()) {
+  return User.countDocuments(reengageQuery(now));
+}
+
+// One second-wave send + its outcome, the same rules as `contact` below.
+async function contactReengage(senderId, u, now = new Date()) {
+  let status = "failed";
+  try {
+    status = await wa.sendOutreachFor(senderId, u.phone, reengageMessage(u));
+  } catch {
+    status = "failed";
+  }
+  if (status === "not_ready") return status;
+
+  const guard = { _id: u._id, reengageStatus: { $in: [null] } };
+  if (status === "sent") {
+    await User.updateOne(guard, {
+      $set: { reengageStatus: "sent", reengageAt: now, reengageReason: "sent" },
+      $inc: { reengageAttempts: 1 },
+    });
+  } else if (status === "no_whatsapp") {
+    await User.updateOne(guard, {
+      $set: { reengageStatus: "skipped", reengageAt: now, reengageReason: "no_whatsapp" },
+    });
+  } else {
+    const nextAttempts = (u.reengageAttempts || 0) + 1;
+    if (nextAttempts >= MAX_RETRIES) {
+      await User.updateOne(guard, {
+        $set: { reengageStatus: "failed", reengageAt: now, reengageReason: "failed", reengageAttempts: nextAttempts },
+      });
+    } else {
+      await User.updateOne(guard, { $set: { reengageReason: "failed" }, $inc: { reengageAttempts: 1 } });
+    }
+  }
+  return status;
+}
+
+async function secondWave(now, senderKeys) {
+  const candidates = await User.find(reengageQuery(now))
+    .select("_id name phone createdAt reengageAttempts")
+    .sort({ createdAt: -1 })
+    .limit(ATTEMPTS_PER_SWEEP)
+    .lean();
+  if (!candidates.length) return { wave: 2, drained: true };
+  let cleared = 0;
+  for (const u of candidates) {
+    const senderId = wa.nextReadyOwner(senderKeys);
+    if (!senderId) return { wave: 2, skipped: "not_ready" };
+    const status = await contactReengage(senderId, u, now);
+    if (status === "not_ready") return { wave: 2, skipped: "not_ready" };
+    if (status === "sent") {
+      // The sweep's own clock, so the gap and the daily count agree with it.
+      await setLastSentAt(now);
+      console.log(`[OUTREACH] wave 2: sent 1 (cleared ${cleared} dead this slot)`);
+      return { wave: 2, sent: 1, cleared };
+    }
+    cleared += 1;
+  }
+  return { wave: 2, sent: 0, cleared };
+}
+
 // Base query for "still waiting": a teacher registered longer than the grace
 // window, with a phone, not yet given a terminal status.
 function waitingQuery(now) {
@@ -200,8 +329,8 @@ async function runOutreachSweep(now = new Date()) {
 
 // One sweep. Idempotent, bounded, safe on an interval.
 async function sweepInner(now = new Date()) {
-  const { enabled, lastSentAt, since } = await getSettings();
-  if (!enabled) return { skipped: "disabled" };
+  const { enabled, reengageEnabled, lastSentAt, since } = await getSettings();
+  if (!enabled && !reengageEnabled) return { skipped: "disabled" };
 
   const admins = await User.find({ role: "admin" }).select("_id").lean();
   // Consider BOTH linked numbers (slot 1 + slot 2) of every admin. The sender is
@@ -219,6 +348,19 @@ async function sweepInner(now = new Date()) {
   const sentToday = await sentTodayCount(now);
   if (sentToday >= DAILY_MAX) return { skipped: "daily_cap", sentToday };
 
+  // The first wave gets the slot when it has someone; otherwise the second.
+  let first = null;
+  if (enabled) {
+    first = await firstWave(now, since, senderKeys);
+    if (first.sent || first.skipped) return first;
+  }
+  if (!reengageEnabled) return first;
+  const second = await secondWave(now, senderKeys);
+  return first ? { ...second, firstWave: first } : second;
+}
+
+// The first wave's queue for one slot: stuck new signups, then the backlog.
+async function firstWave(now, since, senderKeys) {
   // Build the ordered queue: NEW signups (registered after the watcher started)
   // first, oldest-of-them first (FIFO); then the EXISTING backlog, newest-first
   // (LIFO). Everyone is still past the grace window (createdAt <= graceCutoff).
@@ -273,6 +415,11 @@ module.exports = {
   runOutreachSweep,
   getSettings,
   setEnabled,
+  setReengageEnabled,
+  reengageMessage,
+  reengageQuery,
+  reengageWaitingCount,
+  INACTIVE_DAYS,
   waitingCount,
   sentTodayCount,
   withinHours,

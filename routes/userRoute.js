@@ -1,5 +1,5 @@
 const express = require('express')
-const { registerUser, loginUser, deviceLogin, forgetDevice, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserStorageAddon, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush, getOutreachStatus, toggleOutreach, getSetupFunnel, getParentCode } = require('../controllers/userController')
+const { registerUser, loginUser, deviceLogin, forgetDevice, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserStorageAddon, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush, getOutreachStatus, toggleOutreach, toggleReengage, getSetupFunnel, getParentCode } = require('../controllers/userController')
 const { getProfileStats } = require('../controllers/profileStatsController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
 const { refreshHandler, logoutAllHandler, requireSessionFlag } = require('../controllers/authSessionController')
@@ -55,6 +55,7 @@ router.get('/getUsers', protect, teacherOnly, getUsers)
 // above any '/:id' routes so they aren't swallowed by the param match.
 router.get('/outreach/status', protect, adminOnly, getOutreachStatus)
 router.post('/outreach/toggle', protect, adminOnly, toggleOutreach)
+router.post('/outreach/reengage/toggle', protect, adminOnly, toggleReengage)
 // Admin analytics: teacher-setup funnel (current-state snapshot) for İnkişaf tab.
 router.get('/setup-funnel', protect, adminOnly, getSetupFunnel)
 // Admin directory extras: batch role/delete, and one call for everything about
