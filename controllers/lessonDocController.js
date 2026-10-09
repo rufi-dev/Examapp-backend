@@ -447,9 +447,19 @@ function assertSourcesReadable(sending, parts, unreadable) {
   }
 }
 
+/*
+ * A turn whose save lost to a newer version of the material. It was told as
+ * "başqa yerdə dəyişdirilib — səhifəni yeniləyin", which a teacher reads as
+ * someone else editing their material; what happened is that the material moved
+ * on (usually their own earlier request finishing) while this one worked. The
+ * page reloads the material and puts the request back in the box.
+ */
+const TURN_CONFLICT = "Bu istək tətbiq olunmadı — material bu arada yeniləndi. İstəyiniz yazı sahəsinə qaytarıldı, yenidən göndərin.";
+
 function publicFailure(e) {
   // Logged once, by code — never the message, which is the provider's to compose.
   logStudioEvent("turn_failed", e);
+  if (e?.code === "doc_conflict") return { code: "doc_conflict", message: TURN_CONFLICT };
   const code = typeof e?.code === "string" && PUBLIC_FAILURE[e.code] ? e.code : null;
   /*
    * A known code does NOT make the message safe. This used to fall through to
@@ -707,11 +717,13 @@ const getDoc = asyncHandler(async (req, res) => {
    * admin branch: a teacher pays in credits, and the provider bill behind them
    * is not their number to read.
    */
+  // A turn still writing this material (helper/lessonDocTurns): the page waits.
+  const running = require("../helper/lessonDocTurns").runningTurn(doc._id);
   if (req.user.role === "admin") {
     const spend = await costByDoc([doc._id]);
-    return res.json({ doc, background: bgUri, cost: spend.get(String(doc._id)) || { usd: 0, turns: 0, models: [] } });
+    return res.json({ doc, background: bgUri, running, cost: spend.get(String(doc._id)) || { usd: 0, turns: 0, models: [] } });
   }
-  res.json({ doc, background: bgUri });
+  res.json({ doc, background: bgUri, running });
 });
 
 /*
@@ -1062,7 +1074,28 @@ async function runNativeMaterialTurn({ req, doc, text, parts, files, model, abor
   await sendDone({ doc: saved, summary: sum, provider: out.provider, engine: "platform-native" });
 }
 
+/*
+ * One turn per material at a time.
+ *
+ * Checked after ownership and before anything is stored or charged, and set in
+ * the same tick as the check, so two sends cannot both pass it. The page that
+ * gets this keeps the request queued and sends it when the running one ends.
+ */
 const streamMessage = asyncHandler(async (req, res) => {
+  await mine(req, req.params.id);
+  const T = require("../helper/lessonDocTurns");
+  if (T.runningTurn(req.params.id)) {
+    throw httpError(409, "turn_running", "Əvvəlki istəyiniz hələ hazırlanır — bitən kimi bu da göndəriləcək.");
+  }
+  const token = T.startTurn(req.params.id, (req.body && req.body.text) || "");
+  try {
+    await streamMessageTurn(req, res);
+  } finally {
+    T.endTurn(req.params.id, token);
+  }
+});
+
+async function streamMessageTurn(req, res) {
   const doc = await mine(req, req.params.id);
   const text = String((req.body && req.body.text) || "").trim();
   if (!text) throw httpError(400, "message_empty", "Nə yaratmaq istədiyinizi yazın.");
@@ -2043,7 +2076,7 @@ ${S.SOURCE_RULES}`;
     clearInterval(hb);
     res.end();
   }
-});
+}
 
 
 /*

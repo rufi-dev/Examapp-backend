@@ -109,6 +109,7 @@
   "tests/question-draft.test.js",
   "tests/cli-uploads-and-light-check.test.js",
   "tests/reengage-wave.test.js",
+  "tests/lesson-doc-turns.test.js",
   "tests/answer-key-vision.test.js",
   "tests/question-figures.test.js",
   "tests/solve-answers-stream.test.js",
