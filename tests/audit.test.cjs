@@ -149,14 +149,24 @@ eq(
   ),
   ["open-ended-answer"]
 );
-// A manually-graded open question is INTENTIONALLY open — never flagged.
+// A manually-graded open question is INTENTIONALLY open — never flagged as
+// open-ended or keyless. Since c33c677 (7 Oct) it must still carry a SAMPLE for
+// the teacher to mark against, so an empty one asks for exactly that.
 eq(
-  "manualGrade open question is NOT flagged",
+  "manualGrade open question with a sample is NOT flagged",
+  codes(
+    [{ type: "Co", text: "Vətənpərvərliklə bağlı hansı kitabları oxumaq faydalıdır? Qısaca yazın.", openAnswers: ["«Ana» romanı"], manualGrade: true }],
+    { requireAnswers: true }
+  ),
+  []
+);
+eq(
+  "manualGrade open question without a sample asks for one, nothing else",
   codes(
     [{ type: "Co", text: "Vətənpərvərliklə bağlı hansı kitabları oxumaq faydalıdır? Qısaca yazın.", openAnswers: [], manualGrade: true }],
     { requireAnswers: true }
   ),
-  []
+  ["no-sample-answer"]
 );
 // A concrete numeric short-answer is fine even when the prompt says "write it".
 eq(

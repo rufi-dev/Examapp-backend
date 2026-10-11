@@ -25,11 +25,27 @@ const DIAGRAM_TYPES = [...SEMANTIC_TYPES, ...GEOMETRY_TYPES];
  */
 const BLOCK_KINDS = ["heading", "text", "list", "definition", "example", "task", "note", "table", "diagram", "image"];
 const MAX_BLOCKS = 36;
-const MAX_ITEMS = 12;
+const MAX_ITEMS = 20;
 const MAX_TEXT = 1200;
-// 36 blocks x 1,200 characters plus JSON overhead, with room to spare. A native
-// document cannot legitimately exceed this; see nativePrompt.
-const MAX_CURRENT_CHARS = 120000;
+/*
+ * How big a table may be.
+ *
+ * It was 8 columns by 12 rows, and a school's ordinary paperwork does not fit
+ * in that. 11 Oct 2026, Gülanə Məmmədova: a 6th-grade KSQ/BSQ date sheet is
+ * one column of subjects, KSQ 1-3, BSQ 1, KSQ 4-8 and BSQ 2 (11 columns) for
+ * fourteen subjects. The model stopped at KSQ 6 because column 9 did not
+ * exist, split the subjects into a second table because row 13 did not exist,
+ * then deleted the wrong thing each time she asked it to merge them, and her
+ * last two requests (both past 12 rows) came back as the schema itself. A
+ * limit the teacher cannot see turns a plain request into a misunderstanding.
+ * Twelve columns still print on a portrait A4 page; forty rows is a class list.
+ */
+const MAX_TABLE_COLS = 12;
+const MAX_TABLE_ROWS = 40;
+// 36 blocks x 1,200 characters, plus a full table of short cells, plus JSON
+// overhead, with room to spare. A native document cannot legitimately exceed
+// this; see nativePrompt.
+const MAX_CURRENT_CHARS = 200000;
 
 const NATIVE_SCHEMA = {
   type: "object",
@@ -59,8 +75,8 @@ const NATIVE_SCHEMA = {
           items: { type: "array", maxItems: MAX_ITEMS, items: { type: "string" } },
           ordered: { type: "boolean" },
           solution: { type: "string" },
-          columns: { type: "array", maxItems: 8, items: { type: "string" } },
-          rows: { type: "array", maxItems: 12, items: { type: "array", maxItems: 8, items: { type: "string" } } },
+          columns: { type: "array", maxItems: MAX_TABLE_COLS, items: { type: "string" } },
+          rows: { type: "array", maxItems: MAX_TABLE_ROWS, items: { type: "array", maxItems: MAX_TABLE_COLS, items: { type: "string" } } },
           tone: { type: "string", enum: ["info", "warning", "success"] },
           /*
            * Which of the teacher's attached pictures this block shows, by its
@@ -181,8 +197,8 @@ const cleanArray = (value, limit = MAX_ITEMS) => (Array.isArray(value) ? value :
  * the row is padded to the header width instead.
  */
 const cleanRow = (value, width) => {
-  const cells = (Array.isArray(value) ? value : []).slice(0, 8).map((x) => clamp(x, 300));
-  const size = width > 0 ? Math.min(width, 8) : cells.length;
+  const cells = (Array.isArray(value) ? value : []).slice(0, MAX_TABLE_COLS).map((x) => clamp(x, 300));
+  const size = width > 0 ? Math.min(width, MAX_TABLE_COLS) : cells.length;
   while (cells.length < size) cells.push("");
   return cells.slice(0, size);
 };
@@ -210,8 +226,8 @@ function normalizeNative(raw = {}) {
         items: cleanArray(b?.items),
         ordered: Boolean(b?.ordered),
         solution: clamp(b?.solution),
-        columns: cleanArray(b?.columns, 8),
-        rows: (Array.isArray(b?.rows) ? b.rows : []).slice(0, 12).map((r) => cleanRow(r, cleanArray(b?.columns, 8).length)),
+        columns: cleanArray(b?.columns, MAX_TABLE_COLS),
+        rows: (Array.isArray(b?.rows) ? b.rows : []).slice(0, MAX_TABLE_ROWS).map((r) => cleanRow(r, cleanArray(b?.columns, MAX_TABLE_COLS).length)),
         tone: ["info", "warning", "success"].includes(b?.tone) ? b.tone : "info",
         // A positive whole number or nothing. Which attachment it names is not
         // this function's business — it does not know what is attached.
@@ -642,4 +658,4 @@ function nativeCanHandle(doc = {}, countParts) {
   return !parts;
 }
 
-module.exports = { salvageNative, BLOCK_KINDS, stableImageId, NATIVE_SCHEMA, NATIVE_SYSTEM, MAX_BLOCKS, normalizeNative, nativeBlocksToHtml, nativePrompt, nativePrintOptions, diagramSvg, nativeCanHandle };
+module.exports = { salvageNative, BLOCK_KINDS, stableImageId, NATIVE_SCHEMA, NATIVE_SYSTEM, MAX_BLOCKS, MAX_TABLE_COLS, MAX_TABLE_ROWS, normalizeNative, nativeBlocksToHtml, nativePrompt, nativePrintOptions, diagramSvg, nativeCanHandle };

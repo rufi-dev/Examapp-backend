@@ -217,7 +217,7 @@ const doc = { html, blocks: [] };
   {
     const huge = {
       title: "T", audience: "A", reply: "R",
-      blocks: Array.from({ length: 40 }, (_, i) => ({ kind: "text", text: "x".repeat(4000), n: i })),
+      blocks: Array.from({ length: 40 }, (_, i) => ({ kind: "text", text: "x".repeat(6000), n: i })),
     };
     let threw = null;
     try {

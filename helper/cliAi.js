@@ -897,15 +897,19 @@ function runProcess(command, args, { cwd, signal, provider, timeoutMs, stdin, on
  * end". An instruction competing with the content it governs loses.
  */
 function buildSystemPrompt({ system, insist }) {
+  const again =
+    insist === "echo"
+      ? "ÖNCƏKİ CAVABDA SXEMİN ÖZÜNÜ QAYTARDIN. Sxemi təkrarlama — ona uyğun, DOLU məzmunlu JSON qaytar."
+      : insist
+        ? "ÖNCƏKİ CAVAB JSON DEYİLDİ. Bu dəfə yalnız JSON qaytar, başqa heç nə."
+        : "";
   return [
     "SƏN STRUCTURED JSON CAVABI VERƏN BACKEND MODELİSƏN — söhbət yoldaşı deyilsən.",
     "Cavabın YALNIZ bir JSON obyekt olmalıdır: ilk simvol { , son simvol }. Markdown, izah, " +
       "kod çəpəri, giriş və ya yekun cümləsi YAZMA.",
     "HEÇ VAXT sual vermə və aydınlaşdırma istəmə. Tapşırıq qeyri-dəqiqdirsə, ən məntiqli " +
       "fərziyyəni et və yenə də tam JSON qaytar — müəllim nəticəni özü redaktə edəcək.",
-    insist
-      ? "ÖNCƏKİ CAVAB JSON DEYİLDİ. Bu dəfə yalnız JSON qaytar, başqa heç nə."
-      : "",
+    again,
     system || "",
   ].filter(Boolean).join("\n\n");
 }
@@ -913,7 +917,7 @@ function buildSystemPrompt({ system, insist }) {
 /* The user turn: the shape asked for, what to read, and the task itself. */
 function buildPrompt({ prompt, schema, files, attached = false }) {
   return [
-    "JSON bu sxemə uyğun olmalıdır:",
+    "JSON bu sxemə uyğun olmalıdır (bu, cavabın FORMASIDIR — onu təkrarlama, onu məzmunla DOLDUR):",
     JSON.stringify(schema || {}),
     files.length
       ? attached
@@ -922,6 +926,26 @@ function buildPrompt({ prompt, schema, files, attached = false }) {
       : "",
     `TAPŞIRIQ:\n${prompt}`,
   ].filter(Boolean).join("\n\n");
+}
+
+/*
+ * The schema handed back instead of filled in.
+ *
+ * 11 Oct 2026, Gülanə Məmmədova in Lesson Studio: two edits in a row came back
+ * as {"type":"object","additionalProperties":false,"properties":…,"required":…},
+ * the very schema the prompt showed, returned as the answer. It is valid JSON,
+ * so it passed the parser, and the material engine read it as a document with
+ * no blocks: "Materialın məzmunu tam qayıtmadı", twice, with nothing to say
+ * why. Both requests needed a table bigger than the schema allowed; a model
+ * with no valid answer to give gave the shape back. It is not an answer, so it
+ * is treated as one that could not be read: one pointed retry, then the next
+ * route.
+ */
+function isSchemaEcho(doc, schema) {
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) return false;
+  if (typeof doc.type !== "string" || !doc.properties || typeof doc.properties !== "object") return false;
+  const wanted = Array.isArray(schema?.required) ? schema.required : [];
+  return !wanted.some((k) => k !== "type" && k !== "properties" && Object.prototype.hasOwnProperty.call(doc, k));
 }
 
 async function runCliStructured({ provider, model, system, prompt, schema, parts = [], signal, tier = "standard", onText, onThinking }) {
@@ -1026,7 +1050,11 @@ ${fullPrompt}`];
       }
       const limited = limitFromText(raw, chosen);
       if (limited) throw limited;
-      return chosen === "claude" ? claudeResult(raw) : parseJsonText(raw);
+      const parsed = chosen === "claude" ? claudeResult(raw) : parseJsonText(raw);
+      if (isSchemaEcho(parsed, schema)) {
+        throw Object.assign(new Error("cli_invalid_json"), { code: "cli_invalid_json", echo: true, sample: "the schema itself" });
+      }
+      return parsed;
     };
 
     let doc;
@@ -1047,8 +1075,8 @@ ${fullPrompt}`];
        * just makes the teacher wait twice for the same answer.
        */
       if (e?.code !== "cli_invalid_json" || signal?.aborted) throw e;
-      console.warn(`[AI] ${chosen} answered in prose instead of JSON; asking once more`);
-      doc = await attempt(true);
+      console.warn(`[AI] ${chosen} ${e.echo ? "returned the schema instead of an answer" : "answered in prose instead of JSON"}; asking once more`);
+      doc = await attempt(e.echo ? "echo" : true);
     }
     return { doc, provider: `${chosen}-cli`, cost: { model: wanted || model, cliModel: cliModel(chosen, wanted), usd: 0, inputTokens: 0, outputTokens: 0, cli: true } };
   } finally {
@@ -1199,6 +1227,8 @@ module.exports = {
   claudeArgs,
   claudeTurns,
   runCliStructured,
+  isSchemaEcho,
+  buildSystemPrompt,
   runCliChat,
   parseJsonText,
   cliModel,
