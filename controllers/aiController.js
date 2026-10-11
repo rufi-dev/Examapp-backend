@@ -3963,8 +3963,11 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     hasInstr
       ? [
           "Aşağıdakı imtahan sualını müəllimin istəyinə uyğun yenidən işlə. Müəllimin istəyini ÖZÜN oxu və qərar ver:",
-          "• Müəllim KONKRET bir dəyişiklik deyibsə (məs. «6-nı 8 et», «tək seçim et», «C variantını dəyiş») → YALNIZ onu tətbiq et, sualın qalan hissəsini (mətn, variantlar, düzgün cavab, tip) OLDUĞU KİMİ saxla; sualı «yaxşılaşdırmağa» çalışma.",
-          "• Müəllim ÜMUMİ / qeyri-dəqiq bir şey deyibsə (məs. «problemi tap və düzəlt», «yoxla», «yaxşılaşdır», «bu düzgün deyil») və ya nəyin düzələcəyi aydın deyilsə → sualdakı problem(lər)i ÖZÜN müəyyən et və düzəlt (səhv/işarələnməmiş cavab; çoxmənalı açıq sualı Cm et; zəif variantlar; məzmuna uyğun olmayan tip). Sualın mövzusunu saxla, onu tamam başqa suala çevirmə.",
+          "• Müəllim çox vaxt telefonda tələsik yazır: yazı səhvlərini MƏNACA oxu, hərfi mənaya ilişmə (məs. «fərqi sal soruş» çox güman «fərqli sual soruş» deməkdir; «sual dəyişsin» = sualı dəyiş).",
+          "• Müəllim SUALIN ÖZÜNÜN dəyişməsini istəyirsə («dəyiş», «dəyişsin», «başqa», «fərqli», «yeni», «əvəz et», «məsələ tipində ver» və s.) → eyni mövzuda MƏZMUNCA YENİ sual yaz: başqa ədədlər/verilənlər, başqa vəziyyət və ya kontekst, yeni variantlar. Köhnə sualı bir-iki sözünü dəyişib və ya variantlarını qarışdırıb qaytarmaq QADAĞANDIR.",
+          "• Müəllim KONKRET kiçik bir dəyişiklik deyibsə (məs. «6-nı 8 et», «tək seçim et», «C variantını dəyiş») → YALNIZ onu tətbiq et, sualın qalan hissəsini (mətn, variantlar, düzgün cavab, tip) OLDUĞU KİMİ saxla.",
+          "• Müəllim ÜMUMİ bir şey deyibsə (məs. «problemi tap və düzəlt», «yoxla», «yaxşılaşdır», «bu düzgün deyil») → sualdakı problem(lər)i ÖZÜN müəyyən et və düzəlt (səhv/işarələnməmiş cavab; çoxmənalı açıq sualı Cm et; zəif variantlar; məzmuna uyğun olmayan tip). Mövzunu saxla.",
+          "• İki cür başa düşmək mümkündürsə — kiçik hərfi düzəliş, yoxsa yeni sual — müəllimin sualı GÖRÜNƏCƏK dərəcədə dəyişmək istədiyini qəbul et: düyməni ona görə basıb.",
           "YALNIZ BİR sual qaytar.",
         ].join("\n")
       : "Aşağıdakı imtahan sualının yerinə eyni mövzuda, eyni çətinlikdə YENİ, FƏRQLİ bir sual yaz. YALNIZ BİR sual qaytar.",
@@ -4045,14 +4048,49 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     res.status(502);
     throw new Error("AI yeni sual qaytarmadı");
   }
-  const cost = sumCost(out.cost, reviewCost);
+
+  /*
+   * Did it actually change? A teacher who asked for the question to change and
+   * got the same stem back was being told "Sual yeniləndi" about nothing (see
+   * helper/questionSimilarity). Measured against the original; when the request
+   * was plainly "change the question" and the result still reads the same, one
+   * firmer retry. Whatever comes back, the page is told how close it is, so it
+   * can say so instead of announcing a change that did not happen.
+   */
+  const SIM = require("../helper/questionSimilarity");
+  let similarity = SIM.stemSimilarity(question.text, fresh.text);
+  let retryCost = null;
+  if (hasInstr && similarity >= SIM.SIMILAR_AT && SIM.asksForNewQuestion(instructions)) {
+    try {
+      const again = await runGeneration({
+        prompt: `${ask}\n\nDİQQƏT: əvvəlki cavabın köhnə sualla demək olar EYNİ idi. Müəllim sualın özünün dəyişməsini istəyir. Eyni mövzuda, başqa verilənlərlə, məzmunca YENİ sual yaz.`,
+        preset: req.body?.preset,
+        model: PLATFORM_MODEL,
+      });
+      const [next] = cleanQuestions(again.questions || []);
+      retryCost = again.cost;
+      if (next && !auditQuestions([next], { requireAnswers: true }).length) {
+        const s2 = SIM.stemSimilarity(question.text, next.text);
+        if (s2 < similarity) {
+          fresh = next;
+          similarity = s2;
+          issues = [];
+        }
+      }
+    } catch (e) {
+      console.warn("regenerate retry failed (keeping the first answer):", e?.message);
+    }
+  }
+  const similar = similarity >= SIM.SIMILAR_AT;
+
+  const cost = sumCost(sumCost(out.cost, reviewCost), retryCost);
   await logGenerationUsage(req, { ...out, cost, questions: [fresh] });
 
   // An edited description sent from the rewrite panel becomes the exam's
   // description from here on.
   await rememberExamPrompt(req, examPrompt);
   if (req.aiCredit) req.aiCredit.usable(); // CR-122
-  res.json({ question: fresh, cost, issues, verified });
+  res.json({ question: fresh, cost, issues, verified, similarity: Math.round(similarity * 100) / 100, similar });
 });
 
 // ============================ Teacher chat assistant ============================
