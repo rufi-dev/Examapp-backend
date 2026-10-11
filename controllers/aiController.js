@@ -7,6 +7,7 @@ const { runAi } = require("../helper/aiRuntime");
 const User = require("../models/userModel");
 const Exam = require("../models/examModel");
 const Class = require("../models/classModel");
+const { classNameFor, withClassContext } = require("../helper/classContext");
 const Enrollment = require("../models/enrollmentModel");
 
 /*
@@ -2570,6 +2571,7 @@ QAYDALAR:
 - BÖLGÜ: müəllim tiplərin sayını/nisbətini deyibsə, ona hərfi əməl et. «son 7-si açıq» → tam 7 ədəd Co. «yarısı uyğunluq» → qalan qapalı sualların yarısı «Cma» olmalıdır.
   UYĞUNLUQ SUALI YAZMAQDAN ÇƏKİNMƏ: aşağıdakı uzun xəbərdarlıq onu NECƏ düzgün yazmaq barədədir — ondan qaçmaq üçün deyil. İstənilibsə, tələb olunan qədər «Cma» yaz.
 - Qapalı sual (Cm/Cs): "choices" massivində A–E variantları ver və düzgün variant(lar)ın indeksini "correct" massivinə yaz.
+- ⛔ TƏK SEÇİM (Cm) — YALNIZ BİR VARİANT DÜZGÜN OLA BİLƏR. Qaytarmazdan ƏVVƏL hər variantı ayrıca yoxla: «bu da sualın şərtinə uyğundurmu?». İkinci variant da uyğun gəlirsə — ya sualı dəqiqləşdir, ya həmin variantı açıq-aşkar yanlış biri ilə əvəz et, ya da tipi «Cs» et və BÜTÜN düzgünləri "correct"-ə yaz. Bu səhv ən çox qrammatikada olur (cümlə üzvləri, nitq hissələri, hallar, söz quruluşu), eləcə də «hansı doğrudur / hansı deyil» suallarında. Nümunə: «"Müəllim şagirdlərə tapşırıq verdi" cümləsində tamamlıq hansıdır?» tək seçimli ola BİLMƏZ — həm «şagirdlərə» (vasitəli tamamlıq), həm «tapşırıq» (vasitəsiz tamamlıq) düzgündür. Düzgün yazılış: «...cümləsində vasitəsiz tamamlıq hansıdır?» (yeganə cavab: tapşırıq) və ya Cs.
 - AÇIQ SUALIN CAVABI — BURADA ÇOX SƏHV EDİLİR:
   Şagird cavabı KLAVİATURA ilə yazır və cavab hərfbəhərf uyğun gəlməlidir. Ona görə açıq sual YALNIZ o zaman uyğundur ki, cavabın QISA və BİR MƏNALI yazılışı olsun.
   ⛔ ƏN VACİB QAYDA — AÇIQ-UÇLU (çoxcavablı) SUAL YARATMA: Əgər sualın ÇOX SAYDA fərqli düzgün cavabı ola bilərsə, onu AÇIQ (Co) ETMƏ. Nümunələr (BUNLARI Co ETMƏ): «bir yer bildirən isim yaz», «şəxs bildirən söz yaz», «konkret ismə bir nümunə göstər», «bir sifət de», «bir heyvan adı yaz». Belə suallarda minlərlə düzgün cavab var — sən yalnız 3-nü sadalayırsan, «beach/office/tree» yazan şagird HAQSIZ yerə səhv sayılır. Bunun əvəzinə: sualı ÇOXSEÇİMLİ (Cm) et və 4-5 variant ver (biri düzgün), VƏ YA sualı elə dəyiş ki, cavab BİRMƏNALI olsun (məs. «'kitab' sözünün cəm forması» → yeganə cavab). Açıq sual (Co) YALNIZ cavabı YEGANƏ və dəqiq müəyyən olan hallar üçündür: hesablanmış ədəd, konkret termin/tərif, tarixi tarix/ad, sualın birmənalı tələb etdiyi TƏK söz. Şübhə varsa — Co yox, Cm seç.
@@ -3413,6 +3415,9 @@ const generateQuestions = asyncHandler(async (req, res) => {
   }
   const passageCount = detectPassageCount(prompt, req.body?.preset);
   const requestedCount = parseRequestedCount(prompt);
+  // The class it is for: a prompt that names no subject takes it from there.
+  // The teacher's own words stay `prompt` (counting, passages, the saved copy).
+  const aiPrompt = withClassContext(prompt, await classNameFor(req));
   let questions = [];
   let cost = null;
   let issues = [];
@@ -3426,11 +3431,11 @@ const generateQuestions = asyncHandler(async (req, res) => {
       issues = r.issues;
       verified = r.verified;
     } else {
-      const out = await runGeneration({ prompt, preset: req.body?.preset, model: PLATFORM_MODEL });
+      const out = await runGeneration({ prompt: aiPrompt, preset: req.body?.preset, model: PLATFORM_MODEL });
       // Request fidelity: if the model came back short of the teacher's asked count,
       // top the set up to it (best-effort) BEFORE the review — so "20 sual" means 20.
       const topped = await topUpToCount({
-        prompt,
+        prompt: aiPrompt,
         preset: req.body?.preset,
         model: PLATFORM_MODEL,
         questions: out.questions,
@@ -3440,7 +3445,7 @@ const generateQuestions = asyncHandler(async (req, res) => {
       // the teacher sees them. Falls back to the un-reviewed set if review fails.
       const v = await verifyAndFix({
         questions: topped.questions,
-        prompt,
+        prompt: aiPrompt,
         preset: req.body?.preset,
         model: PLATFORM_MODEL,
       });
@@ -3535,6 +3540,8 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
   });
 
   const passageCount = detectPassageCount(prompt, req.body?.preset);
+  // The class it is for: a prompt that names no subject takes it from there.
+  const aiPrompt = withClassContext(prompt, await classNameFor(req));
   let shown = 0;
   let questions = [];
   let cost = null;
@@ -3568,7 +3575,7 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
     } else {
       const out = await runGeneration({
         signal: ac.signal,
-        prompt,
+        prompt: aiPrompt,
         preset: req.body?.preset,
         model: PLATFORM_MODEL,
         onText: (provider) => {
@@ -3613,7 +3620,7 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
         sse("status", { message: "Çatışmayan suallar hazırlanır…" });
       }
       const topped = await topUpToCount({
-        prompt,
+        prompt: aiPrompt,
         preset: req.body?.preset,
         model: PLATFORM_MODEL,
         signal: ac.signal,
@@ -3624,7 +3631,7 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
       // answers before they are committed. `status` events drive the panel.
       const v = await verifyAndFix({
         questions: topped.questions,
-        prompt,
+        prompt: aiPrompt,
         preset: req.body?.preset,
         model: PLATFORM_MODEL,
         signal: ac.signal,
@@ -3955,6 +3962,7 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
   }
 
   const hasInstr = !!(instructions && String(instructions).trim());
+  const className = await classNameFor(req);
   // The MODEL decides how to treat the instruction — we don't keyword-match it.
   // It reads the teacher's request and chooses: apply a specific edit surgically,
   // OR (for a vague "find and fix / improve / check") diagnose and fix the
@@ -3976,6 +3984,7 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     JSON.stringify(question).slice(0, 4000),
     "",
     examPrompt ? `İMTAHANIN ÜMUMİ TƏSVİRİ: ${String(examPrompt).slice(0, 500)}` : "",
+    className ? `SİNİF: «${className}» (sual bu sinfin fənnindən olsun).` : "",
     "",
     hasInstr
       ? `MÜƏLLİMİN İSTƏYİ: ${String(instructions).trim().slice(0, 1000)}`
@@ -3986,6 +3995,9 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     "- RİYAZİYYAT: mətndə və seçimlərdə hər düsturu tək dollar işarələri arasında yaz — $...$ (məs. \"$\\\\frac{5}{7}$\", \"$x^2$\"). $...$-siz açıq LaTeX (\\\\frac, \\\\sqrt, x^2) YAZMA və hər $ üçün bağlayan $ qoy; \"latex\" sahəsi \"\" olsun. Adi rəqəm/aralıq $ ilə yazılmır.",
     // A rewritten question must always be COMPLETE and self-consistent.
     "- ⛔ SUAL TAM VƏ DÜZGÜN OLMALIDIR: sən sualın müəllifisən — DÜZGÜN CAVABI BİLİRSƏN və MÜTLƏQ qeyd et. Tək/çox seçim (Cm/Cs) → 'correct' massivinə düzgün variant(lar)ın indeksini yaz (BOŞ BURAXMA). Açıq (Co/Cd) → 'openAnswers'-i doldur. Uyğunluq (Cma) → 'pairs' düzgün olsun. TİPİ DƏYİŞƏNDƏ (məs. açıq → tək seçim) yeni tipin BÜTÜN sahələrini tam doldur, düzgün cavabı İŞARƏLƏMƏDƏN sual qaytarma. Tək seçimə çevirəndə məntiqli 4 variant qur (biri düzgün) və düzgün olanın indeksini 'correct'-ə yaz.",
+    // Aynure, 11 Oct: "B ve c dogrudur" on a one-answer grammar question that
+    // really had two. Said outright, so it never depends on the model's guess.
+    "- Müəllim bir neçə variantın düzgün olduğunu deyirsə (məs. «B və C doğrudur», «b ve c dogrudur») → tipi «Cs» (çox seçim) et, dediyi variantların HAMISINI 'correct'-ə yaz və sualın mətnini çox cavaba uyğunlaşdır (məs. «hansıdır?» → «hansılardır?»). Tək seçimli (Cm) sualda isə YALNIZ BİR variant düzgün ola bilər.",
     "- Açıq (Co) YALNIZ birmənalı, hamının eyni yazacağı qısa cavab üçündür (ədəd, tək termin, düstur). Cavab çoxmənalı / təsvir / münasibətdirsə → 'Cm' et və düzgün variantı işarələ.",
     ...(hasInstr
       ? []

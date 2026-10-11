@@ -111,6 +111,7 @@
   "tests/reengage-wave.test.js",
   "tests/lesson-doc-turns.test.js",
   "tests/question-rewrite.test.js",
+  "tests/class-context.test.js",
   "tests/answer-key-vision.test.js",
   "tests/question-figures.test.js",
   "tests/solve-answers-stream.test.js",
