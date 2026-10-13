@@ -94,6 +94,19 @@ router.post("/ai-reply", protect, adminOnly, async (req, res) => {
   }
 });
 
+// Test mode: the admin's own numbers are answered too, to try it from one to
+// the other (one setting for both numbers; the AI never answers an AI).
+router.post("/ai-reply/test", protect, adminOnly, async (req, res) => {
+  if (typeof req.body?.on !== "boolean") return res.status(400).json({ message: "on: true və ya false olmalıdır" });
+  try {
+    const ai = require("../helper/waAutoReply");
+    await ai.setTestOwn(req.body.on);
+    res.json(await ai.statusFor(key(req)));
+  } catch {
+    res.status(500).json({ message: "Yadda saxlanmadı" });
+  }
+});
+
 // Notification group for THIS teacher: list their groups, get/set the chosen one
 // (+ optional invite link), and send it a test. The choice lives on the user.
 router.get("/groups", protect, adminOnly, async (req, res) => {

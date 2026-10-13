@@ -36,12 +36,13 @@ let chats = {};
 const ADMIN = "aaaaaaaaaaaaaaaaaaaaaaaa";
 const TEACHER = { _id: "bbbbbbbbbbbbbbbbbbbbbbbb", phone: "+994 50 544 03 07" };
 let teacherOutreached = true; // the teacher's record, as the fresh re-check reads it
-AppSetting.findOne = (q) => chain(q.key in settings ? { key: q.key, value: settings[q.key] } : null);
+AppSetting.find = (q) => chain(Object.entries(settings).filter(([k]) => (q?.key?.$in || []).includes(k)).map(([key, value]) => ({ key, value })));
 AppSetting.updateOne = async (q, u) => {
   settings[q.key] = u.$set.value;
 };
 User.findById = () => ({ select: () => ({ lean: () => Promise.resolve({ role: "admin" }) }) });
-User.find = () => ({ select: () => ({ lean: async () => [TEACHER] }) });
+const ADMIN_PHONE = "+994 55 111 58 59"; // the admin's profile phone: their first number
+User.find = (q) => ({ select: () => ({ lean: async () => (q?.role === "admin" ? [{ phone: ADMIN_PHONE }] : [TEACHER]) }) });
 User.findOne = () => chain(teacherOutreached ? { phone: TEACHER.phone } : null);
 WaAutoChat.findOne = (q) => chain(chats[q.key] || null);
 WaAutoChat.updateOne = async (q, u) => {
@@ -75,7 +76,8 @@ function fakeClient() {
   const c = { sent: [], typing: 0, handlers: {}, history: [], info: { wid: { user: "994501112200" } } };
   c.on = (ev, fn) => (c.handlers[ev] = fn);
   c.sendMessage = async (chatId, text) => {
-    const m = { id: { _serialized: `sent-${c.sent.length}` }, fromMe: true, to: chatId, body: text };
+    const stanza = `ST${Math.random().toString(36).slice(2)}`;
+    const m = { id: { _serialized: `true_${chatId}_${stanza}`, id: stanza }, fromMe: true, to: chatId, body: text };
     c.sent.push({ chatId, text });
     return m;
   };
@@ -271,6 +273,69 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
   await tryOnce(incoming({ type: "ptt", body: "" }), 150);
   ok("a voice message is heard and answered in text", c.sent.length === 1 && /\[səs mesajı\] Sinfi necə yaradım\?/.test(asked[0]?.history.at(-1).text || ""), JSON.stringify(asked[0]?.history));
 
+  console.log("\ntest mode: the admin's own numbers, and never a loop");
+  const OWN = "994551115859";
+  const OWN_CHAT = `${OWN}@c.us`;
+  const own = (over = {}) => incoming({ from: OWN_CHAT, getContact: async () => ({ ...person, number: OWN, isMyContact: true }), ...over });
+  reset();
+  c.history = [theirs("Salam, test")];
+  ok("test mode off: my own number is not answered", (await tryOnce(own())) === 0);
+  await ai.setTestOwn(true);
+  ok("test mode is reported for the WhatsApp page", (await ai.statusFor(ADMIN)).testOwn === true);
+  reset();
+  c.history = [{ fromMe: true, body: "Sabah zəng edərəm", type: "chat", timestamp: now() - 86400 }, theirs("Salam, sinfi necə yaradım?")];
+  ok("test mode on: my own number is answered (saved in the phone, an old chat, no outreach)", (await tryOnce(own())) === 1);
+  ok("…reading only what came since the number was switched on", asked[0]?.history.length === 1 && asked[0].history[0].text === "Salam, sinfi necə yaradım?", JSON.stringify(asked[0]?.history));
+  ok("…never recorded as a teacher", chats[`${ADMIN}|${OWN_CHAT}`]?.user === null);
+  ok("every AI reply carries the invisible mark, and nothing else changes", c.sent[0]?.text === `Salam! *Siniflər* bölməsini açın.${ai.AI_MARK}`);
+  reset();
+  ok("a message an AI wrote is never answered", (await tryOnce(own({ body: `Salam!${ai.AI_MARK}` }))) === 0);
+  reset();
+  ok("…not from a teacher either", (await tryOnce(incoming({ body: `Cavab${ai.AI_MARK}` }))) === 0);
+
+  // Two of the admin's numbers, both switched on, wired to each other the way WhatsApp is:
+  // what one sends, the other receives with the same WhatsApp id.
+  const twoNumbers = async ({ dropMark }) => {
+    reset();
+    const NUM1 = OWN;
+    const NUM2 = "994705552054";
+    const a = fakeClient();
+    const b = fakeClient();
+    a.info.wid.user = NUM1;
+    b.info.wid.user = NUM2;
+    ai.attach(a, ADMIN);
+    ai.attach(b, WA2);
+    const wire = (from, to, fromNum) => {
+      const send = from.sendMessage;
+      from.sendMessage = async (chatId, text) => {
+        const m = await send(chatId, text);
+        from.history.push({ fromMe: true, body: text, type: "chat", timestamp: now() });
+        const body = dropMark ? text.split(ai.AI_MARK).join("") : text;
+        const got = { from: `${fromNum}@c.us`, fromMe: false, type: "chat", body, timestamp: now(), id: { id: m.id.id }, getContact: async () => ({ ...person, number: fromNum }) };
+        to.history.push({ ...got });
+        await to.handlers.message(got);
+        return m;
+      };
+    };
+    wire(a, b, NUM1);
+    wire(b, a, NUM2);
+    // The owner types on number 1's phone, to number 2.
+    const typed = { from: `${NUM1}@c.us`, fromMe: false, type: "chat", body: "Salam, test edirəm", timestamp: now(), id: { id: "HUMAN1" }, getContact: async () => ({ ...person, number: NUM1 }) };
+    a.history.push({ fromMe: true, body: typed.body, type: "chat", timestamp: now() });
+    b.history.push({ ...typed });
+    await b.handlers.message(typed);
+    await wait(500);
+    return { one: a.sent.length, two: b.sent.length };
+  };
+  let r = await twoNumbers({ dropMark: false });
+  ok("from number 1 to number 2: exactly one AI reply, and number 1 does not answer it", r.two === 1 && r.one === 0, JSON.stringify(r));
+  r = await twoNumbers({ dropMark: true });
+  ok("…even if WhatsApp dropped the invisible mark: the server knows its own message", r.two === 1 && r.one === 0, JSON.stringify(r));
+  await ai.setTestOwn(false);
+  reset();
+  c.history = [theirs("Salam, test")];
+  ok("test mode switched off: my own number is not answered again", (await tryOnce(own())) === 0);
+
   console.log("\nour messages, recognised");
   const OLD = "Salam Aysel müəllim 🙂 Examopia komandasından yazıram. Gördüm ki, qeydiyyatdan keçmisiniz, amma hələ başlamamısınız.";
   ok("every outreach message ever sent opens a chat the AI may answer", [OUTREACH, REENGAGE, OLD].every((body) => ai.isOurOutreach({ fromMe: true, body })));
@@ -287,6 +352,7 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
     "each number's switch is read and set on the WhatsApp page, admins only",
     /router\.get\("\/ai-reply", protect, adminOnly,/.test(route) && /router\.post\("\/ai-reply", protect, adminOnly,/.test(route) && /setEnabled\(key\(req\), req\.body\.on\)/.test(route)
   );
+  ok("test mode has its own switch, admins only", /router\.post\("\/ai-reply\/test", protect, adminOnly,/.test(route) && /setTestOwn\(req\.body\.on\)/.test(route));
   const userRoute = fs.readFileSync(path.join(__dirname, "..", "routes", "userRoute.js"), "utf8");
   ok("the old one-switch-for-all is gone", !/wa-auto-reply\/toggle/.test(userRoute));
   const ctl = fs.readFileSync(path.join(__dirname, "..", "controllers", "whatsappController.js"), "utf8");
