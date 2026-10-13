@@ -118,6 +118,7 @@
   "tests/ui-catalog.test.js",
   "tests/chat-voice.test.js",
   "tests/wa-auto-reply.test.js",
+  "tests/teacher-context.test.js",
   "tests/chat-welcome.test.js",
   "tests/answer-key-vision.test.js",
   "tests/question-figures.test.js",

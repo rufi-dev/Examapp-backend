@@ -42,7 +42,7 @@ console.log("\nwired where the reply is made");
 const src = fs.readFileSync(path.join(__dirname, "..", "controllers", "chatController.js"), "utf8");
 const reply = src.slice(src.indexOf("async function maybeAiReply"), src.indexOf("// Toggle \"human control\""));
 const on = reply.indexOf("typing.startTyping(conversationId)");
-const gen = reply.indexOf("generateSupportReply(recent, adminId)");
+const gen = reply.indexOf("generateSupportReply(recent, adminId");
 const off = reply.indexOf("typing.stopTyping(conversationId, token)");
 const save = reply.indexOf("Message.create(");
 ok("starts right before the reply is generated", on > 0 && on < gen, `${on} ${gen}`);

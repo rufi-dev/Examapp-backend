@@ -46,6 +46,31 @@ ok("never claims to have passed something on", /komandaya bildirdim" DEMƏ/.test
 ok("says it will check instead of guessing", /Bunu dəqiqləşdirib sizə yazacam/.test(P));
 ok("addresses teachers as 'siz'", /HƏMİŞƏ "siz" deyə müraciət et/.test(P));
 
+console.log("\nhow it talks and sells (owner, 2026-10-13: too long, too passive, a FAQ, not a seller)");
+ok("two modes: complete steps when a teacher needs help, short and persuasive in talk", /1\) KÖMƏK:[\s\S]{0,400}AYDIN, TAM təlimatdır/.test(P) && /2\) SÖHBƏT:/.test(P) && /qısaltmaq üçün addım atlama/.test(P));
+ok("in help, selling is one short line at the most, and none on errors", /sonda ən çox BİR qısa cümlə ilə əlaqəli fayda; xəta və şikayətdə heç satma/.test(P));
+ok("no feature lists unless asked for everything", /funksiya siyahısı sadalama/.test(P));
+ok("sells the benefit, not the feature", /Funksiyanı yox, FAYDANI sat/.test(P));
+ok("ends with one next step, not a weak generic close", /BİR kiçik növbəti addım/.test(P) && /"Əlavə sualınız olsa, müraciət edin", "Uğurlar" kimi zəif sonluq yalnız söhbət açıq-aydın bitəndə/.test(P));
+ok("knows the teacher's stage, A to F, and does not hard-sell a paying teacher", /MÜƏLLİMİN MƏRHƏLƏSİ/.test(P) && /F\) Ödənişli \(Pro və ya Premium\) → satışa sıxma/.test(P));
+for (const [objection, rule] of [
+  ["no time", /"Vaxtım yoxdur": "vaxtınız olanda yazın" DEMƏ/],
+  ["could not do it", /"Bacarmadım", "alınmadı": dərhal razılaşma/],
+  ["adding questions takes long", /"Sualları əlavə etmək vaxt aparır": yanlış təsəvvürü düzəlt/],
+  ["school year not started", /"Tədris ili başlamayıb": "başlayanda yazın" DEMƏ/],
+  ["upper grades only", /"Elə bildim yalnız yuxarı siniflər üçündür": dərhal düzəlt/],
+  ["not a school teacher (NOT only, never 'not for')", /"Məktəb müəllimi deyiləm": "Examopia TƏKCƏ məktəb müəllimləri üçün deyil: repetitorlar/],
+  ["too dear", /hansı aylıq qiymət sizə uyğun və verilən faydaya dəyər olardı/],
+  ["don't need it", /"bəlkə sizə lazım deyil" DEMƏ/],
+  ["PDF in vs PDF out", /PDF: iki şeyi qarışdırma/],
+  ["safety, without absolute guarantees", /Mütləq təhlükəsizlik zəmanəti vermə/],
+  ["a vague download problem", /qeyri-müəyyən sözlə kifayətlənmə; dəqiq xətanı və ya ekran şəklini istə/],
+]) ok(`objection: ${objection}`, rule.test(P));
+ok("the video guide link is the real public page", P.includes("https://examopia.com/beledci"));
+ok("the old hype lines are gone", !/Cəmi 2 dəqiqəlik işdir!/.test(P) && !/İndi yoxlayaq\? 💪/.test(P) && !/Həvəsli və müsbət yaz/.test(P));
+ok("light on emoji and stock phrases", /Emoji çox az: adətən 0–1, ən çox 2/.test(P) && /Şablon ifadələri İŞLƏTMƏ/.test(P));
+ok("on WhatsApp: 1–4 short sentences in talk, full steps in help, and why we wrote", /SÖHBƏT-də WhatsApp mesajı kimi yaz: adətən 1–4 qısa cümlə/.test(src) && /KÖMƏK-də \(necə edim, harada, alınmır\) addımları/.test(src) && /qeydiyyat zamanı özü yazıb, başqa yerdən götürülməyib/.test(src));
+
 console.log("\nits numbers are the config's numbers");
 const free = PLANS.free;
 const pro = PLANS.pro;

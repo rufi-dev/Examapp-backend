@@ -441,7 +441,9 @@ async function maybeAiReply(conversationId, adminId) {
   let reply;
   let fresh;
   try {
-    reply = await generateSupportReply(recent, adminId);
+    const teacherId = conv.participants.find((p) => String(p) !== String(adminId));
+    const profile = await require("../helper/teacherContext").teacherContext(teacherId);
+    reply = await generateSupportReply(recent, adminId, { profile });
     if (!reply) {
       console.warn("[CHAT-AI] no reply generated for", conversationId);
       return;

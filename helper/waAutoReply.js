@@ -595,7 +595,9 @@ async function answer(ownerKey, client, chatId, teacher) {
 
     await chatState(client, chatId, "typing");
     const { generateSupportReply } = require("../services/chatAssistant");
-    const reply = await generateSupportReply(history, "support", { channel: "whatsapp", context: ours?.body || "" });
+    // Who the teacher is, in counts (the admin's own number in test mode: none).
+    const profile = teacher.tester ? "" : await require("./teacherContext").teacherContext(teacher._id);
+    const reply = await generateSupportReply(history, "support", { channel: "whatsapp", context: ours?.body || "", profile });
     await chatState(client, chatId, "stop");
     if (!reply) return note("the AI gave no reply");
 
