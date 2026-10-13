@@ -410,6 +410,11 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
     rr.found && rr.complete && rr.msgs.length === 2 && rr.msgs[0].fromMe === true && rr.msgs[0].body === OUTREACH && rr.msgs[1].timestamp === 1002 && rr.msgs[1].id.id === "M2",
     JSON.stringify({ found: rr.found, complete: rr.complete, n: rr.msgs?.length })
   );
+  ok("each message keeps its full WhatsApp id (a voice note is fetched by it)", rr.msgs[1]._data._key === `false_${CHAT}_M2`);
+  const bare = { ...model(3, false, ""), id: { fromMe: false, id: "M3", toString: () => `false_${CHAT}_M3` } };
+  page([bare]);
+  rr = await ai._readChat(pc, CHAT, 24, false, ADMIN);
+  ok("…even when the page's model leaves it out", rr.msgs[0]._data._key === `false_${CHAT}_M3`);
   page([model(2, false, "Salam")], { fail: true });
   rr = await ai._readChat(pc, CHAT, 60, true, ADMIN);
   ok("older messages failing to load: what was read is kept, and the start is not taken as reached", rr.found && !rr.complete && rr.msgs.length === 1);
@@ -423,6 +428,7 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
   const rName = (msg) => Object.assign(new Error(msg), { name: "r" });
   const voicePage = ({ cached = false, onObject = true, askFails = false, decrypt = null, resolves = true } = {}) => {
     const msg = {
+      id: { id: "S1" },
       mimetype: "audio/ogg; codecs=opus",
       filehash: "H",
       mediaData: { mediaStage: "FETCHING" },
@@ -435,7 +441,11 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
     global.window = {
       require: (name) =>
         ({
-          WAWebCollections: { Msg: { get: () => msg } },
+          WAWebCollections: {
+            Msg: { get: (k) => (k ? msg : undefined), getModelsArray: () => [msg] },
+            Chat: { get: () => ({ msgs: { getModelsArray: () => [msg] } }) },
+          },
+          WAWebWidFactory: { createWid: (x) => x },
           WAWebMediaInMemoryBlobCache: { InMemoryMediaBlobCache: { get: (h) => (cached && h === "H" ? new Blob([audio]) : undefined) } },
           WAWebDownloadManager: {
             downloadManager: {
@@ -460,6 +470,9 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
   voicePage({ onObject: false, decrypt: new Uint8Array(audio) });
   media = await ai._mediaOf(vp, libraryFails);
   ok("…or, last, the old decrypt call", Buffer.from(media.data, "base64").equals(audio));
+  voicePage({});
+  media = await ai._mediaOf(vp, { id: { fromMe: false, id: "S1" }, downloadMedia: async () => Promise.reject(rName("r")) }, CHAT);
+  ok("a voice note without its full id is found in the chat by its short id", Buffer.from(media.data, "base64").equals(audio));
   voicePage({ onObject: false, askFails: true, resolves: false });
   const whyNot = await ai._mediaOf(vp, libraryFails).then(
     () => "",

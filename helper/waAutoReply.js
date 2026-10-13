@@ -292,16 +292,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * decrypt call stays as the last try. Every step that fails is named in
  * `steps` (WhatsApp's error names only, never the audio).
  */
-async function downloadVoiceInPage(msgId, pollMs = 500) {
+async function downloadVoiceInPage(msgId, pollMs = 500, stanzaId = "", chatId = "") {
   const steps = [];
   const note = (step, e) => steps.push(`${step}: ${[e && e.name, e && e.message].filter(Boolean).join(": ") || String(e)}`.slice(0, 160));
-  const { Msg } = window.require("WAWebCollections");
-  let msg = Msg.get(msgId);
-  if (!msg) {
+  const C = window.require("WAWebCollections");
+  let msg = msgId ? C.Msg.get(msgId) : null;
+  if (!msg && msgId) {
     try {
-      msg = (await Msg.getMessagesById([msgId]))?.messages?.[0];
+      msg = (await C.Msg.getMessagesById([msgId]))?.messages?.[0];
     } catch (e) {
       note("find", e);
+    }
+  }
+  // By its short id, in the chat (or anywhere the page holds it), when the full id is not known.
+  if (!msg && stanzaId) {
+    try {
+      const chat = chatId ? C.Chat.get(window.require("WAWebWidFactory").createWid(chatId)) : null;
+      const same = (x) => x && x.id && x.id.id === stanzaId;
+      msg = (chat && chat.msgs.getModelsArray().find(same)) || C.Msg.getModelsArray().find(same) || null;
+    } catch (e) {
+      note("find by short id", e);
     }
   }
   if (!msg) return { steps: [...steps, "message not found"] };
@@ -362,14 +372,17 @@ async function downloadVoiceInPage(msgId, pollMs = 500) {
   return { data, mimetype: msg.mimetype, steps };
 }
 // The audio: in the page first (above), then the library's own way, asked again a little later each time.
-async function mediaOf(client, m) {
-  const id = m.id?._serialized;
+async function mediaOf(client, m, chatId = "") {
+  const id = m.id?._serialized || m._data?._key || "";
+  const stanza = m.id?.id || "";
   const tried = [];
-  if (id && client.pupPage && typeof client.pupPage.evaluate === "function") {
+  if (!client.pupPage || typeof client.pupPage.evaluate !== "function") tried.push("in page: no page");
+  else if (!id && !stanza) tried.push("in page: the message has no id");
+  else {
     for (const wait of [0, 2].map((x) => x * MEDIA_RETRY_MS)) {
       if (wait) await sleep(wait);
       try {
-        const r = await timeBoxed(client.pupPage.evaluate(downloadVoiceInPage, id, Math.round(MEDIA_RETRY_MS / 3)), 30000, "in-page download");
+        const r = await timeBoxed(client.pupPage.evaluate(downloadVoiceInPage, id, Math.round(MEDIA_RETRY_MS / 3), stanza, chatId), 30000, "in-page download");
         if (r?.data) return r;
         tried.push(`in page: ${(r?.steps || []).join("; ") || "nothing"}`);
       } catch (e) {
@@ -394,11 +407,11 @@ async function mediaOf(client, m) {
 }
 // What a voice note says, heard twice ({ text, alt }, helper/transcribe); each clip is heard once.
 const heardCache = new Map(); // message id -> { text, alt }
-async function voiceText(client, m, ownerKey) {
-  const id = m.id?._serialized;
+async function voiceText(client, m, ownerKey, chatId = "") {
+  const id = m.id?._serialized || m._data?._key || m.id?.id;
   if (id && heardCache.has(id)) return heardCache.get(id);
   try {
-    const media = await mediaOf(client, m);
+    const media = await mediaOf(client, m, chatId);
     const buf = Buffer.from(media.data, "base64");
     if (buf.length > VOICE_MAX_BYTES) throw new Error("too large");
     const { hear } = require("./transcribe");
@@ -451,7 +464,9 @@ function readChatInPage(chatId, limit, earlier) {
       }
     }
     msgs.sort((a, b) => (a.t > b.t ? 1 : -1));
-    return { found: true, isGroup: !!chat.isGroup, complete, msgs: msgs.slice(-limit).map((m) => window.WWebJS.getMessageModel(m)) };
+    // `_key`: the message's full WhatsApp id, which the serialized model may not carry (a voice note is fetched by it).
+    const model = (m) => ({ ...window.WWebJS.getMessageModel(m), _key: m.id ? m.id._serialized || String(m.id) : "" });
+    return { found: true, isGroup: !!chat.isGroup, complete, msgs: msgs.slice(-limit).map(model) };
   };
   return done();
 }
@@ -569,7 +584,7 @@ async function answer(ownerKey, client, chatId, teacher) {
       if (!m.fromMe && (m.type === "ptt" || m.type === "audio")) {
         // Only a voice message since the switch-on is heard (and paid for); older ones are only named.
         if (m.timestamp * 1000 + 999 >= sw.since) {
-          const heard = await voiceText(client, m, ownerKey);
+          const heard = await voiceText(client, m, ownerKey, chatId);
           text = require("./chatVoice").voiceForAi(heard.text, heard.alt);
         } else {
           text = "[əvvəlki səs mesajı]";
