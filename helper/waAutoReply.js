@@ -6,10 +6,11 @@
  *
  * The admin's number is also a personal phone, so every gate below must pass,
  * and the last one checks it all again, fresh, right before anything is sent:
- *   1. switched on (AppSetting waAutoReplyEnabled; WA_AUTO_REPLY=off stops it
- *      outright), and only messages that arrived after it was switched on
- *      (waAutoReplySince) and in the last 10 minutes: never the old messages,
- *      never a backlog after a restart;
+ *   1. switched on for THIS number (each number has its own switch, on the
+ *      WhatsApp page: AppSetting waAutoReplyNumbers; WA_AUTO_REPLY=off stops it
+ *      everywhere), and only messages that arrived after that number was
+ *      switched on and in the last 10 minutes: never the old messages, never a
+ *      backlog after a restart;
  *   2. a chat with one person ("<digits>@c.us" / "@lid", allow-listed): never
  *      a group, community, channel, broadcast list or status;
  *   3. on one of the admin's numbers;
@@ -36,8 +37,8 @@ const AppSetting = require("../models/appSettingModel");
 const User = require("../models/userModel");
 const WaAutoChat = require("../models/waAutoChatModel");
 
-const ENABLED_KEY = "waAutoReplyEnabled";
-const SINCE_KEY = "waAutoReplySince";
+// One switch per WhatsApp number: { "<ownerKey>": { on, since } }.
+const NUMBERS_KEY = "waAutoReplyNumbers";
 const DEBOUNCE_MS = Number(process.env.WA_AI_DEBOUNCE_MS) || 9000;
 // How long after a message from this number to look whether the system sent it.
 const HUMAN_CHECK_MS = Number(process.env.WA_AI_HUMAN_CHECK_MS) || 4000;
@@ -85,23 +86,38 @@ const digitsOf = (raw) => {
 };
 
 /* ── settings ── */
-let settingsCache = { at: 0, enabled: false, since: 0 };
+let settingsCache = { at: 0, numbers: {} };
 async function getSettings({ fresh = false } = {}) {
   if (!fresh && Date.now() - settingsCache.at < 20000) return settingsCache;
-  const rows = await AppSetting.find({ key: { $in: [ENABLED_KEY, SINCE_KEY] } }).lean();
-  const v = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-  settingsCache = { at: Date.now(), enabled: v[ENABLED_KEY] === true, since: v[SINCE_KEY] ? new Date(v[SINCE_KEY]).getTime() : 0 };
+  const row = await AppSetting.findOne({ key: NUMBERS_KEY }).lean();
+  const numbers = row?.value && typeof row.value === "object" ? row.value : {};
+  settingsCache = { at: Date.now(), numbers };
   return settingsCache;
 }
-async function setEnabled(on) {
-  await AppSetting.updateOne({ key: ENABLED_KEY }, { $set: { value: !!on } }, { upsert: true });
-  // Switching on starts from now: older messages are never answered.
-  if (on) await AppSetting.updateOne({ key: SINCE_KEY }, { $set: { value: new Date() } }, { upsert: true });
-  return getSettings({ fresh: true });
+// One number's switch: { on, since (ms) }. A number never switched on is off.
+function numberSwitch(settings, ownerKey) {
+  const n = settings?.numbers?.[ownerKey];
+  return { on: n?.on === true, since: n?.since ? new Date(n.since).getTime() : 0 };
 }
-async function repliesToday() {
-  const [row] = await WaAutoChat.aggregate([{ $match: { day: bakuDay() } }, { $group: { _id: null, n: { $sum: "$replies" } } }]);
+async function setEnabled(ownerKey, on) {
+  const { numbers } = await getSettings({ fresh: true });
+  const prev = numbers[ownerKey] || {};
+  // Switching on starts from now: older messages are never answered.
+  const next = { ...numbers, [ownerKey]: { on: !!on, since: on ? new Date() : prev.since || null } };
+  await AppSetting.updateOne({ key: NUMBERS_KEY }, { $set: { value: next } }, { upsert: true });
+  return numberSwitch(await getSettings({ fresh: true }), ownerKey);
+}
+// AI replies today (Baku day): on one number, or on all of them.
+async function repliesToday(ownerKey) {
+  const match = ownerKey ? { day: bakuDay(), owner: ownerKey } : { day: bakuDay() };
+  const [row] = await WaAutoChat.aggregate([{ $match: match }, { $group: { _id: null, n: { $sum: "$replies" } } }]);
   return row?.n || 0;
+}
+// One number's switch, for the admin's WhatsApp page.
+async function statusFor(ownerKey) {
+  const s = numberSwitch(await getSettings({ fresh: true }), ownerKey);
+  const repliedToday = await repliesToday(ownerKey).catch(() => null);
+  return { on: s.on, since: s.since ? new Date(s.since) : null, repliedToday, dailyMax: DAILY_MAX, perChatPerDay: PER_CHAT_PER_DAY };
 }
 
 /* ── who may be answered ── */
@@ -217,7 +233,7 @@ const stopAt = (ownerKey, why) => {
 // The last gate, right before anything is sent: everything once more, fresh.
 async function stillAllowed(ownerKey, client, chatId, teacher) {
   if (killed() || !personChat(chatId)) return false;
-  if (!(await getSettings({ fresh: true })).enabled) return false;
+  if (!numberSwitch(await getSettings({ fresh: true }), ownerKey).on) return false;
   const state = await WaAutoChat.findOne({ key: `${ownerKey}|${chatId}` }).lean();
   if (state?.humanUntil && new Date(state.humanUntil) > new Date()) return false;
   const u = await User.findOne({ _id: teacher._id, ...OUTREACHED }).select("phone").lean();
@@ -235,8 +251,8 @@ async function answer(ownerKey, client, chatId, teacher) {
   }
   busy.add(key);
   try {
-    const settings = await getSettings();
-    if (!settings.enabled || killed()) return;
+    const sw = numberSwitch(await getSettings(), ownerKey);
+    if (!sw.on || killed()) return;
     const today = bakuDay();
     const state = await WaAutoChat.findOne({ key }).lean();
     if (state?.humanUntil && new Date(state.humanUntil) > new Date()) return;
@@ -262,7 +278,7 @@ async function answer(ownerKey, client, chatId, teacher) {
       let text = String(m.body || "").trim();
       if (!m.fromMe && (m.type === "ptt" || m.type === "audio")) {
         // Only a new voice message is heard (and paid for); older ones are named.
-        const heard = m.timestamp * 1000 + 999 >= settings.since ? await voiceText(m) : "";
+        const heard = m.timestamp * 1000 + 999 >= sw.since ? await voiceText(m) : "";
         text = heard ? `[səs mesajı] ${heard}` : "[səs mesajı göndərdi, amma eşidilmədi]";
       }
       if (text) history.push({ from: m.fromMe ? "support" : "teacher", text });
@@ -314,11 +330,11 @@ async function onIncoming(ownerKey, client, msg) {
   const chatId = String(msg.from || "");
   if (!personChat(chatId)) return;
   if (!["chat", "ptt", "audio"].includes(msg.type)) return;
-  // 1. switched on, and the message is new (WhatsApp stamps whole seconds, so the switch-on second counts)
-  const settings = await getSettings();
-  if (!settings.enabled) return;
+  // 1. switched on for this number, and the message is new (WhatsApp stamps whole seconds, so the switch-on second counts)
+  const sw = numberSwitch(await getSettings(), ownerKey);
+  if (!sw.on) return;
   const at = (msg.timestamp || 0) * 1000;
-  if (at + 999 < settings.since || Date.now() - at > MAX_AGE_MS) return;
+  if (at + 999 < sw.since || Date.now() - at > MAX_AGE_MS) return;
   // 3. on one of the admin's numbers
   if (!(await isAdminNumber(ownerKey))) return;
   // 4. a registered teacher our automatic message went to
@@ -347,6 +363,7 @@ module.exports = {
   noteSent,
   getSettings,
   setEnabled,
+  statusFor,
   repliesToday,
   isOurOutreach,
   // for tests
@@ -356,7 +373,7 @@ module.exports = {
   _digitsOf: digitsOf,
   _personChat: personChat,
   _reset() {
-    settingsCache = { at: 0, enabled: false, since: 0 };
+    settingsCache = { at: 0, numbers: {} };
     outreached = { at: 0, list: [] };
     adminCache.clear();
     clients.clear();
@@ -366,8 +383,7 @@ module.exports = {
     busy.clear();
     again.clear();
   },
-  ENABLED_KEY,
-  SINCE_KEY,
+  NUMBERS_KEY,
   OUR_OPENINGS,
   LIMITS: { DEBOUNCE_MS, MAX_AGE_MS, HUMAN_PAUSE_MS, PER_CHAT_PER_DAY, DAILY_MAX, CHAT_WINDOW },
 };

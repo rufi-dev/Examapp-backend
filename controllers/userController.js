@@ -2105,32 +2105,26 @@ const getOutreachStatus = asyncHandler(async (req, res) => {
     lastSentAt: settings.lastSentAt,
     waiting,
     reengage: await reengageStatusPart(),
-    waAutoReply: await waAutoReplyPart(),
+    waAutoReply: await waAutoReplyPart(req.user._id),
   });
 });
 
-// The WhatsApp auto-reply's state for the admin panel (helper/waAutoReply).
-async function waAutoReplyPart() {
+// The WhatsApp auto-reply on each of this admin's two numbers (helper/waAutoReply),
+// for the outreach panel. The switches themselves are on the WhatsApp page.
+async function waAutoReplyPart(adminId) {
   const ai = require("../helper/waAutoReply");
-  const s = await ai.getSettings({ fresh: true });
-  let repliedToday = null;
-  try {
-    repliedToday = await ai.repliesToday();
-  } catch {
-    repliedToday = null;
+  const { accountKey } = require("../helper/whatsapp");
+  const numbers = [];
+  for (const slot of [1, 2]) {
+    try {
+      const s = await ai.statusFor(accountKey(adminId, slot));
+      numbers.push({ slot, on: s.on, repliedToday: s.repliedToday });
+    } catch {
+      numbers.push({ slot, on: false, repliedToday: null });
+    }
   }
-  return { enabled: s.enabled, since: s.since ? new Date(s.since) : null, repliedToday, dailyMax: ai.LIMITS.DAILY_MAX };
+  return { numbers, dailyMax: ai.LIMITS.DAILY_MAX };
 }
-
-// POST /api/users/outreach/wa-auto-reply/toggle — the support AI answering on
-// WhatsApp the teachers we wrote to first. Switching on starts from now.
-const toggleWaAutoReply = asyncHandler(async (req, res) => {
-  const ai = require("../helper/waAutoReply");
-  const current = await ai.getSettings({ fresh: true });
-  const next = typeof req.body?.enabled === "boolean" ? req.body.enabled : !current.enabled;
-  await ai.setEnabled(next);
-  res.json({ waAutoReply: await waAutoReplyPart() });
-});
 
 // POST /api/users/outreach/reengage/toggle — the second wave on/off. It shares
 // the first wave's numbers, hours, gap and daily cap (jobs/autoOutreach.js).
@@ -2335,6 +2329,5 @@ module.exports = {
   toggleOutreach,
   toggleReengage,
   toggleReengageEmail,
-  toggleWaAutoReply,
   unsubscribeEmail,
 };

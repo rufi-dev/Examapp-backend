@@ -73,6 +73,27 @@ router.post("/test", protect, adminOnly, async (req, res) => {
   res.json({ ok, phone });
 });
 
+// The support AI answering, on THIS number, the teachers our automatic message
+// went to (helper/waAutoReply). Each number has its own switch; on = from now.
+router.get("/ai-reply", protect, adminOnly, async (req, res) => {
+  try {
+    res.json(await require("../helper/waAutoReply").statusFor(key(req)));
+  } catch {
+    res.status(500).json({ message: "AI cavabın vəziyyəti oxunmadı" });
+  }
+});
+
+router.post("/ai-reply", protect, adminOnly, async (req, res) => {
+  if (typeof req.body?.on !== "boolean") return res.status(400).json({ message: "on: true və ya false olmalıdır" });
+  try {
+    const ai = require("../helper/waAutoReply");
+    await ai.setEnabled(key(req), req.body.on);
+    res.json(await ai.statusFor(key(req)));
+  } catch {
+    res.status(500).json({ message: "Yadda saxlanmadı" });
+  }
+});
+
 // Notification group for THIS teacher: list their groups, get/set the chosen one
 // (+ optional invite link), and send it a test. The choice lives on the user.
 router.get("/groups", protect, adminOnly, async (req, res) => {

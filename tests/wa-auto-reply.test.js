@@ -36,7 +36,7 @@ let chats = {};
 const ADMIN = "aaaaaaaaaaaaaaaaaaaaaaaa";
 const TEACHER = { _id: "bbbbbbbbbbbbbbbbbbbbbbbb", phone: "+994 50 544 03 07" };
 let teacherOutreached = true; // the teacher's record, as the fresh re-check reads it
-AppSetting.find = () => chain(Object.entries(settings).map(([key, value]) => ({ key, value })));
+AppSetting.findOne = (q) => chain(q.key in settings ? { key: q.key, value: settings[q.key] } : null);
 AppSetting.updateOne = async (q, u) => {
   settings[q.key] = u.$set.value;
 };
@@ -114,12 +114,28 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
     return c.sent.length;
   };
 
-  console.log("off unless switched on");
+  console.log("off unless switched on, one switch per number");
   reset();
   settings = {};
-  ok("switched off: nothing is answered", (await tryOnce()) === 0);
-  await ai.setEnabled(true);
-  ok("switching on records from when (older messages never count)", settings[ai.SINCE_KEY] instanceof Date);
+  ok("never switched on: nothing is answered", (await tryOnce()) === 0);
+  await ai.setEnabled(ADMIN, true);
+  ok("switching on records from when (older messages never count)", settings[ai.NUMBERS_KEY][ADMIN].on === true && settings[ai.NUMBERS_KEY][ADMIN].since instanceof Date);
+  const WA2 = `${ADMIN}__wa2`;
+  reset();
+  await ai._onIncoming(WA2, c, incoming());
+  await wait(120);
+  ok("number 2 has its own switch: still off there", c.sent.length === 0);
+  await ai.setEnabled(WA2, true);
+  reset();
+  await ai._onIncoming(WA2, c, incoming());
+  await wait(120);
+  ok("…switched on there, number 2 answers", c.sent.length === 1 && chats[`${WA2}|${CHAT}`]?.replies === 1);
+  await ai.setEnabled(ADMIN, false);
+  reset();
+  ok("number 1 switched off: not answered there, while number 2 stays on", (await tryOnce()) === 0 && (await ai.statusFor(WA2)).on === true);
+  const st = await ai.statusFor(ADMIN);
+  ok("each number's state for the WhatsApp page", st.on === false && st.since instanceof Date && st.dailyMax === ai.LIMITS.DAILY_MAX && typeof st.repliedToday === "number");
+  await ai.setEnabled(ADMIN, true);
   reset();
   process.env.WA_AUTO_REPLY = "off";
   ok("WA_AUTO_REPLY=off stops it outright", (await tryOnce()) === 0);
@@ -207,8 +223,9 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
   ok("the reply is counted for the chat", chats[KEY]?.replies === 1);
 
   console.log("\nthe last gate, fresh, right before sending");
+  const switches = settings[ai.NUMBERS_KEY];
   for (const [what, change] of [
-    ["switched off", () => (settings[ai.ENABLED_KEY] = false)],
+    ["this number switched off", () => (settings[ai.NUMBERS_KEY] = { ...switches, [ADMIN]: { on: false } })],
     ["the teacher's record no longer outreached", () => (teacherOutreached = false)],
     ["saved as a contact", () => (person.isMyContact = true)],
     ["a person stepped in", () => (chats[KEY] = { ...(chats[KEY] || {}), humanUntil: new Date(Date.now() + 3600e3) })],
@@ -217,7 +234,7 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
     whileWriting = change;
     const n = await tryOnce();
     ok(`${what} while the reply was written: nothing is sent`, asked.length === 1 && n === 0, `asked=${asked.length} sent=${n}`);
-    settings[ai.ENABLED_KEY] = true;
+    settings[ai.NUMBERS_KEY] = switches;
   }
 
   console.log("\na person takes over");
@@ -265,6 +282,13 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
   const wa = fs.readFileSync(path.join(__dirname, "..", "helper", "whatsapp.js"), "utf8");
   ok("every WhatsApp client gets the auto-reply", /require\("\.\/waAutoReply"\)\.attach\(s\.client, id\)/.test(wa));
   ok("every send is noted (so the system is never taken for a person)", /require\("\.\/waAutoReply"\)\.noteSent\(String\(ownerId\), sent, \{ human, chatId \}\)/.test(wa));
+  const route = fs.readFileSync(path.join(__dirname, "..", "routes", "whatsappRoute.js"), "utf8");
+  ok(
+    "each number's switch is read and set on the WhatsApp page, admins only",
+    /router\.get\("\/ai-reply", protect, adminOnly,/.test(route) && /router\.post\("\/ai-reply", protect, adminOnly,/.test(route) && /setEnabled\(key\(req\), req\.body\.on\)/.test(route)
+  );
+  const userRoute = fs.readFileSync(path.join(__dirname, "..", "routes", "userRoute.js"), "utf8");
+  ok("the old one-switch-for-all is gone", !/wa-auto-reply\/toggle/.test(userRoute));
   const ctl = fs.readFileSync(path.join(__dirname, "..", "controllers", "whatsappController.js"), "utf8");
   ok("the admin's own dashboard message counts as a person", /sendMessageFor\(ownerId, recipient\.phone, message, \{ human: true \}\)/.test(ctl));
   const { forWhatsApp } = require("../services/chatAssistant");
