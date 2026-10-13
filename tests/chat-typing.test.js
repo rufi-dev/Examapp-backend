@@ -50,5 +50,13 @@ ok("stops BEFORE the reply is saved, so no poll shows dots under an answer", off
 ok("stops in a finally, so a failed turn cannot leave it on", /\} finally \{\s*typing\.stopTyping\(conversationId, token\);\s*\}/.test(reply));
 ok("the thread poll reports it", /aiTyping: typing\.isTyping\(conv\._id\)/.test(src));
 
+console.log("\nthe teacher talks to «Examopia Köməkçi»");
+ok("the poll says whether the AI answers this thread", /aiActive: isChatAiEnabled\(\) && !conv\.aiPaused/.test(src));
+const welcome = src.slice(src.indexOf("const welcomeText"), src.indexOf("async function deliverWelcome"));
+ok("the welcome introduces the assistant", /Mən Examopia Köməkçisiyəm/.test(welcome));
+ok("...and no longer signs with the admin's name", !/firstName\(admin\)/.test(welcome) && !/welcomeText\(teacherName, admin\.name\)/.test(src));
+const prompt = require("../services/chatAssistant").SYSTEM_PROMPT;
+ok("the AI knows its name and does not hide that it is an AI", /^Sən «Examopia Köməkçi»sən/.test(prompt) && /AI olduğunu gizlətmə/.test(prompt));
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

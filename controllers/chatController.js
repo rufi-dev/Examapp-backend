@@ -208,13 +208,13 @@ const contactAdmin = asyncHandler(async (req, res) => {
 
 const firstName = (s) => String(s || "").trim().split(/\s+/)[0] || "";
 
-// The admin's personal hello. Written to read like a real person typed it, not a
-// broadcast — greets by name and signs off with the admin's own first name.
-const welcomeText = (teacher, admin) =>
-  `Salam ${firstName(teacher)} 👋 Mən ${firstName(admin)}, Examopia-nı quran komandadanam. ` +
-  `Aramıza qoşulduğun üçün ürəkdən təşəkkür edirəm! İmtahan hazırlayarkən nəsə qarışıq gəlsə, ` +
-  `ya da istənilən sualın-problemin olsa, çəkinmədən birbaşa buradan mənə yaz — həmişə kömək ` +
-  `etməyə hazıram. Uğurlar! 🙌`;
+// The hello in the chat bubble. Teachers see the chat as "Examopia Köməkçi"
+// (owner's call, 2026-10-13), so it introduces the assistant rather than signing
+// with the admin's name: a person's name under an AI header reads as a mix-up.
+const welcomeText = (teacher) =>
+  `Salam ${firstName(teacher)} 👋 Mən Examopia Köməkçisiyəm. Aramıza qoşulduğunuz üçün təşəkkür edirik! ` +
+  `İmtahan hazırlayarkən nəsə qarışıq gəlsə və ya istənilən sualınız olsa, buradan yazın — ` +
+  `bir neçə saniyəyə cavab verirəm. Uğurlar! 🙌`;
 
 // Post the admin's welcome into a (created-if-needed) chat with the teacher.
 // The caller is responsible for having ATOMICALLY claimed `chatWelcomedAt` first
@@ -236,7 +236,7 @@ async function deliverWelcome(teacherId, teacherName) {
     });
   }
 
-  const text = welcomeText(teacherName, admin.name);
+  const text = welcomeText(teacherName);
   const msg = await Message.create({
     conversation: conv._id,
     from: admin._id,
@@ -343,6 +343,9 @@ const getMessages = asyncHandler(async (req, res) => {
     aiPaused: !!conv.aiPaused,
     // True only while a reply is really being written (see helper/chatTyping).
     aiTyping: typing.isTyping(conv._id),
+    // Whether the AI answers this thread at all: the teacher's header says
+    // "Dərhal cavab verir" only when it is true.
+    aiActive: isChatAiEnabled() && !conv.aiPaused,
   });
 });
 
