@@ -58,6 +58,8 @@ const ALLOWED = {
   "controllers/aiController.js":
     "every dispatcher here (extract, extractStream, runGeneration, runChat, runChatAgent) routes through runAi; transcription and the realtime token are declared CLI-unsupported",
   "services/chatAssistant.js": "the support chat - generateSupportReply routes through runAi",
+  "helper/transcribe.js":
+    "speech to text (the /transcribe endpoint and the chat's voice notes) - routes through runAi as capability audio, which the CLIs cannot take",
 };
 
 const walk = (dir) => {

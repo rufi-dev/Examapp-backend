@@ -9,6 +9,7 @@ const { httpError } = require("../utils/appError");
 const { isChatAiEnabled, generateSupportReply } = require("../services/chatAssistant");
 const typing = require("../helper/chatTyping");
 const ui = require("../helper/uiCatalog");
+const { VOICE_MAX_SEC, VOICE_PER_DAY, isVoiceUrl, voicePreview, transcribeVoice } = require("../helper/chatVoice");
 
 // A user counts as "online" if their last heartbeat is within this window. The
 // client pings every ~30s, so 75s tolerates one dropped ping without flicker.
@@ -335,6 +336,9 @@ const getMessages = asyncHandler(async (req, res) => {
       to: m.to,
       text: m.text,
       imageUrl: m.imageUrl || "",
+      audioUrl: m.audioUrl || "",
+      audioSec: m.audioSec || 0,
+      transcript: m.transcript || "",
       createdAt: m.createdAt,
       readAt: m.readAt,
     })),
@@ -354,18 +358,30 @@ const getMessages = asyncHandler(async (req, res) => {
 const sendMessage = asyncHandler(async (req, res) => {
   const text = typeof req.body.text === "string" ? req.body.text.trim() : "";
   const imageUrl = typeof req.body.imageUrl === "string" ? req.body.imageUrl.trim() : "";
+  const audioUrl = typeof req.body.audioUrl === "string" ? req.body.audioUrl.trim() : "";
+  const audioSec = Math.round(Math.max(0, Math.min(Number(req.body.audioSec) || 0, VOICE_MAX_SEC)) * 10) / 10;
   if (text.length > MAX_TEXT) throw httpError(400, "too_long", "Mesaj çox uzundur.");
   if (imageUrl && !isCloudinaryUrl(imageUrl)) throw httpError(400, "bad_image", "Şəkil qəbul edilmədi.");
-  if (!text && !imageUrl) throw httpError(400, "empty", "Mesaj boşdur.");
+  if (audioUrl && !isVoiceUrl(audioUrl)) throw httpError(400, "bad_audio", "Səs mesajı qəbul edilmədi.");
+  if (Number(req.body.audioSec) > VOICE_MAX_SEC + 5) throw httpError(400, "too_long", "Səs mesajı ən çox 3 dəqiqə ola bilər.");
+  if (!text && !imageUrl && !audioUrl) throw httpError(400, "empty", "Mesaj boşdur.");
 
   const conv = await Conversation.findById(req.params.id);
   if (!conv || !conv.participants.some((p) => String(p) === String(req.user._id)))
     throw httpError(404, "conversation_not_found", "Söhbət tapılmadı.");
 
-  const to = conv.participants.find((p) => String(p) !== String(req.user._id));
-  const msg = await Message.create({ conversation: conv._id, from: req.user._id, to, text, imageUrl });
+  let transcript = "";
+  if (audioUrl) {
+    const since = new Date(Date.now() - 24 * 3600 * 1000);
+    const today = await Message.countDocuments({ from: req.user._id, audioUrl: { $ne: "" }, createdAt: { $gte: since } });
+    if (today >= VOICE_PER_DAY) throw httpError(429, "voice_limit", "Bu gün çox səs mesajı göndərmisiniz. Zəhmət olmasa yazın.");
+    transcript = (await transcribeVoice(audioUrl)).slice(0, MAX_TEXT);
+  }
 
-  conv.lastMessageText = text ? text.slice(0, 200) : "📷 Şəkil";
+  const to = conv.participants.find((p) => String(p) !== String(req.user._id));
+  const msg = await Message.create({ conversation: conv._id, from: req.user._id, to, text, imageUrl, audioUrl, audioSec, transcript });
+
+  conv.lastMessageText = text ? text.slice(0, 200) : audioUrl ? voicePreview(transcript) : "📷 Şəkil";
   conv.lastMessageAt = msg.createdAt;
   conv.lastMessageFrom = req.user._id;
   await conv.save();
@@ -376,6 +392,9 @@ const sendMessage = asyncHandler(async (req, res) => {
     to: msg.to,
     text: msg.text,
     imageUrl: msg.imageUrl || "",
+    audioUrl: msg.audioUrl || "",
+    audioSec: msg.audioSec || 0,
+    transcript: msg.transcript || "",
     createdAt: msg.createdAt,
     readAt: msg.readAt,
   });

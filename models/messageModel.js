@@ -8,9 +8,14 @@ const messageSchema = Schema(
     conversation: { type: Schema.Types.ObjectId, ref: "Conversation", required: true },
     from: { type: Schema.Types.ObjectId, ref: "User", required: true },
     to: { type: Schema.Types.ObjectId, ref: "User", required: true },
-    // Text and/or an image — at least one is present (enforced in the controller).
+    // Text, an image or a voice note — at least one is present (enforced in the controller).
     text: { type: String, default: "", trim: true, maxlength: 4000 },
     imageUrl: { type: String, default: "" },
+    // A voice note: the recording (Cloudinary), its length in seconds, and what
+    // it says (speech to text when it was sent; "" if it could not be heard).
+    audioUrl: { type: String, default: "" },
+    audioSec: { type: Number, default: 0 },
+    transcript: { type: String, default: "", maxlength: 4000 },
     readAt: { type: Date, default: null },
   },
   { timestamps: true }

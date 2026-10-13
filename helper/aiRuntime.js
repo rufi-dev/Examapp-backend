@@ -204,16 +204,17 @@ async function runAi({ capability = "structured", api, cli, label = "ai", prefer
   if (typeof api !== "function") throw new Error("runAi: an api route is required");
 
   const unsupported = CLI_UNSUPPORTED[capability];
-  const { mode } = await aiExecution.getAiExecution().catch(() => ({ mode: "api" }));
 
   /*
    * Work the CLI cannot do runs on the API whatever the mode says. This is not
    * a silent fallback - there is no CLI implementation to prefer - and it is
-   * declared above rather than discovered here.
+   * declared above rather than discovered here. (So it needs no mode lookup.)
    */
   if (unsupported || typeof cli !== "function") {
     return api();
   }
+
+  const { mode } = await aiExecution.getAiExecution().catch(() => ({ mode: "api" }));
 
   const steps = await planSteps(mode, preferCli, label);
   const attempts = [];

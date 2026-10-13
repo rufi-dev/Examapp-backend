@@ -4681,45 +4681,22 @@ const chatAssistant = asyncHandler(async (req, res) => {
   res.json({ reply: out.text, cost: out.cost, changed: !!out.changed });
 });
 
-// POST /api/quiz/transcribe (teacher) — audio file -> { text }. OpenAI Whisper
-// with language=az so Azerbaijani speech is transcribed correctly.
+// POST /api/quiz/transcribe (teacher) — audio file -> { text }. Azerbaijani
+// speech to text through helper/transcribe (shared with the chat's voice notes).
 const transcribeAudio = asyncHandler(async (req, res) => {
-  if (!process.env.OPENAI_API_KEY) {
-    res.status(503);
-    throw new Error("Səs tanıma konfiqurasiya olunmayıb (OPENAI_API_KEY)");
-  }
-  if (!req.file || !req.file.buffer?.length) {
-    res.status(400);
-    throw new Error("Səs faylı yoxdur");
-  }
-  const model = process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1";
-  const fd = new FormData();
-  fd.append(
-    "file",
-    new Blob([req.file.buffer], { type: req.file.mimetype || "audio/webm" }),
-    req.file.originalname || "audio.webm"
-  );
-  fd.append("model", model);
-  fd.append("language", "az"); // Azerbaijani
-
-  let r, data;
+  const { transcribe } = require("../helper/transcribe");
+  let text;
   try {
-    r = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-      body: fd,
+    text = await transcribe(req.file?.buffer, {
+      mimetype: req.file?.mimetype || "audio/webm",
+      filename: req.file?.originalname || "audio.webm",
     });
-    data = await r.json();
   } catch (e) {
-    res.status(502);
-    throw new Error("Səs tanınmadı, yenidən cəhd et");
-  }
-  if (!r.ok || data?.error) {
-    res.status(r.status || 502);
-    throw new Error(data?.error?.message || "Səs tanınmadı");
+    res.status(e.status || 502);
+    throw new Error(e.message || "Səs tanınmadı");
   }
   if (req.aiCredit) req.aiCredit.usable(); // CR-122
-  res.json({ text: data.text || "" });
+  res.json({ text });
 });
 
 // POST /api/quiz/realtime-token (teacher) — mints a short-lived ephemeral token
