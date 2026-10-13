@@ -156,7 +156,7 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
   ok("this number itself is not answered", (await tryOnce()) === 0);
   for (const [what, m] of [
     ["a group", incoming({ from: "120363000000000000@g.us" })],
-    ["someone writing in a group", incoming({ author: "994551112233@c.us" })],
+    ["someone writing in a group", incoming({ from: "120363000000000000@g.us", author: "994505440307@c.us" })],
     ["a channel", incoming({ from: "120363000000000000@newsletter" })],
     ["a broadcast list", incoming({ from: "1700000000@broadcast" })],
     ["a status", incoming({ isStatus: true })],
@@ -166,6 +166,18 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
     reset();
     ok(`${what} is not answered`, (await tryOnce(m)) === 0);
   }
+  // WhatsApp's hidden ids ("@lid"): the phone comes from WhatsApp's own map, not the contact's
+  // `number` (which can be the hidden id itself); a private message may carry an author.
+  const LID = "123456789012345@lid";
+  reset();
+  c.getContactLidAndPhone = async () => [{ lid: LID, pn: CHAT }];
+  ok(
+    "a teacher writing under WhatsApp's hidden id is recognised by the phone behind it",
+    (await tryOnce(incoming({ from: LID, author: LID, getContact: async () => ({ ...person, number: "123456789012345" }) }))) === 1 && c.sent[0]?.chatId === LID,
+    JSON.stringify(c.sent)
+  );
+  reset();
+  ok("…and without a known phone, not answered", (await tryOnce(incoming({ from: LID, getContact: async () => ({ ...person, number: "123456789012345" }) }))) === 0);
   ok("only a one-person chat id passes", ai._personChat(CHAT) && ai._personChat("123456789012@lid") && !ai._personChat("120363@g.us") && !ai._personChat("status@broadcast") && !ai._personChat(""));
 
   console.log("\nnot anyone the phone knows");
