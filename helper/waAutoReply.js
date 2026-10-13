@@ -283,17 +283,105 @@ const MEDIA_RETRY_MS = Number(process.env.WA_AI_MEDIA_RETRY_MS) || 1500;
 const VOICE_MAX_BYTES = 16 * 1024 * 1024;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /*
- * A voice note's audio. WhatsApp Web fetches a voice note only when asked, and
- * whatsapp-web.js looks once, right after asking: a clip still on its way came
- * back empty (2026-10-13, "Səs mesajınız mənə çatmadı"). So it asks again, a
- * little later each time, with the message read fresh.
+ * A voice note's audio, fetched in WhatsApp Web's own page. whatsapp-web.js
+ * 1.34.7's downloadMedia() threw "r" on every try on this WhatsApp Web build
+ * (2026-10-13, "Bu səs mesajı da mənə çatmadı"): its decrypt call no longer
+ * works. This follows the library's unreleased fix (main branch,
+ * WWebJS.resolveMediaBlob): ask WhatsApp to download the clip, wait until it
+ * has, then take the audio from WhatsApp's in-memory media cache. The old
+ * decrypt call stays as the last try. Every step that fails is named in
+ * `steps` (WhatsApp's error names only, never the audio).
  */
+async function downloadVoiceInPage(msgId, pollMs = 500) {
+  const steps = [];
+  const note = (step, e) => steps.push(`${step}: ${[e && e.name, e && e.message].filter(Boolean).join(": ") || String(e)}`.slice(0, 160));
+  const { Msg } = window.require("WAWebCollections");
+  let msg = Msg.get(msgId);
+  if (!msg) {
+    try {
+      msg = (await Msg.getMessagesById([msgId]))?.messages?.[0];
+    } catch (e) {
+      note("find", e);
+    }
+  }
+  if (!msg) return { steps: [...steps, "message not found"] };
+  if (!msg.mediaData) return { steps: [...steps, "no media data"] };
+  if (msg.mediaData.mediaStage === "REUPLOADING") return { steps: [...steps, "the clip has expired on WhatsApp"] };
+  try {
+    await msg.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1, isUserInitiated: true });
+  } catch (e) {
+    note("ask", e);
+  }
+  const stage = () => String(msg.mediaData.mediaStage || "");
+  for (let i = 0; i < 20 && stage() !== "RESOLVED" && !stage().includes("ERROR"); i++) await new Promise((r) => setTimeout(r, pollMs));
+  let blob = null;
+  try {
+    const cache = window.require("WAWebMediaInMemoryBlobCache").InMemoryMediaBlobCache;
+    blob = cache.get(msg.mediaObject?.filehash) || cache.get(msg.filehash) || null;
+  } catch (e) {
+    note("cache", e);
+  }
+  for (const [name, holder] of [
+    ["media object", msg.mediaObject],
+    ["media data", msg.mediaData],
+  ]) {
+    if (blob) break;
+    try {
+      if (holder?.mediaBlob) blob = holder.mediaBlob.forceToBlob();
+    } catch (e) {
+      note(name, e);
+    }
+  }
+  if (!blob) {
+    try {
+      const qpl = {
+        addAnnotations() {
+          return this;
+        },
+        addPoint() {
+          return this;
+        },
+      };
+      const buf = await window.require("WAWebDownloadManager").downloadManager.downloadAndMaybeDecrypt({
+        directPath: msg.directPath,
+        encFilehash: msg.encFilehash,
+        filehash: msg.filehash,
+        mediaKey: msg.mediaKey,
+        mediaKeyTimestamp: msg.mediaKeyTimestamp,
+        type: msg.type,
+        signal: new AbortController().signal,
+        downloadQpl: qpl,
+      });
+      blob = new Blob([buf]);
+    } catch (e) {
+      note("decrypt", e);
+    }
+  }
+  if (!blob) return { steps: [...steps, `no audio (stage ${stage()})`] };
+  const data = await window.WWebJS.arrayBufferToBase64Async(await blob.arrayBuffer());
+  return { data, mimetype: msg.mimetype, steps };
+}
+// The audio: in the page first (above), then the library's own way, asked again a little later each time.
 async function mediaOf(client, m) {
+  const id = m.id?._serialized;
+  const tried = [];
+  if (id && client.pupPage && typeof client.pupPage.evaluate === "function") {
+    for (const wait of [0, 2].map((x) => x * MEDIA_RETRY_MS)) {
+      if (wait) await sleep(wait);
+      try {
+        const r = await timeBoxed(client.pupPage.evaluate(downloadVoiceInPage, id, Math.round(MEDIA_RETRY_MS / 3)), 30000, "in-page download");
+        if (r?.data) return r;
+        tried.push(`in page: ${(r?.steps || []).join("; ") || "nothing"}`);
+      } catch (e) {
+        tried.push(`in page: ${e?.message || e}`);
+      }
+    }
+  }
   let last = "no media";
-  for (const wait of [0, 1, 2, 3.5].map((x) => x * MEDIA_RETRY_MS)) {
+  for (const wait of [0, 1, 2].map((x) => x * MEDIA_RETRY_MS)) {
     if (wait) await sleep(wait);
     try {
-      const fresh = wait && typeof client.getMessageById === "function" ? (await client.getMessageById(m.id._serialized).catch(() => null)) || m : m;
+      const fresh = wait && typeof client.getMessageById === "function" ? (await client.getMessageById(id).catch(() => null)) || m : m;
       const media = await timeBoxed(fresh.downloadMedia(), 20000, "download");
       if (media?.data) return media;
       last = "not downloaded yet";
@@ -301,7 +389,8 @@ async function mediaOf(client, m) {
       last = e?.message || String(e);
     }
   }
-  throw new Error(`download: ${last}`);
+  tried.push(`library: ${last}`);
+  throw new Error(`download: ${tried.join(" | ")}`);
 }
 // What a voice note says, heard twice ({ text, alt }, helper/transcribe); each clip is heard once.
 const heardCache = new Map(); // message id -> { text, alt }
@@ -600,6 +689,7 @@ module.exports = {
   _digitsOf: digitsOf,
   _personChat: personChat,
   _readChat: readChat,
+  _mediaOf: mediaOf,
   _reset() {
     settingsCache = { at: 0, numbers: {}, testOwn: false };
     outreached = { at: 0, list: [] };

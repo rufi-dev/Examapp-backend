@@ -418,6 +418,56 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
   ok("without asking for older ones: only what the page holds", rr.found && !rr.complete && rr.msgs.length === 1);
   delete global.window;
 
+  console.log("\nfetching a voice note in WhatsApp Web's page");
+  const audio = Buffer.from("OggS-voice-note");
+  const rName = (msg) => Object.assign(new Error(msg), { name: "r" });
+  const voicePage = ({ cached = false, onObject = true, askFails = false, decrypt = null, resolves = true } = {}) => {
+    const msg = {
+      mimetype: "audio/ogg; codecs=opus",
+      filehash: "H",
+      mediaData: { mediaStage: "FETCHING" },
+      mediaObject: { filehash: "H", mediaBlob: onObject ? { forceToBlob: () => new Blob([audio]) } : null },
+      downloadMedia: async () => {
+        if (askFails) throw rName("");
+        if (resolves) msg.mediaData.mediaStage = "RESOLVED";
+      },
+    };
+    global.window = {
+      require: (name) =>
+        ({
+          WAWebCollections: { Msg: { get: () => msg } },
+          WAWebMediaInMemoryBlobCache: { InMemoryMediaBlobCache: { get: (h) => (cached && h === "H" ? new Blob([audio]) : undefined) } },
+          WAWebDownloadManager: {
+            downloadManager: {
+              downloadAndMaybeDecrypt: async () => {
+                if (!decrypt) throw rName("");
+                return decrypt;
+              },
+            },
+          },
+        })[name],
+      WWebJS: { arrayBufferToBase64Async: async (ab) => Buffer.from(ab).toString("base64") },
+    };
+  };
+  const vp = { pupPage: { evaluate: (fn, ...a) => fn(...a) } };
+  const libraryFails = { id: { _serialized: `false_${CHAT}_V1` }, downloadMedia: async () => Promise.reject(rName("r")) };
+  voicePage({ cached: true });
+  let media = await ai._mediaOf(vp, libraryFails);
+  ok("asked for, then taken from WhatsApp's media cache (no library decrypt)", Buffer.from(media.data, "base64").equals(audio) && /ogg/.test(media.mimetype));
+  voicePage({});
+  media = await ai._mediaOf(vp, libraryFails);
+  ok("…or from the message's own media", Buffer.from(media.data, "base64").equals(audio));
+  voicePage({ onObject: false, decrypt: new Uint8Array(audio) });
+  media = await ai._mediaOf(vp, libraryFails);
+  ok("…or, last, the old decrypt call", Buffer.from(media.data, "base64").equals(audio));
+  voicePage({ onObject: false, askFails: true, resolves: false });
+  const whyNot = await ai._mediaOf(vp, libraryFails).then(
+    () => "",
+    (e) => e.message
+  );
+  ok("every way failing: the log names each step that failed (never the audio)", /in page: ask: r; decrypt: r; no audio \(stage FETCHING\)/.test(whyNot) && /library: r/.test(whyNot), whyNot);
+  delete global.window;
+
   console.log("\nour messages, recognised");
   const OLD = "Salam Aysel müəllim 🙂 Examopia komandasından yazıram. Gördüm ki, qeydiyyatdan keçmisiniz, amma hələ başlamamısınız.";
   ok("every outreach message ever sent opens a chat the AI may answer", [OUTREACH, REENGAGE, OLD].every((body) => ai.isOurOutreach({ fromMe: true, body })));
