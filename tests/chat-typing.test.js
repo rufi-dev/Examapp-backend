@@ -48,6 +48,12 @@ const save = reply.indexOf("Message.create(");
 ok("starts right before the reply is generated", on > 0 && on < gen, `${on} ${gen}`);
 ok("stops BEFORE the reply is saved, so no poll shows dots under an answer", off > gen && off < save, `${off} ${save}`);
 ok("stops in a finally, so a failed turn cannot leave it on", /\} finally \{\s*typing\.stopTyping\(conversationId, token\);\s*\}/.test(reply));
+
+console.log("\nthe admin sees which replies the AI wrote");
+ok("an AI reply is saved marked as the AI's", /text: reply,\s*ai: true,/.test(reply));
+ok("the mark reaches the chat", /ai: !!m\.ai,/.test(src));
+const model = fs.readFileSync(path.join(__dirname, "..", "models", "messageModel.js"), "utf8");
+ok("the message keeps it", /ai: \{ type: Boolean, default: false \}/.test(model));
 ok("the thread poll reports it", /aiTyping: typing\.isTyping\(conv\._id\)/.test(src));
 
 console.log("\nthe teacher talks to «Examopia Köməkçi»");

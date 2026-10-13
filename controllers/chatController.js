@@ -339,6 +339,7 @@ const getMessages = asyncHandler(async (req, res) => {
       audioUrl: m.audioUrl || "",
       audioSec: m.audioSec || 0,
       transcript: m.transcript || "",
+      ai: !!m.ai,
       createdAt: m.createdAt,
       readAt: m.readAt,
     })),
@@ -455,6 +456,7 @@ async function maybeAiReply(conversationId, adminId) {
     from: adminId,
     to,
     text: reply,
+    ai: true,
   });
   fresh.lastMessageText = reply.slice(0, 200);
   fresh.lastMessageAt = aiMsg.createdAt;
