@@ -140,6 +140,8 @@ function outreachMessage(u, stuck) {
   const fn = firstName(u.name);
   const n = fn ? ` ${fn} müəllim` : " müəllim";
   // One unified re-engagement script for every stuck state (WhatsApp bold = *single* asterisks).
+  // The WhatsApp AI answers only chats that begin with one of these messages: a new
+  // opening must be added to OUR_OPENINGS in helper/waAutoReply (tests/wa-auto-reply).
   return `Salam${n} 😊 *Examopia-da qeydiyyatdan keçdiyinizi*, amma platformadan istifadəni davam etdirmədiyinizi gördük.
 
 Examopia müəllimlər üçün *AI ilə test və imtahan yaratmaq, şagirdləri siniflər üzrə idarə etmək, dərs materialları paylaşmaq, ev tapşırıqları vermək, canlı imtahan keçirmək, elektron lövhədən istifadə etmək və nəticələri izləmək* üçün hazırlanmış onlayn tədris platformasıdır.

@@ -4,15 +4,28 @@
  * admin's numbers, the same assistant as the in-app chat answers, from that
  * same number, with the same knowledge, written as a WhatsApp message.
  *
- * Only then:
- *   - switched on (AppSetting waAutoReplyEnabled), and only messages that
- *     arrived after it was switched on (waAutoReplySince) and in the last
- *     10 minutes: never the old messages, never a backlog after a restart;
- *   - a one-to-one chat with a teacher whose outreach was sent; anyone else
- *     (friends, family, groups, statuses) is never answered;
- *   - not while a person is handling the chat: a message the admin typed
- *     (on the phone, or from the dashboard) pauses the AI there for 12 hours;
- *   - at most 12 AI replies per chat and 150 in all per day.
+ * The admin's number is also a personal phone, so every gate below must pass,
+ * and the last one checks it all again, fresh, right before anything is sent:
+ *   1. switched on (AppSetting waAutoReplyEnabled; WA_AUTO_REPLY=off stops it
+ *      outright), and only messages that arrived after it was switched on
+ *      (waAutoReplySince) and in the last 10 minutes: never the old messages,
+ *      never a backlog after a restart;
+ *   2. a chat with one person ("<digits>@c.us" / "@lid", allow-listed): never
+ *      a group, community, channel, broadcast list or status;
+ *   3. on one of the admin's numbers;
+ *   4. the sender is a registered teacher (not deleted) our automatic message
+ *      was sent to, and not this number itself;
+ *   5. not someone the phone knows: a saved contact, a business account or a
+ *      blocked number is left to the owner;
+ *   6. the chat began with our automatic message (nothing before it, from
+ *      either side), so a conversation that existed before is never entered;
+ *   7. not while a person is handling the chat: a message the admin typed (on
+ *      the phone, or from the dashboard) pauses the AI there for 12 hours;
+ *   8. at most 12 AI replies per chat and 150 in all per day.
+ * Anyone who fails 1-5 is not looked at any further: the chat is not opened,
+ * nothing is read, heard or stored, nothing is logged. A reply only ever goes
+ * back to the chat the teacher's message came from.
+ *
  * Several quick messages are answered once, 9 s after the last; "yazır…" shows
  * while the reply is written; a voice message is heard (helper/transcribe).
  *
@@ -33,6 +46,29 @@ const HUMAN_PAUSE_MS = 12 * 3600 * 1000;
 const PER_CHAT_PER_DAY = 12;
 const DAILY_MAX = 150;
 const HISTORY = 24;
+// How far back it looks for the start of a chat it has not verified yet: a longer chat is left to the owner.
+const CHAT_WINDOW = 60;
+
+/*
+ * The openings of every automatic outreach message ever sent (jobs/autoOutreach).
+ * Keep in step with its templates: tests/wa-auto-reply checks each one.
+ */
+const OUR_OPENINGS = [
+  "Examopia komandasından yazıram", // wave 1, 2026-08-06 to 2026-10-09
+  "Examopia-da qeydiyyatdan keçdiyinizi", // wave 1 since 2026-10-09
+  "*Examopia*-da qeydiyyatdan keçmişdiniz", // wave 2
+];
+const isOurOutreach = (m) => {
+  const body = String(m?.body || "");
+  return !!m?.fromMe && /^\s*Salam/.test(body) && OUR_OPENINGS.some((o) => body.includes(o));
+};
+// WhatsApp's own notices in a chat (encryption, changes): not something a person sent.
+const NOTICE_TYPES = new Set(["e2e_notification", "notification", "notification_template", "gp2", "protocol"]);
+// A chat with one person. Everything else is never touched.
+const personChat = (id) => /^\d{6,15}@c\.us$/.test(String(id || "")) || /^\d{6,20}@lid$/.test(String(id || ""));
+// The person as the phone knows them. Fails closed: if WhatsApp can't say, no answer.
+const contactOk = (c) => !!c && !c.isMe && !c.isGroup && !c.isBlocked && !c.isMyContact && !c.isBusiness && !c.isEnterprise;
+const killed = () => process.env.WA_AUTO_REPLY === "off";
 
 const bakuDay = (t = Date.now()) => new Date(t + 4 * 3600 * 1000).toISOString().slice(0, 10);
 const digitsOf = (raw) => {
@@ -69,6 +105,7 @@ async function repliesToday() {
 }
 
 /* ── who may be answered ── */
+const clients = new Map(); // ownerKey -> its WhatsApp client
 const adminCache = new Map(); // ownerKey -> { at, admin }
 async function isAdminNumber(ownerKey) {
   const hit = adminCache.get(ownerKey);
@@ -79,14 +116,22 @@ async function isAdminNumber(ownerKey) {
   adminCache.set(ownerKey, { at: Date.now(), admin });
   return admin;
 }
+const OUTREACHED = { role: "teacher", deletedAt: null, $or: [{ outreachStatus: "sent" }, { reengageStatus: "sent" }] };
 let outreached = { at: 0, list: [] };
 async function outreachedTeachers() {
   if (Date.now() - outreached.at < 5 * 60 * 1000) return outreached.list;
-  const rows = await User.find({ role: "teacher", $or: [{ outreachStatus: "sent" }, { reengageStatus: "sent" }] })
-    .select("_id phone")
-    .lean();
+  const rows = await User.find(OUTREACHED).select("_id phone").lean();
   outreached = { at: Date.now(), list: rows.map((r) => ({ _id: r._id, digits: digitsOf(r.phone) })).filter((r) => r.digits) };
   return outreached.list;
+}
+async function lidPhone(client, lid) {
+  if (!client || typeof client.getContactLidAndPhone !== "function") return null;
+  try {
+    const [r] = await client.getContactLidAndPhone([lid]);
+    return String(r?.pn || "").split("@")[0].replace(/\D/g, "") || null;
+  } catch {
+    return null;
+  }
 }
 // The sender's phone digits: from "<digits>@c.us", else the contact, else WhatsApp's LID map.
 async function senderDigits(client, msg) {
@@ -98,19 +143,18 @@ async function senderDigits(client, msg) {
   } catch {
     /* next */
   }
-  if (from.endsWith("@lid") && typeof client.getContactLidAndPhone === "function") {
-    try {
-      const [r] = await client.getContactLidAndPhone([from]);
-      const pn = String(r?.pn || "").split("@")[0];
-      if (pn) return pn.replace(/\D/g, "");
-    } catch {
-      /* none */
-    }
-  }
-  return null;
+  return from.endsWith("@lid") ? lidPhone(client, from) : null;
 }
+const ownNumber = (client) => String(client?.info?.wid?.user || "");
 async function teacherFor(client, msg) {
   const digits = await senderDigits(client, msg);
+  if (!digits || digits === ownNumber(client)) return null;
+  return (await outreachedTeachers()).find((t) => t.digits === digits) || null;
+}
+// The teacher a chat is with, if it is one the AI may answer (else null).
+async function teacherForChat(ownerKey, chatId) {
+  if (!personChat(chatId)) return null;
+  const digits = chatId.endsWith("@c.us") ? chatId.split("@")[0] : await lidPhone(clients.get(ownerKey), chatId);
   if (!digits) return null;
   return (await outreachedTeachers()).find((t) => t.digits === digits) || null;
 }
@@ -122,10 +166,13 @@ function remember(id) {
   systemSent.add(id);
   if (systemSent.size > 5000) systemSent.delete(systemSent.values().next().value);
 }
+// Only a chat with a teacher the AI may answer is remembered: anyone else's chat leaves no trace.
 async function pauseForHuman(ownerKey, chatId) {
+  const teacher = await teacherForChat(ownerKey, chatId);
+  if (!teacher) return;
   await WaAutoChat.updateOne(
     { key: `${ownerKey}|${chatId}` },
-    { $set: { owner: ownerKey, humanUntil: new Date(Date.now() + HUMAN_PAUSE_MS) } },
+    { $set: { owner: ownerKey, user: teacher._id, humanUntil: new Date(Date.now() + HUMAN_PAUSE_MS) } },
     { upsert: true }
   );
 }
@@ -139,7 +186,7 @@ function onCreated(ownerKey, msg) {
   if (!msg?.fromMe) return;
   const id = msg.id?._serialized;
   const to = String(msg.to || "");
-  if (!id || !to || to.endsWith("@g.us") || to === "status@broadcast") return;
+  if (!id || !personChat(to)) return;
   // sendMessage resolves after this event fires: give it a moment to be noted.
   setTimeout(() => {
     if (systemSent.has(id)) return;
@@ -163,6 +210,23 @@ async function voiceText(m) {
   }
 }
 
+const stopAt = (ownerKey, why) => {
+  console.info(`[WA-AI] not answered on ${ownerKey}: ${why}`);
+};
+
+// The last gate, right before anything is sent: everything once more, fresh.
+async function stillAllowed(ownerKey, client, chatId, teacher) {
+  if (killed() || !personChat(chatId)) return false;
+  if (!(await getSettings({ fresh: true })).enabled) return false;
+  const state = await WaAutoChat.findOne({ key: `${ownerKey}|${chatId}` }).lean();
+  if (state?.humanUntil && new Date(state.humanUntil) > new Date()) return false;
+  const u = await User.findOne({ _id: teacher._id, ...OUTREACHED }).select("phone").lean();
+  if (!u || digitsOf(u.phone) !== teacher.digits) return false;
+  if (chatId.endsWith("@c.us") && chatId.split("@")[0] !== teacher.digits) return false;
+  const contact = typeof client.getContactById === "function" ? await client.getContactById(chatId).catch(() => null) : null;
+  return contactOk(contact);
+}
+
 async function answer(ownerKey, client, chatId, teacher) {
   const key = `${ownerKey}|${chatId}`;
   if (busy.has(key)) {
@@ -172,7 +236,7 @@ async function answer(ownerKey, client, chatId, teacher) {
   busy.add(key);
   try {
     const settings = await getSettings();
-    if (!settings.enabled) return;
+    if (!settings.enabled || killed()) return;
     const today = bakuDay();
     const state = await WaAutoChat.findOne({ key }).lean();
     if (state?.humanUntil && new Date(state.humanUntil) > new Date()) return;
@@ -180,12 +244,21 @@ async function answer(ownerKey, client, chatId, teacher) {
     if ((await repliesToday()) >= DAILY_MAX) return;
 
     const chat = await client.getChatById(chatId);
-    const msgs = await chat.fetchMessages({ limit: HISTORY });
-    const last = msgs[msgs.length - 1];
+    // (WhatsApp may name the same person's chat by phone or by LID: either is a person.)
+    if (!chat || chat.isGroup || !personChat(chat.id?._serialized || chatId)) return;
+    const verified = !!state?.verified && String(state.user) === String(teacher._id);
+    const msgs = (await chat.fetchMessages({ limit: verified ? HISTORY : CHAT_WINDOW })) || [];
+    const real = msgs.filter((m) => !NOTICE_TYPES.has(m.type));
+    const last = real[real.length - 1];
     if (!last || last.fromMe) return; // already answered
-    const ours = msgs.find((m) => m.fromMe && m.body);
+    if (!verified) {
+      // The chat must begin with our automatic message, and its beginning must be in sight.
+      if (msgs.length >= CHAT_WINDOW || !isOurOutreach(real[0])) return stopAt(ownerKey, "the chat did not begin with our message");
+      await WaAutoChat.updateOne({ key }, { $set: { owner: ownerKey, user: teacher._id, verified: true } }, { upsert: true });
+    }
+    const ours = real.find(isOurOutreach);
     const history = [];
-    for (const m of msgs) {
+    for (const m of real.slice(-HISTORY)) {
       let text = String(m.body || "").trim();
       if (!m.fromMe && (m.type === "ptt" || m.type === "audio")) {
         // Only a new voice message is heard (and paid for); older ones are named.
@@ -201,9 +274,8 @@ async function answer(ownerKey, client, chatId, teacher) {
     await chat.clearState().catch(() => {});
     if (!reply) return;
 
-    // A person may have stepped in while it was written.
-    const now = await WaAutoChat.findOne({ key }).lean();
-    if (now?.humanUntil && new Date(now.humanUntil) > new Date()) return;
+    // Everything once more: a person may have stepped in, or it was switched off, while it was written.
+    if (!(await stillAllowed(ownerKey, client, chatId, teacher))) return stopAt(ownerKey, "a gate closed before sending");
     const sent = await client.sendMessage(chatId, reply);
     remember(sent?.id?._serialized);
     await WaAutoChat.updateOne(
@@ -235,24 +307,35 @@ function schedule(ownerKey, client, chatId, teacher) {
 }
 
 async function onIncoming(ownerKey, client, msg) {
+  if (killed()) return;
+  // 2. a message one person sent, in the chat with that person
   if (!msg || msg.fromMe || msg.isStatus || msg.broadcast) return;
+  if (msg.author && msg.author !== msg.from) return; // written by someone in a group
   const chatId = String(msg.from || "");
-  if (!chatId || chatId.endsWith("@g.us") || chatId === "status@broadcast" || chatId.endsWith("@newsletter")) return;
+  if (!personChat(chatId)) return;
   if (!["chat", "ptt", "audio"].includes(msg.type)) return;
+  // 1. switched on, and the message is new (WhatsApp stamps whole seconds, so the switch-on second counts)
   const settings = await getSettings();
   if (!settings.enabled) return;
   const at = (msg.timestamp || 0) * 1000;
-  // Only new messages (WhatsApp stamps whole seconds, so the switch-on second counts).
   if (at + 999 < settings.since || Date.now() - at > MAX_AGE_MS) return;
+  // 3. on one of the admin's numbers
   if (!(await isAdminNumber(ownerKey))) return;
+  // 4. a registered teacher our automatic message went to
   const teacher = await teacherFor(client, msg);
   if (!teacher) return;
+  // 5. not someone the phone knows
+  const contact = await Promise.resolve()
+    .then(() => msg.getContact())
+    .catch(() => null);
+  if (!contactOk(contact)) return;
   schedule(ownerKey, client, chatId, teacher);
 }
 
 // Wire a WhatsApp client (helper/whatsapp initFor) to the auto-reply.
 function attach(client, ownerKey) {
   if (!client || typeof client.on !== "function") return;
+  clients.set(ownerKey, client);
   client.on("message", (msg) => {
     onIncoming(ownerKey, client, msg).catch((e) => console.warn(`[WA-AI] skipped on ${ownerKey}: ${e?.message || e}`));
   });
@@ -265,15 +348,18 @@ module.exports = {
   getSettings,
   setEnabled,
   repliesToday,
+  isOurOutreach,
   // for tests
   _onIncoming: onIncoming,
   _onCreated: onCreated,
   _answer: answer,
   _digitsOf: digitsOf,
+  _personChat: personChat,
   _reset() {
     settingsCache = { at: 0, enabled: false, since: 0 };
     outreached = { at: 0, list: [] };
     adminCache.clear();
+    clients.clear();
     systemSent.clear();
     pending.forEach((t) => clearTimeout(t));
     pending.clear();
@@ -282,5 +368,6 @@ module.exports = {
   },
   ENABLED_KEY,
   SINCE_KEY,
-  LIMITS: { DEBOUNCE_MS, MAX_AGE_MS, HUMAN_PAUSE_MS, PER_CHAT_PER_DAY, DAILY_MAX },
+  OUR_OPENINGS,
+  LIMITS: { DEBOUNCE_MS, MAX_AGE_MS, HUMAN_PAUSE_MS, PER_CHAT_PER_DAY, DAILY_MAX, CHAT_WINDOW },
 };
