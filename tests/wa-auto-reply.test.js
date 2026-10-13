@@ -10,6 +10,7 @@
 process.env.NODE_ENV = "test";
 process.env.WA_AI_DEBOUNCE_MS = "20";
 process.env.WA_AI_HUMAN_CHECK_MS = "20";
+process.env.WA_AI_MEDIA_RETRY_MS = "5";
 
 const path = require("path");
 
@@ -61,7 +62,12 @@ assistant.generateSupportReply = async (history, adminId, opts) => {
   return "Salam! *Siniflər* bölməsini açın.";
 };
 const T = require("../helper/transcribe");
-T.transcribe = async () => "Sinfi necə yaradım?";
+let heardAs = { text: "Sinfi necə yaradım?", alt: "" };
+let hearings = 0;
+T.hear = async () => {
+  hearings += 1;
+  return heardAs;
+};
 
 const ai = require("../helper/waAutoReply");
 const { outreachMessage, reengageMessage } = require("../jobs/autoOutreach");
@@ -284,6 +290,35 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
   ];
   await tryOnce(incoming({ type: "ptt", body: "" }), 150);
   ok("a voice message is heard and answered in text", c.sent.length === 1 && /\[səs mesajı\] Sinfi necə yaradım\?/.test(asked[0]?.history.at(-1).text || ""), JSON.stringify(asked[0]?.history));
+
+  // WhatsApp fetches a voice note only when asked; the first look can find it still on its way.
+  const voiceNote = (over = {}) => ({ fromMe: false, body: "", type: "ptt", timestamp: now(), id: { _serialized: `false_${CHAT}_V${Math.random()}`, id: "V" }, ...over });
+  reset();
+  let looks = 0;
+  c.history = [ourFirst(), voiceNote({ downloadMedia: async () => (++looks < 3 ? undefined : { data: Buffer.from("ogg").toString("base64"), mimetype: "audio/ogg" }) })];
+  await tryOnce(incoming({ type: "ptt", body: "" }), 200);
+  ok("a voice note still downloading is asked for again until it arrives, then heard", looks === 3 && /\[səs mesajı\] Sinfi necə yaradım\?/.test(asked[0]?.history.at(-1).text || ""), `looks=${looks} ${JSON.stringify(asked[0]?.history)}`);
+  reset();
+  c.history = [ourFirst(), voiceNote({ downloadMedia: async () => undefined })];
+  await tryOnce(incoming({ type: "ptt", body: "" }), 200);
+  ok("…one that never arrives is answered with a polite ask to say it again", asked[0]?.history.at(-1).text === "[səs mesajı göndərdi, amma eşidilmədi]");
+  reset();
+  heardAs = { text: "Sinfə necə keçim?", alt: "Sinfə şagird necə əlavə edim?" };
+  hearings = 0;
+  const sameNote = voiceNote({ downloadMedia: async () => ({ data: Buffer.from("ogg").toString("base64"), mimetype: "audio/ogg" }) });
+  c.history = [ourFirst(), sameNote];
+  await tryOnce(incoming({ type: "ptt", body: "" }), 150);
+  ok("heard two ways: the AI sees both hearings", asked[0]?.history.at(-1).text === "[səs mesajı] Sinfə necə keçim? (başqa cür də eşidildi: «Sinfə şagird necə əlavə edim?»)", asked[0]?.history.at(-1).text);
+  c.history = [ourFirst(), sameNote, { fromMe: true, body: "Cavab", type: "chat", timestamp: now() }, theirs("Bəs sonra?")];
+  chats = {};
+  await tryOnce(incoming(), 150);
+  ok("each clip is heard once (not again on the next answer)", hearings === 1 && /Sinfə necə keçim/.test(asked[1]?.history.find((x) => /səs mesajı/.test(x.text))?.text || ""), `hearings=${hearings}`);
+  heardAs = { text: "Sinfi necə yaradım?", alt: "" };
+  reset();
+  c.history = [ourFirst(), voiceNote({ timestamp: now() - 5 * 86400, downloadMedia: async () => ({ data: "eA==" }) }), theirs("Salam")];
+  hearings = 0;
+  await tryOnce(incoming(), 150);
+  ok("a voice note from before the switch-on is only named, not heard or asked about", hearings === 0 && asked[0]?.history.some((x) => x.text === "[əvvəlki səs mesajı]"), JSON.stringify(asked[0]?.history));
 
   console.log("\ntest mode: the admin's own numbers, and never a loop");
   const OWN = "994551115859";

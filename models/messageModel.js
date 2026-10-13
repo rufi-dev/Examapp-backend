@@ -16,6 +16,8 @@ const messageSchema = Schema(
     audioUrl: { type: String, default: "" },
     audioSec: { type: Number, default: 0 },
     transcript: { type: String, default: "", maxlength: 4000 },
+    // The second listener's hearing, when it differs from `transcript` (only the AI reads it).
+    transcriptAlt: { type: String, default: "", maxlength: 4000 },
     // Written by the support AI (as the admin), not typed by a person.
     ai: { type: Boolean, default: false },
     readAt: { type: Date, default: null },

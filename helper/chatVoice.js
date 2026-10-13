@@ -23,8 +23,8 @@ function isVoiceUrl(u) {
 
 const voicePreview = (transcript) => `🎤 ${transcript ? transcript.slice(0, 180) : "Səs mesajı"}`;
 
-// What the clip says, or "" when it cannot be fetched or heard.
-async function transcribeVoice(audioUrl, { transcribe = require("./transcribe").transcribe } = {}) {
+// What the clip says, heard twice ({ text, alt }, see helper/transcribe), or empty when it cannot be fetched or heard.
+async function hearVoice(audioUrl, { hear = require("./transcribe").hear } = {}) {
   try {
     if (!isVoiceUrl(audioUrl)) throw new Error("not a voice url");
     const r = await fetch(audioUrl, { signal: AbortSignal.timeout(15000) });
@@ -34,11 +34,21 @@ async function transcribeVoice(audioUrl, { transcribe = require("./transcribe").
     if (buffer.length > VOICE_MAX_BYTES) throw new Error("too large");
     const filename = decodeURIComponent(new URL(audioUrl).pathname.split("/").pop() || "voice.webm");
     const mimetype = r.headers.get("content-type") || "audio/webm";
-    return await transcribe(buffer, { mimetype, filename });
+    const heard = await hear(buffer, { mimetype, filename });
+    return { text: heard?.text || "", alt: heard?.alt || "" };
   } catch (e) {
     console.warn("[CHAT-VOICE] not transcribed:", e?.message);
-    return "";
+    return { text: "", alt: "" };
   }
 }
 
-module.exports = { VOICE_MAX_SEC, VOICE_MAX_BYTES, VOICE_PER_DAY, isVoiceUrl, voicePreview, transcribeVoice };
+// What the clip says, or "" when it cannot be fetched or heard.
+async function transcribeVoice(audioUrl, { transcribe = require("./transcribe").transcribe } = {}) {
+  return (await hearVoice(audioUrl, { hear: async (buf, o) => ({ text: await transcribe(buf, o), alt: "" }) })).text;
+}
+
+// How the AI reads a voice note: its text, and the second hearing when the two differ.
+const voiceForAi = (text, alt) =>
+  text ? `[səs mesajı] ${text}${alt ? ` (başqa cür də eşidildi: «${alt}»)` : ""}` : "[səs mesajı göndərdi, amma eşidilmədi]";
+
+module.exports = { VOICE_MAX_SEC, VOICE_MAX_BYTES, VOICE_PER_DAY, isVoiceUrl, voicePreview, hearVoice, transcribeVoice, voiceForAi };

@@ -9,7 +9,7 @@ const { httpError } = require("../utils/appError");
 const { isChatAiEnabled, generateSupportReply } = require("../services/chatAssistant");
 const typing = require("../helper/chatTyping");
 const ui = require("../helper/uiCatalog");
-const { VOICE_MAX_SEC, VOICE_PER_DAY, isVoiceUrl, voicePreview, transcribeVoice } = require("../helper/chatVoice");
+const { VOICE_MAX_SEC, VOICE_PER_DAY, isVoiceUrl, voicePreview, hearVoice } = require("../helper/chatVoice");
 
 // A user counts as "online" if their last heartbeat is within this window. The
 // client pings every ~30s, so 75s tolerates one dropped ping without flicker.
@@ -372,15 +372,18 @@ const sendMessage = asyncHandler(async (req, res) => {
     throw httpError(404, "conversation_not_found", "Söhbət tapılmadı.");
 
   let transcript = "";
+  let transcriptAlt = "";
   if (audioUrl) {
     const since = new Date(Date.now() - 24 * 3600 * 1000);
     const today = await Message.countDocuments({ from: req.user._id, audioUrl: { $ne: "" }, createdAt: { $gte: since } });
     if (today >= VOICE_PER_DAY) throw httpError(429, "voice_limit", "Bu gün çox səs mesajı göndərmisiniz. Zəhmət olmasa yazın.");
-    transcript = (await transcribeVoice(audioUrl)).slice(0, MAX_TEXT);
+    const heard = await hearVoice(audioUrl);
+    transcript = heard.text.slice(0, MAX_TEXT);
+    transcriptAlt = heard.alt.slice(0, MAX_TEXT);
   }
 
   const to = conv.participants.find((p) => String(p) !== String(req.user._id));
-  const msg = await Message.create({ conversation: conv._id, from: req.user._id, to, text, imageUrl, audioUrl, audioSec, transcript });
+  const msg = await Message.create({ conversation: conv._id, from: req.user._id, to, text, imageUrl, audioUrl, audioSec, transcript, transcriptAlt });
 
   conv.lastMessageText = text ? text.slice(0, 200) : audioUrl ? voicePreview(transcript) : "📷 Şəkil";
   conv.lastMessageAt = msg.createdAt;

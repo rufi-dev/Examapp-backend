@@ -279,14 +279,51 @@ const pending = new Map(); // chat key -> timer
 const busy = new Set();
 const again = new Set();
 
-async function voiceText(m) {
+const MEDIA_RETRY_MS = Number(process.env.WA_AI_MEDIA_RETRY_MS) || 1500;
+const VOICE_MAX_BYTES = 16 * 1024 * 1024;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/*
+ * A voice note's audio. WhatsApp Web fetches a voice note only when asked, and
+ * whatsapp-web.js looks once, right after asking: a clip still on its way came
+ * back empty (2026-10-13, "Səs mesajınız mənə çatmadı"). So it asks again, a
+ * little later each time, with the message read fresh.
+ */
+async function mediaOf(client, m) {
+  let last = "no media";
+  for (const wait of [0, 1, 2, 3.5].map((x) => x * MEDIA_RETRY_MS)) {
+    if (wait) await sleep(wait);
+    try {
+      const fresh = wait && typeof client.getMessageById === "function" ? (await client.getMessageById(m.id._serialized).catch(() => null)) || m : m;
+      const media = await timeBoxed(fresh.downloadMedia(), 20000, "download");
+      if (media?.data) return media;
+      last = "not downloaded yet";
+    } catch (e) {
+      last = e?.message || String(e);
+    }
+  }
+  throw new Error(`download: ${last}`);
+}
+// What a voice note says, heard twice ({ text, alt }, helper/transcribe); each clip is heard once.
+const heardCache = new Map(); // message id -> { text, alt }
+async function voiceText(client, m, ownerKey) {
+  const id = m.id?._serialized;
+  if (id && heardCache.has(id)) return heardCache.get(id);
   try {
-    const media = await m.downloadMedia();
-    if (!media?.data) return "";
-    const { transcribe } = require("./transcribe");
-    return await transcribe(Buffer.from(media.data, "base64"), { mimetype: media.mimetype || "audio/ogg", filename: "voice.ogg" });
-  } catch {
-    return "";
+    const media = await mediaOf(client, m);
+    const buf = Buffer.from(media.data, "base64");
+    if (buf.length > VOICE_MAX_BYTES) throw new Error("too large");
+    const { hear } = require("./transcribe");
+    const heard = await hear(buf, { mimetype: media.mimetype || "audio/ogg", filename: "voice.ogg" });
+    const out = { text: heard?.text || "", alt: heard?.alt || "" };
+    if (id && out.text) {
+      heardCache.set(id, out);
+      if (heardCache.size > 500) heardCache.delete(heardCache.keys().next().value);
+    }
+    if (!out.text) console.warn(`[WA-AI] voice not heard on ${ownerKey}: no speech found`);
+    return out;
+  } catch (e) {
+    console.warn(`[WA-AI] voice not heard on ${ownerKey}: ${e?.message || e}`);
+    return { text: "", alt: "" };
   }
 }
 
@@ -441,9 +478,13 @@ async function answer(ownerKey, client, chatId, teacher) {
     for (const m of real.slice(-HISTORY)) {
       let text = String(m.body || "").split(AI_MARK).join("").trim();
       if (!m.fromMe && (m.type === "ptt" || m.type === "audio")) {
-        // Only a new voice message is heard (and paid for); older ones are named.
-        const heard = m.timestamp * 1000 + 999 >= sw.since ? await voiceText(m) : "";
-        text = heard ? `[səs mesajı] ${heard}` : "[səs mesajı göndərdi, amma eşidilmədi]";
+        // Only a voice message since the switch-on is heard (and paid for); older ones are only named.
+        if (m.timestamp * 1000 + 999 >= sw.since) {
+          const heard = await voiceText(client, m, ownerKey);
+          text = require("./chatVoice").voiceForAi(heard.text, heard.alt);
+        } else {
+          text = "[əvvəlki səs mesajı]";
+        }
       }
       if (text) history.push({ from: m.fromMe ? "support" : "teacher", text });
     }
@@ -564,6 +605,7 @@ module.exports = {
     outreached = { at: 0, list: [] };
     adminPhones = { at: 0, set: new Set() };
     sentStanzas.clear();
+    heardCache.clear();
     adminCache.clear();
     clients.clear();
     systemSent.clear();
