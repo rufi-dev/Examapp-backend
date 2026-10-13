@@ -504,6 +504,15 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
   ok("the admin's own dashboard message counts as a person", /sendMessageFor\(ownerId, recipient\.phone, message, \{ human: true \}\)/.test(ctl));
   const { forWhatsApp } = require("../services/chatAssistant");
   ok("a reply made for WhatsApp: no guide markers, «words» in bold", forWhatsApp("1) «Siniflər» açın.\n[[steps:nav.sinifler]]") === "1) *Siniflər* açın.");
+  // WhatsApp shows the stars when bold is not well formed (owner, 2026-10-13: *Zibil qutusu*nda).
+  ok(
+    "a word ending joined to «…» goes inside the bold",
+    forWhatsApp("30 gün «Zibil qutusu»nda qalır, «Geri qaytar» ilə qaytarın, «Zibil qutusu»na keçin.") === "30 gün *Zibil qutusunda* qalır, *Geri qaytar* ilə qaytarın, *Zibil qutusuna* keçin."
+  );
+  ok("doubled or nested stars become one bold", forWhatsApp("**Pro** və *«Premium»*; «Planım»-dan baxın.") === "*Pro* və *Premium*; *Planım*-dan baxın.");
+  ok("a star that would not make bold is dropped (2*3 stays)", forWhatsApp("Stray * star, 2*3, *ok* and a* broken* one.") === "Stray star, 2*3, *ok* and a broken one.");
+  ok("the card's «⋯» menu is named, not drawn as dashes", forWhatsApp("Kartda «⋯» menyusuna basın.") === "Kartda *üç nöqtə ⋯* menyusuna basın.");
+  ok("«Diqqət:» stays bold once", forWhatsApp("Diqqət: bu geri qaytarılmır.") === "*Diqqət:* bu geri qaytarılmır.");
 
   ai._reset();
   console.log(`\n${passed} passed, ${failed} failed`);

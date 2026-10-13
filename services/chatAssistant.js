@@ -315,6 +315,7 @@ function slipNote(slips) {
 const whatsappNote = (ourMessage) => `KANAL: WHATSAPP. Bu söhbət müəllimin WhatsApp-ındadır, saytdakı söhbət deyil. Biz ona əvvəlcə yazmışıq, o isə cavab verib. Qaydalar:
 - Şəkilli bələdçi göstərə bilmirsən: [[steps]] YAZMA.
 - WhatsApp mesajı kimi qısa yaz: adətən 2–6 sətir. Addımları "1) ...", "2) ..." kimi ayrı sətirlərdə ver.
+- Yalnız düymə və bölmə adlarını «...» içində yaz (onlar qalın görünür); adi sözləri, cümlələri qalın etmə, ulduz (*) özün yazma.
 - Ekranda yerini sözlə dəqiq de: menyunun hansı bölməsi, hansı düymə.
 - Addım-addım şəkillərlə görmək istəsə: examopia.com-a daxil olub sağ aşağıdakı «Söhbətlər» düyməsinə basmağı təklif et, orada göstərirsən.
 - Şifrə, kart nömrəsi kimi şəxsi məlumat istəmə.
@@ -323,11 +324,35 @@ const whatsappNote = (ourMessage) => `KANAL: WHATSAPP. Bu söhbət müəllimin W
 }`;
 
 // A reply made for WhatsApp: no guide markers; the app's «words» in WhatsApp bold.
+/*
+ * WhatsApp makes *x* bold only when the opening star does not follow a letter
+ * or digit, the closing one is not followed by one, and neither touches a space
+ * inside. «Zibil qutusu»nda used to become *Zibil qutusu*nda, which WhatsApp
+ * shows as stray stars that knock the rest of the line out of shape (owner,
+ * 2026-10-13). So an ending joined to «…» goes inside the bold, doubled stars
+ * become one, and any star that would not make valid bold is dropped.
+ */
+const WA_BOLD = /(^|[^\p{L}\p{N}*])\*(?=[^\s*])([^*\n]*?[^\s*])\*(?![\p{L}\p{N}*])/gu;
+function tidyBold(s) {
+  const spans = [];
+  const kept = s.replace(WA_BOLD, (_, before, inner) => {
+    spans.push(inner);
+    return `${before}\u0000${spans.length - 1}\u0000`;
+  });
+  return kept
+    .replace(/\*/g, (star, at, all) => (/\d/.test(all[at - 1] || "") && /\d/.test(all[at + 1] || "") ? star : "")) // 2*3 stays
+    .replace(/(\S)[ \t]{2,}/g, "$1 ")
+    .replace(/\u0000(\d+)\u0000/g, (_, i) => `*${spans[Number(i)]}*`);
+}
 function forWhatsApp(text) {
-  return String(text || "")
+  const s = String(text || "")
     .replace(/\[\[(?:steps|guide):[^\]]*\]\]/g, "")
-    .replace(/«([^«»\n]{1,60})»/g, "*$1*")
-    .replace(/^(Diqqət|Vacib|Qeyd):/gm, "*$1:*")
+    // The card's «⋯» menu: WhatsApp's font draws a bold ⋯ like dashes, so it is named too.
+    .replace(/«⋯»/g, "«üç nöqtə ⋯»")
+    .replace(/«([^«»\n]{1,60})»(\p{L}*)/gu, "*$1$2*")
+    .replace(/\*{2,}/g, "*")
+    .replace(/^(Diqqət|Vacib|Qeyd):/gm, "*$1:*");
+  return tidyBold(s)
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
