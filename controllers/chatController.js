@@ -6,6 +6,7 @@ const Presence = require("../models/presenceModel");
 const User = require("../models/userModel");
 const { httpError } = require("../utils/appError");
 const { isChatAiEnabled, generateSupportReply } = require("../services/chatAssistant");
+const typing = require("../helper/chatTyping");
 
 // A user counts as "online" if their last heartbeat is within this window. The
 // client pings every ~30s, so 75s tolerates one dropped ping without flicker.
@@ -340,6 +341,8 @@ const getMessages = asyncHandler(async (req, res) => {
     peerOnline: isFresh(presence.get(String(peerId))),
     readWatermark,
     aiPaused: !!conv.aiPaused,
+    // True only while a reply is really being written (see helper/chatTyping).
+    aiTyping: typing.isTyping(conv._id),
   });
 });
 
@@ -405,15 +408,24 @@ async function maybeAiReply(conversationId, adminId) {
   // If the last message is no longer the teacher's, someone already replied.
   if (String(recent[recent.length - 1].from) === String(adminId)) return;
 
-  const reply = await generateSupportReply(recent, adminId);
-  if (!reply) {
-    console.warn("[CHAT-AI] no reply generated for", conversationId);
-    return;
+  // "Yazır…" from here until the reply is saved, and not a moment longer: it is
+  // cleared BEFORE the message is written, so no poll ever shows the dots under
+  // an answer that already arrived. A turn that throws clears it in `finally`.
+  const token = typing.startTyping(conversationId);
+  let reply;
+  let fresh;
+  try {
+    reply = await generateSupportReply(recent, adminId);
+    if (!reply) {
+      console.warn("[CHAT-AI] no reply generated for", conversationId);
+      return;
+    }
+    // Re-check the pause flag right before posting (admin may have taken over).
+    fresh = await Conversation.findById(conversationId);
+    if (!fresh || fresh.aiPaused) return;
+  } finally {
+    typing.stopTyping(conversationId, token);
   }
-
-  // Re-check the pause flag right before posting (admin may have taken over).
-  const fresh = await Conversation.findById(conversationId);
-  if (!fresh || fresh.aiPaused) return;
 
   const to = conv.participants.find((p) => String(p) !== String(adminId));
   const aiMsg = await Message.create({

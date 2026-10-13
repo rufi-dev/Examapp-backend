@@ -114,6 +114,7 @@
   "tests/class-context.test.js",
   "tests/studio-table-limits.test.js",
   "tests/support-chat-quality.test.js",
+  "tests/chat-typing.test.js",
   "tests/answer-key-vision.test.js",
   "tests/question-figures.test.js",
   "tests/solve-answers-stream.test.js",
