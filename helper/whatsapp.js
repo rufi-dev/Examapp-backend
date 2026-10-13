@@ -237,6 +237,13 @@ function initFor(ownerId) {
     },
   });
 
+  // The support AI answers outreached teachers who write back (admin numbers only; see waAutoReply).
+  try {
+    require("./waAutoReply").attach(s.client, id);
+  } catch (e) {
+    console.warn(`[WHATSAPP] ${id} auto-reply not attached: ${e?.message || e}`);
+  }
+
   s.client.on("qr", async (qr) => {
     s.ready = false;
     s.connecting = false;
@@ -416,12 +423,19 @@ async function logoutFor(ownerId) {
 }
 
 // Send plain text from a teacher's session to a chat id ("<digits>@c.us" or
-// "<id>@g.us"). Returns true on success.
-async function sendForOwner(ownerId, chatId, text) {
+// "<id>@g.us"). Returns true on success. `human`: typed by the admin in the
+// dashboard (the support AI then stands back in that chat); anything else is
+// the system's own, which the AI knows not to mistake for a person.
+async function sendForOwner(ownerId, chatId, text, { human = false } = {}) {
   const s = getSession(ownerId);
   if (!s.ready || !s.client || !chatId) return false;
   try {
-    await s.client.sendMessage(chatId, text);
+    const sent = await s.client.sendMessage(chatId, text);
+    try {
+      require("./waAutoReply").noteSent(String(ownerId), sent, { human, chatId });
+    } catch {
+      /* the note is a nicety for the auto-reply */
+    }
     console.log(`[WHATSAPP] message sent for owner ${ownerId}`);
     return true;
   } catch {
@@ -436,7 +450,7 @@ async function sendForOwner(ownerId, chatId, text) {
 // canonical WhatsApp id first (getNumberId) — sending to a raw "<digits>@c.us"
 // is what triggers "No LID for user" on the current WhatsApp Web; the resolved
 // id avoids it (and also confirms the number is actually on WhatsApp).
-async function sendMessageFor(ownerId, phone, text) {
+async function sendMessageFor(ownerId, phone, text, opts = {}) {
   const digits = toDigits(phone);
   if (!digits) return false;
   const s = getSession(ownerId);
@@ -450,7 +464,7 @@ async function sendMessageFor(ownerId, phone, text) {
   } catch {
     console.warn(`[WHATSAPP] recipient lookup failed for owner ${ownerId}`);
   }
-  return sendForOwner(ownerId, chatId, text);
+  return sendForOwner(ownerId, chatId, text, opts);
 }
 
 // Given candidate owner ids, return the first one whose WhatsApp session is
@@ -705,15 +719,34 @@ function initPersistedSessions() {
     .filter(Boolean);
   if (!owners.length) return;
   console.log(`[WHATSAPP] re-linking ${owners.length} persisted teacher session(s)`);
-  let started = 0;
-  for (const o of owners) {
-    if (started >= MAX_SESSIONS) {
-      console.warn(`[WHATSAPP] cap reached on boot — ${owners.length - started} session(s) will start lazily`);
-      break;
+  /*
+   * One at a time, the admin's numbers first (2026-10-13: three Chromiums
+   * starting at once on the 4 GB server, already deep in swap, left the
+   * admin's first number failing every start with "Target closed" until it
+   * gave up, while a teacher's unscanned session took the memory). Each next
+   * session starts WHATSAPP_BOOT_STAGGER_MS later.
+   */
+  const gap = Number(process.env.WHATSAPP_BOOT_STAGGER_MS ?? 20000);
+  const start = (order) => {
+    order.slice(0, MAX_SESSIONS).forEach((o, i) => {
+      setTimeout(() => {
+        if (!shuttingDown) initFor(o);
+      }, i * gap);
+    });
+    if (order.length > MAX_SESSIONS) {
+      console.warn(`[WHATSAPP] cap reached on boot — ${order.length - MAX_SESSIONS} session(s) will start lazily`);
     }
-    initFor(o);
-    started += 1;
-  }
+  };
+  const ids = [...new Set(owners.map((o) => o.split("__")[0]))].filter((id) => /^[0-9a-f]{24}$/i.test(id));
+  const lookup = User.find({ _id: { $in: ids }, role: "admin" }).select("_id").lean();
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 5000));
+  Promise.race([lookup, timeout])
+    .then((admins) => {
+      const isAdmin = new Set((admins || []).map((u) => String(u._id)));
+      const rank = (o) => (isAdmin.has(o.split("__")[0]) ? 0 : 1);
+      start([...owners].sort((a2, b2) => rank(a2) - rank(b2)));
+    })
+    .catch(() => start(owners));
 }
 
 // CR-117 — graceful shutdown for the optional WhatsApp subsystem. Prevents any new

@@ -2105,7 +2105,31 @@ const getOutreachStatus = asyncHandler(async (req, res) => {
     lastSentAt: settings.lastSentAt,
     waiting,
     reengage: await reengageStatusPart(),
+    waAutoReply: await waAutoReplyPart(),
   });
+});
+
+// The WhatsApp auto-reply's state for the admin panel (helper/waAutoReply).
+async function waAutoReplyPart() {
+  const ai = require("../helper/waAutoReply");
+  const s = await ai.getSettings({ fresh: true });
+  let repliedToday = null;
+  try {
+    repliedToday = await ai.repliesToday();
+  } catch {
+    repliedToday = null;
+  }
+  return { enabled: s.enabled, since: s.since ? new Date(s.since) : null, repliedToday, dailyMax: ai.LIMITS.DAILY_MAX };
+}
+
+// POST /api/users/outreach/wa-auto-reply/toggle — the support AI answering on
+// WhatsApp the teachers we wrote to first. Switching on starts from now.
+const toggleWaAutoReply = asyncHandler(async (req, res) => {
+  const ai = require("../helper/waAutoReply");
+  const current = await ai.getSettings({ fresh: true });
+  const next = typeof req.body?.enabled === "boolean" ? req.body.enabled : !current.enabled;
+  await ai.setEnabled(next);
+  res.json({ waAutoReply: await waAutoReplyPart() });
 });
 
 // POST /api/users/outreach/reengage/toggle — the second wave on/off. It shares
@@ -2311,5 +2335,6 @@ module.exports = {
   toggleOutreach,
   toggleReengage,
   toggleReengageEmail,
+  toggleWaAutoReply,
   unsubscribeEmail,
 };

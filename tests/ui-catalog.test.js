@@ -104,7 +104,8 @@ ok("a control only one layout has says so", /trash\.qaytar — «Qaytar» \(düy
 
 console.log("\nwired into the support chat");
 const src = fs.readFileSync(path.join(__dirname, "..", "services", "chatAssistant.js"), "utf8");
-ok("the controls that fit are handed to the AI", /const found = ui\.candidatesFor\(asked\);/.test(src) && /EKRAN ELEMENTLƏRİ/.test(src));
+// (On WhatsApp no guide can be shown, so the search is skipped there.)
+ok("the controls that fit are handed to the AI", /const found = whatsapp \? "" : ui\.candidatesFor\(asked\);/.test(src) && /EKRAN ELEMENTLƏRİ/.test(src));
 ok("the reply's steps are rebuilt from the catalogue", /ui\.fixSteps\(toPlainText\(text\)\)/.test(src));
 ok("no trace of the old fixed guides", !/guideCatalog|\[\[guide:/.test(src));
 const prompt = require("../services/chatAssistant").SYSTEM_PROMPT;

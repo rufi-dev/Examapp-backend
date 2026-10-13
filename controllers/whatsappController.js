@@ -58,7 +58,8 @@ const sendAdminUserMessage = asyncHandler(async (req, res) => {
     );
   }
 
-  const delivered = await sendMessageFor(ownerId, recipient.phone, message);
+  // Typed by the admin: the support AI stands back in this chat for a while.
+  const delivered = await sendMessageFor(ownerId, recipient.phone, message, { human: true });
   if (!delivered) {
     throw httpError(
       502,

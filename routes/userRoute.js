@@ -1,5 +1,5 @@
 const express = require('express')
-const { registerUser, loginUser, deviceLogin, forgetDevice, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserStorageAddon, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush, getOutreachStatus, toggleOutreach, toggleReengage, toggleReengageEmail, unsubscribeEmail, getSetupFunnel, getParentCode } = require('../controllers/userController')
+const { registerUser, loginUser, deviceLogin, forgetDevice, logoutUser, loginWithGoogle, loginWithCode, sendLoginCode, changePassword, resetPassword, sendVerificationEmail, forgotPasswordEmail, verifyUser, getUser, getUsers, updateUser, deleteUser, setUserPhone, impersonateUser, loginStatus, upgradeUser, getUserById, bulkUsers, teacherOverview, addAchivement, getAchivements, markOnboardingStep, onboardingReport, getMyStorage, setUserStorage, setUserStorageAddon, setUserPlan, setUserCredits, markAppInstalled, getPushPublicKey, subscribePush, unsubscribePush, getOutreachStatus, toggleOutreach, toggleReengage, toggleReengageEmail, toggleWaAutoReply, unsubscribeEmail, getSetupFunnel, getParentCode } = require('../controllers/userController')
 const { getProfileStats } = require('../controllers/profileStatsController')
 const { protect, adminOnly, teacherOnly } = require('../middleware/authMiddleware')
 const { refreshHandler, logoutAllHandler, requireSessionFlag } = require('../controllers/authSessionController')
@@ -57,6 +57,8 @@ router.get('/outreach/status', protect, adminOnly, getOutreachStatus)
 router.post('/outreach/toggle', protect, adminOnly, toggleOutreach)
 router.post('/outreach/reengage/toggle', protect, adminOnly, toggleReengage)
 router.post('/outreach/reengage/email/toggle', protect, adminOnly, toggleReengageEmail)
+// The support AI answering outreached teachers on WhatsApp (helper/waAutoReply).
+router.post('/outreach/wa-auto-reply/toggle', protect, adminOnly, toggleWaAutoReply)
 // "Buradan imtina edin" in an outreach email: signed per teacher, no login.
 router.post('/unsubscribe', resetLimiter, unsubscribeEmail)
 // Admin analytics: teacher-setup funnel (current-state snapshot) for İnkişaf tab.

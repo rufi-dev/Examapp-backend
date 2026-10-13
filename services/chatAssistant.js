@@ -307,7 +307,33 @@ function slipNote(slips) {
 // Generate a support reply text, or null if unavailable / nothing to say. Logs
 // failures so silent non-replies are visible, and which route answered, so a
 // strange reply can be traced to the model that wrote it.
-async function generateSupportReply(messages, adminId) {
+/*
+ * The same assistant on WhatsApp (helper/waAutoReply): a teacher we wrote to
+ * first has answered there. No picture guide can be shown, the message must
+ * read as a WhatsApp message, and our first message is the context.
+ */
+const whatsappNote = (ourMessage) => `KANAL: WHATSAPP. Bu söhbət müəllimin WhatsApp-ındadır, saytdakı söhbət deyil. Biz ona əvvəlcə yazmışıq, o isə cavab verib. Qaydalar:
+- Şəkilli bələdçi göstərə bilmirsən: [[steps]] YAZMA.
+- WhatsApp mesajı kimi qısa yaz: adətən 2–6 sətir. Addımları "1) ...", "2) ..." kimi ayrı sətirlərdə ver.
+- Ekranda yerini sözlə dəqiq de: menyunun hansı bölməsi, hansı düymə.
+- Addım-addım şəkillərlə görmək istəsə: examopia.com-a daxil olub sağ aşağıdakı «Söhbətlər» düyməsinə basmağı təklif et, orada göstərirsən.
+- Şifrə, kart nömrəsi kimi şəxsi məlumat istəmə.
+- Müəllim sadəcə "sağ olun", "ok", "👍" yazıbsa, bir qısa, səmimi cümlə ilə cavab ver; mövzunu uzatma.${
+  ourMessage ? `\n\nBİZİM İLK MESAJIMIZ (müəllim buna cavab verir): «${String(ourMessage).slice(0, 600)}»` : ""
+}`;
+
+// A reply made for WhatsApp: no guide markers; the app's «words» in WhatsApp bold.
+function forWhatsApp(text) {
+  return String(text || "")
+    .replace(/\[\[(?:steps|guide):[^\]]*\]\]/g, "")
+    .replace(/«([^«»\n]{1,60})»/g, "*$1*")
+    .replace(/^(Diqqət|Vacib|Qeyd):/gm, "*$1:*")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+async function generateSupportReply(messages, adminId, { channel = "app", context = "" } = {}) {
   const history = buildHistory(messages, adminId);
   if (!history.length || history[history.length - 1].role !== "user") return null;
 
@@ -346,10 +372,13 @@ async function generateSupportReply(messages, adminId) {
     .slice(-2)
     .map((h) => h.content)
     .join("\n");
-  const found = ui.candidatesFor(asked);
-  const system = found
-    ? `${SYSTEM_PROMPT}\n\nEKRAN ELEMENTLƏRİ (bu suala uyğun ekranlar və onlardakı idarəetmə elementləri; [[steps:…]] üçün YALNIZ bu ID-lər):\n${found}`
-    : `${SYSTEM_PROMPT}\n\nEKRAN ELEMENTLƏRİ: bu suala uyğun ekran tapılmadı, [[steps]] yazma.`;
+  const whatsapp = channel === "whatsapp";
+  const found = whatsapp ? "" : ui.candidatesFor(asked);
+  const system = whatsapp
+    ? `${SYSTEM_PROMPT}\n\n${whatsappNote(context)}`
+    : found
+      ? `${SYSTEM_PROMPT}\n\nEKRAN ELEMENTLƏRİ (bu suala uyğun ekranlar və onlardakı idarəetmə elementləri; [[steps:…]] üçün YALNIZ bu ID-lər):\n${found}`
+      : `${SYSTEM_PROMPT}\n\nEKRAN ELEMENTLƏRİ: bu suala uyğun ekran tapılmadı, [[steps]] yazma.`;
 
   let text = await ask(system);
   // One rewrite when the reply slipped into Turkish; the cleaner of the two wins.
@@ -361,7 +390,7 @@ async function generateSupportReply(messages, adminId) {
   }
 
   // Steps rebuilt from the catalogue: unknown IDs go, the way to each screen is added.
-  const clean = ui.fixSteps(toPlainText(text));
+  const clean = whatsapp ? forWhatsApp(toPlainText(text)) : ui.fixSteps(toPlainText(text));
   return clean || null;
 }
 
@@ -387,4 +416,4 @@ async function replyOnApi(history, system = SYSTEM_PROMPT) {
   return text;
 }
 
-module.exports = { isChatAiEnabled, generateSupportReply, SYSTEM_PROMPT, turkishSlips, buildHistory };
+module.exports = { isChatAiEnabled, generateSupportReply, SYSTEM_PROMPT, turkishSlips, buildHistory, forWhatsApp, whatsappNote };
