@@ -68,6 +68,8 @@ async function main() {
   const a = await patch({ assistantEnabled: true });
   const afterPref = await User.findById(user._id).lean();
   ok("a save without the profile fields leaves them alone", a.status === 200 && afterPref.bio === "Riyaziyyatı sevirəm" && afterPref.photo.includes("cloudinary") && afterPref.phone === "+994501112233", JSON.stringify(afterPref));
+  // Retired 2026-10-13: a cached old page may still send `true`; it stays off.
+  ok("the retired AI assistant cannot be switched back on", afterPref.assistantEnabled !== true, String(afterPref.assistantEnabled));
 
   const b = await patch({ name: "Aysel Məmmədova", phone: "+994501112233", bio: "", photo: "", grade: "9" });
   const cleared = await User.findById(user._id).lean();

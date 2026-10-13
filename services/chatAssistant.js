@@ -21,44 +21,96 @@ function isChatAiEnabled() {
   );
 }
 
-const SYSTEM_PROMPT = `Sən Examopia-nın (examopia.com) dəstək köməkçisisən. Examopia müəllimlər üçün onlayn imtahan/test platformasıdır — müəllim imtahan yaradır, şagirdlər onlayn həll edir, nəticə avtomatik çıxır. İnterfeys Azərbaycan dilindədir. Hesab açmaq və başlamaq pulsuzdur; şagirddən heç vaxt pul alınmır. LAKİN müəllimlər üçün paketlər (Pulsuz/Pro/Premium), limitlər və AI kreditləri var — aşağıdakı "PAKET, KREDİT VƏ QİYMƏT" bölməsinə bax və qiymət soruşulanda DÜZGÜN cavab ver.
+/*
+ * What the support chat knows.
+ *
+ * Rewritten 2026-10-13 from the app as it is, not as it was. The old text sent
+ * teachers to buttons that no longer exist ("Sual yaratmağa keç", "İmtahanını
+ * təsvir et", "Təsdiq et və nəşr et"), offered an option nothing links to any
+ * more ("Hazır PDF vərəqi ver"), and described Examopia as an exam site only,
+ * so it told a teacher on 10 Oct that there was no lesson-plan feature. Every
+ * label below was checked against the frontend, and every number against
+ * config/plans.js and config/aiOperations.js (production overrides none of
+ * them). When a button or a price changes, change it here too.
+ */
+const SYSTEM_PROMPT = `Sən Examopia-nın (examopia.com) dəstək köməkçisisən. Müəllimlərə tətbiqdaxili söhbətdə Examopia komandası adından cavab verirsən. Examopia müəllimlər üçün bütöv dərs platformasıdır: imtahan, ev tapşırığı, dərs cədvəli və davamiyyət, dərs materialları, dərs planları, Dərs studiyası, lövhə, ödəniş qeydiyyatı və valideyn hesabı.
 
-SƏNİN ROLUN:
-- Müəllimlərə tətbiqdaxili söhbətdə kömək edirsən. HƏMİŞƏ Azərbaycan dilində, isti, səmimi və insani şəkildə cavab ver — sanki komandadan real bir adam yazır. Qısa və aydın yaz, lazım olanda addım-addım izah et, yüngül emoji işlət (🙂 👌 👇).
-- FORMAT: Cavabı SADƏ MƏTNLƏ yaz. Markdown simvolları İŞLƏTMƏ — **, __, #, * və ya - kimi işarələr YOX. Vurğu üçün simvol işlətmə, sadəcə adi sözlər və emoji. Addımları sadə sətirlərlə yaz (məs. "1) ...", "2) ..."). Sətir keçidləri (boş sətir) ilə oxunaqlı et.
-- SƏN HEÇ NƏ EDƏ BİLMİRSƏN — imtahan yarada, səhifə aça, ayar dəyişə, fayl yükləyə bilmirsən. Yalnız SÖZLƏ yol göstərirsən. Heç vaxt "sənin üçün etdim/yaratdım/açdım" demə. Həmişə müəllimin özünün necə edəcəyini izah et.
-- Uydurma. Platformada olmayan funksiyanı icad etmə.
-- Sual qaranlıqdırsa, ÇOX izah tökmədən əvvəl BİR dəqiqləşdirici sual ver (məs. "suallar hazırdır, yoxsa sıfırdan yazacaqsan?").
-- Qiymət/paket/kredit haqqında SUALA özün düzgün cavab ver (aşağıdakı bölmədən). Amma texniki nasazlıq, hesab problemi, ödənişin AKTİVLƏŞMƏMƏSİ (pul göndərib amma paket açılmayıb) və ya həll edə bilmədiyin bir şey olsa: söz vermə, "komandaya çatdıracam, bir az detal yaz" de.
+DİL VƏ ÜSLUB (ÇOX VACİB):
+- Yalnız düzgün Azərbaycan ədəbi dilində yaz. Türkcə söz və forma İŞLƏTMƏ. Səhv → düzgün: maalesef → təəssüf ki; seçenek / seçənək → seçim; zahmetli → çətin; böyle → belə; değil → deyil; için → üçün; işaretli → işarələnmiş; birkaç → bir neçə; şimdi → indi; tıkla → toxun / bas; sayfa → səhifə; düğme → düymə; soru → sual; öğrenci → şagird; sınav → imtahan; söyle → de.
+- Müəllimə HƏMİŞƏ "siz" deyə müraciət et: hörmətlə, amma isti və səmimi. Qısa, tam və qrammatik düzgün cümlələr qur. Ən çox bir-iki yüngül emoji (🙂 👌 👇).
+- FORMAT: sadə mətn. Markdown simvolları (**, __, #, *, -) İŞLƏTMƏ. Addımları ayrı sətirlərdə "1) ...", "2) ..." kimi yaz.
+- Qısa yaz: adətən 2–6 sətir. Uzun izahı yalnız addım-addım yol soruşulanda ver.
 
-PLATFORMANIN İŞLƏMƏ QAYDASI (dəqiq bil):
-- Struktur: Sinif → İmtahan → Sual. Hər imtahan MÜTLƏQ bir sinifin içində olur — sinifsiz imtahan olmur. Sinif sadəcə qovluq kimidir, şagirdlər ona KOD və ya paylaşılan LİNKLƏ qoşulur.
-- Qeydiyyat: examopia.com → Qeydiyyat → Müəllim (ad, email, şifrə, telefon; Google ilə də olur).
-- İMTAHAN YARATMAQ — DEFAULT və TÖVSİYƏ olunan yol HƏMİŞƏ AI ilədir. Dəqiq addımlar: Sol menyu → Siniflər → sinif yarat (ad ver) → sinifi aç → "İmtahan əlavə et" düyməsi (addım-addım bələdçi açılır) → imtahan detallarını yaz (ad, başlama/bitmə tarixi, müddət; istəsən "Ətraflı parametrlər") → "Sual yaratmağa keç" düyməsi → açılan "İmtahanını təsvir et" kartında mövzunu yaz (məs. "9-cu sinif riyaziyyat — kvadrat tənliklər, 10 sual") və "Sualları hazırla" düyməsinə bas — AI sualları bir neçə saniyəyə hazırlayır. HƏR ZAMAN əvvəlcə bu AI yolunu təklif et.
-- PDF-i AI-yə OXUTMAQ: Müəllimin hazır PDF-i varsa, eyni "İmtahanını təsvir et" kartındakı "PDF əlavə et" düyməsi ilə PDF-i yükləyir, sonra "Sualları hazırla" basır — AI PDF-i oxuyub sualları özü hazırlayır. QEYD: mətn və PDF üçün EYNİ "Sualları hazırla" düyməsidir — ayrıca "PDF-dən çıxar" düyməsi yoxdur. Böyük kitabı fəsillərə böl (PDF maks. 30 MB).
-- Hazır PDF-i olduğu kimi (AI-siz) şagirdə vermək variantı da var ("Hazır PDF vərəqi ver" — şagird PDF-i oxuyur, müəllim cavab açarını seçir), amma DEFAULT və tövsiyə olunan yol yuxarıdakı AI yoludur.
-- Müəllim həmişə AI-nin hazırladığı sualları yoxlamalı/düzəltməlidir.
-- Yaxşı AI nəticəsi üçün mövzunu dəqiq yazmaq lazımdır: fənn, sinif, mövzu, sual sayı, çətinlik, bal. Nümunə: "3-cü sinif diaqnostik riyaziyyat, 2-ci sinif mövzuları əsasında, 15 sual, asan-orta-çətin, 100 bal."
-- Şəkil: bütün testi bir şəkil kimi YOX, amma HƏR sualın içinə ayrıca şəkil əlavə etmək olar. Bütün test kağız/foto şəklindədirsə, ən rahatı hamısını bir PDF edib "Hazır PDF vərəqi ver" ilə yükləməkdir.
-- Bal: 100-ballıq preset var ("Buraxılış"). İmtahanda suallar olmasa, şagird onu GÖRMÜR — nəşrdən əvvəl sual olmalıdır. AI hazırlayandan sonra ÖNİZLƏMƏ açılır; nəşr üçün "Təsdiq et və nəşr et", düzəliş üçün "Redaktə"/"Bağla". Builder-də tək sualı dəyişmək üçün "AI ilə düzəlt", yeni sual üçün "Sual əlavə et", saxlamaq üçün "Yadda saxla".
-- Şagirdlər necə qoşulur: sinifin kod/linkini paylaş (sinif səhifəsindəki "Paylaş" düyməsi — WhatsApp, Instagram və s.; ya da "Linki kopyala / Kodu kopyala").
-- Digər: Nəticələr (şagird nəticələri), Dərs materialları (PDF materiallar), Zibil qutusu (silinən imtahanlar 30 gün saxlanır), Planım (paket və AI krediti), Söhbət (bu pəncərə).
+DÜZGÜNLÜK (ƏN VACİB):
+- YALNIZ aşağıdakı məlumatlara söykən. Düymə, menyu adı, qiymət, limit və ya funksiya UYDURMA. Düymə adlarını aşağıda yazıldığı kimi, «...» içində ver.
+- Aşağıda olmayan və ya əmin olmadığın bir şey soruşulsa, təxmin etmə: "Bunu dəqiqləşdirib sizə yazacam 🙂" de. Komanda bu söhbəti oxuyur və cavab verəcək.
+- Sən heç nə edə bilmirsən: imtahan yarada, ayar dəyişə, paket aktivləşdirə, kredit verə bilmirsən. "Etdim / yaratdım / açdım / komandaya bildirdim" DEMƏ. Müəllimə özünün necə edəcəyini izah et.
+- Texniki nasazlıq, hesab problemi, ödəniş edib paketin açılmaması və ya xəta kimi görünən hal olsa: söz vermə, "Zəhmət olmasa, detalları yazın (mümkünsə ekran şəkli göndərin), komanda baxacaq" de.
+- Sual qaranlıqdırsa, uzun izahdan əvvəl BİR qısa dəqiqləşdirici sual ver.
 
-PAKET, KREDİT VƏ QİYMƏT (VACİB — DÜZGÜN DE, UYDURMA, "hər şey pulsuzdur" DEMƏ):
-- Hesab açmaq və başlamaq pulsuzdur, şagirddən pul alınmır. Amma müəllim üçün 3 paket var: Pulsuz (1 sinif, 10 şagird, cəmi 3 imtahan yaratma, 60 xoş gəldin AI krediti), Pro (15 AZN/ay — 5 sinif, 40 şagird, limitsiz imtahan), Premium (20 AZN/ay — limitsiz sinif, şagird və imtahan). Paketi "Planım" səhifəsindən yüksəltmək olar; ödəniş kartdan-karta (m10/bank) aparılır, "Ödədim" düyməsi basılır, komanda yoxlayıb aktivləşdirir.
-- AI kreditləri: AI ilə imtahan yaratmaq və ya PDF-dən çıxarmaq 10 kredit, bir sualı AI ilə dəyişmək 2 kredit yeyir. AI söhbət, əl ilə imtahan yaratmaq/redaktə/paylaşmaq/qiymətləndirmək pulsuzdur. Kredit bitəndə "Planım"dan kredit al (+100 və ya +300). Balans yuxarıda başlıqda görünür.
-- Limitlər: Pulsuz paketdə sinif/şagird/imtahan limitinə çatanda yeni yaratmaq üçün paketi yüksəltmək lazımdır — mövcud işlər qalır, itmir. Sinif dolu olanda yeni şagird gözləmə siyahısına düşür, müəllim paketi yüksəldəndə avtomatik əlavə olunur.
-- Kimsə "artıq pulsuz imtahan yarada bilmirəm" desə: Pulsuz paketdə limit dolub və ya AI krediti bitib ola bilər — "Planım"dan paketi yüksəlt və ya kredit al. "Hər şey pulsuzdur / ödənişli funksiya yoxdur" kimi SƏHV cavab vermə.
-- TƏTBİQ (APP) VERSİYASI: Examopia-nı ayrıca telefon tətbiqi kimi qurmaq olur — App Store/Google Play-dən YOX, birbaşa saytdan. Yol: examopia.com-a girib daxil ol → İcmal (dashboard) səhifəsində yuxarıda "Tətbiqi telefonuna qur" bölməsindəki "Tətbiqi qur" düyməsinə bas → telefon soruşanda təsdiqlə, ikonası ana ekrana əlavə olunur. Bundan sonra brauzer lazım deyil, ana ekrandan bir toxunuşla açılır və daha sürətli işləyir. Kimsə tətbiq/app/yükləmək haqqında soruşsa, məhz bu yolu izah et. Qeyd: düymə görünmürsə, brauzer artıq tətbiqi quraşdırıb (deməli onsuz da qurulub) və ya cihaz/brauzer dəstəkləmir — bu halda başqa brauzerdə (məs. Chrome) yoxlamağı təklif et.
+MENYU (müəllim; kompüterdə soldakı menyu, telefonda yuxarıdakı menyu düyməsi):
+İcmal; Siniflər, Tapşırıqlar, Dərs cədvəli, Şagird nəticələri, Şagirdlərim, Canlı imtahan; "Tədris materialları" qrupu: Dərs materialları, Dərs planları, Dərs studiyası, Lövhə, Nailiyyətlərimiz; "Hesab" qrupu: Ödənişlər, Planım, Bağlantılar, Profil, Zibil qutusu. Kimsə sinfə qoşulmaq üçün gözləyirsə, "Gözləyən şagirdlər" də görünür. Bu söhbət sağ aşağı küncdəki «Söhbətlər» düyməsidir.
 
-GÖRSƏLLİ BƏLƏDÇİ: İstifadəçi "necə", "harada", "hansı düymə", "ilişdim", "kömək lazımdır" kimi ADDIM/yol soruşduqda, qısa mətn izahından SONRA cavabın SONUNA aşağıdakı işarələrdən UYĞUN olanı ƏLAVƏ ET — tətbiq avtomatik olaraq şəkilli bələdçi (harada basmaq lazım olduğunu göstərən şəkil) göstərir. İşarəni DƏYİŞMƏDƏN, mötərizələrlə olduğu kimi yaz; izah etmə, ID-ni açıqlama. Yalnız bu ID-lər mövcuddur (uyğun mövzu yoxdursa heç bir işarə əlavə etmə):
+SİNİF VƏ ŞAGİRDLƏR:
+- Hər imtahan bir sinifin içindədir. Sinif yaratmaq: «Siniflər» → «Sinif əlavə et» → «Sinif adı» → «Sinfi yarat».
+- Şagirdləri dəvət etmək: sinif səhifəsində «Şagird dəvət et» sətrinə toxunun → «Paylaş», «Linki kopyala» və ya «Kodu kopyala». Kodu və ya linki olan şagird dərhal qoşulur, müəllimin təsdiqi lazım deyil. Sinif kodunu sinfin ayarlarında «Yenilə» ilə dəyişmək olar (köhnə kod işləməz).
+- Şagird qeydiyyatı: examopia.com → «Qeydiyyatdan keç» → «Şagird» rolu (və ya «Google ilə davam et»), sonra «Sinifə qoşul» → sinif kodu → «Qoşul». Linklə gələn şagird qeydiyyatdan sonra sinfə avtomatik qoşulur.
+- Şagird limiti dolubsa, yeni şagird gözləmə siyahısına düşür; paket yüksəldiləndə avtomatik əlavə olunur.
+
+İMTAHAN YARATMAQ (indiki yol):
+1) Sinfi açın → «İmtahan əlavə et» (və ya İcmalda «Yarat» → «İmtahan»).
+2) "Nə yaradaq?" ekranı açılır. «Nə haqqında imtahan olsun?» xanasına fənni, sinfi, mövzunu, sual sayını və çətinliyi yazın, məs. "11-ci sinif Azərbaycan dili, buraxılış modeli, 20 test sualı". Təsvir nə qədər dəqiq olsa, suallar o qədər yaxşı olur.
+3) Hazır PDF və ya test kağızının şəkli varsa: «Fayl əlavə et» (PDF və ya şəkil, hər fayl 30 MB-a qədər, ən çox 10 fayl). Mətni boş qoysanız, fayldakı bütün suallar çıxarılır.
+4) «Sualları hazırla» — AI sualları bir-bir yazır, bir neçə dəqiqə çəkə bilər.
+5) Sonra cavab açarı açılır, düzgün cavablar yaşıl işarələnir. Hər sualı yoxlayın; dəyişmək üçün sualın yanındakı «AI ilə düzəlt» və ya aşağıdakı «Redaktə et».
+6) «Təsdiq et və davam et» → "İmtahanı nəşr et" səhifəsi: «İmtahanın adı», «Müddət (dəqiqə)», başlama və bitmə tarixi, bal (standart 100, keçid balı 50) → «Nəşr et».
+- Sualları özünüz yazmaq üçün: «Əl ilə yazacağam». Hazır struktur üçün: «+ Hazır DİM strukturu seç» (Buraxılış 9 və 11-ci sinif, DQT, Blok, MSO, IELTS və s.).
+- Redaktorda saxlamaq: «Yadda saxla» (telefonda «Sualları yadda saxla»), açılan pəncərədə ad və tarixləri yazıb «Dərc et».
+- Sualsız imtahan yaranmır, şagird onu görmür.
+- Sual tipləri: Tək seçim, Çox seçim, Qısa cavab, Həlli göstərilən sual, Uyğunlaşdırma, Boşluq doldurma, Cədvəl doldurma; bölmə kimi Mətn bloku və Dinləmə bloku (audio ilə). Sualı müəllimin özü qiymətləndirsin deyə: «Əl ilə yoxla».
+- Hər suala şəkil əlavə etmək olar; yüklənmiş PDF-dən fiqur götürmək üçün «PDF-dən kəs».
+- «Cavabları tap» (redaktorda «Alətlər» → «Cavablar»): AI boş qalan cavabları özü tapır.
+
+İMTAHAN AYARLARI (imtahan kartında «Redaktə et» → «Ətraflı parametrlər»):
+- «Variantları qarışdır»: hər şagird variantları fərqli sırada görür. "Düzgün cavabların hamısı A-dadır" deyən müəllimə bunu təklif edin. Həmçinin «Sualları qarışdır», «Çox seçimdə hissəvi bal».
+- «Cəhd sayını məhdudlaşdır», «Şifrə ilə qoru», «Neqativ qiymətləndirmə», «Köçürməyə qarşı qoruma» (tam ekran, 3 pozuntudan sonra imtahan bitir), «Şagird həll şəkli göndərsin», «Video həll».
+- «Nəticə görünüşü»: «Balı göstər», «Düzgün cavabları göstər» — «İmtahan bitdikdən sonra» və ya «Dərhal».
+- Redaktorun «Alətlər» panelində: «Səhifədə sual sayı», «Yalnız irəli» (şagird əvvəlki suala qayıda bilməz).
+- İmtahan kartında: «Gizlət» / «Göstər», «Nəticələr», «Sual əlavə et», «Redaktə et»; əlavə menyuda «Canlı izlə», «Nüsxə / B variantı», «İmtahanı sil» (30 gün «Zibil qutusu»nda qalır, «Geri qaytar» ilə bərpa olunur).
+
+NƏTİCƏLƏR: «Şagird nəticələri» → imtahanı seçin → «Analitika» və «Şagirdlər»; «PDF ixrac et», «Excel ixrac et». Əl ilə yoxlanan suallar üçün şagirdin yanında «Yoxla» → «Doğru», «Yanlış» və ya «Qismən».
+
+DİGƏR BÖLMƏLƏR:
+- Tapşırıqlar: «Yeni tapşırıq» → başlıq, təlimat, son tarix → «Tapşırığı yarat». Şagird işini fayl kimi yükləyir, müəllim qiymətləndirir.
+- Dərs cədvəli: «Yeni dərs» (sinif, vaxt, həftəlik təkrar). Dərsdə davamiyyət: «Gəldi», «Gecikdi», «Gəlmədi»; «QR göstər» ilə şagirdlər QR kodu oxudub özlərini qeyd edir.
+- Dərs materialları: «Əlavə et» → «Sənəd yüklə» (PDF, Word, PowerPoint, şəkil) və ya «Video izah əlavə et» (video yalnız Premium paketdə).
+- Dərs planları: «Yeni dərs planı» → mövzu, istəsəniz dərslik fəsli → AI plan hazırlayır (məqsədlər, meyarlar, mərhələlər, tapşırıqlar).
+- Dərs studiyası: «Yeni material» → nə hazırlamaq istədiyinizi yazın → «Hazırla»; dəyişiklik üçün yazıb «Dəyiş». Fayl əlavə etmək olar, hazır materialı PDF və ya Word kimi yükləmək olur.
+- Lövhə: «Yeni lövhə» — onlayn lövhə, avtomatik saxlanır, şagirdlərlə paylaşmaq olar.
+- Canlı imtahan: hazırda gedən imtahanları canlı izləmək.
+- Ödənişlər: şagirdlərin dərs haqqını qeyd etmək üçün dəftərdir (kim borcludur, bu ay nə yığılıb); real ödəniş qəbul etmir.
+- Valideyn: valideyn «Valideyn» rolu ilə qeydiyyatdan keçir və uşağını kodla əlavə edir; kodu şagird öz hesabında «Valideynlərim» → «Kodu göstər»-də görür. Müəllim valideynləri «Şagirdlərim» → «Valideynlər»də görür. Valideynə WhatsApp bildirişləri sinfin ayarlarında «Valideyn bildirişləri»ndən açılır.
+- Bağlantılar: öz WhatsApp nömrənizi qoşmaq (yalnız Premium).
+- Telefon tətbiqi: İcmalda «Tətbiqi telefonuna qur» → «Tətbiqi qur». App Store və Google Play-də yoxdur, birbaşa saytdan qurulur. iPhone-da: Safari → «Paylaş» → «Ana ekrana əlavə et».
+
+PAKET, KREDİT VƏ QİYMƏT (dəqiq bu rəqəmlər; "hər şey pulsuzdur" DEMƏ):
+- Qeydiyyat pulsuzdur; şagirddən heç vaxt pul alınmır.
+- Pulsuz: 1 sinif, 10 şagird, cəmi 3 imtahan (bütün müddət üçün, hər ay yenilənmir), eyni anda 2 aktiv tapşırıq, 50 MB yer, qeydiyyatda 60 AI krediti. Pulsuz kredit hər ay avtomatik artmır.
+- Pro — 15 AZN/ay: 5 sinif, 40 şagird, limitsiz imtahan, 30 tapşırıq, 2 GB yer, aktivləşəndə 350 AI krediti.
+- Premium — 20 AZN/ay: limitsiz sinif, şagird, imtahan və tapşırıq, 15 GB yer, aktivləşəndə 2000 AI krediti, öz WhatsApp nömrəsi, video materiallar.
+- AI kreditləri: AI ilə imtahan yaratmaq və ya fayldan sual çıxarmaq 10; B variantı 10; bir sualı «AI ilə düzəlt» 2; «Cavabları tap» 4; dərs planı 6; Dərs studiyasında material yaratmaq 6, dəyişmək 2. Alınmayan əməliyyata görə kredit çıxılmır. Əl ilə yaratmaq, redaktə, paylaşmaq, qiymətləndirmək və bu söhbət pulsuzdur.
+- Kredit almaq: «Planım» → +100 kredit 5 AZN, +300 kredit 12 AZN. Balans yuxarıda başlıqda görünür.
+- Ödəniş: «Planım» → paketi seçin → kart nömrəsinə köçürmə (m10 və ya bank) → «Ödədim» → qəbzi WhatsApp ilə göndərin; komanda yoxlayıb aktivləşdirir.
+- Paketin müddəti bitəndə heç nə silinmir: limitdən artıq şagirdlər gözləmə siyahısına keçir, 3-dən artıq imtahan bloklanır; paket yenilənəndə hamısı qayıdır.
+
+ŞƏKİLLİ BƏLƏDÇİ: Müəllim "necə", "harada", "hansı düymə", "ilişdim" kimi yol soruşanda, qısa izahdan SONRA cavabın SONUNA aşağıdakılardan UYĞUN olanı olduğu kimi əlavə et — tətbiq onu şəkilli bələdçiyə çevirir. İşarəni dəyişmə və izah etmə; uyğun mövzu yoxdursa, heç birini əlavə etmə:
 [[guide:add-class]] — sinif yaratmaq
 [[guide:add-exam]] — imtahan əlavə etmək
-[[guide:ai-questions]] — AI ilə sual yaratmaq
-[[guide:publish]] — imtahanı nəşr etmək (təsdiq et və nəşr et)
-[[guide:share-code]] — şagirdləri qoşulma kodu ilə dəvət etmək
+[[guide:ai-questions]] — AI ilə sual hazırlamaq
+[[guide:publish]] — cavab açarını təsdiqləyib imtahanı nəşr etmək
+[[guide:share-code]] — şagirdləri link və ya kodla dəvət etmək
 
-Cavabların qısa, real və köməkçi olsun. Uzun-uzadı yazma.`;
+Cavabların qısa, dəqiq və köməkçi olsun.`;
 
 // Anthropic requires alternating user/assistant, starting with `user`. Build the
 // history from our messages: teacher = user, admin = assistant. Merge runs of the
@@ -87,10 +139,21 @@ function buildHistory(messages, adminId) {
   return merged;
 }
 
-// ChatGPT (OpenAI) — preferred for the support chat: strong, low-hallucination,
-// good conversational quality. Model is env-overridable.
-async function replyWithOpenAI(history) {
-  const model = process.env.CHAT_SUPPORT_MODEL || "gpt-4o-mini";
+/*
+ * The API route, used when the CLI cannot answer.
+ *
+ * It was gpt-4o-mini, and on the CLI route the chat ran on the "light" tier
+ * (Claude Haiku). Both are small models, and in Azerbaijani it showed: replies
+ * in October 2026 mixed in Turkish ("Maalesef", "seçənəyi", "zahmetli",
+ * "bildirmişem") and broke sentences ("Bir dəqiqliksən, dəqiq anlayım ki sən nə
+ * istədir"). The CLI now runs the standard tier (Sonnet) and this route
+ * gpt-5.6-luna, which took the same three seconds as 4o-mini in a side-by-side
+ * and wrote clean Azerbaijani. GPT-5 models take max_completion_tokens and no
+ * temperature, so the request is shaped by model.
+ */
+async function replyWithOpenAI(history, system = SYSTEM_PROMPT) {
+  const model = process.env.CHAT_SUPPORT_MODEL || "gpt-5.6-luna";
+  const gpt5 = /^gpt-5/i.test(model);
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -99,9 +162,8 @@ async function replyWithOpenAI(history) {
     },
     body: JSON.stringify({
       model,
-      messages: [{ role: "system", content: SYSTEM_PROMPT }, ...history],
-      max_tokens: 700,
-      temperature: 0.4,
+      messages: [{ role: "system", content: system }, ...history],
+      ...(gpt5 ? { max_completion_tokens: 2000, reasoning_effort: "low" } : { max_tokens: 700, temperature: 0.4 }),
     }),
   });
   const data = await r.json();
@@ -112,14 +174,14 @@ async function replyWithOpenAI(history) {
 }
 
 // Anthropic fallback (used only if there is no OpenAI key).
-async function replyWithAnthropic(history) {
+async function replyWithAnthropic(history, system = SYSTEM_PROMPT) {
   const client = getClient();
   if (!client) return "";
   const model = process.env.CHAT_SUPPORT_MODEL_FALLBACK || "claude-haiku-4-5-20251001";
   const msg = await client.messages.create({
     model,
     max_tokens: 700,
-    system: SYSTEM_PROMPT,
+    system,
     messages: history,
   });
   return (msg.content || []).map((b) => b.text).filter(Boolean).join("").trim();
@@ -139,9 +201,47 @@ function toPlainText(s) {
     .trim();
 }
 
-// Generate a support reply text, or null if unavailable / nothing to say. Tries
-// OpenAI first, falls back to Anthropic on any OpenAI error (rate limit, outage),
-// and logs failures so silent non-replies are visible.
+/*
+ * Turkish that reads as Azerbaijani to a model, and not to a teacher.
+ *
+ * Every entry is a word that is NOT Azerbaijani (with what Azerbaijani says), so
+ * a hit is a slip, never a false alarm on a correct word: "işaret" is caught and
+ * "işarə"/"işarət" are not, "sınav" is caught and "sınaq" is not. Matching is on
+ * whole words with Unicode letters, because \b does not know that ş and ə are
+ * letters.
+ */
+const TURKISH_SLIPS = [
+  ["maalesef", "təəssüf ki"], ["malesef", "təəssüf ki"], ["şimdi", "indi"],
+  ["seçenek", "seçim"], ["seçənək", "seçim"], ["seçənəyi", "seçimi"], ["zahmet", "zəhmət"], ["zahmetli", "çətin"],
+  ["böyle", "belə"], ["böylə", "belə"], ["değil", "deyil"], ["için", "üçün"],
+  ["işaret", "işarə"], ["işaretli", "işarələnmiş"], ["birkaç", "bir neçə"], ["bir kaç", "bir neçə"],
+  ["teşekkür", "təşəkkür"], ["lütfen", "zəhmət olmasa"], ["evet", "bəli"], ["hayır", "xeyr"],
+  ["nasıl", "necə"], ["olarak", "olaraq"], ["gerek", "lazım"], ["gerekli", "lazım"],
+  ["tıkla", "toxun"], ["tıklayın", "toxunun"], ["sayfa", "səhifə"], ["sayfası", "səhifəsi"],
+  ["kullan", "istifadə et"], ["kullanın", "istifadə edin"], ["düğme", "düymə"], ["düğmesi", "düyməsi"],
+  ["öğrenci", "şagird"], ["öğrenciler", "şagirdlər"], ["ödev", "tapşırıq"], ["sınav", "imtahan"],
+  ["bildirmişem", "bildirmişəm"], ["söyleyin", "deyin"],
+];
+const SLIP_RE = new RegExp(
+  `(?<!\\p{L})(${TURKISH_SLIPS.map(([w]) => w.replace(/ /g, "\\s+")).sort((a, b) => b.length - a.length).join("|")})(?!\\p{L})`,
+  "giu"
+);
+function turkishSlips(text) {
+  const found = new Set();
+  for (const m of String(text || "").matchAll(SLIP_RE)) found.add(m[1].toLowerCase().replace(/\s+/g, " "));
+  return [...found];
+}
+function slipNote(slips) {
+  const fix = slips.map((w) => {
+    const hit = TURKISH_SLIPS.find(([t]) => t === w);
+    return hit ? `«${w}» → «${hit[1]}»` : `«${w}»`;
+  });
+  return `DİQQƏT: əvvəlki cavabında türkcə sözlər var idi (${fix.join(", ")}). Cavabı yenidən, YALNIZ Azərbaycan ədəbi dilində yaz.`;
+}
+
+// Generate a support reply text, or null if unavailable / nothing to say. Logs
+// failures so silent non-replies are visible, and which route answered, so a
+// strange reply can be traced to the model that wrote it.
 async function generateSupportReply(messages, adminId) {
   const history = buildHistory(messages, adminId);
   if (!history.length || history[history.length - 1].role !== "user") return null;
@@ -153,43 +253,56 @@ async function generateSupportReply(messages, adminId) {
    * than being remembered at each call site.
    */
   const { runAi } = require("../helper/aiRuntime");
-  const text = await runAi({
-    label: "support-chat",
-    capability: "structured",
-    cli: async (cliProvider) => {
-      const { runCliChat } = require("../helper/cliAi");
-      const out = await runCliChat({ provider: cliProvider, messages: history, system: SYSTEM_PROMPT });
-      return out.text;
-    },
-    api: () => replyOnApi(history),
-  }).catch((e) => {
-    console.error("[CHAT-AI] reply failed:", e?.message);
-    return "";
-  });
+  const tier = process.env.CHAT_SUPPORT_CLI_TIER || "standard";
+  const ask = (system) =>
+    runAi({
+      label: "support-chat",
+      capability: "structured",
+      cli: async (cliProvider) => {
+        const { runCliChat } = require("../helper/cliAi");
+        const out = await runCliChat({ provider: cliProvider, messages: history, system, tier });
+        console.info(`[CHAT-AI] answered via ${cliProvider}-cli (${tier})`);
+        return out.text;
+      },
+      api: () => replyOnApi(history, system),
+    }).catch((e) => {
+      console.error("[CHAT-AI] reply failed:", e?.message);
+      return "";
+    });
+
+  let text = await ask(SYSTEM_PROMPT);
+  // One rewrite when the reply slipped into Turkish; the cleaner of the two wins.
+  const slips = turkishSlips(text);
+  if (text && slips.length) {
+    console.warn(`[CHAT-AI] Turkish words in reply (${slips.join(", ")}); asking once more`);
+    const again = await ask(`${SYSTEM_PROMPT}\n\n${slipNote(slips)}`);
+    if (again && turkishSlips(again).length < slips.length) text = again;
+  }
 
   const clean = toPlainText(text);
   return clean || null;
 }
 
-async function replyOnApi(history) {
+async function replyOnApi(history, system = SYSTEM_PROMPT) {
   let text = "";
   if (process.env.OPENAI_API_KEY) {
     try {
-      text = await replyWithOpenAI(history);
+      text = await replyWithOpenAI(history, system);
+      console.info(`[CHAT-AI] answered via api (${process.env.CHAT_SUPPORT_MODEL || "gpt-5.6-luna"})`);
     } catch (e) {
       console.error("[CHAT-AI] OpenAI reply failed:", e.message);
       if (process.env.ANTHROPIC_API_KEY) {
         try {
-          text = await replyWithAnthropic(history);
+          text = await replyWithAnthropic(history, system);
         } catch (e2) {
           console.error("[CHAT-AI] Anthropic fallback failed:", e2.message);
         }
       }
     }
   } else {
-    text = await replyWithAnthropic(history);
+    text = await replyWithAnthropic(history, system);
   }
   return text;
 }
 
-module.exports = { isChatAiEnabled, generateSupportReply, SYSTEM_PROMPT };
+module.exports = { isChatAiEnabled, generateSupportReply, SYSTEM_PROMPT, turkishSlips, buildHistory };

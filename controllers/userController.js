@@ -802,9 +802,10 @@ const updateUser = asyncHandler(async (req, res) => {
     if (typeof req.body.hideAssistant === "boolean") {
       user.hideAssistant = req.body.hideAssistant;
     }
-    // Opt in/out of the AI assistant (staff preference; off by default).
-    if (typeof req.body.assistantEnabled === "boolean") {
-      user.assistantEnabled = req.body.assistantEnabled;
+    // The AI assistant robot is retired (2026-10-13): it can be switched off but
+    // no longer on, so a cached old page showing the switch cannot bring it back.
+    if (req.body.assistantEnabled === false) {
+      user.assistantEnabled = false;
     }
     // Grade ("Sinif") — only when the client sends a non-empty value.
     if (typeof req.body.grade === "string" && req.body.grade.trim()) {
