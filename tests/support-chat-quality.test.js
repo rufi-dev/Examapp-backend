@@ -78,7 +78,7 @@ console.log("\nthe engine");
 ok("the CLI runs the standard tier (Sonnet), not Haiku", /const tier = process\.env\.CHAT_SUPPORT_CLI_TIER \|\| "standard"/.test(src) && /runCliChat\(\{ provider: cliProvider, messages: history, system, tier \}\)/.test(src));
 ok("the API fallback is gpt-5.6-luna, not gpt-4o-mini", /process\.env\.CHAT_SUPPORT_MODEL \|\| "gpt-5\.6-luna"/.test(src) && !/CHAT_SUPPORT_MODEL \|\| "gpt-4o-mini"/.test(src));
 ok("a GPT-5 request uses max_completion_tokens and no temperature", /gpt5 \? \{ max_completion_tokens: 2000, reasoning_effort: "low" \} : \{ max_tokens: 700, temperature: 0\.4 \}/.test(src));
-ok("a reply with Turkish words is rewritten once, and the cleaner one wins", /if \(text && slips\.length\)[\s\S]{0,260}const again = await ask\(`\$\{SYSTEM_PROMPT\}\\n\\n\$\{slipNote\(slips\)\}`\);\s*if \(again && turkishSlips\(again\)\.length < slips\.length\) text = again;/.test(src));
+ok("a reply with Turkish words is rewritten once, and the cleaner one wins", /if \(text && slips\.length\)[\s\S]{0,260}const again = await ask\(`\$\{system\}\\n\\n\$\{slipNote\(slips\)\}`\);\s*if \(again && turkishSlips\(again\)\.length < slips\.length\) text = again;/.test(src));
 ok("which model answered is logged", /\[CHAT-AI\] answered via \$\{cliProvider\}-cli/.test(src) && /\[CHAT-AI\] answered via api/.test(src));
 
 console.log(`\n${passed} passed, ${failed} failed`);

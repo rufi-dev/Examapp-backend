@@ -1,4 +1,5 @@
 const AnthropicPkg = require("@anthropic-ai/sdk");
+const guides = require("../helper/guideCatalog");
 const Anthropic = AnthropicPkg.default || AnthropicPkg;
 
 // Support auto-reply for the in-app chat. This is DELIBERATELY a plain text
@@ -103,12 +104,19 @@ PAKET, KREDİT VƏ QİYMƏT (dəqiq bu rəqəmlər; "hər şey pulsuzdur" DEMƏ)
 - Ödəniş: «Planım» → paketi seçin → kart nömrəsinə köçürmə (m10 və ya bank) → «Ödədim» → qəbzi WhatsApp ilə göndərin; komanda yoxlayıb aktivləşdirir.
 - Paketin müddəti bitəndə heç nə silinmir: limitdən artıq şagirdlər gözləmə siyahısına keçir, 3-dən artıq imtahan bloklanır; paket yenilənəndə hamısı qayıdır.
 
-ŞƏKİLLİ BƏLƏDÇİ: Müəllim "necə", "harada", "hansı düymə", "ilişdim" kimi yol soruşanda, qısa izahdan SONRA cavabın SONUNA aşağıdakılardan UYĞUN olanı olduğu kimi əlavə et — tətbiq onu şəkilli bələdçiyə çevirir. İşarəni dəyişmə və izah etmə; uyğun mövzu yoxdursa, heç birini əlavə etmə:
+ŞƏKİLLİ BƏLƏDÇİ: Müəllim "necə", "harada", "hansı düymə", "ilişdim" kimi yol soruşanda, qısa izahdan SONRA cavabın SONUNA aşağıdakılardan UYĞUN olanı olduğu kimi əlavə et. Tətbiq onu saytın REAL ekran şəkillərindən addım-addım bələdçiyə çevirir (telefonda telefon görünüşü, kompüterdə kompüter görünüşü, basılacaq yer işarələnmiş). İşarəni dəyişmə və izah etmə; ən çox BİR bələdçi əlavə et; uyğun mövzu yoxdursa, heç birini əlavə etmə:
 [[guide:add-class]] — sinif yaratmaq
-[[guide:add-exam]] — imtahan əlavə etmək
-[[guide:ai-questions]] — AI ilə sual hazırlamaq
+[[guide:add-exam]] — sinifdə imtahan əlavə etmək (sinfi açmaq → «İmtahan əlavə et» → mövzu → «Sualları hazırla»)
+[[guide:ai-questions]] — AI ilə sual hazırlamaq, PDF və ya şəkil əlavə etmək
 [[guide:publish]] — cavab açarını təsdiqləyib imtahanı nəşr etmək
 [[guide:share-code]] — şagirdləri link və ya kodla dəvət etmək
+[[guide:shuffle-options]] — variantları qarışdırmaq («Ətraflı parametrlər»)
+[[guide:homework]] — ev tapşırığı vermək
+[[guide:lesson-plan]] — dərs planı hazırlamaq
+[[guide:studio]] — Dərs studiyasında material hazırlamaq
+[[guide:plan-credits]] — paketi yüksəltmək və ya AI krediti almaq
+[[guide:install-app]] — tətbiqi telefona qurmaq
+[[guide:trash-restore]] — silinmiş imtahanı zibil qutusundan bərpa etmək
 
 Cavabların qısa, dəqiq və köməkçi olsun.`;
 
@@ -270,16 +278,29 @@ async function generateSupportReply(messages, adminId) {
       return "";
     });
 
-  let text = await ask(SYSTEM_PROMPT);
+  /*
+   * Which guides fit this question, found by keyword (helper/guideCatalog), so
+   * the AI is told by name instead of having to recall the list; and when it
+   * leaves a plain how-to question without one, the server adds the match.
+   */
+  const asked = history[history.length - 1].content;
+  const fits = guides.matchGuides(asked);
+  const system = fits.length
+    ? `${SYSTEM_PROMPT}\n\nBU SUALA UYĞUN ŞƏKİLLİ BƏLƏDÇİ (açar sözlərlə tapılıb): ${fits.map((g) => `[[guide:${g.id}]] — ${g.title}`).join("; ")}. Müəllim yol soruşursa, uyğun olanı cavabın sonuna əlavə et.`
+    : SYSTEM_PROMPT;
+
+  let text = await ask(system);
   // One rewrite when the reply slipped into Turkish; the cleaner of the two wins.
   const slips = turkishSlips(text);
   if (text && slips.length) {
     console.warn(`[CHAT-AI] Turkish words in reply (${slips.join(", ")}); asking once more`);
-    const again = await ask(`${SYSTEM_PROMPT}\n\n${slipNote(slips)}`);
+    const again = await ask(`${system}\n\n${slipNote(slips)}`);
     if (again && turkishSlips(again).length < slips.length) text = again;
   }
 
-  const clean = toPlainText(text);
+  let clean = toPlainText(text);
+  const auto = clean && !/\[\[guide:[a-z-]+\]\]/.test(clean) ? guides.autoGuide(asked) : null;
+  if (auto) clean = `${clean}\n\n[[guide:${auto}]]`;
   return clean || null;
 }
 
