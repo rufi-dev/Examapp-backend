@@ -2,6 +2,7 @@ const asyncHandler = require("express-async-handler");
 const mongoose = require("mongoose");
 const Conversation = require("../models/conversationModel");
 const Message = require("../models/messageModel");
+const Exam = require("../models/examModel");
 const Presence = require("../models/presenceModel");
 const User = require("../models/userModel");
 const { httpError } = require("../utils/appError");
@@ -50,10 +51,8 @@ const ping = asyncHandler(async (req, res) => {
   );
   const unread = await Message.countDocuments({ to: req.user._id, readAt: null });
 
-  // Reliable welcome: a capable teacher whose account has aged past the delay and
-  // who was never welcomed gets it here — surviving short sessions / reloads that
-  // the client-side timer misses. No-op for everyone else. Best-effort.
-  maybeSendWelcome(req.user._id).catch(() => {});
+  // The welcome is NOT sent from here any more: it waits for the dashboard (see
+  // `welcome` below), so it never lands in the middle of the first-exam steps.
 
   // Did someone ask us to pop a specific thread open? Return it once, then clear.
   let openConversationId = null;
@@ -211,10 +210,30 @@ const firstName = (s) => String(s || "").trim().split(/\s+/)[0] || "";
 // The hello in the chat bubble. Teachers see the chat as "Examopia Köməkçi"
 // (owner's call, 2026-10-13), so it introduces the assistant rather than signing
 // with the admin's name: a person's name under an AI header reads as a mix-up.
-const welcomeText = (teacher) =>
-  `Salam ${firstName(teacher)} 👋 Mən Examopia Köməkçisiyəm. Aramıza qoşulduğunuz üçün təşəkkür edirik! ` +
-  `İmtahan hazırlayarkən nəsə qarışıq gəlsə və ya istənilən sualınız olsa, buradan yazın — ` +
-  `bir neçə saniyəyə cavab verirəm. Uğurlar! 🙌`;
+//
+// It arrives on the dashboard after the first-exam steps, so it speaks to where
+// the teacher is: with an exam made, the step that makes it useful (inviting
+// students), shown with the real-screen guide; without one, how to make it.
+// The perks are the reasons teachers stay, said plainly.
+const WELCOME_PERKS =
+  "Examopia ilə bundan da çoxunu edə bilərsiniz:\n" +
+  "• İstənilən fəndən AI ilə bir neçə dəqiqəyə yeni imtahan, cavablar avtomatik yoxlanılır\n" +
+  "• Ev tapşırığı, dərs cədvəli və QR kodla davamiyyət — hamısı bir yerdə\n" +
+  "• Valideynlərə WhatsApp bildirişləri: nəticə, davamiyyət, tapşırıq\n" +
+  "• AI ilə dərs planı və çapa hazır iş vərəqləri";
+const WELCOME_ASK = "Sualınız olsa, elə buradan yazın — bir neçə saniyəyə cavab verirəm, lazım olsa ekran şəkilləri ilə göstərirəm 🙂";
+const welcomeText = (teacher, hasExam) => {
+  const hi = `Salam ${firstName(teacher)} 👋 Mən Examopia Köməkçisiyəm.`;
+  return hasExam
+    ? `${hi} İlk imtahanınız hazırdır — təbriklər! 🎉\n\n` +
+        "İndi ən vacib addım: sinif səhifəsindəki «Şagird dəvət et» ilə linki şagirdlərə göndərin. " +
+        "Onlar imtahanı yazan kimi cavablar avtomatik yoxlanılır, nəticələr sizə hazır gəlir.\n\n" +
+        `${WELCOME_PERKS}\n\n${WELCOME_ASK}\n\n[[guide:share-code]]`
+    : `${hi} Xoş gəldiniz! 🎉\n\n` +
+        "İlk imtahanınızı bir neçə dəqiqəyə hazırlaya bilərsiniz: sinfi açın, «İmtahan əlavə et»ə basın " +
+        "və mövzunu bir cümlə ilə yazın — qalanını AI edir.\n\n" +
+        `${WELCOME_PERKS}\n\n${WELCOME_ASK}\n\n[[guide:add-exam]]`;
+};
 
 // Post the admin's welcome into a (created-if-needed) chat with the teacher.
 // The caller is responsible for having ATOMICALLY claimed `chatWelcomedAt` first
@@ -236,7 +255,8 @@ async function deliverWelcome(teacherId, teacherName) {
     });
   }
 
-  const text = welcomeText(teacherName);
+  const hasExam = !!(await Exam.exists({ owner: teacherId, deletedAt: null }));
+  const text = welcomeText(teacherName, hasExam);
   const msg = await Message.create({
     conversation: conv._id,
     from: admin._id,
@@ -250,38 +270,12 @@ async function deliverWelcome(teacherId, teacherName) {
   return true;
 }
 
-// The welcome is DELAYED (feels human, not an instant autoresponder) but must be
-// RELIABLE — it can't depend on a teacher keeping one page open for a full minute.
-// Both the explicit /welcome call and the heartbeat below only fire it once the
-// account is at least this old, and both claim `chatWelcomedAt` atomically. A
-// teacher who left before it fired simply gets it on their next visit's heartbeat.
-const WELCOME_DELAY_MS = 60 * 1000;
-
-// Atomically claim + send the welcome to a CAPABLE teacher whose account has
-// aged past the delay. No-op (returns false) for anyone already welcomed, not a
-// capable teacher, or too new. Safe to call on every heartbeat.
-async function maybeSendWelcome(userId) {
-  const claimed = await User.findOneAndUpdate(
-    {
-      _id: userId,
-      role: "teacher",
-      teacherApproval: { $in: ["approved", "approved_legacy"] },
-      chatWelcomedAt: null,
-      createdAt: { $lte: new Date(Date.now() - WELCOME_DELAY_MS) },
-    },
-    { $set: { chatWelcomedAt: new Date() } },
-    { new: false }
-  ).select("name");
-  if (!claimed) return false;
-  return deliverWelcome(claimed._id, claimed.name);
-}
-
-// One-time welcome: when a teacher first lands in the app, drop a personal
-// message from the admin into a chat with them, so they know they can reach out.
-// Atomically claims `chatWelcomedAt` so concurrent calls send it exactly once.
+// One-time welcome: the page calls this when a teacher reaches the dashboard
+// after the first-exam steps. Atomically claims `chatWelcomedAt`, so it is sent
+// exactly once, ever, and only to a working teacher.
 const welcome = asyncHandler(async (req, res) => {
   const claimed = await User.findOneAndUpdate(
-    { _id: req.user._id, role: { $ne: "admin" }, chatWelcomedAt: null },
+    { _id: req.user._id, role: "teacher", teacherApproval: { $in: ["approved", "approved_legacy"] }, chatWelcomedAt: null },
     { $set: { chatWelcomedAt: new Date() } },
     { new: false }
   ).select("name");

@@ -116,6 +116,7 @@
   "tests/support-chat-quality.test.js",
   "tests/chat-typing.test.js",
   "tests/guide-catalog.test.js",
+  "tests/chat-welcome.test.js",
   "tests/answer-key-vision.test.js",
   "tests/question-figures.test.js",
   "tests/solve-answers-stream.test.js",

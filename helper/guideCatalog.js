@@ -27,23 +27,78 @@ const fold = (s) =>
     .replace(/ğ/g, "g")
     .replace(/\s+/g, " ");
 
+const CREATE = ["yarat", "yarad", "elave", "ac", "qur", "duzelt", "duzeld", "hazirla"];
+const EXAM = ["imtahan", "sinaq", "test"];
+const CHANGE = ["deyis", "yenile", "duzelt", "duzeld", "redakte", "duzelis", "teze"];
+const SEE = ["bax", "gor", "harda", "harada", "yukle", "tap"];
+
+// Order matters on a tie: the more specific guide comes first.
 const GUIDES = [
-  // Verbs appear in both stems: "yarat-" becomes "yarad-" before a vowel
-  // ("yaradım", "yaradın"), "düzəlt-" becomes "düzəld-".
-  { id: "add-class", title: "Sinif yaratmaq", groups: [["sinif", "sinf", "qrup"], ["yarat", "yarad", "elave", "ac", "qur", "duzelt", "duzeld"]] },
-  { id: "add-exam", title: "İmtahan əlavə etmək", groups: [["imtahan", "sinaq", "test"], ["yarat", "yarad", "elave", "ac", "qur", "duzelt", "duzeld", "hazirla"]] },
-  { id: "ai-questions", title: "AI ilə sual hazırlamaq", groups: [["sual"], ["ai", "suni", "hazirla", "yarat", "yarad", "pdf", "fayl", "sekil", "yukle"]] },
-  { id: "publish", title: "İmtahanı nəşr etmək", groups: [["nesr", "derc", "yayimla", "yayinla", "paylas"], ["imtahan", "sinaq", "test"]] },
-  { id: "share-code", title: "Şagirdləri dəvət etmək", groups: [["sagird", "telebe", "usaq"], ["devet", "qos", "elave", "link", "kod", "paylas", "gonder"]] },
-  { id: "shuffle-options", title: "Variantları qarışdırmaq", groups: [["variant", "cavab"], ["qaris", "sira", "hamisi a", "eyni yer", "eyni herf", "deyis"]] },
-  { id: "homework", title: "Ev tapşırığı vermək", groups: [["tapsiriq", "ev isi", "ev tapsirig", "odev"], ["ver", "yarat", "elave", "gonder", "paylas"]] },
+  /* classes and people */
+  { id: "add-class", title: "Sinif yaratmaq", groups: [["sinif", "sinf", "qrup"], CREATE] },
+  { id: "student-join", title: "Şagird sinfə necə qoşulur", groups: [["sagird", "usaq", "telebe"], ["qosulur", "qosulsun", "qosulmaq", "kodu hara", "sinfe nece gir"]] },
+  { id: "board-share", title: "Lövhəni paylaşmaq", groups: [["lovhe", "doska"], ["paylas", "gorsun", "goster", "sagird"]] },
+  { id: "share-code", title: "Şagirdləri dəvət etmək", groups: [["sagird", "telebe", "usaq"], ["devet", "link", "kod", "paylas", "gonder", "qos"]] },
+  { id: "class-settings", title: "Sinfin adını və kodunu dəyişmək", groups: [["sinif", "sinf"], ["adini", "adi", "kodu", "kod", "sekli", "qabig", ...CHANGE]] },
+  { id: "parent-notifications", title: "Valideynlərə WhatsApp bildirişləri", groups: [["valideyn", "ana", "ata"], ["bildiris", "mesaj", "whatsapp", "vatsap", "xeber"]] },
+  { id: "delete-class", title: "Sinfi silmək", groups: [["sinif", "sinf"], ["sil", "legv et"]] },
+  { id: "students", title: "Şagirdin şifrəsini dəyişmək", groups: [["sagird", "usaq", "telebe"], ["sifre", "parol"]] },
+  { id: "remove-student", title: "Şagirdi sinifdən çıxarmaq", groups: [["sagird", "usaq", "telebe"], ["cixar", "uzaqlasdir", "sil"]] },
+  { id: "add-parent", title: "Valideyn hesabı yaratmaq", groups: [["valideyn"], ["hesab", "elave", "qos", "yarat", "yarad"]] },
+  /* exams: creating */
+  { id: "add-exam", title: "İmtahan əlavə etmək", groups: [EXAM, CREATE] },
+  { id: "ai-questions", title: "AI ilə sual hazırlamaq", groups: [["sual"], ["ai", "suni", "hazirla", "yarat", "yarad", "pdf", "fayl", "yukle", "cixar"]] },
+  { id: "dim-preset", title: "Hazır DİM strukturu", groups: [["dim", "buraxilis", "mso", "dqt", "blok", "ielts", "struktur", "sablon"]] },
+  { id: "publish", title: "İmtahanı nəşr etmək", groups: [["nesr", "derc", "yayimla", "yayinla"], EXAM] },
+  { id: "ai-fix", title: "Bir sualı AI ilə dəyişmək", groups: [["sual"], ["deyis", "duzelt", "duzeld", "basqa", "yeniden yaz"]] },
+  { id: "manual-question", title: "Sualı əl ilə yazmaq", groups: [["sual"], ["el ile", "elle", "ozum", "tipini"]] },
+  { id: "question-image", title: "Suala şəkil əlavə etmək", groups: [["sekil", "foto", "diaqram", "fiqur", "resm"], ["sual", "suala", "variant"]] },
+  { id: "find-answers", title: "Cavabları AI ilə tapmaq", groups: [["cavab"], ["tap", "avtomatik", "doldur", "ai"]] },
+  /* exams: settings and card */
+  { id: "shuffle-options", title: "Variantları qarışdırmaq", groups: [["variant", "cavab"], ["qaris", "sira", "hamisi a", "hamsi a", "a variant", "eyni yer", "eyni herf", "eyni variant"]] },
+  { id: "exam-password", title: "İmtahana şifrə qoymaq", groups: [EXAM, ["sifre", "parol"]] },
+  { id: "exam-attempts", title: "Cəhd sayını məhdudlaşdırmaq", groups: [["cehd", "bir defe", "yeniden yaza", "tekrar yaza", "neçe defe", "nece defe"]] },
+  { id: "anti-cheat", title: "Köçürməyə qarşı qoruma", groups: [["kocur", "kopy", "firildaq", "tam ekran", "tab", "baxib yaz"]] },
+  { id: "result-visibility", title: "Nəticəni və düzgün cavabları göstərmək", groups: [["netice", "bal", "duzgun cavab", "cavablari"], ["goster", "gorunsun", "gizle", "gormesin", "acilsin", "gorsun"]] },
+  { id: "exam-time", title: "İmtahanın vaxtını dəyişmək", groups: [["vaxt", "muddet", "tarix", "saat", "deqiqe"], ["deyis", "uzat", "uzad", "qoy", "teyin", "artir"]] },
+  { id: "hide-exam", title: "İmtahanı gizlətmək", groups: [EXAM, ["gizle", "gorunmesin", "gizlet"]] },
+  { id: "copy-exam", title: "İmtahanın nüsxəsi və B variantı", groups: [["nusxe", "b variant", "dublikat", "kopya", "ikinci variant"]] },
+  { id: "delete-exam", title: "İmtahanı silmək", groups: [EXAM, ["sil"]] },
+  // Suggested to the AI only (auto: false): too loose to put a picture under
+  // the answer by itself.
+  { id: "trash-restore", title: "Silinmiş imtahanı bərpa etmək", auto: false, groups: [["zibil", "berpa", "qaytar", "itdi", "itib", "tapa bilmir", "silinmis", "silinen", "yoxa cix"]] },
+  /* results */
+  { id: "live-monitor", title: "İmtahanı canlı izləmək", groups: [["canli", "real vaxt", "izle"]] },
+  { id: "manual-grading", title: "Açıq sualları əl ilə yoxlamaq", groups: [["el ile", "yoxla", "qiymetlendir", "bal ver"], ["aciq", "yazili", "esse", "insa"]] },
+  { id: "results", title: "Nəticələrə baxmaq və yükləmək", groups: [["netice", "analitika", "statistika", "bal"], [...SEE, "excel", "pdf"]] },
+  /* teaching tools */
+  { id: "grade-homework", title: "Ev tapşırığını yoxlamaq", groups: [["tapsiriq", "ev isi", "ev tapsirig"], ["yoxla", "qiymet", "bal", "qiymetlendir"]] },
+  { id: "homework", title: "Ev tapşırığı vermək", groups: [["tapsiriq", "ev isi", "ev tapsirig", "odev"], ["ver", "yarat", "yarad", "elave", "gonder", "paylas"]] },
+  { id: "attendance", title: "Davamiyyət və QR", groups: [["davamiyyet", "qr", "gelmeyen", "gelib", "gecikdi"]] },
+  { id: "lesson-schedule", title: "Dərs cədvəli", groups: [["ders"], ["cedvel", "teqvim", "elave", "yarat", "yarad", "qeyd"]] },
+  { id: "payments", title: "Ödənişləri qeyd etmək", auto: false, groups: [["sagird", "valideyn", "ayliq", "ders haqq", "borc"], ["odenis", "pul", "borc", "haqq"]] },
+  { id: "material-share", title: "Materialı linklə paylaşmaq", groups: [["material", "sened"], ["link", "paylas"]] },
+  { id: "materials", title: "Dərs materialı yükləmək", groups: [["material", "sened", "video", "pdf", "word", "powerpoint"], ["yukle", "elave", "qoy", "paylas"]] },
+  { id: "whiteboard", title: "Lövhədən istifadə", groups: [["lovhe", "doska", "yazi taxtasi"]] },
   { id: "lesson-plan", title: "Dərs planı hazırlamaq", groups: [["ders plan", "dersin plan", "plan hazirla"]] },
-  { id: "studio", title: "Dərs studiyasında material", groups: [["studiya", "is vereq", "material hazirla", "material yarat"]] },
-  // Suggested to the AI only (auto: false): a word like "kredit" or "itdi" is too
-  // loose to put a picture under the answer by itself.
-  { id: "plan-credits", title: "Paket və AI krediti", auto: false, groups: [["paket", "kredit", "pro ", "premium", "yuksel", "abune"]] },
+  { id: "studio", title: "Dərs studiyasında material", groups: [["studiya", "is vereq", "material hazirla", "material yarat", "word", "pdf yukle"]] },
+  { id: "achievements", title: "Nailiyyətləri paylaşmaq", groups: [["nailiyyet", "ugur hekaye", "sertifikat"]] },
+  /* account */
+  { id: "plan-payment", title: "Paketin ödənişi", groups: [["paket", "pro ", "premium", "plan"], ["odenis", "ode", "kart", "odedim"]] },
+  { id: "plan-credits", title: "Paket və AI krediti", auto: false, groups: [["paket", "kredit", "pro ", "premium", "yuksel", "abune", "limit"]] },
+  { id: "whatsapp-connect", title: "Öz WhatsApp nömrənizi qoşmaq", groups: [["whatsapp", "vatsap", "wp"], ["qos", "bagla", "oz nomre", "nomremi"]] },
+  { id: "change-password", title: "Şifrəni dəyişmək", groups: [["sifre", "parol"], CHANGE] },
+  { id: "forgot-password", title: "Şifrəni unutmusunuzsa", groups: [["sifre", "parol"], ["unut", "yadimdan", "yaddan", "sifirla", "berpa"]] },
+  { id: "edit-profile", title: "Profili dəyişmək", groups: [["profil", "adimi", "seklimi", "fotomu", "telefonumu", "nomremi"], CHANGE] },
+  { id: "logout-everywhere", title: "Bütün cihazlardan çıxmaq", groups: [["butun cihaz", "cihazlardan cix", "hesabdan cix", "cixis"]] },
+  { id: "dark-mode", title: "Qaranlıq tema", groups: [["qaranliq", "tema", "gece rejimi", "dark"]] },
   { id: "install-app", title: "Tətbiqi telefona qurmaq", groups: [["tetbiq", "app", "proqram"], ["qur", "yukle", "telefon", "ana ekran"]] },
-  { id: "trash-restore", title: "Silinmiş imtahanı bərpa etmək", auto: false, groups: [["sil", "zibil", "itdi", "itib", "tapa bilmir", "yoxa cix"], ["imtahan", "sinaq", "test", "qaytar", "berpa", "geri"]] },
+  { id: "guide-videos", title: "Video bələdçilər", auto: false, groups: [["video"], ["izah", "beledci", "telimat", "oyren", "istifade"]] },
+  { id: "register", title: "Qeydiyyat", auto: false, groups: [["qeydiyyat", "hesab ac", "qeydiyyatdan"]] },
+  /* the student side */
+  { id: "student-exam", title: "Şagird imtahanı necə yazır", groups: [["sagird", "usaq", "telebe"], EXAM, ["yazir", "yazsin", "verir", "basla", "bitir", "isleyir"]] },
+  { id: "student-results", title: "Şagird nəticəsini harada görür", groups: [["sagird", "usaq", "telebe"], ["netice", "bal"], ["gorur", "gore biler", "bilecek", "gorsun"]] },
+  { id: "student-homework", title: "Şagird ev tapşırığını təhvil verir", groups: [["sagird", "usaq", "telebe"], ["tapsiriq", "ev isi"], ["tehvil", "yukle", "gonder"]] },
 ];
 
 const GUIDE_IDS = GUIDES.map((g) => g.id);
@@ -67,9 +122,9 @@ function matchGuides(text) {
   const out = [];
   for (const g of GUIDES) {
     const hits = g.groups.filter((alts) => alts.some((a) => startsWord(t, a)));
-    if (hits.length === g.groups.length) out.push({ id: g.id, title: g.title, auto: g.auto !== false, score: hits.length });
+    if (hits.length === g.groups.length) out.push({ id: g.id, title: g.title, auto: g.auto !== false, score: hits.length, order: GUIDES.indexOf(g) });
   }
-  return out.sort((a, b) => b.score - a.score).slice(0, 2);
+  return out.sort((a, b) => b.score - a.score || a.order - b.order).slice(0, 2);
 }
 
 const asksHow = (text) => {

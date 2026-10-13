@@ -28,8 +28,8 @@ const G = require("../helper/guideCatalog");
 const top = (q) => (G.matchGuides(q)[0] || {}).id;
 
 // Must equal Frontend/src/components/chat/guideIds.js (and the capture spec).
-const IDS = ["add-class", "add-exam", "ai-questions", "publish", "share-code", "shuffle-options", "homework", "lesson-plan", "studio", "plan-credits", "install-app", "trash-restore"];
-ok("the catalogue has exactly the guides the frontend can show", JSON.stringify(G.GUIDE_IDS) === JSON.stringify(IDS), G.GUIDE_IDS.join(","));
+const IDS = ["add-class", "student-join", "board-share", "share-code", "class-settings", "parent-notifications", "delete-class", "students", "remove-student", "add-parent", "add-exam", "ai-questions", "dim-preset", "publish", "ai-fix", "manual-question", "question-image", "find-answers", "shuffle-options", "exam-password", "exam-attempts", "anti-cheat", "result-visibility", "exam-time", "hide-exam", "copy-exam", "delete-exam", "trash-restore", "live-monitor", "manual-grading", "results", "grade-homework", "homework", "attendance", "lesson-schedule", "payments", "material-share", "materials", "whiteboard", "lesson-plan", "studio", "achievements", "plan-payment", "plan-credits", "whatsapp-connect", "change-password", "forgot-password", "edit-profile", "logout-everywhere", "dark-mode", "install-app", "guide-videos", "register", "student-exam", "student-results", "student-homework"];
+ok("the catalogue has exactly the guides the frontend can show", JSON.stringify([...G.GUIDE_IDS].sort()) === JSON.stringify([...IDS].sort()), G.GUIDE_IDS.join(","));
 
 console.log("\nquestions teachers actually asked");
 const cases = [
@@ -44,6 +44,19 @@ const cases = [
   ["ev tapsirigi nece verim", "homework"],
   ["Dərs planı hazırlanma prosesini izah edərdiniz zəhmət olmasa", "lesson-plan"],
   ["telefona tetbiqi nece yukleyim", "install-app"],
+  // 13 Oct: "şifrəmi necə dəyişim?" got "I don't know" from the bot.
+  ["sifremi nece deyisim?", "change-password"],
+  ["şifrəmi unutmuşam, necə bərpa edim?", "forgot-password"],
+  ["şagirdin şifrəsini necə dəyişim", "students"],
+  ["imtahana şifrə necə qoyum", "exam-password"],
+  ["valideynə bildiriş necə gedir", "parent-notifications"],
+  ["lövhəni şagirdlərlə necə paylaşım", "board-share"],
+  ["şagird sinfə necə qoşulur", "student-join"],
+  ["imtahanın vaxtını necə uzadım", "exam-time"],
+  ["B variantı necə edim", "copy-exam"],
+  ["açıq sualları necə yoxlayım", "manual-grading"],
+  ["davamiyyəti necə qeyd edim", "attendance"],
+  ["qaranlıq tema necə", "dark-mode"],
 ];
 for (const [q, want] of cases) ok(`«${q.slice(0, 48)}» → ${want}`, top(q) === want, String(top(q)));
 ok("a thank-you matches nothing", G.matchGuides("Çox sağ olun təşəkkür edirəm").length === 0);
