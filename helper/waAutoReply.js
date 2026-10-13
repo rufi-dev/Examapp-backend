@@ -290,6 +290,78 @@ async function voiceText(m) {
   }
 }
 
+const timeBoxed = (p, ms, what) =>
+  Promise.race([p, new Promise((_, reject) => setTimeout(() => reject(new Error(`${what} timed out`)), ms))]);
+
+/*
+ * A chat's recent messages, read in WhatsApp Web's own page. whatsapp-web.js's
+ * getChatById / fetchMessages threw ("r") on this WhatsApp Web build
+ * (2026-10-13), as its getChats hangs (helper/whatsapp readGroupsInPage).
+ * What the page holds is read first; with `earlier`, older messages are asked
+ * for until `limit`, and `complete` says whether the chat's start was reached
+ * (a failure there keeps what was read, and says the start is not in sight).
+ */
+function readChatInPage(chatId, limit, earlier) {
+  const C = window.require("WAWebCollections");
+  const wid = window.require("WAWebWidFactory").createWid(chatId);
+  const chat = C.Chat.get(wid);
+  if (!chat) return { found: false };
+  const keep = (m) => !m.isNotification;
+  let msgs = chat.msgs.getModelsArray().filter(keep);
+  const done = async () => {
+    let complete = false;
+    if (earlier) {
+      try {
+        while (msgs.length < limit) {
+          const more = await window.require("WAWebChatLoadMessages").loadEarlierMsgs({ chat });
+          if (!more || !more.length) {
+            complete = true;
+            break;
+          }
+          msgs = [...more.filter(keep), ...msgs];
+        }
+      } catch {
+        complete = false;
+      }
+    }
+    msgs.sort((a, b) => (a.t > b.t ? 1 : -1));
+    return { found: true, isGroup: !!chat.isGroup, complete, msgs: msgs.slice(-limit).map((m) => window.WWebJS.getMessageModel(m)) };
+  };
+  return done();
+}
+// The chat's messages as whatsapp-web.js Messages: in the page first, else the library's own way.
+async function readChat(client, chatId, limit, earlier, ownerKey) {
+  if (client.pupPage && typeof client.pupPage.evaluate === "function") {
+    try {
+      const r = await timeBoxed(client.pupPage.evaluate(readChatInPage, chatId, limit, earlier), 20000, "in-page chat read");
+      if (r?.found) {
+        const { Message } = require("whatsapp-web.js");
+        return { ...r, msgs: r.msgs.map((m) => new Message(client, m)) };
+      }
+    } catch (e) {
+      console.warn(`[WA-AI] in-page chat read failed on ${ownerKey} (${e?.message || e}); trying fetchMessages`);
+    }
+  }
+  const chat = await client.getChatById(chatId);
+  if (!chat) return { found: false };
+  const msgs = (await chat.fetchMessages({ limit })) || [];
+  return { found: true, isGroup: !!chat.isGroup, complete: msgs.length < limit, msgs };
+}
+// "yazır…" in the chat (or its end), without opening the chat through the library.
+async function chatState(client, chatId, state) {
+  try {
+    if (client.pupPage && typeof client.pupPage.evaluate === "function") {
+      await timeBoxed(client.pupPage.evaluate((id, s) => window.WWebJS.sendChatstate(s, id), chatId, state), 5000, "chat state");
+    } else {
+      const chat = await client.getChatById(chatId);
+      if (state === "typing") await chat.sendStateTyping();
+      else await chat.clearState();
+    }
+  } catch {
+    /* a nicety */
+  }
+}
+
 const stopAt = (ownerKey, why) => {
   console.info(`[WA-AI] not answered on ${ownerKey}: ${why}`);
 };
@@ -307,7 +379,17 @@ async function stillAllowed(ownerKey, client, chatId, teacher) {
   const state = await WaAutoChat.findOne({ key: `${ownerKey}|${chatId}` }).lean();
   if (state?.humanUntil && new Date(state.humanUntil) > new Date()) return false;
   // The admin's own number, in test mode: still on, still theirs.
-  if (teacher.tester) return settings.testOwn && (await ownNumbers()).has(teacher.digits);
+  if (teacher.tester) {
+    // The last check's contact lookup for a teacher, tried too, so a test proves it (ok / failed only).
+    if (settings.testOwn && typeof client.getContactById === "function") {
+      const p = await client.getContactById(chatId).then(
+        (c) => (c ? "ok" : "empty"),
+        (e) => `failed (${e?.message || e})`
+      );
+      console.info(`[WA-AI] test: the last check's contact lookup ${p}`);
+    }
+    return settings.testOwn && (await ownNumbers()).has(teacher.digits);
+  }
   const u = await User.findOne({ _id: teacher._id, ...OUTREACHED }).select("phone").lean();
   if (!u || digitsOf(u.phone) !== teacher.digits) return false;
   if (chatId.endsWith("@c.us") && chatId.split("@")[0] !== teacher.digits) return false;
@@ -333,11 +415,14 @@ async function answer(ownerKey, client, chatId, teacher) {
     if (state?.day === today && state.replies >= PER_CHAT_PER_DAY) return note(`${PER_CHAT_PER_DAY} replies in this chat today already`);
     if ((await repliesToday()) >= DAILY_MAX) return note(`${DAILY_MAX} replies today already`);
 
-    const chat = await client.getChatById(chatId);
-    // (WhatsApp may name the same person's chat by phone or by LID: either is a person.)
-    if (!chat || chat.isGroup || !personChat(chat.id?._serialized || chatId)) return note("the chat could not be opened as a one-person chat");
     const verified = !teacher.tester && !!state?.verified && String(state.user) === String(teacher._id);
-    const msgs = (await chat.fetchMessages({ limit: verified || teacher.tester ? HISTORY : CHAT_WINDOW })) || [];
+    // A teacher's chat not yet seen to begin with our message is read back to its start. (In test
+    // mode the owner's own chat is read the same way, so a test also proves that path works.)
+    const needStart = !verified;
+    const read = await readChat(client, chatId, verified || teacher.tester ? HISTORY : CHAT_WINDOW, needStart, ownerKey);
+    if (!read?.found || read.isGroup) return note("the chat could not be read as a one-person chat");
+    if (teacher.tester) note(`(not a stop) read ${read.msgs.length} messages, start of the chat ${read.complete ? "reached" : "not reached"}`);
+    const msgs = read.msgs;
     // The admin's own numbers have talked before: only what came since this number was switched on is read.
     const real = msgs.filter((m) => !NOTICE_TYPES.has(m.type) && (!teacher.tester || m.timestamp * 1000 + 999 >= sw.since));
     const last = real[real.length - 1];
@@ -348,7 +433,7 @@ async function answer(ownerKey, client, chatId, teacher) {
     if (aiWritten(last.body) || sentStanzas.has(last.id?.id)) return note("the last message was written by an AI");
     if (!verified && !teacher.tester) {
       // The chat must begin with our automatic message, and its beginning must be in sight.
-      if (msgs.length >= CHAT_WINDOW || !isOurOutreach(real[0])) return stopAt(ownerKey, "the chat did not begin with our message");
+      if (!read.complete || msgs.length >= CHAT_WINDOW || !isOurOutreach(real[0])) return stopAt(ownerKey, "the chat did not begin with our message");
       await WaAutoChat.updateOne({ key }, { $set: { owner: ownerKey, user: teacher._id, verified: true } }, { upsert: true });
     }
     const ours = real.find(isOurOutreach);
@@ -363,10 +448,10 @@ async function answer(ownerKey, client, chatId, teacher) {
       if (text) history.push({ from: m.fromMe ? "support" : "teacher", text });
     }
 
-    await chat.sendStateTyping().catch(() => {});
+    await chatState(client, chatId, "typing");
     const { generateSupportReply } = require("../services/chatAssistant");
     const reply = await generateSupportReply(history, "support", { channel: "whatsapp", context: ours?.body || "" });
-    await chat.clearState().catch(() => {});
+    await chatState(client, chatId, "stop");
     if (!reply) return note("the AI gave no reply");
 
     // Everything once more: a person may have stepped in, or it was switched off, while it was written.
@@ -435,7 +520,16 @@ async function onIncoming(ownerKey, client, msg) {
       .catch(() => null);
     if (!contactOk(contact)) return note("a saved contact, a business account or a blocked number");
   }
-  if (teacher.tester) console.info(`[WA-AI] test: answering on ${ownerKey} in ${DEBOUNCE_MS / 1000} s`);
+  if (teacher.tester) {
+    // The contact lookup a teacher's message goes through, tried too, so a test proves it (ok / failed only).
+    const probe = await Promise.resolve()
+      .then(() => msg.getContact())
+      .then(
+        (c) => (c ? "ok" : "empty"),
+        (e) => `failed (${e?.message || e})`
+      );
+    console.info(`[WA-AI] test: answering on ${ownerKey} in ${DEBOUNCE_MS / 1000} s (contact lookup ${probe})`);
+  }
   schedule(ownerKey, client, chatId, teacher);
 }
 
@@ -464,6 +558,7 @@ module.exports = {
   _answer: answer,
   _digitsOf: digitsOf,
   _personChat: personChat,
+  _readChat: readChat,
   _reset() {
     settingsCache = { at: 0, numbers: {}, testOwn: false };
     outreached = { at: 0, list: [] };

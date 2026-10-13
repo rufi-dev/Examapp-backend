@@ -348,6 +348,41 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
   c.history = [theirs("Salam, test")];
   ok("test mode switched off: my own number is not answered again", (await tryOnce(own())) === 0);
 
+  console.log("\nreading the chat in WhatsApp Web's page");
+  const page = (models, { earlier = [], fail = false } = {}) => {
+    let calls = 0;
+    global.window = {
+      require: (name) =>
+        ({
+          WAWebCollections: { Chat: { get: () => ({ isGroup: false, msgs: { getModelsArray: () => models } }) } },
+          WAWebWidFactory: { createWid: (id) => id },
+          WAWebChatLoadMessages: {
+            loadEarlierMsgs: async () => {
+              if (fail) throw new Error("r");
+              return earlier[calls++] || [];
+            },
+          },
+        })[name],
+      WWebJS: { getMessageModel: (m) => m },
+    };
+  };
+  const model = (i, fromMe, body) => ({ id: { fromMe, id: `M${i}`, _serialized: `${fromMe}_${CHAT}_M${i}`, remote: CHAT }, body, type: "chat", t: 1000 + i, from: fromMe ? "me" : CHAT });
+  const pc = { pupPage: { evaluate: (fn, ...a) => fn(...a) } };
+  page([model(2, false, "Salam")], { earlier: [[model(1, true, OUTREACH)]] });
+  let rr = await ai._readChat(pc, CHAT, 60, true, ADMIN);
+  ok(
+    "the page's messages, older ones asked for, in order, as whatsapp-web.js Messages",
+    rr.found && rr.complete && rr.msgs.length === 2 && rr.msgs[0].fromMe === true && rr.msgs[0].body === OUTREACH && rr.msgs[1].timestamp === 1002 && rr.msgs[1].id.id === "M2",
+    JSON.stringify({ found: rr.found, complete: rr.complete, n: rr.msgs?.length })
+  );
+  page([model(2, false, "Salam")], { fail: true });
+  rr = await ai._readChat(pc, CHAT, 60, true, ADMIN);
+  ok("older messages failing to load: what was read is kept, and the start is not taken as reached", rr.found && !rr.complete && rr.msgs.length === 1);
+  page([model(2, false, "Salam")]);
+  rr = await ai._readChat(pc, CHAT, 24, false, ADMIN);
+  ok("without asking for older ones: only what the page holds", rr.found && !rr.complete && rr.msgs.length === 1);
+  delete global.window;
+
   console.log("\nour messages, recognised");
   const OLD = "Salam Aysel müəllim 🙂 Examopia komandasından yazıram. Gördüm ki, qeydiyyatdan keçmisiniz, amma hələ başlamamısınız.";
   ok("every outreach message ever sent opens a chat the AI may answer", [OUTREACH, REENGAGE, OLD].every((body) => ai.isOurOutreach({ fromMe: true, body })));
