@@ -8,6 +8,7 @@ const User = require("../models/userModel");
 const { httpError } = require("../utils/appError");
 const { isChatAiEnabled, generateSupportReply } = require("../services/chatAssistant");
 const typing = require("../helper/chatTyping");
+const ui = require("../helper/uiCatalog");
 
 // A user counts as "online" if their last heartbeat is within this window. The
 // client pings every ~30s, so 75s tolerates one dropped ping without flicker.
@@ -222,17 +223,22 @@ const WELCOME_PERKS =
   "• Valideynlərə WhatsApp bildirişləri: nəticə, davamiyyət, tapşırıq\n" +
   "• AI ilə dərs planı və çapa hazır iş vərəqləri";
 const WELCOME_ASK = "Sualınız olsa, elə buradan yazın — bir neçə saniyəyə cavab verirəm, lazım olsa ekran şəkilləri ilə göstərirəm 🙂";
+// The picture guide under it, from the screen catalogue (none if a capture lacks these).
+const WELCOME_STEPS = {
+  invite: ["class-page.sagird-devet-et", "class-invite.qosulma-linkini-kopyala"],
+  exam: ["class-page.imtahan-elave-et", "composer.suallari-hazirla"],
+};
 const welcomeText = (teacher, hasExam) => {
   const hi = `Salam ${firstName(teacher)} 👋 Mən Examopia Köməkçisiyəm.`;
   return hasExam
     ? `${hi} İlk imtahanınız hazırdır — təbriklər! 🎉\n\n` +
         "İndi ən vacib addım: sinif səhifəsindəki «Şagird dəvət et» ilə linki şagirdlərə göndərin. " +
         "Onlar imtahanı yazan kimi cavablar avtomatik yoxlanılır, nəticələr sizə hazır gəlir.\n\n" +
-        `${WELCOME_PERKS}\n\n${WELCOME_ASK}\n\n[[guide:share-code]]`
+        `${WELCOME_PERKS}\n\n${WELCOME_ASK}\n\n${ui.stepsMarker(WELCOME_STEPS.invite)}`
     : `${hi} Xoş gəldiniz! 🎉\n\n` +
         "İlk imtahanınızı bir neçə dəqiqəyə hazırlaya bilərsiniz: sinfi açın, «İmtahan əlavə et»ə basın " +
         "və mövzunu bir cümlə ilə yazın — qalanını AI edir.\n\n" +
-        `${WELCOME_PERKS}\n\n${WELCOME_ASK}\n\n[[guide:add-exam]]`;
+        `${WELCOME_PERKS}\n\n${WELCOME_ASK}\n\n${ui.stepsMarker(WELCOME_STEPS.exam)}`;
 };
 
 // Post the admin's welcome into a (created-if-needed) chat with the teacher.

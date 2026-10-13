@@ -1,5 +1,5 @@
 const AnthropicPkg = require("@anthropic-ai/sdk");
-const guides = require("../helper/guideCatalog");
+const ui = require("../helper/uiCatalog");
 const Anthropic = AnthropicPkg.default || AnthropicPkg;
 
 // Support auto-reply for the in-app chat. This is DELIBERATELY a plain text
@@ -167,63 +167,11 @@ PAKET, KREDİT VƏ QİYMƏT (dəqiq bu rəqəmlər; "hər şey pulsuzdur" DEMƏ)
 - Ödəniş: «Planım» → paketi seçin → kart nömrəsinə köçürmə (m10 və ya bank) → «Ödədim» → qəbzi WhatsApp ilə göndərin; komanda yoxlayıb aktivləşdirir.
 - Paketin müddəti bitəndə heç nə silinmir: limitdən artıq şagirdlər gözləmə siyahısına keçir, 3-dən artıq imtahan bloklanır; paket yenilənəndə hamısı qayıdır.
 
-ŞƏKİLLİ BƏLƏDÇİ: Müəllim "necə", "harada", "hansı düymə", "ilişdim" kimi yol soruşanda, qısa izahdan SONRA cavabın SONUNA aşağıdakılardan UYĞUN olanı olduğu kimi əlavə et. Tətbiq onu saytın REAL ekran şəkillərindən addım-addım bələdçiyə çevirir (telefonda telefon görünüşü, kompüterdə kompüter görünüşü, basılacaq yer işarələnmiş). İşarəni dəyişmə və izah etmə; ən çox BİR bələdçi əlavə et; uyğun mövzu yoxdursa, heç birini əlavə etmə:
-[[guide:add-class]] — sinif yaratmaq
-[[guide:share-code]] — şagirdləri link və ya kodla dəvət etmək
-[[guide:class-settings]] — sinfin adını, şəklini, kodunu dəyişmək
-[[guide:parent-notifications]] — valideynlərə WhatsApp bildirişlərini açmaq
-[[guide:delete-class]] — sinfi silmək
-[[guide:students]] — şagirdin şifrəsini dəyişmək
-[[guide:remove-student]] — şagirdi sinifdən çıxarmaq
-[[guide:add-parent]] — valideyn hesabı yaratmaq
-[[guide:add-exam]] — sinifdə imtahan əlavə etmək (sinfi açmaq → «İmtahan əlavə et» → mövzu → «Sualları hazırla»)
-[[guide:ai-questions]] — AI ilə sual hazırlamaq, PDF və ya şəkil əlavə etmək
-[[guide:dim-preset]] — hazır DİM strukturu (Buraxılış, MSO, DQT, IELTS)
-[[guide:publish]] — cavab açarını təsdiqləyib imtahanı nəşr etmək
-[[guide:ai-fix]] — bir sualı AI ilə dəyişmək
-[[guide:manual-question]] — sualı əl ilə yazmaq, sual tipini dəyişmək
-[[guide:question-image]] — suala şəkil əlavə etmək
-[[guide:find-answers]] — cavabları AI ilə tapmaq
-[[guide:shuffle-options]] — variantları qarışdırmaq
-[[guide:exam-password]] — imtahana şifrə qoymaq
-[[guide:exam-attempts]] — cəhd sayını məhdudlaşdırmaq
-[[guide:anti-cheat]] — köçürməyə qarşı qoruma
-[[guide:result-visibility]] — balı və düzgün cavabları göstərmək
-[[guide:exam-time]] — imtahanın vaxtını və müddətini dəyişmək
-[[guide:hide-exam]] — imtahanı gizlətmək
-[[guide:copy-exam]] — imtahanın nüsxəsi və B variantı
-[[guide:delete-exam]] — imtahanı silmək
-[[guide:trash-restore]] — silinmiş imtahanı zibil qutusundan bərpa etmək
-[[guide:live-monitor]] — imtahanı canlı izləmək
-[[guide:results]] — nəticələrə baxmaq, PDF/Excel yükləmək
-[[guide:manual-grading]] — açıq sualları əl ilə yoxlamaq
-[[guide:homework]] — ev tapşırığı vermək
-[[guide:grade-homework]] — ev tapşırığını yoxlamaq və qiymət vermək
-[[guide:lesson-schedule]] — dərs cədvəlinə dərs əlavə etmək
-[[guide:attendance]] — davamiyyət və QR ilə qeydiyyat
-[[guide:payments]] — şagird ödənişlərini qeyd etmək
-[[guide:materials]] — dərs materialı yükləmək
-[[guide:material-share]] — materialı linklə paylaşmaq
-[[guide:whiteboard]] — lövhədən istifadə
-[[guide:board-share]] — lövhəni şagirdlərlə paylaşmaq
-[[guide:lesson-plan]] — dərs planı hazırlamaq
-[[guide:studio]] — Dərs studiyasında material hazırlamaq və PDF/Word yükləmək
-[[guide:achievements]] — nailiyyətləri paylaşmaq
-[[guide:plan-credits]] — paketi yüksəltmək və ya AI krediti almaq
-[[guide:plan-payment]] — paketin ödənişi («Ödədim»)
-[[guide:whatsapp-connect]] — öz WhatsApp nömrəsini qoşmaq
-[[guide:change-password]] — öz şifrəsini dəyişmək
-[[guide:edit-profile]] — profili (ad, şəkil, telefon) dəyişmək
-[[guide:logout-everywhere]] — bütün cihazlardan çıxmaq
-[[guide:dark-mode]] — qaranlıq tema
-[[guide:install-app]] — tətbiqi telefona qurmaq
-[[guide:guide-videos]] — video bələdçilər
-[[guide:forgot-password]] — şifrəni unudanda sıfırlamaq
-[[guide:register]] — qeydiyyat (müəllim, şagird, valideyn)
-[[guide:student-join]] — şagird sinfə necə qoşulur
-[[guide:student-exam]] — şagird imtahanı necə yazır
-[[guide:student-results]] — şagird nəticəsini harada görür
-[[guide:student-homework]] — şagird ev tapşırığını necə təhvil verir
+ŞƏKİLLİ BƏLƏDÇİ: Müəllim bir işi necə və ya harada edəcəyini soruşanda ("necə", "harada", "hansı düymə", "tapa bilmirəm", "ilişdim"), qısa izahdan SONRA cavabın ən sonunda ayrıca sətirdə belə yaz: [[steps:ID|ID|ID]]. ID-lər cavabında adını çəkdiyin düymələr, xanalar, sekmələr və açarlardır, cavabdakı SIRA ilə, YALNIZ sonda verilən «EKRAN ELEMENTLƏRİ» siyahısından, hərfi-hərfinə. Tətbiq bunu saytın REAL ekran şəkillərindən addım-addım bələdçiyə çevirir (telefonda telefon, kompüterdə kompüter görünüşü, basılacaq yer işıqlandırılır). Qaydalar:
+- Menyu bəndini və ekranı açan düyməni yazmağa ehtiyac yoxdur, sistem yolu özü əlavə edir; sən son hədəfləri yaz (məs. silinmiş imtahanı həmişəlik silmək üçün Zibil qutusundakı «Həmişəlik sil» düyməsinin ID-si).
+- ID uydurma və oxşar ekrandan götürmə: imtahanı zibil qutusundan silmək sualına «İmtahanı sil» düyməsi YOX, Zibil qutusu ekranındakı düymə uyğundur; bio/«Haqqımda» sualına şəkil düyməsi YOX, «Haqqımda» xanası uyğundur.
+- Siyahıda cavabındakı addıma DƏQİQ uyğun element yoxdursa, [[steps]] YAZMA. Yanlış şəkil göstərməkdənsə şəkilsiz cavab yaxşıdır.
+- Bələdçi sözünü, ID-ləri və işarəni mətndə izah etmə; bir cavabda ən çox bir [[steps:…]].
 
 Cavabların qısa, dəqiq və köməkçi olsun.`;
 
@@ -386,15 +334,20 @@ async function generateSupportReply(messages, adminId) {
     });
 
   /*
-   * Which guides fit this question, found by keyword (helper/guideCatalog), so
-   * the AI is told by name instead of having to recall the list; and when it
-   * leaves a plain how-to question without one, the server adds the match.
+   * The screens and controls that fit this question (helper/uiCatalog searches
+   * every captured control), so the AI names the exact ones its answer is
+   * about. The last two things the teacher wrote are searched together, so a
+   * follow-up like "bəs telefonda?" still finds the screen.
    */
-  const asked = history[history.length - 1].content;
-  const fits = guides.matchGuides(asked);
-  const system = fits.length
-    ? `${SYSTEM_PROMPT}\n\nBU SUALA UYĞUN ŞƏKİLLİ BƏLƏDÇİ (açar sözlərlə tapılıb): ${fits.map((g) => `[[guide:${g.id}]] — ${g.title}`).join("; ")}. Müəllim yol soruşursa, uyğun olanı cavabın sonuna əlavə et.`
-    : SYSTEM_PROMPT;
+  const asked = history
+    .filter((h) => h.role === "user")
+    .slice(-2)
+    .map((h) => h.content)
+    .join("\n");
+  const found = ui.candidatesFor(asked);
+  const system = found
+    ? `${SYSTEM_PROMPT}\n\nEKRAN ELEMENTLƏRİ (bu suala uyğun ekranlar və onlardakı idarəetmə elementləri; [[steps:…]] üçün YALNIZ bu ID-lər):\n${found}`
+    : `${SYSTEM_PROMPT}\n\nEKRAN ELEMENTLƏRİ: bu suala uyğun ekran tapılmadı, [[steps]] yazma.`;
 
   let text = await ask(system);
   // One rewrite when the reply slipped into Turkish; the cleaner of the two wins.
@@ -405,9 +358,8 @@ async function generateSupportReply(messages, adminId) {
     if (again && turkishSlips(again).length < slips.length) text = again;
   }
 
-  let clean = toPlainText(text);
-  const auto = clean && !/\[\[guide:[a-z-]+\]\]/.test(clean) ? guides.autoGuide(asked) : null;
-  if (auto) clean = `${clean}\n\n[[guide:${auto}]]`;
+  // Steps rebuilt from the catalogue: unknown IDs go, the way to each screen is added.
+  const clean = ui.fixSteps(toPlainText(text));
   return clean || null;
 }
 

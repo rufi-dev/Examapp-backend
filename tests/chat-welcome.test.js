@@ -36,8 +36,16 @@ ok("only to a working teacher, once ever", /role: "teacher", teacherApproval: \{
 console.log("\nwhat it says");
 ok("introduces the assistant, not a person", /Mən Examopia Köməkçisiyəm/.test(text) && !/firstName\(admin\)/.test(text));
 ok("words it by whether the teacher already has an exam", /const hasExam = !!\(await Exam\.exists\(\{ owner: teacherId, deletedAt: null \}\)\);/.test(src) && /hasExam\s*\?/.test(text));
-ok("with an exam: congratulates and points to inviting students, with that guide", /İlk imtahanınız hazırdır — təbriklər!/.test(text) && /\[\[guide:share-code\]\]/.test(text));
-ok("without one: how to make it, with that guide", /İlk imtahanınızı bir neçə dəqiqəyə hazırlaya bilərsiniz/.test(text) && /\[\[guide:add-exam\]\]/.test(text));
+ok("with an exam: congratulates and points to inviting students, with that guide", /İlk imtahanınız hazırdır — təbriklər!/.test(text) && /ui\.stepsMarker\(WELCOME_STEPS\.invite\)/.test(text));
+ok("without one: how to make it, with that guide", /İlk imtahanınızı bir neçə dəqiqəyə hazırlaya bilərsiniz/.test(text) && /ui\.stepsMarker\(WELCOME_STEPS\.exam\)/.test(text));
+// The guides' controls exist in the captured catalogue, so the welcome really shows them.
+const ui = require("../helper/uiCatalog");
+const steps = src.slice(src.indexOf("const WELCOME_STEPS"), src.indexOf("const welcomeText"));
+for (const key of ["invite", "exam"]) {
+  const ids = [...steps.slice(steps.indexOf(`${key}:`)).split("\n")[0].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  const marker = ui.stepsMarker(ids);
+  ok(`the ${key} guide's controls are all captured (${ids.join(", ")})`, ids.length >= 2 && marker.startsWith("[[steps:") && ids.every((id) => marker.includes(id)), marker);
+}
 ok("sells what teachers stay for", /AI ilə bir neçə dəqiqəyə yeni imtahan/.test(text) && /QR kodla davamiyyət/.test(text) && /Valideynlərə WhatsApp bildirişləri/.test(text));
 ok("addresses the teacher as 'siz'", /yazın/.test(text) && !/\byaz —/.test(text));
 const slips = require("../services/chatAssistant").turkishSlips(text);
