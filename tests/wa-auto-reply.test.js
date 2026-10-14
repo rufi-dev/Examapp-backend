@@ -496,6 +496,32 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
   ok("every way failing: the log names each step that failed (never the audio)", /in page: ask: r; decrypt: r; no audio \(stage FETCHING\)/.test(whyNot) && /library: r/.test(whyNot), whyNot);
   delete global.window;
 
+  console.log("\nanswering one teacher now, at the admin's request (a missed reply)");
+  const now1 = async (over) => {
+    reset();
+    ai.attach(c, ADMIN);
+    c.history = [ourFirst(), theirs("İstifadə edə bilmədim", now() - 3 * 3600)];
+    if (over) over();
+    const r = await ai.answerNow(ADMIN, TEACHER._id);
+    return { r, sent: c.sent.length };
+  };
+  let an = await now1();
+  ok("a message from hours ago is answered on request, and the AI is told it is late", an.r.ok && an.sent === 1 && /cavab gecikib/.test(asked[0]?.opts?.profile || ""), JSON.stringify(an));
+  an = await now1(() => (person.isMyContact = true));
+  ok("…but never a saved contact", !an.r.ok && an.sent === 0 && /saved contact/.test(an.r.why), JSON.stringify(an));
+  an = await now1(() => c.history.push({ fromMe: true, body: "Salam, kömək edim", type: "chat", timestamp: now() }));
+  ok("…nor a chat already answered", !an.r.ok && an.sent === 0 && /this number's own/.test(an.r.why), JSON.stringify(an));
+  an = await now1(() => (chats[KEY] = { humanUntil: new Date(Date.now() + 3600e3) }));
+  ok("…nor one a person wrote in the last 12 hours", !an.r.ok && an.sent === 0 && /12 hours/.test(an.r.why), JSON.stringify(an));
+  an = await now1(() => (c.history = [theirs("Salam qardaş", now() - 99 * 86400), ourFirst(), theirs("İstifadə edə bilmədim", now() - 3 * 3600)]));
+  ok("…nor a chat that did not begin with our message", !an.r.ok && an.sent === 0 && /did not begin/.test(an.r.why), JSON.stringify(an));
+  reset();
+  ai.attach(c, ADMIN);
+  const notOurs = await ai.answerNow(ADMIN, "cccccccccccccccccccccccc");
+  ok("…nor anyone our automatic message did not go to", !notOurs.ok && /not a teacher/.test(notOurs.why) && c.sent.length === 0);
+  reset();
+  ok("…and only on a connected number", !(await ai.answerNow(ADMIN, TEACHER._id)).ok);
+
   console.log("\nour messages, recognised");
   const OLD = "Salam Aysel müəllim 🙂 Examopia komandasından yazıram. Gördüm ki, qeydiyyatdan keçmisiniz, amma hələ başlamamısınız.";
   ok("every outreach message ever sent opens a chat the AI may answer", [OUTREACH, REENGAGE, OLD].every((body) => ai.isOurOutreach({ fromMe: true, body })));
@@ -512,6 +538,7 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
     "each number's switch is read and set on the WhatsApp page, admins only",
     /router\.get\("\/ai-reply", protect, adminOnly,/.test(route) && /router\.post\("\/ai-reply", protect, adminOnly,/.test(route) && /setEnabled\(key\(req\), req\.body\.on\)/.test(route)
   );
+  ok("answering one teacher now is for admins only", /router\.post\("\/ai-reply\/answer-now", protect, adminOnly,/.test(route) && /answerNow\(key\(req\), userId\)/.test(route));
   ok("test mode has its own switch, admins only", /router\.post\("\/ai-reply\/test", protect, adminOnly,/.test(route) && /setTestOwn\(req\.body\.on\)/.test(route));
   const userRoute = fs.readFileSync(path.join(__dirname, "..", "routes", "userRoute.js"), "utf8");
   ok("the old one-switch-for-all is gone", !/wa-auto-reply\/toggle/.test(userRoute));

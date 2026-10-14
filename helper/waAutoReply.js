@@ -508,12 +508,16 @@ async function chatState(client, chatId, state) {
 
 const stopAt = (ownerKey, why) => {
   console.info(`[WA-AI] not answered on ${ownerKey}: ${why}`);
+  return why;
 };
 // In test mode the log also says which gate stopped a message (never who, never what),
-// so a try that got no answer can be explained. Quiet otherwise.
+// so a try that got no answer can be explained. Quiet otherwise. Returns the reason.
 const testNote = (settings, ownerKey, why) => {
   if (settings?.testOwn) console.info(`[WA-AI] test: not answered on ${ownerKey}: ${why}`);
+  return why;
 };
+// Told to the AI when the answer comes hours after the teacher wrote (answerNow).
+const LATE_NOTE = `QEYD: müəllim bu mesajı bir neçə saat əvvəl yazıb, cavab gecikib. Cavabı bir qısa üzrlə başla (məs. "Gecikdiyimiz üçün üzr istəyirəm"), sonra adi qaydada davam et.`;
 
 // The last gate, right before anything is sent: everything once more, fresh.
 async function stillAllowed(ownerKey, client, chatId, teacher) {
@@ -541,11 +545,12 @@ async function stillAllowed(ownerKey, client, chatId, teacher) {
   return contactOk(contact);
 }
 
-async function answer(ownerKey, client, chatId, teacher) {
+// Answers the chat if every gate allows; returns "replied" or the reason it did not.
+async function answer(ownerKey, client, chatId, teacher, { late = false } = {}) {
   const key = `${ownerKey}|${chatId}`;
   if (busy.has(key)) {
     again.add(key);
-    return;
+    return "already being answered";
   }
   busy.add(key);
   try {
@@ -599,7 +604,8 @@ async function answer(ownerKey, client, chatId, teacher) {
     await chatState(client, chatId, "typing");
     const { generateSupportReply } = require("../services/chatAssistant");
     // Who the teacher is, in counts (the admin's own number in test mode: none).
-    const profile = teacher.tester ? "" : await require("./teacherContext").teacherContext(teacher._id);
+    const known = teacher.tester ? "" : await require("./teacherContext").teacherContext(teacher._id);
+    const profile = late ? [known, LATE_NOTE].filter(Boolean).join("\n\n") : known;
     const reply = await generateSupportReply(history, "support", { channel: "whatsapp", context: ours?.body || "", profile });
     await chatState(client, chatId, "stop");
     if (!reply) return note("the AI gave no reply");
@@ -616,8 +622,10 @@ async function answer(ownerKey, client, chatId, teacher) {
       { upsert: true }
     );
     console.info(`[WA-AI] replied on ${ownerKey} to ${teacher.tester ? "the admin's own number (test mode)" : `teacher ${teacher._id}`}`);
+    return "replied";
   } catch (e) {
     console.warn(`[WA-AI] no reply on ${ownerKey}: ${e?.message || e}`);
+    return `failed: ${e?.message || e}`;
   } finally {
     busy.delete(key);
     if (again.delete(key)) schedule(ownerKey, client, chatId, teacher);
@@ -683,6 +691,48 @@ async function onIncoming(ownerKey, client, msg) {
   schedule(ownerKey, client, chatId, teacher);
 }
 
+/*
+ * The admin asks for one teacher to be answered now: a reply missed while the
+ * AI could not match phones stored as "+994 0XX…" (2026-10-14). Every gate
+ * holds (the switch, a person's 12 hours, the chat begun by our message, the
+ * contact, the limits, the fresh re-check) except the 10-minute age of the
+ * message, and the AI is told it is late. Returns { ok, why }.
+ */
+async function answerNow(ownerKey, userId) {
+  const client = clients.get(ownerKey);
+  if (!client || !client.info) return { ok: false, why: "this WhatsApp number is not connected" };
+  if (!(await isAdminNumber(ownerKey))) return { ok: false, why: "not one of the admin's numbers" };
+  outreached = { at: 0, list: [] }; // read the teachers fresh
+  const teacher = (await outreachedTeachers()).find((t) => String(t._id) === String(userId));
+  if (!teacher) return { ok: false, why: "not a teacher our automatic message went to" };
+  // The chat, by the id WhatsApp keeps it under (the hidden id or the phone).
+  const ids = [];
+  if (typeof client.getContactLidAndPhone === "function") {
+    try {
+      const [r] = await client.getContactLidAndPhone([`${teacher.digits}@c.us`]);
+      if (r?.lid) ids.push(r.lid);
+      if (r?.pn) ids.push(r.pn);
+    } catch {
+      /* the phone id below */
+    }
+  }
+  ids.push(`${teacher.digits}@c.us`);
+  let chatId = null;
+  for (const id of [...new Set(ids)]) {
+    const r = await readChat(client, id, 1, false, ownerKey).catch(() => null);
+    if (r?.found) {
+      chatId = id;
+      break;
+    }
+  }
+  if (!chatId) return { ok: false, why: "no chat with this teacher on this number" };
+  const contact = typeof client.getContactById === "function" ? await client.getContactById(chatId).catch(() => null) : null;
+  if (!contactOk(contact)) return { ok: false, why: "a saved contact, a business account or a blocked number" };
+  const why = await answer(ownerKey, client, chatId, teacher, { late: true });
+  console.info(`[WA-AI] answer-now on ${ownerKey} for teacher ${teacher._id}: ${why}`);
+  return { ok: why === "replied", why };
+}
+
 // Wire a WhatsApp client (helper/whatsapp initFor) to the auto-reply.
 function attach(client, ownerKey) {
   if (!client || typeof client.on !== "function") return;
@@ -700,6 +750,7 @@ module.exports = {
   setEnabled,
   setTestOwn,
   statusFor,
+  answerNow,
   repliesToday,
   isOurOutreach,
   // for tests

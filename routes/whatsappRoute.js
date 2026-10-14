@@ -94,6 +94,18 @@ router.post("/ai-reply", protect, adminOnly, async (req, res) => {
   }
 });
 
+// One teacher answered now, at the admin's request (a reply the AI missed): every
+// gate holds except the 10-minute age of the message (helper/waAutoReply answerNow).
+router.post("/ai-reply/answer-now", protect, adminOnly, async (req, res) => {
+  const userId = String(req.body?.userId || "");
+  if (!/^[0-9a-f]{24}$/i.test(userId)) return res.status(400).json({ ok: false, why: "userId" });
+  try {
+    res.json(await require("../helper/waAutoReply").answerNow(key(req), userId));
+  } catch {
+    res.status(500).json({ ok: false, why: "failed" });
+  }
+});
+
 // Test mode: the admin's own numbers are answered too, to try it from one to
 // the other (one setting for both numbers; the AI never answers an AI).
 router.post("/ai-reply/test", protect, adminOnly, async (req, res) => {
