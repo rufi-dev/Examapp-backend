@@ -54,6 +54,9 @@ function toDigits(raw) {
     else if (s.startsWith("0")) s = "994" + s.slice(1);
     else if (s.length === 9) s = "994" + s;
   }
+  // "+994 0XX…": the national 0 kept after the country code (43 outreached teachers, 2026-10-14).
+  // WhatsApp's own lookup forgives it, an exact comparison (and a "<digits>@c.us" id) does not.
+  if (/^9940\d{9}$/.test(s)) s = "994" + s.slice(4);
   return s.length >= 8 ? s : null;
 }
 

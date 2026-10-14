@@ -99,6 +99,9 @@ const digitsOf = (raw) => {
     else if (s.startsWith("0")) s = `994${s.slice(1)}`;
     else if (s.length === 9) s = `994${s}`;
   }
+  // "+994 0XX…": the national 0 kept after the country code. 43 of the 636 outreached teachers
+  // were stored so (2026-10-14), and the AI never matched them: WhatsApp gives the phone without it.
+  if (/^9940\d{9}$/.test(s)) s = `994${s.slice(4)}`;
   return s.length >= 8 ? s : null;
 };
 

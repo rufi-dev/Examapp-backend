@@ -184,6 +184,21 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
   );
   reset();
   ok("…and without a known phone, not answered", (await tryOnce(incoming({ from: LID, getContact: async () => ({ ...person, number: "123456789012345" }) }))) === 0);
+  // A teacher stored as "+994 0XX…" (the national 0 kept): WhatsApp gives the phone without it.
+  reset();
+  const TEACHER_PHONE = TEACHER.phone;
+  TEACHER.phone = "+994 0505440307";
+  c.getContactLidAndPhone = async () => [{ lid: LID, pn: CHAT }];
+  ok("a teacher stored with the extra 0 after +994 is still recognised", (await tryOnce(incoming({ from: LID }))) === 1);
+  TEACHER.phone = TEACHER_PHONE;
+  const W = require("../helper/whatsapp");
+  const same = ["+994 0505440307", "+994 50 544 03 07", "0505440307", "505440307", "+9940505440307", "00994505440307"];
+  ok(
+    "sending and matching read a stored phone the same way, extra 0 or not",
+    same.every((p) => ai._digitsOf(p) === "994505440307" && W.toDigits(p) === "994505440307"),
+    JSON.stringify(same.map((p) => [ai._digitsOf(p), W.toDigits(p)]))
+  );
+  ok("…and leave other countries' numbers alone", ai._digitsOf("+90 532 123 45 67") === "905321234567" && W.toDigits("+7 916 123 45 67") === "79161234567");
   ok("only a one-person chat id passes", ai._personChat(CHAT) && ai._personChat("123456789012@lid") && !ai._personChat("120363@g.us") && !ai._personChat("status@broadcast") && !ai._personChat(""));
 
   console.log("\nnot anyone the phone knows");
