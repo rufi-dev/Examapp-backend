@@ -162,6 +162,20 @@ function scheduleInitRetry(s, id, reason) {
   s.reconnectTimer = setTimeout(() => { if (!shuttingDown) initFor(id); }, delay);
 }
 
+/*
+ * Whether a dropped session comes back by itself: only one that was LINKED (a
+ * network blip), and never after WhatsApp ended the link (LOGOUT, UNPAIRED) or a
+ * QR went unscanned. Such a session can only show a QR, and restarting it is a
+ * headless browser looping for ever: 2026-10-15, number 2 was logged out at
+ * 10:08, came back as "linked" every time its QR ran out, and relaunched
+ * browsers until the server's memory and swap were full and number 1 stopped
+ * receiving messages. It now waits for the admin to scan a new QR.
+ */
+function shouldReconnect(reason, wasLinked) {
+  if (!wasLinked) return false;
+  return !/LOGOUT|UNPAIRED|qrcode retries/i.test(String(reason || ""));
+}
+
 // Boot (or re-boot) a teacher's WhatsApp client. Safe to call repeatedly.
 function initFor(ownerId) {
   if (!ENABLED || !ownerId || shuttingDown) return; // CR-117: never start a new client during shutdown
@@ -313,8 +327,17 @@ function initFor(ownerId) {
   s.client.on("disconnected", (reason) => {
     console.error(`[WHATSAPP] ${id} disconnected:`, reason);
     const wasLinked = s.everAuthed;
+    const again = shouldReconnect(reason, wasLinked);
+    const dead = s.client;
     s.ready = false;
     s.client = null;
+    if (!again) {
+      // Logged out or never scanned: forget "linked", and close the browser now.
+      s.everAuthed = false;
+      Promise.resolve()
+        .then(() => dead && dead.destroy())
+        .catch(() => {});
+    }
     s.starting = false;
     s.qrLogged = false;
     s.connecting = false;
@@ -325,8 +348,8 @@ function initFor(ownerId) {
     // stopped — the teacher re-links on demand from the dashboard — so we don't
     // loop a headless browser + QR forever. CR-117: never reconnect during shutdown,
     // and TRACK the timer so lifecycleShutdown can clear it.
-    if (wasLinked && !shuttingDown) s.reconnectTimer = setTimeout(() => { if (!shuttingDown) initFor(id); }, 10000);
-    else if (!wasLinked) console.log(`[WHATSAPP] ${id} not linked — stopped (re-link from dashboard).`);
+    if (again && !shuttingDown) s.reconnectTimer = setTimeout(() => { if (!shuttingDown) initFor(id); }, 10000);
+    else if (!again) console.log(`[WHATSAPP] ${id} ${wasLinked ? "logged out" : "not linked"} — stopped (re-link from dashboard).`);
   });
 
   // Start watchdog: if this start neither shows a QR nor connects within the
@@ -791,6 +814,7 @@ module.exports = {
   _injectSessionForTests,
   _isShuttingDownForTests,
   _initForTest,
+  _shouldReconnect: shouldReconnect,
   getStatusFor,
   getQrFor,
   logoutFor,

@@ -3,7 +3,7 @@
  * The support AI answering on WhatsApp (owner, 2026-10-13): only teachers we
  * wrote to first, only new messages, never over a person, within its limits.
  * The number is the owner's personal phone too, so every gate is tried on its
- * own: groups, channels, saved contacts, business accounts, chats that existed
+ * own: groups, channels, saved contacts, blocked numbers, chats that existed
  * before our message, and the fresh re-check right before sending.
  * A fake WhatsApp client and stubbed database calls: nothing is sent.
  */
@@ -203,14 +203,19 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
 
   console.log("\nnot anyone the phone knows");
   for (const [what, flag] of [
-    ["a saved contact", "isMyContact"],
-    ["a business account", "isBusiness"],
-    ["an enterprise account", "isEnterprise"],
+    ["a contact saved in the phone", "isMyContact"],
     ["a blocked number", "isBlocked"],
   ]) {
     reset();
     person[flag] = true;
     ok(`${what} is not answered, even if registered and written to`, (await tryOnce()) === 0);
+  }
+  // 2026-10-15: a teacher who answered the outreach went unanswered because her own WhatsApp is a
+  // Business account. The owner's business contacts are kept out by "saved" and "began with our message".
+  for (const flag of ["isBusiness", "isEnterprise"]) {
+    reset();
+    person[flag] = true;
+    ok(`a teacher on WhatsApp Business (${flag}) we wrote to is answered`, (await tryOnce()) === 1);
   }
   reset();
   ok(
@@ -508,7 +513,9 @@ const theirs = (body = "Salam, sinfi necə yaradım?", ts = now()) => ({ fromMe:
   let an = await now1();
   ok("a message from hours ago is answered on request, and the AI is told it is late", an.r.ok && an.sent === 1 && /cavab gecikib/.test(asked[0]?.opts?.profile || ""), JSON.stringify(an));
   an = await now1(() => (person.isMyContact = true));
-  ok("…but never a saved contact", !an.r.ok && an.sent === 0 && /saved contact/.test(an.r.why), JSON.stringify(an));
+  ok("…a contact saved in the phone too: the admin chose this teacher", an.r.ok && an.sent === 1, JSON.stringify(an));
+  an = await now1(() => (person.isBlocked = true));
+  ok("…but never a blocked number", !an.r.ok && an.sent === 0 && /blocked/.test(an.r.why), JSON.stringify(an));
   an = await now1(() => c.history.push({ fromMe: true, body: "Salam, kömək edim", type: "chat", timestamp: now() }));
   ok("…nor a chat already answered", !an.r.ok && an.sent === 0 && /this number's own/.test(an.r.why), JSON.stringify(an));
   an = await now1(() => (chats[KEY] = { humanUntil: new Date(Date.now() + 3600e3) }));

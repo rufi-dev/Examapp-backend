@@ -279,6 +279,30 @@ async function contactReengage(senderId, u, now = new Date()) {
   return status;
 }
 
+/*
+ * One message per PHONE, not per account: a teacher who had registered twice
+ * with the same number got the second wave twice, an hour apart (2026-10-15).
+ * The numbers a wave has already reached, compared in one normal form
+ * ("+994 50 123 45 67", "+9940501234567" and "0501234567" are one phone).
+ */
+function phoneKey(raw) {
+  let s = String(raw || "").trim();
+  const plus = s.startsWith("+");
+  s = s.replace(/\D/g, "");
+  if (!s) return null;
+  if (!plus) {
+    if (s.startsWith("00")) s = s.slice(2);
+    else if (s.startsWith("0")) s = `994${s.slice(1)}`;
+    else if (s.length === 9) s = `994${s}`;
+  }
+  if (/^9940\d{9}$/.test(s)) s = `994${s.slice(4)}`;
+  return s.length >= 8 ? s : null;
+}
+async function reachedPhones(statusField) {
+  const rows = await User.find({ role: "teacher", [statusField]: "sent" }).select("phone").lean();
+  return new Set(rows.map((r) => phoneKey(r.phone)).filter(Boolean));
+}
+
 async function secondWave(now, senderKeys) {
   const candidates = await User.find(reengageQuery(now))
     .select("_id name phone createdAt reengageAttempts")
@@ -286,8 +310,18 @@ async function secondWave(now, senderKeys) {
     .limit(ATTEMPTS_PER_SWEEP)
     .lean();
   if (!candidates.length) return { wave: 2, drained: true };
+  const reached = await reachedPhones("reengageStatus");
   let cleared = 0;
   for (const u of candidates) {
+    if (reached.has(phoneKey(u.phone))) {
+      // Another account with this phone already had the second wave: closed, never sent twice.
+      await User.updateOne(
+        { _id: u._id, reengageStatus: { $in: [null] } },
+        { $set: { reengageStatus: "skipped", reengageAt: now, reengageReason: "duplicate_phone" } }
+      );
+      cleared += 1;
+      continue;
+    }
     const senderId = wa.nextReadyOwner(senderKeys);
     if (!senderId) return { wave: 2, skipped: "not_ready" };
     const status = await contactReengage(senderId, u, now);
@@ -508,12 +542,22 @@ async function firstWave(now, since, senderKeys) {
   if (!candidates.length) return { drained: true };
 
   const stuckMap = await stuckStateForOwners(candidates.map((c) => c._id));
+  const reached = await reachedPhones("outreachStatus");
   let attempts = 0;
   let cleared = 0;
   for (const u of candidates) {
     if (attempts >= ATTEMPTS_PER_SWEEP) break;
     const stuck = stuckMap.get(String(u._id));
     if (!stuck || !stuck.isStuck) continue; // finished setup → leave alone
+    if (reached.has(phoneKey(u.phone))) {
+      // Another account with this phone already had the first wave: closed, never sent twice.
+      await User.updateOne(
+        { _id: u._id, outreachStatus: { $in: [null] } },
+        { $set: { outreachStatus: "skipped", outreachAt: new Date(), outreachReason: "duplicate_phone" } }
+      );
+      cleared += 1;
+      continue;
+    }
     attempts += 1;
     // Rotate to the next ready number for THIS send, so consecutive sends go out
     // from alternating linked numbers ("1 by 1").

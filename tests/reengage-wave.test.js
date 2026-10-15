@@ -181,6 +181,21 @@ async function main() {
   ok("another teacher's token fails", !checkUnsubscribeToken(String(quiet._id), unsubscribeToken(String(dead._id))));
   ok("a made-up one fails", !checkUnsubscribeToken(String(quiet._id), "0".repeat(32)));
 
+  console.log("\n8. One message per PHONE, not per account (2026-10-15: one teacher, two accounts, two messages)");
+  const digits = (p) => String(p).replace(/\D/g, "").replace(/^9940/, "994");
+  const twinA = await teacher({ lastActiveAt: ago(10), createdAt: ago(9), phone: "+994 50 777 11 22" });
+  const twinB = await teacher({ lastActiveAt: ago(10), createdAt: ago(9), phone: "+9940507771122" });
+  const day2 = new Date(NOW.getTime() + DAY);
+  const before8 = sent.length;
+  await job.runOutreachSweep(day2);
+  await job.runOutreachSweep(new Date(day2.getTime() + 31 * 60 * 1000));
+  await job.runOutreachSweep(new Date(day2.getTime() + 62 * 60 * 1000));
+  const toTwin = sent.slice(before8).filter((s) => digits(s.phone) === "994507771122");
+  ok("the phone gets the second wave once", toTwin.length === 1, JSON.stringify(sent.slice(before8)));
+  const [a8, b8] = await Promise.all([User.findById(twinA._id).lean(), User.findById(twinB._id).lean()]);
+  const reasons = [a8.reengageReason, b8.reengageReason].sort();
+  ok("…the other account is closed as a duplicate, never sent", reasons.join() === "duplicate_phone,sent" && [a8.reengageStatus, b8.reengageStatus].sort().join() === "sent,skipped", JSON.stringify(reasons));
+
   await mongoose.disconnect();
   await mem.stop();
   console.log(`\n${passed} passed, ${failed} failed`);

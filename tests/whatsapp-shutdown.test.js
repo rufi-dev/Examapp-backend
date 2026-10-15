@@ -44,6 +44,14 @@ async function main() {
   await wa.shutdownWhatsapp({ timeoutMs: 1000 });
   ok("second shutdown is idempotent (client not destroyed twice)", destroyed === 1);
 
+  // 2026-10-15: a logged-out number came back as "linked" every time its QR ran out and relaunched
+  // browsers until the server's memory and swap were full. Only a linked session's blip reconnects.
+  const again = wa._shouldReconnect;
+  ok("a linked session that dropped (network, navigation) reconnects", again("NAVIGATION", true) && again("CONFLICT", true));
+  ok("…but never after WhatsApp ended the link", !again("LOGOUT", true) && !again("UNPAIRED", true) && !again("UNPAIRED_IDLE", true));
+  ok("…nor after a QR nobody scanned", !again("Max qrcode retries reached", true));
+  ok("a never-linked session never reconnects", !again("NAVIGATION", false));
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 }

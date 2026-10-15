@@ -16,8 +16,11 @@
  *   3. on one of the admin's numbers;
  *   4. the sender is a registered teacher (not deleted) our automatic message
  *      was sent to, and not this number itself;
- *   5. not someone the phone knows: a saved contact, a business account or a
- *      blocked number is left to the owner;
+ *   5. not someone the phone knows: a contact saved in the phone or a blocked
+ *      number is left to the owner (a WhatsApp Business account is no reason:
+ *      many tutors use one, and the owner's business contacts are kept out by
+ *      gates 5 and 6; when the admin asks for one teacher to be answered now,
+ *      a saved contact is let through, a blocked number never);
  *   6. the chat began with our automatic message (nothing before it, from
  *      either side), so a conversation that existed before is never entered;
  *   7. not while a person is handling the chat: a message the admin typed (on
@@ -85,7 +88,15 @@ const NOTICE_TYPES = new Set(["e2e_notification", "notification", "notification_
 // A chat with one person. Everything else is never touched.
 const personChat = (id) => /^\d{6,15}@c\.us$/.test(String(id || "")) || /^\d{6,20}@lid$/.test(String(id || ""));
 // The person as the phone knows them. Fails closed: if WhatsApp can't say, no answer.
-const contactOk = (c) => !!c && !c.isMe && !c.isGroup && !c.isBlocked && !c.isMyContact && !c.isBusiness && !c.isEnterprise;
+// Why the phone's own knowledge of this person keeps the AI out, or "" when it does not. Fails closed.
+function contactWhy(c, { allowSaved = false } = {}) {
+  if (!c) return "WhatsApp could not say who it is";
+  if (c.isMe) return "this number itself";
+  if (c.isGroup) return "a group";
+  if (c.isBlocked) return "a blocked number";
+  if (c.isMyContact && !allowSaved) return "a contact saved in the phone";
+  return "";
+}
 const killed = () => process.env.WA_AUTO_REPLY === "off";
 
 const bakuDay = (t = Date.now()) => new Date(t + 4 * 3600 * 1000).toISOString().slice(0, 10);
@@ -519,13 +530,14 @@ const testNote = (settings, ownerKey, why) => {
 // Told to the AI when the answer comes hours after the teacher wrote (answerNow).
 const LATE_NOTE = `QEYD: müəllim bu mesajı bir neçə saat əvvəl yazıb, cavab gecikib. Cavabı bir qısa üzrlə başla (məs. "Gecikdiyimiz üçün üzr istəyirəm"), sonra adi qaydada davam et.`;
 
-// The last gate, right before anything is sent: everything once more, fresh.
-async function stillAllowed(ownerKey, client, chatId, teacher) {
-  if (killed() || !personChat(chatId)) return false;
+// The last gate, right before anything is sent: everything once more, fresh. Returns why not, or "".
+async function stillAllowed(ownerKey, client, chatId, teacher, { allowSaved = false } = {}) {
+  if (killed()) return "switched off on the server (WA_AUTO_REPLY=off)";
+  if (!personChat(chatId)) return "not a one-person chat";
   const settings = await getSettings({ fresh: true });
-  if (!numberSwitch(settings, ownerKey).on) return false;
+  if (!numberSwitch(settings, ownerKey).on) return "switched off on this number";
   const state = await WaAutoChat.findOne({ key: `${ownerKey}|${chatId}` }).lean();
-  if (state?.humanUntil && new Date(state.humanUntil) > new Date()) return false;
+  if (state?.humanUntil && new Date(state.humanUntil) > new Date()) return "a person wrote in this chat in the last 12 hours";
   // The admin's own number, in test mode: still on, still theirs.
   if (teacher.tester) {
     // The last check's contact lookup for a teacher, tried too, so a test proves it (ok / failed only).
@@ -536,17 +548,19 @@ async function stillAllowed(ownerKey, client, chatId, teacher) {
       );
       console.info(`[WA-AI] test: the last check's contact lookup ${p}`);
     }
-    return settings.testOwn && (await ownNumbers()).has(teacher.digits);
+    if (!settings.testOwn) return "test mode switched off";
+    return (await ownNumbers()).has(teacher.digits) ? "" : "no longer one of the admin's numbers";
   }
   const u = await User.findOne({ _id: teacher._id, ...OUTREACHED }).select("phone").lean();
-  if (!u || digitsOf(u.phone) !== teacher.digits) return false;
-  if (chatId.endsWith("@c.us") && chatId.split("@")[0] !== teacher.digits) return false;
+  if (!u) return "no longer a teacher our automatic message went to";
+  if (digitsOf(u.phone) !== teacher.digits) return "the teacher's phone changed";
+  if (chatId.endsWith("@c.us") && chatId.split("@")[0] !== teacher.digits) return "the chat is with another number";
   const contact = typeof client.getContactById === "function" ? await client.getContactById(chatId).catch(() => null) : null;
-  return contactOk(contact);
+  return contactWhy(contact, { allowSaved });
 }
 
 // Answers the chat if every gate allows; returns "replied" or the reason it did not.
-async function answer(ownerKey, client, chatId, teacher, { late = false } = {}) {
+async function answer(ownerKey, client, chatId, teacher, { late = false, allowSaved = false } = {}) {
   const key = `${ownerKey}|${chatId}`;
   if (busy.has(key)) {
     again.add(key);
@@ -611,7 +625,8 @@ async function answer(ownerKey, client, chatId, teacher, { late = false } = {}) 
     if (!reply) return note("the AI gave no reply");
 
     // Everything once more: a person may have stepped in, or it was switched off, while it was written.
-    if (!(await stillAllowed(ownerKey, client, chatId, teacher))) return stopAt(ownerKey, "a gate closed before sending");
+    const closed = await stillAllowed(ownerKey, client, chatId, teacher, { allowSaved });
+    if (closed) return stopAt(ownerKey, `a gate closed before sending: ${closed}`);
     const sent = await client.sendMessage(chatId, `${reply}${AI_MARK}`);
     remember(sent);
     await WaAutoChat.updateOne(
@@ -676,7 +691,8 @@ async function onIncoming(ownerKey, client, msg) {
     const contact = await Promise.resolve()
       .then(() => msg.getContact())
       .catch(() => null);
-    if (!contactOk(contact)) return note("a saved contact, a business account or a blocked number");
+    const known = contactWhy(contact);
+    if (known) return note(known);
   }
   if (teacher.tester) {
     // The contact lookup a teacher's message goes through, tried too, so a test proves it (ok / failed only).
@@ -727,8 +743,10 @@ async function answerNow(ownerKey, userId) {
   }
   if (!chatId) return { ok: false, why: "no chat with this teacher on this number" };
   const contact = typeof client.getContactById === "function" ? await client.getContactById(chatId).catch(() => null) : null;
-  if (!contactOk(contact)) return { ok: false, why: "a saved contact, a business account or a blocked number" };
-  const why = await answer(ownerKey, client, chatId, teacher, { late: true });
+  // The admin chose this teacher: a contact saved in the phone is no reason here; a blocked number still is.
+  const known = contactWhy(contact, { allowSaved: true });
+  if (known) return { ok: false, why: known };
+  const why = await answer(ownerKey, client, chatId, teacher, { late: true, allowSaved: true });
   console.info(`[WA-AI] answer-now on ${ownerKey} for teacher ${teacher._id}: ${why}`);
   return { ok: why === "replied", why };
 }
