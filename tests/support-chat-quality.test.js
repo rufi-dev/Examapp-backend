@@ -39,6 +39,7 @@ for (const gone of ["Sual yaratmağa keç", "İmtahanını təsvir et", "Təsdiq
 // The card's «Sinfi dəyiş» (2026-10-16, as BunkerMath has it).
 ok("names the card's «Sinfi dəyiş»", /«Sinfi dəyiş» \(imtahanı başqa sinfinizə köçürür: «Yeni sinif» → «Köçür»/.test(P));
 // The ready-PDF exam is back on the "Nə yaradaq?" screen (2026-10-16).
+ok("tells «extract the PDF's questions» (Fayl əlavə et) from «give the PDF as it is» (Hazır PDF vərəqi ver)", /PDF-dəki sualları platformaya çıxarım[^"]*" = «Fayl əlavə et»[^"]*"PDF-i olduğu kimi verim[^"]*" = «Hazır PDF vərəqi ver»/.test(P));
 ok("names the ready-PDF exam and keeps it apart from «Fayl əlavə et»", /«Hazır PDF vərəqi ver»[^\n]*cavab açarı[^\n]*«Fayl əlavə et»-dən fərqlidir/.test(P));
 for (const now of ["Nə haqqında imtahan olsun?", "Fayl əlavə et", "Sualları hazırla", "Təsdiq et və davam et", "Nəşr et", "Şagird dəvət et", "Linki kopyala", "Variantları qarışdır", "Ətraflı parametrlər", "Cavabları tap"]) {
   ok(`names «${now}»`, P.includes(now));

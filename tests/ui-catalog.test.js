@@ -106,7 +106,7 @@ console.log("\nwired into the support chat");
 const src = fs.readFileSync(path.join(__dirname, "..", "services", "chatAssistant.js"), "utf8");
 // (On WhatsApp no guide can be shown, so the search is skipped there.)
 ok("the controls that fit are handed to the AI", /const found = whatsapp \? "" : ui\.candidatesFor\(asked\);/.test(src) && /EKRAN ELEMENTLƏRİ/.test(src));
-ok("the reply's steps are rebuilt from the catalogue", /ui\.fixSteps\(toPlainText\(body\)\)/.test(src));
+ok("the reply's steps are rebuilt to follow its text", /ui\.alignSteps\(toPlainText\(body\)\)/.test(src));
 ok("no trace of the old fixed guides", !/guideCatalog|\[\[guide:/.test(src));
 const prompt = require("../services/chatAssistant").SYSTEM_PROMPT;
 ok("the AI is told to use only listed IDs, final targets only, or none", /\[\[steps:ID\|ID\|ID\]\]/.test(prompt) && /YALNIZ sonda verilən «EKRAN ELEMENTLƏRİ»/.test(prompt) && /\[\[steps\]\] YAZMA/.test(prompt));
@@ -131,6 +131,43 @@ ok("real: the bin question shows the bin's «Həmişəlik sil» and its menu ite
 ok("real: the bio question shows the profile's «Haqqımda» field", /profile\.haqqimda — «Haqqımda» \(xana\)/.test(realShown("biomu necə dəyişim")));
 ok("real: a route the AI starts from another entrance follows it (results list → results → Excel)", ui.expandSteps(["nav.sagird-neticeleri", "results.excel-ixrac-et"], { cat: real }).join(" > ") === "nav.sagird-neticeleri > results-list.kesrler-1-ci-yoxlama > results.excel-ixrac-et", ui.expandSteps(["nav.sagird-neticeleri", "results.excel-ixrac-et"], { cat: real }).join(" > "));
 ok("real: the bin's way starts at the menu", ui.expandSteps(["trash.hemiselik-sil"], { cat: real })[0] === "nav.zibil-qutusu", ui.expandSteps(["trash.hemiselik-sil"], { cat: real }).join(" > "));
+
+
+console.log("\nthe pictures follow the text (owner, 2026-10-16: the text was right, the pictures were not)");
+const labelsOf = (out, c = real) => ((out.match(/\[\[steps:([^\]]*)\]\]/) || [])[1] || "").split("|").filter(Boolean).map((id) => c.elements[id]?.label);
+const SEVANA = `Sevana müəllim, hazır PDF-dən test belə hazırlanır:
+1) «Siniflər» bölməsindən sinfi açın və «İmtahan əlavə et» düyməsinə basın.
+2) "Nə yaradaq?" ekranında «Fayl əlavə et» düyməsinə basıb PDF-i seçin (hər fayl 30 MB-a qədər, ən çox 10 fayl).
+3) «Nə haqqında imtahan olsun?» xanasını boş qoyun. Onda fayldakı bütün suallar çıxarılır, cavablar da tapılır.
+4) «Sualları hazırla» düyməsinə basın. Bir neçə dəqiqə çəkə bilər.
+5) Açılan cavab açarında düzgün cavablar yaşıl işarələnir. Hər sualı yoxlayın. Dəyişmək üçün sualın yanındakı «AI ilə düzəlt» və ya aşağıdakı «Redaktə et» düyməsindən istifadə edin.
+6) «Təsdiq et və davam et» düyməsinə basın, imtahanın adını, müddətini və tarixini yazıb «Nəşr et» deyin.
+Diqqət: PDF-dəki fiqur və ya şəkil sualda düzgün çıxmasa, sual kartında «PDF-dən kəs» düyməsi ilə onu özünüz seçib əlavə edə bilərsiniz.
+[[steps:nav.sinifler|class-page.imtahan-elave-et|composer.ne-haqqinda-imtahan-olsun|composer.el-ile-yazacagam|editor.pdf-den-kes]]`;
+const sev = labelsOf(ui.alignSteps(SEVANA, { cat: real }));
+ok("real: Sevana's reply (16 Oct) is shown as it is written", sev.join(" > ") === "Siniflər > İmtahanlar > İmtahan əlavə et > Fayl əlavə et > Nə haqqında imtahan olsun? > Sualları hazırla > Təsdiq et və davam et > Nəşr et", sev.join(" > "));
+ok("…not the AI's wrong picks (Əl ilə yazacağam), nor the note's «PDF-dən kəs»", !sev.includes("Əl ilə yazacağam") && !sev.includes("PDF-dən kəs"));
+ok("a name the text only mentions (a status, a label) is not a step", ui.namedControls("1) Kartda «Aktiv» və «Gizli» statusları görünür.\n2) «Göstər» düyməsinə basın.").join("|") === "Göstər");
+ok("a note after the steps is not a step", !ui.namedControls("1) «Siniflər» bölməsinə keçin.\n2) «Sinif əlavə et» düyməsinə basın.\nDiqqət: «Sil» düyməsinə basmayın.").includes("Sil"));
+ok("no numbered steps: every control the text acts on, notes left out", ui.namedControls("«Planım» → «Paket seç» edin.\nQeyd: «Sil» düyməsinə basmayın.").join("|") === "Planım|Paket seç");
+ok("a reply naming nothing found keeps the AI's steps", ui.alignSteps("Bunu belə edin.\n[[steps:profile.haqqimda]]", { cat }) === ui.fixSteps("Bunu belə edin.\n[[steps:profile.haqqimda]]", { cat }));
+ok("a reply without a marker gets no guide", !/\[\[steps/.test(ui.alignSteps("1) «Siniflər» bölməsinə keçin.\n2) «Sinif əlavə et» düyməsinə basın.", { cat: real })));
+const inv = labelsOf(ui.alignSteps("1) «Siniflər» bölməsindən sinfi açın.\n2) «Şagird dəvət et» sətrinə toxunun.\n3) «Paylaş» düyməsi ilə linki göndərin.\n[[steps:nav.sinifler]]", { cat: real }));
+ok("real: inviting students follows the class page into the invite", inv.join(" > ").startsWith("Siniflər > İmtahanlar > Şagird dəvət et") && inv[inv.length - 1] === "Paylaş", inv.join(" > "));
+
+console.log("\n…and keep to the flow the text describes (the 32-question eval, 2026-10-16)");
+const g = (t, ids = "nav.sinifler") => labelsOf(ui.alignSteps(`${t}\n[[steps:${ids}]]`, { cat: real }));
+const pw = g("1) «Şagirdlərim» bölməsinə keçin.\n2) Şagirdin yanında «Şifrəni dəyiş» düyməsinə basın.\n3) «Şifrəni təyin et» düyməsinə basın.\n4) Yeni şifrəni «Kopyala» ilə kopyalayıb şagirdə göndərin.", "users.sifreni-deyis");
+ok("real: a «Kopyala» found only on another screen is not a jump there (the student password)", !pw.includes("Düzəliş et") && pw[pw.length - 1] === "Şifrəni təyin et", pw.join(" > "));
+const manual = g("1) Sinfi açıb «İmtahan əlavə et» düyməsinə basın.\n2) «Əl ilə yazacağam» seçin.\n3) Tipi «Sual tipini dəyiş» ilə seçin.\n4) Yeni sual üçün «Sual əlavə et» düyməsinə basın.");
+ok("real: after a dialog («Sual tipini dəyiş») the guide goes on on the screen it came from", manual.includes("Sual tipini dəyiş") && manual[manual.length - 1] === "Sual əlavə et", manual.join(" > "));
+const derail = g("1) «Siniflər» bölməsindən sinfi açın və «İmtahan əlavə et» düyməsinə basın.\n2) «AI ilə yaz və ya PDF-dən çıxar» seçimini edin.\n3) «Fayl əlavə et» düyməsinə basıb PDF-i seçin.\n4) «Sualları hazırla» düyməsinə basın.\n5) «Təsdiq et və davam et» düyməsinə basın.");
+ok("real: one option named from another page does not pull the guide off the flow", derail.slice(-3).join(" > ") === "Fayl əlavə et > Sualları hazırla > Təsdiq et və davam et" && !derail.includes("Hazır PDF vərəqi ver"), derail.join(" > "));
+const pay = g("1) «Ödənişlər» bölməsinə keçin, sinfi və şagirdi seçin.\n2) «Məbləğ» xanasına məbləği yazın.\n3) «Ödənişin təsviri» xanasına qeyd yazın.\n4) «Ödənilib» düyməsinə basın.", "nav.odenisler");
+ok("real: fields two clicks deep (class → student → payment) are reached, the way added", pay[0] === "Ödənişlər" && pay.slice(-3).join(" > ") === "Məbləğ > Ödənişin təsviri > Ödənilib", pay.join(" > "));
+const noMarker = ui.alignSteps("1) «Siniflər» bölməsindən sinfi açın.\n2) «Redaktə et» düyməsinə basın.\n3) «Ətraflı parametrlər» bölməsini açın.\n4) «Şifrə ilə qoru» seçimini yandırın.", { cat: real });
+ok("real: a plain walk-through gets its guide even without the AI's marker", /\[\[steps:/.test(noMarker) && labelsOf(noMarker).slice(-2).join(" > ") === "Ətraflı parametrlər > Şifrə ilə qoru", labelsOf(noMarker).join(" > "));
+ok("…but a short answer without numbered steps does not", !/\[\[steps:/.test(ui.alignSteps("Bunun üçün «Planım» bölməsinə keçin və «Pro paketinə keç» düyməsinə basın.", { cat: real })));
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

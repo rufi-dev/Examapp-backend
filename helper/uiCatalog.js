@@ -348,7 +348,11 @@ function expandSteps(targets, { cat = load() } = {}) {
     // A screen with an entrance right where the guide is (the results list's
     // exam link to its results) is one click away, not the long way round.
     const near = s !== here && (cat.entries[s] || []).find((el) => cat.stateOf(el) === here);
-    if (near) push(near);
+    // Back on the screen this one was opened from (a dialog closed): no clicks to add.
+    const back = here && cat.entry[here] && cat.stateOf(cat.entry[here]) === s;
+    if (back) {
+      /* nothing to add */
+    } else if (near) push(near);
     else if (s !== here && !EVERYWHERE[cat.elements[t].scope]) {
       const way = cat.pathTo(s);
       let from = -1;
@@ -363,7 +367,7 @@ function expandSteps(targets, { cat = load() } = {}) {
     push(t);
     here = cat.leads[t] || s;
   }
-  return steps.slice(0, 8);
+  return steps.slice(0, 12);
 }
 
 const STEPS_RE = /\[\[steps:([^\]]*)\]\]/g;
@@ -386,6 +390,171 @@ function fixSteps(text, { cat = load() } = {}) {
     .trim();
 }
 
+/*
+ * The guide follows the TEXT (owner, 2026-10-16: "it explains correctly but
+ * the pictures explain wrong"). The AI chose its step IDs from a short list,
+ * and a control its answer named but the list lacked was swapped for a
+ * neighbour: a reply walking through «Fayl əlavə et» → «Sualları hazırla» →
+ * «Nəşr et» showed «Əl ilə yazacağam» and a side note's «PDF-dən kəs».
+ *
+ * So the controls are read from the reply itself: every «name» it tells the
+ * teacher to act on (a name followed by "düyməsinə basın", "xanasına",
+ * "bölməsindən"…, or on either side of an arrow), in order, from its numbered
+ * steps when it has them (a note after them is not a step). Each name is
+ * found in the whole catalogue; when several screens have it, the one the
+ * guide is on wins, then one a click away, then the AI's own pick. A detour
+ * the next step comes back from (an optional «AI ilə düzəlt» or «Redaktə et»
+ * before «Təsdiq et və davam et» on the same screen) is left out of the
+ * pictures. The way to each screen is added as before (expandSteps). A reply
+ * that names nothing found keeps the AI's IDs.
+ */
+const ACTS_ON = /^\s*[»"”']?\s*(?:→|\(|düymə|sekmə|bölmə|xana|menyu|seçim|açar|keçid|link|sətr|kart|ikon|işarə|bənd|siyahı|basın|basıb|basaraq|bas\b|toxun|seçin|seçib|seçərək|yazın|yazıb|açın|açıb|keçin|keçib|daxil|klik|kopyala|göndər|yüklə|qoyun|edin|yandır|söndür|saxla|paylaş|dəyiş|vurun|sürüşdür|işarələ|deyin|deyib|ilə\s|ilə$|təsdiqlə|bağla|başla|gizlət|göstər|qaytar|sil\b|silin|silib|aktivləşdir|yenilə)/i;
+const normLabel = (s) =>
+  fold(String(s || "").replace(/\([^)]*\)/g, " "))
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+// A step a sentence offers as a choice or an extra: "… «X» və ya «Y» …", "istəsəniz…", "dəyişmək üçün…".
+const OPTIONAL = /\b(və ya|yaxud|ya da|istəsəniz|istəyirsinizsə|lazım olsa|lazım gəlsə|ehtiyac olsa|dəyişmək üçün|düzəltmək üçün|əgər)\b/i;
+
+// The «names» of the controls a reply tells the teacher to use, in order, each with whether it is optional.
+function namedSteps(text) {
+  const body = String(text || "").replace(STEPS_RE, "");
+  const lines = body.split("\n");
+  const numbered = lines.filter((l) => /^\s*\d+[).]\s/.test(l));
+  // A note ("Diqqət: …", "Qeyd: …") is not a step.
+  const note = (l) => /^[^\p{L}\d]*(diqqət|qeyd|məsləhət)\s*:/iu.test(l.trim());
+  const scope = numbered.length >= 2 ? numbered : lines.filter((l) => !note(l));
+  const out = [];
+  for (const line of scope) {
+    for (const m of line.matchAll(/«([^»]+)»/g)) {
+      const after = line.slice(m.index + m[0].length, m.index + m[0].length + 40);
+      const before = line.slice(Math.max(0, m.index - 4), m.index);
+      if (!ACTS_ON.test(after) && !/→\s*$/.test(before)) continue;
+      // The sentence the name is in.
+      const from = Math.max(line.lastIndexOf(".", m.index), line.lastIndexOf("!", m.index), line.lastIndexOf("?", m.index - 1), 0);
+      const to = (() => {
+        const ends = [".", "!", "?"].map((c) => line.indexOf(c, m.index + m[0].length)).filter((i) => i >= 0);
+        return ends.length ? Math.min(...ends) : line.length;
+      })();
+      out.push({ name: m[1].trim(), optional: OPTIONAL.test(line.slice(from, to)) });
+    }
+  }
+  return out;
+}
+const namedControls = (text) => namedSteps(text).map((s) => s.name);
+const numberedCount = (text) => String(text || "").split("\n").filter((l) => /^\s*\d+[).]\s/.test(l)).length;
+
+function alignTargets(text, hinted, { cat = load() } = {}) {
+  const named = namedSteps(text);
+  if (!named.length) return [];
+  const hint = new Set(hinted.filter((id) => cat.elements[id]));
+  const byLabel = new Map();
+  for (const id of cat.ids) {
+    const k = normLabel(cat.elements[id].label);
+    if (!k) continue;
+    if (!byLabel.has(k)) byLabel.set(k, []);
+    byLabel.get(k).push(id);
+  }
+  const lookup = (name) => {
+    const k = normLabel(name);
+    if (!k) return [];
+    if (byLabel.has(k)) return byLabel.get(k);
+    // «Sualları yadda saxla (3)» on screen, «Sualları yadda saxla» in the text, and the like.
+    if (k.length < 5) return [];
+    for (const [label, ids] of byLabel) if (label.length >= 5 && (label.startsWith(k) || k.startsWith(label))) return ids;
+    return [];
+  };
+  /*
+   * The best WHOLE path, not the best next step: one wrong option the text
+   * names (a card on another page) must not pull the guide off the flow it
+   * then describes. Each named control is matched or skipped; a match scores,
+   * and every click the text does not name that has to be added to reach it
+   * costs. Coming back from a dialog to the screen it opened from is a
+   * click's cost and adds none. The path with the best score wins.
+   */
+  const parentOf = (st) => (st && cat.entry[st] ? cat.stateOf(cat.entry[st]) : null);
+  const hops = (here, s, id) => {
+    if (!here || EVERYWHERE[cat.elements[id].scope] || s === here) return 0;
+    if ((cat.entries[s] || []).some((el) => cat.stateOf(el) === here)) return 1;
+    if (s === parentOf(here)) return 1;
+    const way = cat.pathTo(s);
+    for (let i = way.length - 1; i >= 0; i -= 1) if (cat.stateOf(way[i]) === here) return way.length - i;
+    return Infinity;
+  };
+  let frontier = new Map([[null, { score: 0, picks: [] }]]);
+  for (const step of named) {
+    const ids = lookup(step.name);
+    const next = new Map();
+    const offer = (h, cand) => {
+      const cur = next.get(h);
+      if (!cur || cand.score > cur.score) next.set(h, cand);
+    };
+    for (const [here, cur] of frontier) {
+      offer(here, cur); // this name skipped
+      for (const id of ids) {
+        const s = cat.stateOf(id);
+        const n = hops(here, s, id);
+        if (!Number.isFinite(n) || n > 3) continue;
+        const last = cur.picks[cur.picks.length - 1];
+        if (last && last.id === id) continue;
+        let v = 10 - (here ? n * 6 : 0);
+        if (hint.has(id)) v += 1;
+        if (!here && EVERYWHERE[cat.elements[id].scope]) v += 2;
+        if (cat.elements[id].m && cat.elements[id].d) v += 0.5;
+        if (cat.states[s]?.as && cat.states[s].as !== "teacher") v -= 4;
+        // An optional step is a side trip: the guide stays where it was.
+        const h2 = step.optional && cat.leads[id] ? here || s : cat.leads[id] || s;
+        offer(h2, { score: cur.score + v, picks: [...cur.picks, { id, optional: step.optional }] });
+      }
+    }
+    frontier = next;
+  }
+  const picked = [...frontier.values()].reduce((a, b) => (b.score > a.score ? b : a), { score: -Infinity, picks: [] }).picks;
+  // An OPTIONAL detour the next step comes back from is not part of the way
+  // («AI ilə düzəlt» or «Redaktə et» before «Təsdiq et və davam et»); a step
+  // that opens a dialog for the teacher to use («Sual tipini dəyiş») stays.
+  return picked
+    .filter(({ id, optional }, i) => {
+      const nxt = picked[i + 1];
+      if (!optional || !nxt || !cat.leads[id]) return true;
+      return cat.stateOf(nxt.id) !== cat.stateOf(id) || cat.leads[id] === cat.stateOf(id);
+    })
+    .map((x) => x.id);
+}
+
+/*
+ * A reply's [[steps:…]] rebuilt to follow its text; the AI's IDs when the
+ * text names nothing found. A reply that is plainly a walk-through (three or
+ * more numbered steps naming at least two controls found) gets its guide
+ * even when the AI left the marker out: it does that when the control was
+ * missing from the short list it chose from.
+ */
+function alignSteps(text, { cat = load() } = {}) {
+  const src = String(text || "");
+  const m = src.match(/\[\[steps:([^\]]*)\]\]/);
+  const hinted = m ? m[1].split(/[|,\s]+/).map((x) => x.trim()).filter(Boolean) : [];
+  const targets = alignTargets(src, hinted, { cat });
+  if (!m) {
+    if (numberedCount(src) < 3 || targets.length < 2) return fixSteps(src, { cat });
+    const steps = expandSteps(targets, { cat });
+    return steps.length ? `${src.trim()}\n[[steps:${steps.join("|")}]]` : src;
+  }
+  if (!targets.length) return fixSteps(src, { cat });
+  const steps = expandSteps(targets, { cat });
+  let first = true;
+  return src
+    .replace(STEPS_RE, () => {
+      if (!first || !steps.length) return "";
+      first = false;
+      return `[[steps:${steps.join("|")}]]`;
+    })
+    .replace(/\[\[guide:[a-z-]+\]\]/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 // A ready marker for server-written messages (the welcome); "" if the catalogue lacks them.
 function stepsMarker(targets, { cat = load() } = {}) {
   const steps = expandSteps(targets, { cat });
@@ -396,4 +565,4 @@ function hasCatalog(cat = load()) {
   return cat.ids.length > 0;
 }
 
-module.exports = { FILE, fold, load, index, search, candidatesFor, expandSteps, fixSteps, stepsMarker, hasCatalog, sameStem, queryWords };
+module.exports = { FILE, fold, load, index, search, candidatesFor, expandSteps, fixSteps, alignSteps, alignTargets, namedControls, stepsMarker, hasCatalog, sameStem, queryWords };

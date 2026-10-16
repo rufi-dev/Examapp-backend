@@ -125,7 +125,7 @@ VALİDEYNLƏR:
 5) Sonra cavab açarı açılır, düzgün cavablar yaşıl işarələnir. Hər sualı yoxlayın; dəyişmək üçün sualın yanındakı «AI ilə düzəlt» və ya aşağıdakı «Redaktə et».
 6) «Təsdiq et və davam et» → "İmtahanı nəşr et" səhifəsi: «İmtahanın adı», «Müddət (dəqiqə)» (30 dəq, 45 dəq, 1 saat, 1 saat 30 dəq), başlama və bitmə tarixi, «Ümumi bal» (standart 100), «Keçid balı» (50) → «Nəşr et».
 - Sualları özünüz yazmaq üçün: «Əl ilə yazacağam» → sual kartında mətn və variantlar; tipi «Sual tipini dəyiş» ilə; yeni sual «Sual əlavə et»; «Oxu bölməsi əlavə et», «Dinləmə bölməsi əlavə et» (audio, «Neçə dəfə dinləyə bilər?»), «Bölmə əlavə et (Qrammatika və s.)».
-- PDF-i olduğu kimi vermək (suallar platformada yazılmır): "Nə yaradaq?" ekranının altında «Hazır PDF vərəqi ver» → «İmtahanın adı», PDF faylı, müddət → «İmtahanı əlavə et». Sonra solda PDF, sağda cavab açarı açılır: sual sayını PDF-dəki qədər edin («Sual əlavə et», «Sualı sil»), hər sual üçün tipi (Qapalı a–e, Açıq, Həll tələb, Uyğunluq) və düzgün cavabı seçin → «Sualları yadda saxla (N)». Şagird imtahanda PDF-i oxuyur və hər sual üçün variantı işarələyir; nəticə cavab açarı ilə avtomatik hesablanır. Bu, «Fayl əlavə et»-dən fərqlidir: orada AI sualları fayldan çıxarıb platformada yenidən yazır.
+- PDF-i olduğu kimi vermək (suallar platformada yazılmır): "Nə yaradaq?" ekranının altında «Hazır PDF vərəqi ver» → «İmtahanın adı», PDF faylı, müddət → «İmtahanı əlavə et». Sonra solda PDF, sağda cavab açarı açılır: sual sayını PDF-dəki qədər edin («Sual əlavə et», «Sualı sil»), hər sual üçün tipi (Qapalı a–e, Açıq, Həll tələb, Uyğunluq) və düzgün cavabı seçin → «Sualları yadda saxla (N)». Şagird imtahanda PDF-i oxuyur və hər sual üçün variantı işarələyir; nəticə cavab açarı ilə avtomatik hesablanır. Bu, «Fayl əlavə et»-dən fərqlidir: orada AI sualları fayldan çıxarıb platformada yenidən yazır. Hansını deyəcəyini sözlərdən seç: "PDF-dəki sualları platformaya çıxarım / köçürüm / yükləyim, suallar saytda olsun, AI oxusun" = «Fayl əlavə et» (yuxarıdakı 3-cü addım); "PDF-i olduğu kimi verim, şagird PDF-ə baxıb variantı işarələsin, AI lazım deyil" = «Hazır PDF vərəqi ver». Aydın deyilsə, ikisini bir cümlə ilə fərqləndirib soruş.
 - Hazır struktur: «+ Hazır DİM strukturu seç» — Fərdi, MSO (15 sual), Riyaziyyat (Buraxılış 11 və 9, DQT, Blok 1 və 2-ci qrup), Azərbaycan dili (Buraxılış 9 və 11), İngilis dili (Buraxılış 9 və 11), IELTS Academic Reading.
 - Sual tipləri: Tək seçim, Çox seçim, Qısa cavab, Həlli göstərilən sual, Uyğunlaşdırma, Boşluq doldurma, Cədvəl doldurma; bölmələr: Mətn bloku, Dinləmə bloku. Müəllimin özü yoxlasın deyə sualda «Əl ilə yoxla».
 - Şəkil: sual kartında «Şəkil» ilə şəkil yükləyin; yüklənmiş PDF-dən fiqur götürmək üçün «PDF-dən kəs». Variantlara şəkil üçün «Alətlər»də «Variantlarda şəkil».
@@ -482,7 +482,8 @@ async function generateSupportReply(messages, adminId, { channel = "app", contex
   // goes back on the end for the controller (helper/teacherActions.prepare).
   const { splitAction } = require("../helper/teacherActions");
   const { text: body, raw } = splitAction(text);
-  const clean = whatsapp ? forWhatsApp(toPlainText(body)) : ui.fixSteps(toPlainText(body));
+  // The pictures follow the text: the controls it names, in its order (uiCatalog.alignSteps).
+  const clean = whatsapp ? forWhatsApp(toPlainText(body)) : ui.alignSteps(toPlainText(body));
   if (!clean) return null;
   return !whatsapp && raw ? `${clean}\n[[action:${raw}]]` : clean;
 }
