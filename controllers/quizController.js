@@ -1507,6 +1507,13 @@ const setExamHidden = asyncHandler(async (req, res) => {
   });
 });
 
+// The exam card's «Sinfi dəyiş» (ported from BunkerMath): see helper/moveExam.
+const moveExamToClass = asyncHandler(async (req, res) => {
+  const { moveExam } = require("../helper/moveExam");
+  const out = await moveExam(req.user, req.params.examId, req.body?.classId);
+  res.status(out.status).json(out.body);
+});
+
 const getClassesByTag = asyncHandler(async (req, res) => {
   const { tagId } = req.params;
 
@@ -5775,6 +5782,7 @@ module.exports = {
   finalizeExpiredAttempts,
   finalizeAttempt, // exported for CR-038 deterministic freeze tests
   republishExam, // exported for CR-034 publish tests
+  moveExamToClass,
   finalizeAttempt,
   scoreAndCreateResult,
   effectiveExpiry,

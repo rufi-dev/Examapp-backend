@@ -10,6 +10,13 @@ const { isChatAiEnabled, generateSupportReply } = require("../services/chatAssis
 const typing = require("../helper/chatTyping");
 const ui = require("../helper/uiCatalog");
 const { VOICE_MAX_SEC, VOICE_PER_DAY, isVoiceUrl, voicePreview, hearVoice } = require("../helper/chatVoice");
+const actions = require("../helper/teacherActions");
+
+// The card a reply carries (helper/teacherActions), as the client sees it.
+const actionView = (a) =>
+  a && a.kind
+    ? { kind: a.kind, title: a.title, lines: a.lines || [], status: a.status, result: a.result || "", link: a.link || "", prompt: a.kind === "create_exam" ? a.params?.prompt || "" : undefined, classId: a.kind === "create_exam" ? a.params?.classId || "" : undefined }
+    : null;
 
 // A user counts as "online" if their last heartbeat is within this window. The
 // client pings every ~30s, so 75s tolerates one dropped ping without flicker.
@@ -340,6 +347,7 @@ const getMessages = asyncHandler(async (req, res) => {
       audioSec: m.audioSec || 0,
       transcript: m.transcript || "",
       ai: !!m.ai,
+      action: actionView(m.action),
       createdAt: m.createdAt,
       readAt: m.readAt,
     })),
@@ -443,7 +451,12 @@ async function maybeAiReply(conversationId, adminId) {
   try {
     const teacherId = conv.participants.find((p) => String(p) !== String(adminId));
     const profile = await require("../helper/teacherContext").teacherContext(teacherId);
-    reply = await generateSupportReply(recent, adminId, { profile });
+    // Their own classes and exams: what the chat can answer about and act on.
+    const account = await actions.accountBrief(teacherId).catch((e) => {
+      console.error("[CHAT-AI] account brief failed:", e?.message);
+      return "";
+    });
+    reply = await generateSupportReply(recent, adminId, { profile, account });
     if (!reply) {
       console.warn("[CHAT-AI] no reply generated for", conversationId);
       return;
@@ -456,14 +469,37 @@ async function maybeAiReply(conversationId, adminId) {
   }
 
   const to = conv.participants.find((p) => String(p) !== String(adminId));
+  /*
+   * A reply may end with an action the AI prepared. It is checked against THIS
+   * teacher's own data and becomes the card under the reply; nothing changes
+   * until they confirm it. One that does not check out says why instead.
+   */
+  const { text: said, raw } = actions.splitAction(reply);
+  let action;
+  let text = said;
+  // Still promising a card that is not there (after the one retry): say so.
+  if (!raw && actions.promisesCard(said)) {
+    console.warn("[CHAT-AI] reply still promises a card without one", conversationId);
+    text = `${said}\n\nBağışlayın, kart hazırlanmadı. Nəyi dəyişmək istədiyinizi bir daha yazın, yenidən hazırlayım.`;
+  }
+  if (raw) {
+    const teacher = await User.findById(to).select("role").lean();
+    const ready = teacher ? await actions.prepare(raw, { _id: to, role: teacher.role }).catch((e) => ({ ok: false, why: e?.message || "xəta" })) : { ok: false, why: "müəllim tapılmadı" };
+    if (ready.ok) action = { ...ready.action, status: "pending" };
+    else {
+      console.warn(`[CHAT-AI] action not prepared (${ready.why})`, conversationId);
+      text = `${said}\n\nBağışlayın, bunu hazırlaya bilmədim: ${ready.why}. Bunu özünüz «Redaktə et» ilə edə bilərsiniz və ya mənə bir az dəqiq yazın.`;
+    }
+  }
   const aiMsg = await Message.create({
     conversation: conv._id,
     from: adminId,
     to,
-    text: reply,
+    text,
     ai: true,
+    ...(action ? { action } : {}),
   });
-  fresh.lastMessageText = reply.slice(0, 200);
+  fresh.lastMessageText = text.slice(0, 200);
   fresh.lastMessageAt = aiMsg.createdAt;
   fresh.lastMessageFrom = adminId;
   await fresh.save();
@@ -479,4 +515,52 @@ const setConversationAi = asyncHandler(async (req, res) => {
   res.json({ ok: true, aiPaused: conv.aiPaused });
 });
 
-module.exports = { ping, nudge, welcome, listConversations, startConversation, contactAdmin, getMessages, sendMessage, setConversationAi };
+/*
+ * The teacher's answer to a card the AI prepared: «Təsdiq et» runs it, as the
+ * teacher, with every check made again; «Ləğv et» drops it. Only the teacher
+ * the card was written to may decide, and only once (pending → running is one
+ * atomic step, so a double tap cannot run it twice).
+ */
+const decideAction = asyncHandler(async (req, res) => {
+  const decision = req.body?.decision;
+  if (!["confirm", "cancel"].includes(decision)) throw httpError(400, "bad_decision", "Təsdiq və ya ləğv seçin.");
+  if (!mongoose.isValidObjectId(req.params.id)) throw httpError(404, "message_not_found", "Mesaj tapılmadı.");
+  const msg = await Message.findById(req.params.id).lean();
+  if (!msg || !msg.ai || !msg.action || String(msg.to) !== String(req.user._id))
+    throw httpError(404, "message_not_found", "Mesaj tapılmadı.");
+  if (msg.action.status !== "pending") return res.json({ action: actionView(msg.action) });
+
+  if (decision === "cancel") {
+    const done = await Message.findOneAndUpdate(
+      { _id: msg._id, "action.status": "pending" },
+      { $set: { "action.status": "cancelled", "action.result": "Ləğv edildi.", "action.decidedAt": new Date() } },
+      { new: true }
+    ).lean();
+    return res.json({ action: actionView((done || msg).action) });
+  }
+
+  const claimed = await Message.findOneAndUpdate(
+    { _id: msg._id, "action.status": "pending" },
+    { $set: { "action.status": "running", "action.decidedAt": new Date() } },
+    { new: true }
+  ).lean();
+  if (!claimed) {
+    const now = await Message.findById(msg._id).lean();
+    return res.json({ action: actionView(now?.action) });
+  }
+  let out;
+  try {
+    out = await actions.run(claimed.action, req.user);
+  } catch (e) {
+    console.error("[CHAT-ACTION] run failed:", e?.message);
+    out = { ok: false, message: "Alınmadı: gözlənilməz xəta. Bir azdan yenidən cəhd edin." };
+  }
+  const saved = await Message.findOneAndUpdate(
+    { _id: msg._id },
+    { $set: { "action.status": out.ok ? "done" : "failed", "action.result": out.message || "", "action.link": out.link || "" } },
+    { new: true }
+  ).lean();
+  res.json({ action: actionView(saved.action) });
+});
+
+module.exports = { ping, nudge, welcome, listConversations, startConversation, contactAdmin, getMessages, sendMessage, setConversationAi, decideAction };

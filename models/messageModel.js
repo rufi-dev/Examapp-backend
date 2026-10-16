@@ -20,6 +20,26 @@ const messageSchema = Schema(
     transcriptAlt: { type: String, default: "", maxlength: 4000 },
     // Written by the support AI (as the admin), not typed by a person.
     ai: { type: Boolean, default: false },
+    // Something the support AI prepared for the teacher to confirm
+    // (helper/teacherActions): the card under the reply. Nothing happens until
+    // the teacher presses «Təsdiq et». `kind`, not `type`: Mongoose reads a
+    // nested `type` key as the path's own type.
+    action: {
+      type: new Schema(
+        {
+          kind: { type: String, enum: ["update_exam", "move_exam", "create_exam"], required: true },
+          params: { type: Schema.Types.Mixed, default: {} },
+          title: { type: String, default: "" },
+          lines: { type: [String], default: [] },
+          status: { type: String, enum: ["pending", "running", "done", "failed", "cancelled"], default: "pending" },
+          result: { type: String, default: "" },
+          link: { type: String, default: "" },
+          decidedAt: { type: Date, default: null },
+        },
+        { _id: false }
+      ),
+      default: undefined,
+    },
     readAt: { type: Date, default: null },
   },
   { timestamps: true }

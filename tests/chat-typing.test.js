@@ -50,7 +50,7 @@ ok("stops BEFORE the reply is saved, so no poll shows dots under an answer", off
 ok("stops in a finally, so a failed turn cannot leave it on", /\} finally \{\s*typing\.stopTyping\(conversationId, token\);\s*\}/.test(reply));
 
 console.log("\nthe admin sees which replies the AI wrote");
-ok("an AI reply is saved marked as the AI's", /text: reply,\s*ai: true,/.test(reply));
+ok("an AI reply is saved marked as the AI's", /text,\s*ai: true,/.test(reply));
 ok("the mark reaches the chat", /ai: !!m\.ai,/.test(src));
 const model = fs.readFileSync(path.join(__dirname, "..", "models", "messageModel.js"), "utf8");
 ok("the message keeps it", /ai: \{ type: Boolean, default: false \}/.test(model));

@@ -11,6 +11,7 @@ const {
   getMessages,
   sendMessage,
   setConversationAi,
+  decideAction,
 } = require("../controllers/chatController");
 
 // Presence heartbeat + unread badge (any logged-in user; the widget itself is
@@ -40,5 +41,9 @@ router.post("/welcome", protect, welcome);
 // conversations.
 router.get("/conversations/:id/messages", protect, getMessages);
 router.post("/conversations/:id/messages", protect, sendMessage);
+
+// The teacher's «Təsdiq et» / «Ləğv et» on a card the support AI prepared
+// (helper/teacherActions). Only the teacher the card was written to.
+router.post("/messages/:id/action", protect, decideAction);
 
 module.exports = router;

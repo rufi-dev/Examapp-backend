@@ -141,7 +141,7 @@ VALİDEYNLƏR:
 - Vaxt: eyni səhifədə «Vaxt və müddət». Bitmə vaxtı başlamadan sonra olmalı, aralıq müddətdən qısa olmamalıdır.
 - «Ödənişli imtahan» hələ yoxdur ("Tezliklə"); bütün imtahanlar pulsuzdur.
 
-İMTAHAN KARTI (yalnız müəllim görür): göz «Gizlət»/«Göstər» (gizli imtahanı şagirdlər görmür), «Nəticələr», «Sual əlavə et», «Redaktə et», «⋯» menyu: «Canlı izlə», «Nüsxə / B variantı» («Eyni nüsxə» — dərhal, pulsuz; «B variantı» — AI ədədləri dəyişir və cavabları yenidən həll edir, ~40 saniyə, 10 kredit), «Analitik cədvəl» (yalnız MSO strukturunda, PDF), «İmtahanı sil» (30 gün zibil qutusunda qalır). Telefonda bu düymələr yazısız işarələrdir. Kartda status: «Gələcək», «Aktiv», «Bitib», «Gizli». "Sual yoxdur" yazısı varsa şagirdlər imtahanı görmür; "Bloklanıb" — paket limiti.
+İMTAHAN KARTI (yalnız müəllim görür): göz «Gizlət»/«Göstər» (gizli imtahanı şagirdlər görmür), «Nəticələr», «Sual əlavə et», «Redaktə et», «⋯» menyu: «Canlı izlə», «Nüsxə / B variantı» («Eyni nüsxə» — dərhal, pulsuz; «B variantı» — AI ədədləri dəyişir və cavabları yenidən həll edir, ~40 saniyə, 10 kredit), «Sinfi dəyiş» (imtahanı başqa sinfinizə köçürür: «Yeni sinif» → «Köçür»; nəticələr və suallar onunla gedir, imtahanı yalnız yeni sinfin şagirdləri görür), «Analitik cədvəl» (yalnız MSO strukturunda, PDF), «İmtahanı sil» (30 gün zibil qutusunda qalır). Telefonda bu düymələr yazısız işarələrdir. Kartda status: «Gələcək», «Aktiv», «Bitib», «Gizli». "Sual yoxdur" yazısı varsa şagirdlər imtahanı görmür; "Bloklanıb" — paket limiti.
 
 NƏTİCƏLƏR:
 - «Şagird nəticələri» → imtahanı seçin (və ya kartda «Nəticələr»). İki bölmə: «Analitika» (sinfin nəticəsi, təkrar edilməli suallar, köməyə ehtiyacı olanlar, sual xəritəsi, vaxt) və «Şagirdlər». «PDF ixrac et» və «Excel ixrac et» ilə yükləyin. Bəzi qrafiklər üçün ən azı 5 şagird lazımdır.
@@ -391,6 +391,7 @@ function tidyBold(s) {
 function forWhatsApp(text) {
   const s = String(text || "")
     .replace(/\[\[(?:steps|guide):[^\]]*\]\]/g, "")
+    .replace(/\[\[action:[\s\S]*?\]\]/g, "")
     // The card's «⋯» menu: WhatsApp's font draws a bold ⋯ like dashes, so it is named too.
     .replace(/«⋯»/g, "«üç nöqtə ⋯»")
     .replace(/«([^«»\n]{1,60})»(\p{L}*)/gu, "*$1$2*")
@@ -402,7 +403,7 @@ function forWhatsApp(text) {
     .trim();
 }
 
-async function generateSupportReply(messages, adminId, { channel = "app", context = "", profile = "" } = {}) {
+async function generateSupportReply(messages, adminId, { channel = "app", context = "", profile = "", account = "" } = {}) {
   const history = buildHistory(messages, adminId);
   if (!history.length || history[history.length - 1].role !== "user") return null;
 
@@ -444,7 +445,10 @@ async function generateSupportReply(messages, adminId, { channel = "app", contex
   const whatsapp = channel === "whatsapp";
   const found = whatsapp ? "" : ui.candidatesFor(asked);
   // Who the teacher is, in counts (helper/teacherContext): the stage the reply is pitched at.
-  const about = profile ? `\n\n${profile}` : "";
+  // In the app also their classes and exams, and what the chat may do with them
+  // (helper/teacherActions): the robot's abilities, behind a confirm card.
+  const { ACTIONS_NOTE } = require("../helper/teacherActions");
+  const about = `${profile ? `\n\n${profile}` : ""}${!whatsapp && account ? `\n\n${ACTIONS_NOTE}\n\n${account}` : ""}`;
   const system = whatsapp
     ? `${SYSTEM_PROMPT}\n\n${whatsappNote(context)}${about}`
     : found
@@ -460,10 +464,30 @@ async function generateSupportReply(messages, adminId, { channel = "app", contex
     if (again && turkishSlips(again).length < slips.length) text = again;
   }
 
+  /*
+   * "Hazırladım, «Təsdiq et» basın" with no card under it is the one failure a
+   * teacher cannot recover from by reading: the reply promises a button that is
+   * not there. The model was seen to drop the marker that way (2 of 15 in the
+   * eval, 2026-10-16), so such a reply is asked for once more with the marker.
+   */
+  const { promisesCard } = require("../helper/teacherActions");
+  if (!whatsapp && account && text && promisesCard(text)) {
+    console.warn("[CHAT-AI] reply promises a card without a marker; asking once more");
+    const again = await ask(`${system}\n\n${CARD_NOTE}`);
+    if (again && !promisesCard(again)) text = again;
+  }
+
   // Steps rebuilt from the catalogue: unknown IDs go, the way to each screen is added.
-  const clean = whatsapp ? forWhatsApp(toPlainText(text)) : ui.fixSteps(toPlainText(text));
-  return clean || null;
+  // An action marker is kept out of the markdown clean-up (its JSON is data) and
+  // goes back on the end for the controller (helper/teacherActions.prepare).
+  const { splitAction } = require("../helper/teacherActions");
+  const { text: body, raw } = splitAction(text);
+  const clean = whatsapp ? forWhatsApp(toPlainText(body)) : ui.fixSteps(toPlainText(body));
+  if (!clean) return null;
+  return !whatsapp && raw ? `${clean}\n[[action:${raw}]]` : clean;
 }
+
+const CARD_NOTE = `DÜZƏLİŞ: əvvəlki cavabında müəllimə nəyisə hazırladığını və «Təsdiq et» (və ya «Yaratma ekranını aç») basmasını yazdın, amma sonunda [[action:{...}]] işarəsi yox idi, ona görə kart çıxmadı. Eyni cavabı yenidən yaz və sonunda ayrıca sətirdə düzgün [[action:{...}]] yaz. Hazırlaya bilmirsənsə (hansı imtahan olduğu aydın deyil, məlumat çatmır), "hazırladım" yazma, nəyin lazım olduğunu soruş.`;
 
 async function replyOnApi(history, system = SYSTEM_PROMPT) {
   let text = "";

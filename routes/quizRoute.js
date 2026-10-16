@@ -57,7 +57,7 @@ const {
   getResultsByExam,
   deleteResult,
   getPendingReviews,
-  gradeManualAnswer, createVariantB, duplicateExam, msoReport } = require("../controllers/quizController");
+  gradeManualAnswer, createVariantB, duplicateExam, msoReport, moveExamToClass } = require("../controllers/quizController");
 const { extractQuestions, extractQuestionsStream, getAiUsage, chatAssistant, generateQuestions, generateQuestionsStream, transcribeAudio, realtimeToken, regenerateQuestion, solveAnswers } = require("../controllers/aiController");
 const { aiRateLimit, aiBudgetGuard } = require("../middleware/aiLimit");
 // Teacher Success Journey — per-teacher AI credit metering (flag-gated; passthrough when off).
@@ -290,6 +290,8 @@ router.delete("/deleteTag/:tagId", protect, requireCapability("exam:manage:own")
 router.patch("/editTag/:tagId", protect, requireCapability("exam:manage:own"), editTag);
 router.patch("/editClass/:classId", protect, requireCapability("class:manage:own"), editClass);
 router.patch("/setExamHidden/:examId", protect, requireCapability("exam:manage:own"), setExamHidden);
+// Move an exam to another class the teacher owns (the card's «Sinfi dəyiş»).
+router.patch("/exam/:examId/class", protect, requireCapability("exam:manage:own"), moveExamToClass);
 router.post("/exam/:examId/start", protect, requireCompleteProfile, startAttempt);
 router.post("/exam/:examId/autosave", protect, autosaveAttempt);
 router.post("/exam/:examId/heartbeat", protect, heartbeatAttempt);

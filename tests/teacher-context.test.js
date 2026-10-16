@@ -95,9 +95,9 @@ const freeUsage = (o = {}) => ({
   const chat = fs.readFileSync(path.join(__dirname, "..", "controllers", "chatController.js"), "utf8");
   const wa = fs.readFileSync(path.join(__dirname, "..", "helper", "waAutoReply.js"), "utf8");
   const asst = fs.readFileSync(path.join(__dirname, "..", "services", "chatAssistant.js"), "utf8");
-  ok("the site's chat passes the teacher's line", /teacherContext\(teacherId\)/.test(chat) && /generateSupportReply\(recent, adminId, \{ profile \}\)/.test(chat));
+  ok("the site's chat passes the teacher's line", /teacherContext\(teacherId\)/.test(chat) && /generateSupportReply\(recent, adminId, \{ profile, account \}\)/.test(chat));
   ok("WhatsApp passes it too (not for the owner's own test number)", /teacher\.tester \? "" : await require\("\.\/teacherContext"\)\.teacherContext\(teacher\._id\)/.test(wa) && /context: ours\?\.body \|\| "", profile \}/.test(wa));
-  ok("the assistant puts it in the prompt", /const about = profile \? `\\n\\n\$\{profile\}` : "";/.test(asst));
+  ok("the assistant puts it in the prompt", /const about = `\$\{profile \? `\\n\\n\$\{profile\}` : ""\}/.test(asst));
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
