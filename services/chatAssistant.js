@@ -403,7 +403,7 @@ function forWhatsApp(text) {
     .trim();
 }
 
-async function generateSupportReply(messages, adminId, { channel = "app", context = "", profile = "", account = "" } = {}) {
+async function generateSupportReply(messages, adminId, { channel = "app", context = "", profile = "", account = "", note = "" } = {}) {
   const history = buildHistory(messages, adminId);
   if (!history.length || history[history.length - 1].role !== "user") return null;
 
@@ -448,7 +448,7 @@ async function generateSupportReply(messages, adminId, { channel = "app", contex
   // In the app also their classes and exams, and what the chat may do with them
   // (helper/teacherActions): the robot's abilities, behind a confirm card.
   const { ACTIONS_NOTE } = require("../helper/teacherActions");
-  const about = `${profile ? `\n\n${profile}` : ""}${!whatsapp && account ? `\n\n${ACTIONS_NOTE}\n\n${account}` : ""}`;
+  const about = `${profile ? `\n\n${profile}` : ""}${!whatsapp && account ? `\n\n${ACTIONS_NOTE}\n\n${account}` : ""}${note ? `\n\n${note}` : ""}`;
   const system = whatsapp
     ? `${SYSTEM_PROMPT}\n\n${whatsappNote(context)}${about}`
     : found

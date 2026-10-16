@@ -94,6 +94,36 @@ function blockIfArchived(res, exam) {
   return false;
 }
 
+// The settings page's fields, how each compares, and what a teacher calls it.
+const FIELD_NAMES = {
+  name: "ad", duration: "müddət", startDate: "başlanma tarixi", endDate: "bitmə tarixi",
+  totalMarks: "ümumi bal", passingMarks: "keçid balı", maxTry: "cəhd sayı",
+  showScore: "balı göstər", showCorrectAnswers: "düzgün cavablar", revealAfterEnd: "cavabların vaxtı",
+  negativeMarking: "neqativ qiymətləndirmə", antiCheat: "köçürməyə qarşı qoruma",
+  shuffleOptions: "variantları qarışdır", shuffleQuestions: "sualları qarışdır", partialCredit: "hissəvi bal",
+};
+const BOOL_FIELDS = new Set(["showCorrectAnswers", "revealAfterEnd", "negativeMarking", "antiCheat", "shuffleOptions", "shuffleQuestions", "partialCredit"]);
+function settingValue(k, v) {
+  if (k === "startDate" || k === "endDate") {
+    if (!v) return null;
+    const t = new Date(v).getTime();
+    return Number.isFinite(t) ? Math.round(t / 60000) : null; // the form edits minutes
+  }
+  if (k === "showScore") return v !== false && v !== "false";
+  if (BOOL_FIELDS.has(k)) return v === true || v === "true";
+  if (k === "duration" || k === "totalMarks" || k === "passingMarks" || k === "maxTry") return Number(v) || 0;
+  return String(v ?? "").trim();
+}
+// Fields changed since the page loaded them that this save would change again.
+function staleFields(base, current, next) {
+  return Object.keys(FIELD_NAMES).filter((k) => {
+    if (!(k in base) || !(k in next)) return false;
+    const then = settingValue(k, base[k]);
+    const nowV = settingValue(k, current[k]);
+    return then !== nowV && settingValue(k, next[k]) !== nowV;
+  });
+}
+
 // A short, unambiguous join code (no easily-confused chars).
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function genJoinCode(len = 6) {
@@ -4894,6 +4924,26 @@ const editExam = asyncHandler(async (req, res) => {
       Object.entries(update).filter(([, value]) => value !== undefined)
     );
 
+    /*
+     * A page that loaded the exam earlier must not quietly undo a change made
+     * since. Nigar (16 Oct) set 45 minutes in the support chat; a settings page
+     * still holding 60 was saved a minute later and put 60 back, and nobody was
+     * told. The settings page sends `base`, the values it loaded: a field that
+     * has changed since AND that this save would change again is refused.
+     */
+    const base = req.body.base && typeof req.body.base === "object" ? req.body.base : null;
+    if (base) {
+      const stale = staleFields(base, examExists, safeUpdate);
+      if (stale.length) {
+        res.status(409).json({
+          reason: "stale",
+          fields: stale,
+          message: `İmtahan bu səhifə açılandan sonra başqa yerdə dəyişdirilib (${stale.map((k) => FIELD_NAMES[k] || k).join(", ")}). Səhifəni yeniləyib yenidən yoxlayın.`,
+        });
+        return;
+      }
+    }
+
     if (pdfPath) {
       // AUD-013 CR-069/CR-075: replacing the PDF. CLAIM the new staged upload for
       // THIS teacher, BOUND to this exam id; if the claim fails, leave the old
@@ -4933,6 +4983,17 @@ const editExam = asyncHandler(async (req, res) => {
           await Exam.updateOne({ _id: examId }, { $set: { blockedByPlan: true } });
         }
       }
+      pub = await republishExam(examId);
+    } else if (examExists.activeVersionId && !examExists.provisional) {
+      /*
+       * Already live: what the teacher saves is what students get from now on.
+       * The settings page says publish:false (it is not the guided publish), and
+       * that used to leave the change in the exam record only, while students
+       * were served the last published version: 17 exams of 7 teachers had
+       * drifted (a 160-minute exam taken in 60, anti-cheat on for the teacher and
+       * off for the students). A student already in the exam keeps the version
+       * they started; nothing to publish (no questions yet) is not an error here.
+       */
       pub = await republishExam(examId);
     }
 

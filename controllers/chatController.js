@@ -487,8 +487,24 @@ async function maybeAiReply(conversationId, adminId) {
     const ready = teacher ? await actions.prepare(raw, { _id: to, role: teacher.role }).catch((e) => ({ ok: false, why: e?.message || "xəta" })) : { ok: false, why: "müəllim tapılmadı" };
     if (ready.ok) action = { ...ready.action, status: "pending" };
     else {
-      console.warn(`[CHAT-AI] action not prepared (${ready.why})`, conversationId);
-      text = `${said}\n\nBağışlayın, bunu hazırlaya bilmədim: ${ready.why}. Bunu özünüz «Redaktə et» ilə edə bilərsiniz və ya mənə bir az dəqiq yazın.`;
+      /*
+       * The card could not be made (the exam already is so, it is in the bin…).
+       * A reply that says "hazırladım, «Təsdiq et» basın" and then, tacked on,
+       * "I couldn't" contradicts itself (Nigar, 16 Oct). So the reply is written
+       * once more, knowing why; the old tacked-on line is only the fallback.
+       */
+      console.warn(`[CHAT-AI] action not prepared (${ready.why}); rewriting the reply`, conversationId);
+      const why = `KART HAZIRLANMADI: ${ready.why}. Cavabını buna görə yenidən yaz: "hazırladım" və «Təsdiq et» YAZMA, [[action]] YAZMA. Vəziyyəti düz və qısa de (məsələn: "«X» imtahanının müddəti artıq 60 dəqiqədir, dəyişməyə ehtiyac yoxdur") və lazımdırsa nə etmək olar.`;
+      const profile2 = await require("../helper/teacherContext").teacherContext(to).catch(() => "");
+      const account2 = await actions.accountBrief(to).catch(() => "");
+      const tok = typing.startTyping(conversationId); // "yazır…" while it is written again
+      const again = await generateSupportReply(recent, adminId, { profile: profile2, account: account2, note: why })
+        .catch(() => null)
+        .finally(() => typing.stopTyping(conversationId, tok));
+      const clean = again ? actions.splitAction(again).text : "";
+      text = clean && !actions.promisesCard(clean)
+        ? clean
+        : `${said}\n\nBağışlayın, bunu hazırlaya bilmədim: ${ready.why}. Bunu özünüz «Redaktə et» ilə edə bilərsiniz və ya mənə bir az dəqiq yazın.`;
     }
   }
   const aiMsg = await Message.create({

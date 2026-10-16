@@ -188,6 +188,8 @@ const oid = () => new mongoose.Types.ObjectId();
     ok("WhatsApp never shows a marker", !asst.forWhatsApp('Bax.\n[[action:{"type":"move_exam"}]]').includes("[[action"));
     ok("the rules say nothing changes before «Təsdiq et»", /«Təsdiq et» basmayınca HEÇ NƏ dəyişmir/.test(A.ACTIONS_NOTE) && /"dəyişdim", "etdim", "köçürdüm" YAZMA/.test(A.ACTIONS_NOTE));
     ok("the card's route is registered for the signed-in teacher", /router\.post\("\/messages\/:id\/action", protect, decideAction\)/.test(read("routes/chatRoute.js")));
+    ok("a card that cannot be made gets the reply written again, knowing why (not a «hazırladım» with a refusal tacked on)",
+      /KART HAZIRLANMADI/.test(read("controllers/chatController.js")) && /note: why/.test(read("controllers/chatController.js")) && /note = ""/.test(read("services/chatAssistant.js")));
     ok("the move's route needs exam:manage:own", /router\.patch\("\/exam\/:examId\/class", protect, requireCapability\("exam:manage:own"\), moveExamToClass\)/.test(read("routes/quizRoute.js")));
   } finally {
     await mongoose.disconnect();
