@@ -143,6 +143,15 @@ async function main() {
   const noBase = await json("PATCH", `${base}/editExam/${examId}`, { ...FIELDS, duration: 3000, passingMarks: 60, publish: false });
   ok("a save without `base` (other callers) is unchanged", noBase.status === 200);
 
+  console.log("\na change made and undone reaches students too (60 → 45 → 60):");
+  await json("PATCH", `${base}/editExam/${examId}`, { ...FIELDS, duration: 3600, passingMarks: 60, publish: false });
+  await json("PATCH", `${base}/editExam/${examId}`, { ...FIELDS, duration: 2700, passingMarks: 60, publish: false });
+  s = await studentsGet(examId);
+  ok("…45 published", s.duration === 2700, `students ${s.duration}`);
+  await json("PATCH", `${base}/editExam/${examId}`, { ...FIELDS, duration: 3600, passingMarks: 60, publish: false });
+  s = await studentsGet(examId);
+  ok("…and back to 60: students get 60 again (the earlier version is reused)", s.duration === 3600 && s.exam.duration === 3600, `students ${s.duration}`);
+
   console.log("\nan exam not yet live is not published by a details save:");
   const fd2 = new FormData();
   Object.entries({ ...FIELDS, name: "Qaralama", clientMutationId: `draft:${Date.now()}` }).forEach(([k, v]) => fd2.append(k, String(v)));

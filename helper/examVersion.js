@@ -203,6 +203,30 @@ async function publishExam(exam, questionDoc, ExamVersion, Exam) {
   if (res.modifiedCount === 1) {
     exam.activeVersionId = version._id;
     exam.activeVersionNumber = version.versionNumber;
+    return version;
+  }
+  /*
+   * Content that went BACK to an earlier version's (60 min → 45 → 60, anti-cheat
+   * on → off): the hash finds that older version, and the advance-only pointer
+   * above refuses to move to a lower number, so the publish did nothing and
+   * students stayed on the middle version (Nigar, 16 Oct). The pointer goes back
+   * to it only when the exam's CURRENT draft, read again now, is exactly that
+   * content — so a slow publisher holding a stale draft still cannot move it.
+   */
+  const cur = await Exam.findById(exam._id).select("activeVersionId activeVersionNumber").lean();
+  if (cur && String(cur.activeVersionId) !== String(version._id) && (cur.activeVersionNumber || 0) > version.versionNumber) {
+    const now = await Exam.findById(exam._id).populate("questions");
+    const nowHash = now && now.questions ? hashSnapshot(buildSnapshot(now, now.questions)) : null;
+    if (nowHash === version.contentHash) {
+      const back = await Exam.updateOne(
+        { _id: exam._id, activeVersionId: cur.activeVersionId },
+        { $set: { activeVersionId: version._id, activeVersionNumber: version.versionNumber } }
+      );
+      if (back.modifiedCount === 1) {
+        exam.activeVersionId = version._id;
+        exam.activeVersionNumber = version.versionNumber;
+      }
+    }
   }
   return version;
 }
