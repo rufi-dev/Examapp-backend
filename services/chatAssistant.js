@@ -27,8 +27,9 @@ function isChatAiEnabled() {
  *
  * Rewritten 2026-10-13 from the app as it is, not as it was. The old text sent
  * teachers to buttons that no longer exist ("Sual yaratmağa keç", "İmtahanını
- * təsvir et", "Təsdiq et və nəşr et"), offered an option nothing links to any
- * more ("Hazır PDF vərəqi ver"), and described Examopia as an exam site only,
+ * təsvir et", "Təsdiq et və nəşr et"), offered an option nothing linked to
+ * then ("Hazır PDF vərəqi ver", back on the "Nə yaradaq?" screen since
+ * 2026-10-16, see below), and described Examopia as an exam site only,
  * so it told a teacher on 10 Oct that there was no lesson-plan feature. Every
  * label below was checked against the frontend, and every number against
  * config/plans.js and config/aiOperations.js (production overrides none of
@@ -124,6 +125,7 @@ VALİDEYNLƏR:
 5) Sonra cavab açarı açılır, düzgün cavablar yaşıl işarələnir. Hər sualı yoxlayın; dəyişmək üçün sualın yanındakı «AI ilə düzəlt» və ya aşağıdakı «Redaktə et».
 6) «Təsdiq et və davam et» → "İmtahanı nəşr et" səhifəsi: «İmtahanın adı», «Müddət (dəqiqə)» (30 dəq, 45 dəq, 1 saat, 1 saat 30 dəq), başlama və bitmə tarixi, «Ümumi bal» (standart 100), «Keçid balı» (50) → «Nəşr et».
 - Sualları özünüz yazmaq üçün: «Əl ilə yazacağam» → sual kartında mətn və variantlar; tipi «Sual tipini dəyiş» ilə; yeni sual «Sual əlavə et»; «Oxu bölməsi əlavə et», «Dinləmə bölməsi əlavə et» (audio, «Neçə dəfə dinləyə bilər?»), «Bölmə əlavə et (Qrammatika və s.)».
+- PDF-i olduğu kimi vermək (suallar platformada yazılmır): "Nə yaradaq?" ekranının altında «Hazır PDF vərəqi ver» → «İmtahanın adı», PDF faylı, müddət → «İmtahanı əlavə et». Sonra solda PDF, sağda cavab açarı açılır: sual sayını PDF-dəki qədər edin («Sual əlavə et», «Sualı sil»), hər sual üçün tipi (Qapalı a–e, Açıq, Həll tələb, Uyğunluq) və düzgün cavabı seçin → «Sualları yadda saxla (N)». Şagird imtahanda PDF-i oxuyur və hər sual üçün variantı işarələyir; nəticə cavab açarı ilə avtomatik hesablanır. Bu, «Fayl əlavə et»-dən fərqlidir: orada AI sualları fayldan çıxarıb platformada yenidən yazır.
 - Hazır struktur: «+ Hazır DİM strukturu seç» — Fərdi, MSO (15 sual), Riyaziyyat (Buraxılış 11 və 9, DQT, Blok 1 və 2-ci qrup), Azərbaycan dili (Buraxılış 9 və 11), İngilis dili (Buraxılış 9 və 11), IELTS Academic Reading.
 - Sual tipləri: Tək seçim, Çox seçim, Qısa cavab, Həlli göstərilən sual, Uyğunlaşdırma, Boşluq doldurma, Cədvəl doldurma; bölmələr: Mətn bloku, Dinləmə bloku. Müəllimin özü yoxlasın deyə sualda «Əl ilə yoxla».
 - Şəkil: sual kartında «Şəkil» ilə şəkil yükləyin; yüklənmiş PDF-dən fiqur götürmək üçün «PDF-dən kəs». Variantlara şəkil üçün «Alətlər»də «Variantlarda şəkil».

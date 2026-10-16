@@ -33,9 +33,11 @@ const P = C.SYSTEM_PROMPT;
 const src = fs.readFileSync(path.join(__dirname, "..", "services", "chatAssistant.js"), "utf8");
 
 console.log("it describes the app as it is");
-for (const gone of ["Sual yaratmağa keç", "İmtahanını təsvir et", "Təsdiq et və nəşr et", "Hazır PDF vərəqi ver", "PDF əlavə et"]) {
+for (const gone of ["Sual yaratmağa keç", "İmtahanını təsvir et", "Təsdiq et və nəşr et", "PDF əlavə et"]) {
   ok(`no longer sends teachers to «${gone}»`, !P.includes(gone));
 }
+// The ready-PDF exam is back on the "Nə yaradaq?" screen (2026-10-16).
+ok("names the ready-PDF exam and keeps it apart from «Fayl əlavə et»", /«Hazır PDF vərəqi ver»[^\n]*cavab açarı[^\n]*«Fayl əlavə et»-dən fərqlidir/.test(P));
 for (const now of ["Nə haqqında imtahan olsun?", "Fayl əlavə et", "Sualları hazırla", "Təsdiq et və davam et", "Nəşr et", "Şagird dəvət et", "Linki kopyala", "Variantları qarışdır", "Ətraflı parametrlər", "Cavabları tap"]) {
   ok(`names «${now}»`, P.includes(now));
 }
