@@ -38,6 +38,22 @@ for (const gone of ["Sual yaratmağa keç", "İmtahanını təsvir et", "Təsdiq
 }
 // The card's «Sinfi dəyiş» (2026-10-16, as BunkerMath has it).
 ok("names the card's «Sinfi dəyiş»", /«Sinfi dəyiş» \(imtahanı başqa sinfinizə köçürür: «Yeni sinif» → «Köçür»/.test(P));
+// The AI remembers what became of its cards (Nigar, 17 Oct: it apologised for a change she had confirmed).
+{
+  const h = C.buildHistory([
+    { from: "t", text: "1 saat et" },
+    { from: "a", text: "Hazırladım, «Təsdiq et» basın.", action: { kind: "update_exam", title: "«Hüceyrənin quruluşu» imtahanını dəyiş", lines: ["Müddət: 30 dəq → 60 dəq"], status: "done" } },
+    { from: "t", text: "sagol" },
+  ], "a");
+  ok("a reply's card and its fate are in the AI's history", /⟦sistem: .*Müddət: 30 dəq → 60 dəq.*TƏSDİQLƏDİ/.test(h[1].content), h[1].content);
+  ok("a cancelled card is a closed one", /LƏĞV ETDİ.*bağlıdır/.test(C.cardNote({ kind: "update_exam", title: "x", lines: [], status: "cancelled" })));
+  ok("no note under a reply without a card, nor under the teacher's words", !/⟦/.test(h[0].content) && !/⟦/.test(h[2].content));
+  const A = require("../helper/teacherActions").ACTIONS_NOTE;
+  ok("the account wins over the history, and no card for a value it already has", /HESAB doğrudur/.test(A) && /artıq olan dəyərə dəyişiklik kartı HAZIRLAMA/.test(A));
+  ok("no 'correcting' old messages, no invented reasons, no apology unless a real mistake is shown", /Keçmiş mesajlarını "düzəltmə", səbəb uydurma, üzr istəmə/.test(A) && /Üzr yalnız müəllim sənin konkret səhvini göstərəndə/.test(A));
+  ok("the AI never writes the system's card note itself", /⟦sistem:\[\^⟧\]\*⟧/.test(src) || /SYSTEM_NOTE_RE/.test(src));
+  ok("a name only from the teacher's profile, never made up", /ad verilməyibsə adla müraciət etmə, ad uydurma/.test(P));
+}
 // The ready-PDF exam is back on the "Nə yaradaq?" screen (2026-10-16).
 ok("tells «extract the PDF's questions» (Fayl əlavə et) from «give the PDF as it is» (Hazır PDF vərəqi ver)", /PDF-dəki sualları platformaya çıxarım[^"]*" = «Fayl əlavə et»[^"]*"PDF-i olduğu kimi verim[^"]*" = «Hazır PDF vərəqi ver»/.test(P));
 ok("names the ready-PDF exam and keeps it apart from «Fayl əlavə et»", /«Hazır PDF vərəqi ver»[^\n]*cavab açarı[^\n]*«Fayl əlavə et»-dən fərqlidir/.test(P));

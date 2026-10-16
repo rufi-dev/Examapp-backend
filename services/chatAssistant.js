@@ -46,7 +46,7 @@ Qarışıqdırsa (həm etiraz, həm sual): əvvəl sualı tam cavabla, sonra eti
 
 DİL VƏ ÜSLUB (ÇOX VACİB):
 - Yalnız düzgün Azərbaycan ədəbi dilində yaz. Türkcə söz və forma İŞLƏTMƏ. Səhv → düzgün: maalesef → təəssüf ki; seçenek / seçənək → seçim; zahmetli → çətin; böyle → belə; değil → deyil; için → üçün; işaretli → işarələnmiş; birkaç → bir neçə; şimdi → indi; tıkla → toxun / bas; sayfa → səhifə; düğme → düymə; soru → sual; öğrenci → şagird; sınav → imtahan; söyle → de.
-- Müəllimə HƏMİŞƏ "siz" deyə müraciət et: hörmətlə, təbii, söhbət dilində, inamlı və insan kimi. "Müəllim" sözünü təbii işlət (adı məlumdursa "Aysel müəllim"), hər cümlədə yox. Qısa, tam və qrammatik düzgün cümlələr qur.
+- Müəllimə HƏMİŞƏ "siz" deyə müraciət et: hörmətlə, təbii, söhbət dilində, inamlı və insan kimi. "Müəllim" sözünü təbii işlət, hər cümlədə yox. Adla müraciət yalnız «MÜƏLLİM HAQQINDA» sətrindəki adla (məs. orada "adı Nərmin" yazılıbsa "Nərmin müəllim"); ad verilməyibsə adla müraciət etmə, ad uydurma. Qısa, tam və qrammatik düzgün cümlələr qur.
 - Emoji çox az: adətən 0–1, ən çox 2 (😊 🌷 👌); hər cümlənin sonuna qoyma.
 - Şablon ifadələri İŞLƏTMƏ: "Məmnuniyyətlə kömək edərik", "Əlbəttə", "Çox gözəl", "Problem deyil", "Narahat olmayın", "Uğurlar arzulayırıq", "Sizə kömək etməyə hazıram" (yalnız həqiqətən yerinə düşəndə). Müəllimin sözünü ona geri təkrarlama, "Başa düşürəm" ilə hər cavabı başlama. Həddən artıq tərif və nida yox.
 - FORMAT: sadə mətn. Markdown simvolları (**, __, #, *, -) İŞLƏTMƏ. Addımları ayrı sətirlərdə "1) ...", "2) ..." kimi yaz. Addımlı cavabı belə qur: bir qısa giriş cümləsi (iki nöqtə ilə bitir), boş sətir, addımlar, boş sətir, sonra ən çox bir-iki qısa qeyd (hər biri ayrı abzas). Xəbərdarlığı "Diqqət:" ilə başla; nümunə mətni "Məsələn: "..."" kimi dırnaqda ver. Tətbiq bu quruluşu gözəl göstərir: addımları nömrəli, «...» sözlərini düymə kimi.
@@ -222,12 +222,39 @@ Xatırla: KÖMƏK lazım olanda aydın və tam təlimat ver. SÖHBƏT-də məqs�
 // Anthropic requires alternating user/assistant, starting with `user`. Build the
 // history from our messages: teacher = user, admin = assistant. Merge runs of the
 // same role, drop any leading assistant turns (the welcome), keep the last ~20.
+/*
+ * What became of a card a reply carried, for the AI's own memory of the chat.
+ *
+ * The history used to be the words alone. The AI saw itself write
+ * "hazırladım, «Təsdiq et» basın", then an account where the number had
+ * changed — because the teacher HAD confirmed — and decided its earlier
+ * message was wrong: it apologised and invented a reason ("30 was the
+ * question count"), and said no card had appeared (Nigar, 17 Oct). The note
+ * is written by the server, never by the model, and stripped if it copies it.
+ */
+const CARD_FATE = {
+  pending: "müəllim hələ təsdiqləməyib",
+  running: "icra olunur",
+  done: "müəllim TƏSDİQLƏDİ, dəyişiklik edildi",
+  failed: "alınmadı",
+  cancelled: "müəllim LƏĞV ETDİ, heç nə dəyişmədi; bu kart bağlıdır (yenə istəsə, yeni kart lazımdır)",
+};
+function cardNote(a) {
+  if (!a || !a.kind) return "";
+  const what = [a.title, ...(a.lines || []).slice(0, 2)].filter(Boolean).join(" — ");
+  const why = a.status === "failed" && a.result ? ` (${a.result})` : "";
+  return `⟦sistem: bu mesajın altında kart göstərildi: ${what}. ${CARD_FATE[a.status] || a.status}${why}⟧`;
+}
+const SYSTEM_NOTE_RE = /⟦sistem:[^⟧]*⟧/g;
+
 function buildHistory(messages, adminId) {
   const mapped = messages
     .map((m) => {
       const role = String(m.from) === String(adminId) ? "assistant" : "user";
       const voice = m.audioUrl ? require("../helper/chatVoice").voiceForAi(m.transcript, m.transcriptAlt) : "";
-      const content = (m.text && m.text.trim()) || voice || (m.imageUrl ? "[şəkil göndərdi]" : "");
+      const said = (m.text && m.text.trim()) || voice || (m.imageUrl ? "[şəkil göndərdi]" : "");
+      const card = role === "assistant" ? cardNote(m.action) : "";
+      const content = [said, card].filter(Boolean).join("\n");
       return content ? { role, content } : null;
     })
     .filter(Boolean);
@@ -481,6 +508,8 @@ async function generateSupportReply(messages, adminId, { channel = "app", contex
   // An action marker is kept out of the markdown clean-up (its JSON is data) and
   // goes back on the end for the controller (helper/teacherActions.prepare).
   const { splitAction } = require("../helper/teacherActions");
+  // A card note is the server's, never the reply's.
+  text = String(text || "").replace(SYSTEM_NOTE_RE, "").trim();
   const { text: body, raw } = splitAction(text);
   // The pictures follow the text: the controls it names, in its order (uiCatalog.alignSteps).
   const clean = whatsapp ? forWhatsApp(toPlainText(body)) : ui.alignSteps(toPlainText(body));
@@ -512,4 +541,4 @@ async function replyOnApi(history, system = SYSTEM_PROMPT) {
   return text;
 }
 
-module.exports = { isChatAiEnabled, generateSupportReply, SYSTEM_PROMPT, turkishSlips, buildHistory, forWhatsApp, whatsappNote };
+module.exports = { isChatAiEnabled, generateSupportReply, SYSTEM_PROMPT, turkishSlips, buildHistory, forWhatsApp, whatsappNote, cardNote };
