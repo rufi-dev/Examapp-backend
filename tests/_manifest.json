@@ -142,6 +142,7 @@
   "tests/storage-quota.test.js",
   "tests/http/exam-create-flow.test.js",
   "tests/http/exam-settings-live.test.js",
+  "tests/http/live-camera.test.js",
   "tests/http/exam-results-list.test.js",
   "tests/http/profile-stats.test.js",
   "tests/http/profile-update.test.js",

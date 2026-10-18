@@ -89,6 +89,10 @@ const examSchema = Schema({
     typePoints: { type: Schema.Types.Mixed, default: undefined },
     // When enabled, the exam runner activates anti-cheat measures.
     antiCheat: { type: Boolean, default: false },
+    // Live exam cameras (2026-10-18): when on, a student is asked to open their
+    // camera and the teacher watches it on the live exam page (helper/liveCamera).
+    // Not frozen into the version: it changes nothing about a grade.
+    cameraMonitoring: { type: Boolean, default: false },
     // Multi-select (Cs) partial credit: award proportional points
     // (correct picks − wrong picks, floored at 0) instead of all-or-nothing.
     partialCredit: { type: Boolean, default: false },

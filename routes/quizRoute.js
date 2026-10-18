@@ -31,6 +31,8 @@ const {
   addResult,
   autosaveAttempt,
   getLiveAttempts,
+  studentCameraToken,
+  teacherCameraToken,
   getLiveExams,
   heartbeatAttempt,
   startAttempt,
@@ -299,6 +301,9 @@ router.get("/exam/:examId/attemptStatus", protect, attemptStatus);
 // Live exam watch — owner/admin sees who is currently writing + their progress.
 router.get("/live-exams", protect, getLiveExams);
 router.get("/exam/:examId/live", protect, getLiveAttempts);
+// Live exam cameras (helper/liveCamera): a student's pass to send, the teacher's to watch.
+router.get("/exam/:examId/camera/token", protect, studentCameraToken);
+router.get("/exam/:examId/camera/watch", protect, teacherCameraToken);
 router.post("/exam/:examId/violation", protect, reportViolation);
 router.get("/exam/:examId/rank", protect, getExamRank);
 router.post("/addResult/:examId", protect, verifiedOnly, addResult);

@@ -7,6 +7,7 @@ const Class = require("../models/classModel");
 const Question = require("../models/questionModel");
 const Result = require("../models/resultModel");
 const Attempt = require("../models/attemptModel");
+const liveCamera = require("../helper/liveCamera");
 const ExamVersion = require("../models/examVersionModel");
 const User = require("../models/userModel");
 const Enrollment = require("../models/enrollmentModel");
@@ -102,8 +103,9 @@ const FIELD_NAMES = {
   showScore: "balı göstər", showCorrectAnswers: "düzgün cavablar", revealAfterEnd: "cavabların vaxtı",
   negativeMarking: "neqativ qiymətləndirmə", antiCheat: "köçürməyə qarşı qoruma",
   shuffleOptions: "variantları qarışdır", shuffleQuestions: "sualları qarışdır", partialCredit: "hissəvi bal",
+  cameraMonitoring: "kamera ilə nəzarət",
 };
-const BOOL_FIELDS = new Set(["showCorrectAnswers", "revealAfterEnd", "negativeMarking", "antiCheat", "shuffleOptions", "shuffleQuestions", "partialCredit"]);
+const BOOL_FIELDS = new Set(["showCorrectAnswers", "revealAfterEnd", "negativeMarking", "antiCheat", "shuffleOptions", "shuffleQuestions", "partialCredit", "cameraMonitoring"]);
 function settingValue(k, v) {
   if (k === "startDate" || k === "endDate") {
     if (!v) return null;
@@ -2283,6 +2285,9 @@ const startAttempt = asyncHandler(async (req, res) => {
       // CR-034: anti-cheat mode is FROZEN with the version (a mid-attempt live
       // toggle must not change the runner an in-progress student sees).
       antiCheat: v ? !!vDisplay.antiCheat : !!exam.antiCheat,
+      // Live exam cameras: read from the LIVE exam (not graded, not frozen); only
+      // when the video server is configured, so a student is never asked for nothing.
+      cameraMonitoring: !!exam.cameraMonitoring && liveCamera.configured(),
       // Server-truth anti-cheat state so a reload/resume restores the real count
       // (it can't be wiped by refreshing or clearing localStorage).
       violations: attempt.violations || 0,
@@ -3734,7 +3739,7 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   // Polled every ~2s while a teacher watches, so keep it light: only the fields the
   // live view needs (ownership + name + how many questions), not the full paper.
   const exam = await Exam.findById(examId)
-    .select("name owner questions totalMarks antiCheat")
+    .select("name owner questions totalMarks antiCheat cameraMonitoring")
     .populate({ path: "questions", select: "correctAnswers" });
   if (!exam) {
     res.status(404);
@@ -3820,6 +3825,7 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
     const seen = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
     return {
       attemptId: a._id,
+      userId: uid(a.userId), // matches the student's camera (helper/liveCamera)
       name: a.userId?.name || "—",
       email: a.userId?.email || "",
       grade: a.userId?.grade || "",
@@ -3888,6 +3894,7 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
     const timing = attemptTiming(r, a);
     return {
       attemptId: r.attemptId || r._id,
+      userId: uid(r.userId),
       name: r.userId?.name || "—",
       email: r.userId?.email || "",
       grade: r.userId?.grade || "",
@@ -3922,10 +3929,54 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
     // monitor can show each student's live "X/limit" violation count.
     antiCheat: !!exam.antiCheat,
     violationLimit: ANTICHEAT_LIMIT,
+    // Live exam cameras: on for this exam, and whether the video server is there.
+    cameraMonitoring: !!exam.cameraMonitoring,
+    cameraReady: liveCamera.configured(),
     activeCount: activeStudents.filter((s) => s.active).length,
     finishedCount: finishedStudents.length,
     serverNow: new Date(now),
     students,
+  });
+});
+
+/*
+ * GET /api/quiz/exam/:examId/camera/token — a student taking this exam asks for
+ * a pass to SEND their camera (helper/liveCamera). Only with the setting on, only
+ * with an attempt under way, only their own camera. 503 when the video server is
+ * not configured: the student then takes the exam without one.
+ */
+const studentCameraToken = asyncHandler(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (!liveCamera.configured()) return res.status(503).json({ message: "Kamera xidməti hazırda aktiv deyil" });
+  const { examId } = req.params;
+  const exam = await Exam.findById(examId).select("cameraMonitoring").lean();
+  if (!exam) return res.status(404).json({ message: "İmtahan tapılmadı" });
+  if (!exam.cameraMonitoring) return res.status(409).json({ message: "Bu imtahanda kamera ilə nəzarət yoxdur" });
+  const attempt = await Attempt.findOne({ examId, userId: req.user._id, submitted: false, expiresAt: { $gt: new Date() } })
+    .select("_id expiresAt")
+    .lean();
+  if (!attempt) return res.status(403).json({ message: "Davam edən imtahan tapılmadı" });
+  res.json({
+    url: process.env.LIVEKIT_URL,
+    token: liveCamera.studentPass({ examId, userId: req.user._id, name: req.user.name, expiresAt: attempt.expiresAt }),
+  });
+});
+
+/*
+ * GET /api/quiz/exam/:examId/camera/watch — the exam's teacher (or an admin)
+ * asks for a hidden pass to WATCH the students' cameras on the live exam page.
+ */
+const teacherCameraToken = asyncHandler(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (!liveCamera.configured()) return res.status(503).json({ message: "Kamera xidməti hazırda aktiv deyil" });
+  const { examId } = req.params;
+  const exam = await Exam.findById(examId).select("owner cameraMonitoring").lean();
+  if (!exam) return res.status(404).json({ message: "İmtahan tapılmadı" });
+  if (!ownsOrAdmin(req.user, exam)) return res.status(403).json({ message: "Bu imtahan sizə aid deyil" });
+  if (!exam.cameraMonitoring) return res.status(409).json({ message: "Bu imtahanda kamera ilə nəzarət yoxdur" });
+  res.json({
+    url: process.env.LIVEKIT_URL,
+    token: liveCamera.teacherPass({ examId, userId: req.user._id, name: req.user.name, tag: require("crypto").randomBytes(3).toString("hex") }),
   });
 });
 
@@ -4864,6 +4915,7 @@ const editExam = asyncHandler(async (req, res) => {
     shuffleOptions,
     shuffleQuestions,
     studentSolutionPhotos,
+    cameraMonitoring,
     coverImage,
     preset,
     pdfPath,
@@ -4901,6 +4953,8 @@ const editExam = asyncHandler(async (req, res) => {
       shuffleQuestions: shuffleQuestions === true || shuffleQuestions === "true",
       studentSolutionPhotos:
         studentSolutionPhotos === true || studentSolutionPhotos === "true",
+      // Only the settings page sends it; any other save leaves the cameras as they are.
+      cameraMonitoring: flag(cameraMonitoring, !!examExists.cameraMonitoring),
     };
     // Only touch the solution images when the client sends them, so partial
     // edits don't wipe the existing list.
@@ -5792,6 +5846,8 @@ const msoReport = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  studentCameraToken, // live exam cameras: a student's pass to send (helper/liveCamera)
+  teacherCameraToken, // …and the teacher's to watch
   /*
    * The correctness evaluator, exported so that anything which has to REPRODUCE a
    * grade uses the code that produced it in the first place.
