@@ -110,9 +110,13 @@ async function main() {
   const sp = decode(r.body.token);
   ok("signed with the video server's key, for this student", sp.iss === "APItestkey" && sp.sub === `u-${student._id}` && sp.name === "Murad Əliyev");
   ok("the exam's own room", sp.video?.room === `exam-${examId}` && sp.video?.roomJoin === true);
-  ok("may send a camera — and only a camera", sp.video?.canPublish === true && JSON.stringify(sp.video?.canPublishSources) === '["camera"]');
+  ok("may send a camera and a microphone — nothing else (no screen)", sp.video?.canPublish === true && JSON.stringify(sp.video?.canPublishSources) === '["camera","microphone"]');
   ok("sees no one, sends no data", sp.video?.canSubscribe === false && sp.video?.canPublishData === false);
   ok("good for the exam's time (and a little more), not for ever", sp.exp - sp.iat >= 40 * 60 && sp.exp - sp.iat <= 52 * 60, `${sp.exp - sp.iat}s`);
+  const lp = decode(r.body.listen || "");
+  ok("…and a pass to hear the teacher, in the separate voice room", lp.sub === `u-${student._id}` && lp.video?.room === `exam-${examId}-voice` && lp.video?.roomJoin === true);
+  ok("there it only listens, unseen by the other students, sends nothing", lp.video?.canSubscribe === true && lp.video?.canPublish === false && lp.video?.hidden === true && lp.video?.canPublishData === false);
+  ok("…for the exam's time too", lp.exp - lp.iat >= 40 * 60 && lp.exp - lp.iat <= 52 * 60);
   r = await call(teacher, "GET", `/exam/${examId}/camera/token`);
   ok("a teacher who is not taking it gets no student pass", r.status === 403, `${r.status}`);
 
@@ -120,7 +124,10 @@ async function main() {
   r = await call(teacher, "GET", `/exam/${examId}/camera/watch`);
   ok("the exam's teacher: a pass", r.status === 200 && !!r.body?.token, `${r.status}`);
   const tp = decode(r.body.token);
-  ok("watches every camera, hidden, sends nothing", tp.video?.canSubscribe === true && tp.video?.hidden === true && tp.video?.canPublish === false && tp.video?.room === `exam-${examId}`);
+  ok("watches and listens to every student, hidden, sends nothing there", tp.video?.canSubscribe === true && tp.video?.hidden === true && tp.video?.canPublish === false && tp.video?.room === `exam-${examId}`);
+  const kp = decode(r.body.talk || "");
+  ok("…and a pass to speak, in the voice room, as the same person", kp.sub === tp.sub && kp.video?.room === `exam-${examId}-voice`);
+  ok("there: a microphone only, says whom to (attributes), hears no one, visible to students", kp.video?.canPublish === true && JSON.stringify(kp.video?.canPublishSources) === '["microphone"]' && kp.video?.canUpdateOwnMetadata === true && kp.video?.canSubscribe === false && !kp.video?.hidden);
   ok("a different identity for each tab (no one kicks another out)", tp.sub.startsWith(`t-${teacher._id}-`) && decode((await call(teacher, "GET", `/exam/${examId}/camera/watch`)).body.token).sub !== tp.sub);
   ok("another teacher: no (403)", (await call(other, "GET", `/exam/${examId}/camera/watch`)).status === 403);
   ok("a student: no (403)", (await call(student, "GET", `/exam/${examId}/camera/watch`)).status === 403);

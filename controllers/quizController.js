@@ -3941,9 +3941,10 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
 
 /*
  * GET /api/quiz/exam/:examId/camera/token — a student taking this exam asks for
- * a pass to SEND their camera (helper/liveCamera). Only with the setting on, only
- * with an attempt under way, only their own camera. 503 when the video server is
- * not configured: the student then takes the exam without one.
+ * the passes to SEND their camera and microphone, and to HEAR the teacher
+ * (helper/liveCamera). Only with the setting on, only with an attempt under way,
+ * only their own. 503 when the video server is not configured: the student then
+ * takes the exam without one.
  */
 const studentCameraToken = asyncHandler(async (req, res) => {
   res.set("Cache-Control", "no-store");
@@ -3956,15 +3957,18 @@ const studentCameraToken = asyncHandler(async (req, res) => {
     .select("_id expiresAt")
     .lean();
   if (!attempt) return res.status(403).json({ message: "Davam edən imtahan tapılmadı" });
+  const who = { examId, userId: req.user._id, name: req.user.name, expiresAt: attempt.expiresAt };
   res.json({
     url: process.env.LIVEKIT_URL,
-    token: liveCamera.studentPass({ examId, userId: req.user._id, name: req.user.name, expiresAt: attempt.expiresAt }),
+    token: liveCamera.studentPass(who), // send camera + microphone
+    listen: liveCamera.studentListenPass(who), // hear the teacher (also without a camera)
   });
 });
 
 /*
  * GET /api/quiz/exam/:examId/camera/watch — the exam's teacher (or an admin)
- * asks for a hidden pass to WATCH the students' cameras on the live exam page.
+ * asks for a hidden pass to WATCH and LISTEN to the students on the live exam
+ * page, and one to SPEAK to them (all, or one).
  */
 const teacherCameraToken = asyncHandler(async (req, res) => {
   res.set("Cache-Control", "no-store");
@@ -3974,9 +3978,11 @@ const teacherCameraToken = asyncHandler(async (req, res) => {
   if (!exam) return res.status(404).json({ message: "İmtahan tapılmadı" });
   if (!ownsOrAdmin(req.user, exam)) return res.status(403).json({ message: "Bu imtahan sizə aid deyil" });
   if (!exam.cameraMonitoring) return res.status(409).json({ message: "Bu imtahanda kamera ilə nəzarət yoxdur" });
+  const who = { examId, userId: req.user._id, name: req.user.name, tag: require("crypto").randomBytes(3).toString("hex") };
   res.json({
     url: process.env.LIVEKIT_URL,
-    token: liveCamera.teacherPass({ examId, userId: req.user._id, name: req.user.name, tag: require("crypto").randomBytes(3).toString("hex") }),
+    token: liveCamera.teacherPass(who), // watch + listen
+    talk: liveCamera.teacherTalkPass(who), // speak to everyone or to one student
   });
 });
 
