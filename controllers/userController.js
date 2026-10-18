@@ -1,4 +1,5 @@
 const asyncHandler = require("express-async-handler");
+const { tiktokEvent } = require("../services/tiktokEvents");
 const User = require("../models/userModel");
 const MaintenanceAudit = require("../models/maintenanceAuditModel");
 const { usedBytes, quotaFor } = require("../middleware/uploadLimit");
@@ -61,9 +62,12 @@ function cleanAcquisition(a) {
     campaign: s(a.campaign, 200),
     referrer: s(a.referrer, 400),
     landing: s(a.landing, 300),
+    // The TikTok ad click this visit came from (?ttclid=): lets the Events API
+    // tie the sign-up, and the teacher's later class and exam, to the ad.
+    ttclid: s(a.ttclid, 300),
   };
   const meaningful = out.source && out.source !== "(direct)";
-  if (!meaningful && !out.campaign && !out.referrer) return undefined;
+  if (!meaningful && !out.campaign && !out.referrer && !out.ttclid) return undefined;
   out.at = new Date();
   return out;
 }
@@ -169,6 +173,9 @@ const registerUser = asyncHandler(async (req, res) => {
     const token = await issueLoginToken(req, res, user);
     // Trust this device for one-tap re-login later (opt-in; default on).
     if (req.body?.rememberDevice !== false) await issueTrustDevice(req, res, user);
+
+    // TikTok Events API: the sign-up, with the id the browser pixel uses (services/tiktokEvents).
+    tiktokEvent("CompleteRegistration", { eventId: `reg-${user._id}`, user, req, path: "/register", properties: { content_name: role } });
 
     // CR-125: bind a referral if a valid code came through the register flow
     // (?ref=<code>). Teacher referees only. NEVER fail registration on a referral
@@ -1518,6 +1525,8 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
     });
 
     if (newUser) {
+      // TikTok Events API: a Google sign-up is a sign-up too (its role comes later).
+      tiktokEvent("CompleteRegistration", { eventId: `reg-${newUser._id}`, user: newUser, req, path: "/register", properties: { content_name: "google" } });
       // Generate token
       // AUD-002 (CR-011): unified issuance (Google, new user) — preserve the
       // historical 1-day flag-off cookie expiry.
@@ -2286,6 +2295,7 @@ const getParentCode = asyncHandler(async (req, res) => {
 
 module.exports = {
   __setGoogleVerifyForTest, // test-only seam (rejects unless NODE_ENV==="test")
+  cleanAcquisition, // what a sign-up records about its source (tests/tiktok-events)
   getParentCode,
   getSetupFunnel,
   getMyStorage,

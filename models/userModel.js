@@ -469,6 +469,7 @@ const userSchema = Schema(
             campaign: { type: String }, // utm_campaign
             referrer: { type: String },
             landing: { type: String },  // first page of the visit
+            ttclid: { type: String },   // the TikTok ad click (?ttclid=), for the Events API
             at: { type: Date },
         },
         // Teacher Journey (flag-gated): when the teacher first saw the full-page

@@ -1,4 +1,5 @@
 const asyncHandler = require("express-async-handler");
+const { tiktokEvent } = require("../services/tiktokEvents");
 const Exam = require("../models/examModel");
 const PDF = require("../models/pdfModel");
 const Tag = require("../models/tagModel");
@@ -221,6 +222,12 @@ const addClass = asyncHandler(async (req, res) => {
       joinCode: await uniqueJoinCode(),
       requireCode: true,
     });
+
+    // TikTok Events API: a teacher who makes a class has started using the
+    // product — the id the browser pixel uses, so it counts once (services/tiktokEvents).
+    if (req.user?.role !== "admin") {
+      tiktokEvent("TeacherActivated", { eventId: `class-${newClass._id}`, user: req.user, req, path: "/classAdd", properties: { content_name: "class" } });
+    }
 
     res.status(201).json({ message: "Class has been saved", newClass });
   } catch (e) {
@@ -2032,6 +2039,12 @@ const addQuestion = asyncHandler(async (req, res) => {
   const pub = deferPublish ? { ok: false, reason: "deferred" } : await republishExam(examId);
   // Only announce when the publish succeeded (CR-034).
   if (pub.ok) notifyStudentsNewExam(examId).catch(() => {});
+
+  // TikTok Events API: questions saved into an exam — the strongest signal there
+  // is. One per exam (repeated saves share the id), as the browser pixel sends it.
+  if (req.user?.role !== "admin") {
+    tiktokEvent("TeacherActivated", { eventId: `exam-${examId}`, user: req.user, req, path: `/exam/${examId}/build`, properties: { content_name: "exam" } });
+  }
 
   res.status(200).json({
     message: wasUpdate

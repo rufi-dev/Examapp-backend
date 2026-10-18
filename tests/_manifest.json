@@ -114,6 +114,7 @@
   "tests/class-context.test.js",
   "tests/studio-table-limits.test.js",
   "tests/support-chat-quality.test.js",
+  "tests/tiktok-events.test.js",
   "tests/chat-typing.test.js",
   "tests/ui-catalog.test.js",
   "tests/chat-voice.test.js",
