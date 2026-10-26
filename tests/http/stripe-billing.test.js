@@ -80,9 +80,22 @@ function sub(id, userId, { status = "active", price = "price_pro", start = NOW, 
 }
 let evn = 0;
 const ev = (type, object, id) => ({ id: id || `evt_${++evn}`, object: "event", type, data: { object } });
-const invoice = (id, subscriptionId, { reason = "subscription_cycle", subtotal = 1500, legacy = false } = {}) => ({
+// Lines as Stripe sends them: API 2026 nests the subscription item under `parent`,
+// older versions put `type: "subscription"` and `proration` on the line itself.
+const invoice = (id, subscriptionId, { reason = "subscription_cycle", subtotal = 1500, legacy = false, proration = false, lines = true } = {}) => ({
   id, object: "invoice", billing_reason: reason, subtotal, amount_paid: subtotal, status: "paid",
   ...(legacy ? { subscription: subscriptionId } : { parent: { type: "subscription_details", subscription_details: { subscription: subscriptionId } } }),
+  ...(lines
+    ? {
+        lines: {
+          data: [
+            legacy
+              ? { id: `il_${id}`, amount: subtotal, type: "subscription", proration }
+              : { id: `il_${id}`, amount: subtotal, parent: { type: "subscription_item_details", subscription_item_details: { proration, subscription: subscriptionId } } },
+          ],
+        },
+      }
+    : {}),
 });
 
 function call(server, { method = "GET", path: p, token, body, raw, headers = {} }) {
@@ -205,14 +218,20 @@ async function main() {
   await send(ev("invoice.paid", invoice("in_2", "sub_t", { legacy: true })));
   u = await fresh(tester);
   ok("paid month: an older-API invoice (invoice.subscription) still works", u.aiCredits === 805);
+  await send(ev("invoice.paid", invoice("in_early", "sub_t", { reason: "subscription_update" })));
+  u = await fresh(tester);
+  ok("paid month: a trial ended early bills a full month as subscription_update, and it counts", u.aiCredits === 1155);
+  await send(ev("invoice.paid", invoice("in_nolines", "sub_t", { lines: false })));
+  u = await fresh(tester);
+  ok("paid month: an invoice without lines falls back to its billing reason", u.aiCredits === 1505);
   const audits = await MaintenanceAudit.find({ actor: "stripe", "target.userId": String(tester._id) }).lean();
-  ok("credits: every Stripe grant leaves an audit row", audits.length === 3);
+  ok("credits: every Stripe grant leaves an audit row", audits.length === 5);
 
   // ── card fails at renewal: past_due keeps the plan while Stripe retries ──
   sub("sub_t", tester._id, { status: "past_due", end: end2, customer: "cus_t" });
   await send(ev("invoice.payment_failed", invoice("in_3", "sub_t")));
   u = await fresh(tester);
-  ok("past_due: still Pro, status recorded, no credits", u.plan === "pro" && u.stripeSubscriptionStatus === "past_due" && u.aiCredits === 805);
+  ok("past_due: still Pro, status recorded, no credits", u.plan === "pro" && u.stripeSubscriptionStatus === "past_due" && u.aiCredits === 1505);
   ok("past_due: the plan holds 7 days from the missed payment, not a whole unpaid month", near(u.planExpiresAt, NOW * 1000 + 7 * DAY * 1000));
   sub("sub_t", tester._id, { status: "active", end: end2, customer: "cus_t" });
   await send(ev("customer.subscription.updated", subs.get("sub_t")));
@@ -257,7 +276,7 @@ async function main() {
   u = await fresh(switcher);
   ok("upgrade: Premium now, roster reconciled", u.plan === "premium" && reconciles === reconcilesBefore + 1);
   ok("upgrade: half a month left → half of Premium's extra 1650 credits", u.aiCredits - creditsBefore === 825);
-  await send(ev("invoice.paid", invoice("in_up", "sub_new", { reason: "subscription_update", subtotal: 250 })));
+  await send(ev("invoice.paid", invoice("in_up", "sub_new", { reason: "subscription_update", subtotal: 250, proration: true })));
   await send(ev("customer.subscription.updated", subs.get("sub_new")));
   u = await fresh(switcher);
   ok("upgrade: the proration invoice and later events grant nothing more", u.aiCredits - creditsBefore === 825);

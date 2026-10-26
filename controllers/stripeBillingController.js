@@ -119,10 +119,27 @@ async function grantTrialCredits(userId, subscriptionId) {
   if (result.modifiedCount && amount > 0) await auditGrant("stripe_trial_credits", userId, amount, `trial ${subscriptionId}`);
 }
 
-// A paid month brings the plan's monthly credits. The trial's 0 ₼ invoice brings
-// none (the trial has its own grant); a 100% coupon still counts as a paid month.
+/*
+ * Does this invoice pay for a month of the plan? Read from its lines, because the
+ * billing reason alone misleads: ending a trial early bills a full month as
+ * "subscription_update", the same reason an upgrade's proration carries. A month
+ * is a full-period (non-proration) subscription line with an amount, so the
+ * trial's 0 ₼ line is not one and a 100% coupon month still is.
+ */
+function paysForAMonth(invoice) {
+  const lines = invoice?.lines?.data;
+  if (!Array.isArray(lines) || !lines.length) return MONTH_INVOICES.has(invoice?.billing_reason) && Number(invoice?.subtotal) > 0;
+  return lines.some((line) => {
+    const item = line?.parent?.subscription_item_details; // API 2025-03-31+
+    const fromSubscription = item ? true : line?.type === "subscription";
+    const proration = item ? item.proration : line?.proration;
+    return fromSubscription && !proration && Number(line?.amount) > 0;
+  });
+}
+
+// A paid month brings the plan's monthly credits; the trial has its own grant.
 async function grantInvoiceCredits(userId, invoice, plan) {
-  if (!MONTH_INVOICES.has(invoice?.billing_reason) || !(Number(invoice?.subtotal) > 0)) return;
+  if (!paysForAMonth(invoice)) return;
   const amount = planDef(plan).credits?.monthly || 0;
   if (!amount || !invoice.id) return;
   const result = await User.updateOne(
