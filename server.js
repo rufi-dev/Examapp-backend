@@ -170,6 +170,10 @@ const app = express()
 // req.protocol and req.ip reflect the original HTTPS request.
 app.set("trust proxy", 1)
 
+// Stripe signs the exact request bytes. Mount this before the global JSON
+// parser so verification cannot be performed against a re-serialized object.
+app.post("/api/billing/stripe/webhook", express.raw({ type: "application/json" }), require("./controllers/stripeBillingController").webhook)
+
 // Middlewares
 // Request timing/error metrics for the admin Health page (in-memory, ~zero
 // overhead). Registered first so every API request is measured.
@@ -243,6 +247,7 @@ app.use("/api/boards", require("./routes/boardRoute"))
 app.use("/api/teacher-success", require("./routes/teacherSuccessRoute"))
 app.use("/api/chat", require("./routes/chatRoute"))
 app.use("/api/plan", require("./routes/planRoute"))
+app.use("/api/billing", require("./routes/stripeBillingRoute"))
 // Parent portal: a parent links to a child by code, then reads that child's exam
 // results + homework (read-only). Every route is protect + parentOnly.
 app.use("/api/parent", require("./routes/parentRoute"))

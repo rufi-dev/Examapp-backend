@@ -266,19 +266,17 @@ async function main() {
   const startRes = await req(server, { method: "POST", path: `/exam/${legacyPaid._id}/start`, token: tok(enrolledStudent) });
   ok("STRIPE-002: a legacy positive-price exam does NOT deny an enrolled student as not_owned (price-free access)", !(startRes.status === 403 && startRes.body && startRes.body.reason === "not_owned"));
 
-  // ── the Stripe route/controller files are gone; server.js mounts no /api/stripe ──
-  ok("stripeController.js removed", !fs.existsSync(path.join(__dirname, "..", "..", "controllers", "stripeController.js")));
-  ok("stripeRoute.js removed", !fs.existsSync(path.join(__dirname, "..", "..", "routes", "stripeRoute.js")));
+  // ── legacy exam purchases remain retired; plan Billing is separate ──
+  ok("legacy stripeController.js remains absent", !fs.existsSync(path.join(__dirname, "..", "..", "controllers", "stripeController.js")));
+  ok("legacy stripeRoute.js remains absent", !fs.existsSync(path.join(__dirname, "..", "..", "routes", "stripeRoute.js")));
   const serverSrc = fs.readFileSync(path.join(__dirname, "..", "..", "server.js"), "utf8");
-  ok("server.js has no active /api/stripe mount", !serverSrc.split("\n").some((l) => !l.trimStart().startsWith("//") && /\/api\/stripe/.test(l)));
-  ok("package.json no longer depends on stripe", !/\"stripe\"\s*:/.test(fs.readFileSync(path.join(__dirname, "..", "..", "package.json"), "utf8")));
-  // STRIPE-001: the dependency is gone from BOTH sides + not installed.
-  ok("stripe is not installed (node_modules/stripe absent)", !fs.existsSync(path.join(__dirname, "..", "..", "node_modules", "stripe")));
-  ok("package-lock.json has no stripe entry", !/node_modules\/stripe|\/stripe\/-\/stripe|\"stripe\"\s*:/.test(fs.readFileSync(path.join(__dirname, "..", "..", "package-lock.json"), "utf8")));
+  ok("server.js has no legacy /api/stripe mount", !serverSrc.split("\n").some((l) => !l.trimStart().startsWith("//") && /\/api\/stripe/.test(l)));
+  ok("server.js mounts authenticated Billing", /\/api\/billing/.test(serverSrc));
+  ok("Stripe SDK is installed for Billing", /\"stripe\"\s*:/.test(fs.readFileSync(path.join(__dirname, "..", "..", "package.json"), "utf8")));
 
   // ── health checker no longer probes Stripe ──
   const healthSrc = fs.readFileSync(path.join(__dirname, "..", "..", "controllers", "healthController.js"), "utf8");
-  ok("healthController has no active Stripe probe", !/stripeProbe|stripe\.balance|require\(["']stripe["']\)/.test(healthSrc));
+  ok("healthController has no active Stripe probe", !/stripeProbe|stripe\.balance/.test(healthSrc));
   ok("healthController loads without stripe", (() => { try { require("../../controllers/healthController"); return true; } catch { return false; } })());
 
   await new Promise((r) => server.close(r));

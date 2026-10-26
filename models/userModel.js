@@ -316,7 +316,17 @@ const userSchema = Schema(
         // Pro/Premium term end; null = free / no expiry. Enforcement of expiry is
         // a follow-up — for now it is informational + admin-managed.
         planExpiresAt: { type: Date, default: null },
-        planSource: { type: String, enum: ["admin", "migration"], default: "migration" },
+        planSource: { type: String, enum: ["admin", "migration", "stripe"], default: "migration" },
+        // Stripe Billing linkage. IDs are server-side fields; billing/status is
+        // exposed through the authenticated billing endpoint rather than user DTOs.
+        stripeCustomerId: { type: String, select: false },
+        stripeSubscriptionId: { type: String, select: false },
+        stripePriceId: { type: String, select: false },
+        stripeSubscriptionStatus: { type: String, select: false },
+        stripeCurrentPeriodEnd: { type: Date, select: false },
+        stripeCancelAtPeriodEnd: { type: Boolean, default: false, select: false },
+        stripeRiskStatus: { type: String, default: null, select: false },
+        stripeLastRiskEventAt: { type: Date, default: null, select: false },
         // Set when an admin downgrades a PAID teacher back to free, so they stay
         // visible in a "downgraded" panel (not silently gone from the list).
         // Cleared when they upgrade to a paid plan again.

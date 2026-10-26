@@ -65,6 +65,7 @@
   "tests/cr070-structural.test.js",
   "tests/http/payments-removed.test.js",
   "tests/stripe-source-scan.test.js",
+  "tests/stripe-billing-config.test.js",
   "tests/http/free-all-exams-migration.test.js",
   "tests/http/canonicalize-acquisition-migration.test.js",
   "tests/email-send.test.js",

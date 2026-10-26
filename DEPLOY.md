@@ -43,7 +43,19 @@ Key values in `.env`:
 - `SITE_ADDRESS` — `<SERVER_IP>.sslip.io`, e.g. `5.75.1.2.sslip.io` (no `https://`).
 - `FRONTEND_URL` — `https://examopia.com`.
 - `JWT_SECRET`, `CRYPTR_KEY` — long random strings (`openssl rand -hex 32`).
-- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, email SMTP vars. (Payments/Stripe were removed — no `STRIPE_KEY` is used.)
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, email SMTP vars.
+- Stripe Billing: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+  `STRIPE_PRICE_PRO_MONTHLY`, and `STRIPE_PRICE_PREMIUM_MONTHLY`. Keep these in
+  the server secret environment; never commit them or expose them to the frontend.
+
+Create one Stripe webhook endpoint at `https://api.examopia.com/api/billing/stripe/webhook`
+and subscribe it to `checkout.session.completed`, `customer.subscription.created`,
+`customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`,
+`invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`, and
+`radar.early_fraud_warning.created`. Put the signing secret in
+`STRIPE_WEBHOOK_SECRET`. The application verifies the signature against the raw
+request body and applies plan changes from webhook events, not from the browser's
+success redirect.
 
 ### 1.5 Launch
 ```bash
