@@ -2,6 +2,7 @@ const asyncHandler = require("express-async-handler");
 const PlanUpgradeRequest = require("../models/planUpgradeRequestModel");
 const User = require("../models/userModel");
 const { PLANS, PLAN_IDS, CREDIT_TOPUPS, STORAGE_PACKS, AI_ACTION_COSTS, paymentInfo } = require("../config/plans");
+const { billingOpen, priceForPlan, trialDays } = require("../config/stripe");
 
 // GET /api/plan/catalog — public plan/pricing catalog for the pricing page.
 // (Limits use Infinity → serialize as null = "unlimited" for JSON.)
@@ -28,6 +29,9 @@ const getCatalog = asyncHandler(async (req, res) => {
     // along on the public catalog — the payment page reads it here without an
     // auth round-trip (the auth-gated /payment-info stays as a fallback).
     payment: paymentInfo(),
+    // Card subscriptions, only once they are open to every teacher (the pricing
+    // page is public, so it cannot ask the per-user billing status).
+    cardBilling: billingOpen() && !!priceForPlan("pro") ? { trialDays: trialDays() } : null,
   });
 });
 
@@ -163,7 +167,7 @@ const listSubscribers = asyncHandler(async (req, res) => {
     plan: { $in: ["pro", "premium"] },
     deletedAt: null,
   })
-    .select("name email phone role plan planSince planExpiresAt aiCredits")
+    .select("name email phone role plan planSince planExpiresAt aiCredits planSource +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAt")
     .lean();
   rows.sort((a, b) => {
     const av = a.planExpiresAt ? new Date(a.planExpiresAt).getTime() : Infinity;

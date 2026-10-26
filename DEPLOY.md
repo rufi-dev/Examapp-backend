@@ -47,6 +47,13 @@ Key values in `.env`:
 - Stripe Billing: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
   `STRIPE_PRICE_PRO_MONTHLY`, and `STRIPE_PRICE_PREMIUM_MONTHLY`. Keep these in
   the server secret environment; never commit them or expose them to the frontend.
+- Who is offered card billing: `STRIPE_BILLING_ENABLED=true` opens it to every
+  teacher. Unset, only admins and the emails in `STRIPE_BILLING_TESTERS`
+  (comma-separated) see it, which is how a sandbox key stays away from real
+  teachers. Open it only with live keys.
+- Trial: `BILLING_TRIAL_DAYS` (default 7, 0 = no trial) and `BILLING_TRIAL_CREDITS`
+  (default 100 AI credits at trial start; the plan's monthly credits come with
+  each paid invoice). One trial per teacher, ever.
 
 Create one Stripe webhook endpoint at `https://api.examopia.com/api/billing/stripe/webhook`
 and subscribe it to `checkout.session.completed`, `customer.subscription.created`,

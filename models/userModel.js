@@ -325,6 +325,15 @@ const userSchema = Schema(
         stripeSubscriptionStatus: { type: String, select: false },
         stripeCurrentPeriodEnd: { type: Date, select: false },
         stripeCancelAtPeriodEnd: { type: Boolean, default: false, select: false },
+        // When a cancelled subscription stops (a portal cancel sets this, not the flag above).
+        stripeCancelAt: { type: Date, default: null, select: false },
+        stripeTrialEnd: { type: Date, default: null, select: false },
+        // One card trial per teacher, ever; stamped when the trial's credits are granted.
+        stripeTrialUsedAt: { type: Date, default: null, select: false },
+        // The last invoice whose monthly credits were granted, so a replay grants nothing.
+        stripeLastCreditedInvoiceId: { type: String, default: null, select: false },
+        // The plan upgrade whose extra credits were granted (subscription:plan:period end).
+        stripeUpgradeCreditKey: { type: String, default: null, select: false },
         stripeRiskStatus: { type: String, default: null, select: false },
         stripeLastRiskEventAt: { type: Date, default: null, select: false },
         // Set when an admin downgrades a PAID teacher back to free, so they stay

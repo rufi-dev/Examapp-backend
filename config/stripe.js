@@ -1,6 +1,7 @@
 const Stripe = require("stripe");
 
 let client;
+let testClient = null;
 
 const required = (name) => {
   const value = String(process.env[name] || "").trim();
@@ -14,6 +15,7 @@ const required = (name) => {
 };
 
 function stripeClient() {
+  if (testClient) return testClient;
   const key = required("STRIPE_SECRET_KEY");
   if (!client || client._examopiaKey !== key) {
     // stripe@23 exposes the Node client as the Stripe constructor. Keep this
@@ -39,4 +41,50 @@ const planForPrice = (priceId) => {
 
 const frontendUrl = () => String(process.env.FRONTEND_URL || "https://examopia.com").replace(/\/$/, "");
 
-module.exports = { required, stripeClient, priceForPlan, planForPrice, frontendUrl };
+const wholeNumber = (value, fallback) => {
+  const n = Number(value);
+  return value !== undefined && value !== "" && Number.isFinite(n) && n >= 0 ? Math.round(n) : fallback;
+};
+// 0 turns the trial off. The trial grants a smaller credit pack than a paid month,
+// so "start a trial, spend a month of AI, cancel" is not worth doing.
+const trialDays = () => wholeNumber(process.env.BILLING_TRIAL_DAYS, 7);
+const trialCredits = () => wholeNumber(process.env.BILLING_TRIAL_CREDITS, 100);
+
+/*
+ * Who is offered card billing. STRIPE_BILLING_ENABLED=true opens it to every
+ * teacher; until then only admins and the emails in STRIPE_BILLING_TESTERS see it.
+ * Without this gate a sandbox key would show real teachers a test-mode Checkout
+ * the moment any frontend build shipped.
+ */
+const billingOpen = () =>
+  !!String(process.env.STRIPE_SECRET_KEY || "").trim() &&
+  ["true", "1", "all"].includes(String(process.env.STRIPE_BILLING_ENABLED || "").trim().toLowerCase());
+
+function billingEnabledFor(user) {
+  if (!String(process.env.STRIPE_SECRET_KEY || "").trim()) return false;
+  if (billingOpen() || user?.role === "admin") return true;
+  const email = String(user?.email || "").trim().toLowerCase();
+  const testers = String(process.env.STRIPE_BILLING_TESTERS || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return !!email && testers.includes(email);
+}
+
+// Tests swap in a fake client; nothing else may call this.
+const _setStripeForTest = (fake) => {
+  testClient = fake || null;
+};
+
+module.exports = {
+  required,
+  stripeClient,
+  priceForPlan,
+  planForPrice,
+  frontendUrl,
+  trialDays,
+  trialCredits,
+  billingOpen,
+  billingEnabledFor,
+  _setStripeForTest,
+};
