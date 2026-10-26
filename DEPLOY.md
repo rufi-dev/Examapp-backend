@@ -52,7 +52,9 @@ Create one Stripe webhook endpoint at `https://api.examopia.com/api/billing/stri
 and subscribe it to `checkout.session.completed`, `customer.subscription.created`,
 `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`,
 `invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`, and
-`radar.early_fraud_warning.created`. Put the signing secret in
+`radar.early_fraud_warning.created`, plus
+`checkout.session.async_payment_succeeded` and
+`checkout.session.async_payment_failed` for delayed payment methods. Put the signing secret in
 `STRIPE_WEBHOOK_SECRET`. The application verifies the signature against the raw
 request body and applies plan changes from webhook events, not from the browser's
 success redirect.

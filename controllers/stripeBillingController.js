@@ -104,12 +104,15 @@ async function handleStripeEvent(event) {
   const claim = await markEvent(event);
   if (claim.duplicate) return;
   try {
-    if (event.type === "checkout.session.completed") {
+    if (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") {
       const session = event.data.object;
       if (session.mode === "subscription" && session.subscription) {
         const subscription = await stripeClient().subscriptions.retrieve(session.subscription);
         await syncSubscription(subscription);
       }
+    } else if (event.type === "checkout.session.async_payment_failed") {
+      // The subscription lifecycle/invoice events remain authoritative. This
+      // event is recorded for audit and deliberately does not grant access.
     } else if (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated" || event.type === "customer.subscription.deleted") {
       await syncSubscription(event.data.object);
     } else if (event.type === "invoice.paid") {
