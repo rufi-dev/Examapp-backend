@@ -6,6 +6,7 @@ const router = express.Router();
 router.use(protect, teacherOnly);
 router.get("/status", controller.billingStatus);
 router.post("/checkout", controller.createCheckout);
+router.post("/addon", controller.createAddonCheckout);
 router.post("/portal", controller.createPortal);
 
 module.exports = router;

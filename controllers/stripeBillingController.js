@@ -4,6 +4,7 @@ const User = require("../models/userModel");
 const StripeEvent = require("../models/stripeEventModel");
 const MaintenanceAudit = require("../models/maintenanceAuditModel");
 const { refundStatus } = require("../helper/stripeRefund");
+const { needsSubscription } = require("../helper/teacherAccess");
 const { planDef } = require("../config/plans");
 const {
   required,
@@ -15,6 +16,8 @@ const {
   trialDays,
   trialCredits,
   billingEnabledFor,
+  ADDONS,
+  addonPrices,
 } = require("../config/stripe");
 
 // Statuses that keep the paid plan; past_due keeps it while Stripe retries the card.
@@ -62,20 +65,31 @@ const invoiceSubscriptionId = (invoice) => {
 const cancelDate = (subscription) =>
   toDate(subscription?.cancel_at) || (subscription?.cancel_at_period_end ? periodEnd(subscription) : null);
 
+const customerIdOf = (object) => (typeof object?.customer === "string" ? object.customer : object?.customer?.id || null);
+
+// An add-on (credit pack, storage) is its own subscription, tagged at checkout.
+const isAddon = (subscription) => subscription?.metadata?.examopia_kind === "addon";
+
 function priceFromSubscription(subscription) {
   return subscription?.items?.data?.map((item) => item?.price?.id).find(Boolean) || "";
 }
 
+const monthlyCredits = (plan) => planDef(plan).credits?.monthly || 0;
+
 const hasPaidPlanNow = (user) =>
   ["pro", "premium"].includes(user?.plan) && (!user.planExpiresAt || new Date(user.planExpiresAt) > new Date());
 
-// A first-time card subscriber gets the trial: no trial before, no Stripe
-// subscription before, and not already on a paid plan paid by transfer.
-const trialEligible = (user) =>
-  trialDays() > 0 && !!user && !user.stripeTrialUsedAt && !user.stripeSubscriptionId && !hasPaidPlanNow(user);
+/*
+ * Who gets the 7-day trial: a teacher who has never paid. Anyone who had a plan
+ * (by card, by transfer, or set by the admin — the stored plan stays "pro" or
+ * "premium" after it lapses) or a card subscription before pays straight away.
+ */
+const everPaid = (user) =>
+  !!(user?.stripeTrialUsedAt || user?.stripeSubscriptionId || user?.planDowngradedAt || ["pro", "premium"].includes(user?.plan));
+const trialEligible = (user) => trialDays() > 0 && !!user && !everPaid(user);
 
 // Credits granted by Stripe leave a trail like an admin adjustment does; the guard
-// fields on the user (trial stamp, last invoice id) are what stop a second grant.
+// fields on the user (trial stamp, invoice ids) are what stop a second grant.
 const auditGrant = (action, userId, credits, ref) =>
   MaintenanceAudit.create({
     action,
@@ -112,11 +126,98 @@ async function customerFor(user) {
   return customer;
 }
 
-async function grantTrialCredits(userId, subscriptionId) {
+async function userFor(subscription, fields) {
+  const metadataUserId = subscription?.metadata?.examopia_user_id;
+  const customerId = customerIdOf(subscription);
+  const query = mongoose.isValidObjectId(metadataUserId)
+    ? { _id: metadataUserId }
+    : customerId
+      ? { stripeCustomerId: customerId }
+      : null;
+  return query ? User.findOne(query).select(fields) : null;
+}
+
+/*
+ * ── Add-ons ────────────────────────────────────────────────────────────────
+ * What the teacher's live add-on subscriptions add up to: monthly credits on top
+ * of the plan's, and storage. Read from Stripe each time, so the answer is the
+ * one that is true now (an add-on cancelled at period end is gone at renewal).
+ */
+async function addonState(customerId) {
+  const empty = { credits: 0, gb: 0, until: null, list: [] };
+  if (!customerId) return empty;
+  const subs = await stripeClient().subscriptions.list({ customer: customerId, status: "all", limit: 100 });
+  const now = Date.now();
+  const state = { ...empty, list: [] };
+  for (const sub of subs.data || []) {
+    if (!isAddon(sub) || !LIVE_STATUSES.has(sub.status)) continue;
+    const addon = ADDONS[sub.metadata?.addon_key];
+    const end = periodEnd(sub);
+    if (!addon || (end && end.getTime() + GRACE_MS < now)) continue;
+    const quantity = (sub.items?.data || []).reduce((n, item) => n + (Number(item.quantity) || 1), 0) || 1;
+    state.credits += addon.credits * quantity;
+    state.gb += addon.gb * quantity;
+    if (end && (!state.until || end > state.until)) state.until = end;
+    state.list.push({ key: addon.key, subscriptionId: sub.id, status: sub.status, quantity, cancelAt: cancelDate(sub), periodEnd: end });
+  }
+  return state;
+}
+
+async function saveAddonState(userId, state) {
+  await User.updateOne(
+    { _id: userId },
+    {
+      $set: {
+        addonCreditsMonthly: state.credits,
+        cardStorageGb: state.gb,
+        cardStorageUntil: state.until ? new Date(state.until.getTime() + GRACE_MS) : null,
+        stripeAddons: state.list,
+      },
+    }
+  );
+  return state;
+}
+
+/*
+ * Add-ons live and die with the plan: when the plan is set to end, they are set to
+ * end on the same moment; when it has ended, they end within minutes (no prorated
+ * credit — the month was already used). A plan cancellation that is withdrawn takes
+ * the add-ons' end date away again. Uses cancel_at, which the restricted key may
+ * set on its own (an outright cancel needs a human approval in Stripe).
+ */
+async function alignAddons(customerId, main) {
+  if (!customerId) return;
+  const subs = await stripeClient().subscriptions.list({ customer: customerId, status: "all", limit: 100 });
+  const addons = (subs.data || []).filter((s) => isAddon(s) && LIVE_STATUSES.has(s.status));
+  if (!addons.length) return;
+  const nowS = Math.floor(Date.now() / 1000);
+  const mainEnds = ENDED_STATUSES.has(main.status)
+    ? nowS + 120
+    : Number(main.cancel_at) || (main.cancel_at_period_end ? Math.floor((periodEnd(main)?.getTime() || 0) / 1000) : 0);
+  for (const sub of addons) {
+    try {
+      if (mainEnds) {
+        if (Number(sub.cancel_at) && Number(sub.cancel_at) <= mainEnds) continue;
+        await stripeClient().subscriptions.update(sub.id, {
+          cancel_at: mainEnds,
+          proration_behavior: "none",
+          metadata: { cancel_with_main: "1" },
+        });
+      } else if (Number(sub.cancel_at) && sub.metadata?.cancel_with_main === "1") {
+        await stripeClient().subscriptions.update(sub.id, { cancel_at: "", metadata: { cancel_with_main: "" } });
+      }
+    } catch (e) {
+      console.error("[BILLING] add-on align failed:", sub.id, e.message);
+    }
+  }
+}
+
+async function grantTrialCredits(userId, subscriptionId, trialEnd) {
   const amount = trialCredits();
+  // The trial's credits replace whatever was there: credits never roll over.
   const result = await User.updateOne(
     { _id: userId, stripeTrialUsedAt: null },
-    { $set: { stripeTrialUsedAt: new Date() }, ...(amount > 0 ? { $inc: { aiCredits: amount } } : {}) }
+    { $set: { stripeTrialUsedAt: new Date(), aiCredits: amount, aiCreditsResetAt: trialEnd || null } }
   );
   if (result.modifiedCount && amount > 0) await auditGrant("stripe_trial_credits", userId, amount, `trial ${subscriptionId}`);
 }
@@ -139,26 +240,36 @@ function paysForAMonth(invoice) {
   });
 }
 
-// A paid month brings the plan's monthly credits (the trial has its own grant) and
-// starts the 7-day refund window, so its date and credits are remembered.
-async function grantInvoiceCredits(userId, invoice, plan) {
+/*
+ * A paid month of the plan: the balance is RESET to the month's allowance (plan
+ * credits + the live add-ons' credits) — unused credits from the month before do
+ * not carry over. It also starts the 7-day refund window, so its date and credits
+ * are remembered.
+ */
+async function startPaidMonth(userId, invoice, plan, subscription) {
   if (!paysForAMonth(invoice) || !invoice.id) return;
-  const amount = planDef(plan).credits?.monthly || 0;
+  const addons = await saveAddonState(userId, await addonState(customerIdOf(subscription)));
+  const amount = monthlyCredits(plan) + addons.credits;
   const paidAt = toDate(invoice.status_transitions?.paid_at) || new Date();
   const result = await User.updateOne(
     { _id: userId, stripeLastCreditedInvoiceId: { $ne: invoice.id } },
     {
-      $set: { stripeLastCreditedInvoiceId: invoice.id, stripeLastPaidAt: paidAt, stripeLastCreditedAmount: amount },
-      $inc: { aiCredits: amount },
+      $set: {
+        aiCredits: amount,
+        aiCreditsResetAt: periodEnd(subscription),
+        stripeLastCreditedInvoiceId: invoice.id,
+        stripeLastPaidAt: paidAt,
+        stripeLastCreditedAmount: amount,
+      },
     }
   );
-  if (result.modifiedCount) await auditGrant("stripe_invoice_credits", userId, amount, `invoice ${invoice.id}`);
+  if (result.modifiedCount) await auditGrant("stripe_invoice_credits", userId, amount, `invoice ${invoice.id} (reset)`);
 }
 
 // Pro → Premium mid-month: the teacher paid the prorated difference, so they get the
 // same share of the extra monthly credits now; the full amount comes at renewal.
 async function grantUpgradeCredits(userId, subscription, from, to) {
-  const extra = (planDef(to).credits?.monthly || 0) - (planDef(from).credits?.monthly || 0);
+  const extra = monthlyCredits(to) - monthlyCredits(from);
   const item = subscription?.items?.data?.[0];
   const start = Number(item?.current_period_start);
   const end = Number(item?.current_period_end);
@@ -175,22 +286,45 @@ async function grantUpgradeCredits(userId, subscription, from, to) {
 }
 
 /*
+ * A credit add-on bought mid-month: its first invoice charges the days left until
+ * the plan's renewal, so it brings that share of the pack now. From the next
+ * renewal on, its credits are part of the month's reset.
+ */
+async function grantAddonFirstCredits(userId, invoice, subscription) {
+  const addon = ADDONS[subscription?.metadata?.addon_key];
+  if (!addon?.credits || !invoice?.id) return;
+  const items = subscription.items?.data || [];
+  const quantity = items.reduce((n, item) => n + (Number(item.quantity) || 1), 0) || 1;
+  const full = items.reduce((n, item) => n + (Number(item.price?.unit_amount) || 0) * (Number(item.quantity) || 1), 0);
+  const share = full > 0 ? Math.min(1, Math.max(0, Number(invoice.amount_paid) / full)) : 1;
+  const amount = Math.round(addon.credits * quantity * share);
+  if (!amount) return;
+  const result = await User.updateOne(
+    { _id: userId, stripeAddonCreditedInvoices: { $ne: invoice.id } },
+    { $push: { stripeAddonCreditedInvoices: { $each: [invoice.id], $slice: -50 } }, $inc: { aiCredits: amount } }
+  );
+  if (result.modifiedCount) await auditGrant("stripe_addon_credits", userId, amount, `add-on ${addon.key} invoice ${invoice.id}`);
+}
+
+async function syncAddonSubscription(subscription) {
+  const user = await userFor(subscription, "_id");
+  if (!user) return null;
+  await saveAddonState(user._id, await addonState(customerIdOf(subscription)));
+  return { userId: user._id, plan: null, addon: true };
+}
+
+/*
  * Writes a Stripe subscription onto its teacher. Returns { userId, plan } where
  * plan is the paid plan the subscription grants right now (null when it grants none).
  */
 async function syncSubscription(subscription) {
+  if (isAddon(subscription)) return syncAddonSubscription(subscription);
   const priceId = priceFromSubscription(subscription);
   const plan = planForPrice(priceId);
-  const metadataUserId = subscription?.metadata?.examopia_user_id;
-  const customerId = typeof subscription?.customer === "string" ? subscription.customer : subscription?.customer?.id;
-  const query = mongoose.isValidObjectId(metadataUserId)
-    ? { _id: metadataUserId }
-    : customerId
-      ? { stripeCustomerId: customerId }
-      : null;
-  if (!query) return null;
-  const user = await User.findOne(query).select(
-    "+stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt plan planSource planSince planExpiresAt"
+  const customerId = customerIdOf(subscription);
+  const user = await userFor(
+    subscription,
+    "+stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt +stripeAddons plan planSource planSince planExpiresAt"
   );
   if (!user) return null;
 
@@ -238,12 +372,17 @@ async function syncSubscription(subscription) {
   }
   await User.updateOne({ _id: user._id }, { $set: update });
 
-  if (status === "trialing" && !user.stripeTrialUsedAt) await grantTrialCredits(user._id, subscription.id);
+  if (status === "trialing" && !user.stripeTrialUsedAt) await grantTrialCredits(user._id, subscription.id, toDate(subscription.trial_end));
   const upgraded =
     grants && status === "active" && user.planSource === "stripe" && user.stripeSubscriptionId === subscription.id &&
     user.plan !== "free" && PLAN_RANK[grants] > (PLAN_RANK[user.plan] || 0);
   if (upgraded) await grantUpgradeCredits(user._id, subscription, user.plan, grants);
   if (update.plan && update.plan !== user.plan) await reconcile(user._id);
+  // Add-ons follow the plan (end with it, un-end with it).
+  if ((user.stripeAddons || []).length) {
+    await alignAddons(customerId, subscription);
+    await saveAddonState(user._id, await addonState(customerId));
+  }
   return { userId: user._id, plan: grants };
 }
 
@@ -269,7 +408,7 @@ async function markRiskEvent(object, kind) {
  */
 async function takeBackRefundedCredits(charge) {
   if (!charge?.refunded || Number(charge.amount_refunded) < Number(charge.amount)) return;
-  const customerId = typeof charge.customer === "string" ? charge.customer : charge.customer?.id;
+  const customerId = customerIdOf(charge);
   const paymentIntent = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id;
   if (!customerId || !paymentIntent) return;
   const payments = await stripeClient().invoicePayments.list({ payment: { type: "payment_intent", payment_intent: paymentIntent }, limit: 1 });
@@ -308,7 +447,12 @@ async function syncInvoice(invoice, { paid }) {
   if (!subscriptionId) return;
   const subscription = await stripeClient().subscriptions.retrieve(subscriptionId);
   const synced = await syncSubscription(subscription);
-  if (paid && synced?.plan) await grantInvoiceCredits(synced.userId, invoice, synced.plan);
+  if (!paid || !synced) return;
+  if (synced.addon) {
+    if (invoice.billing_reason === "subscription_create") await grantAddonFirstCredits(synced.userId, invoice, subscription);
+  } else if (synced.plan) {
+    await startPaidMonth(synced.userId, invoice, synced.plan, subscription);
+  }
 }
 
 async function handleStripeEvent(event) {
@@ -361,7 +505,7 @@ const createCheckout = asyncHandler(async (req, res) => {
     throw new Error("Stripe qiyməti hələ konfiqurasiya edilməyib");
   }
   const user = await User.findById(req.user._id).select(
-    "name email plan planExpiresAt +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt"
+    "name email plan planExpiresAt planDowngradedAt +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt"
   );
   if (!user) { res.status(404); throw new Error("İstifadəçi tapılmadı"); }
   if (user.stripeSubscriptionId && LIVE_STATUSES.has(user.stripeSubscriptionStatus)) {
@@ -395,6 +539,56 @@ const createCheckout = asyncHandler(async (req, res) => {
   res.json({ url: session.url, sessionId: session.id, trialDays: trial });
 });
 
+/*
+ * A monthly add-on (credit pack or storage). It joins the plan's billing date:
+ * the first payment covers only the days left until the plan renews, and from then
+ * on it is charged together with the plan, on the same day.
+ */
+const createAddonCheckout = asyncHandler(async (req, res) => {
+  const key = String(req.body?.addon || "");
+  const addon = ADDONS[key];
+  if (!addon) { res.status(400); throw new Error("Yanlış əlavə"); }
+  if (!billingEnabledFor(req.user)) { res.status(403); throw new Error("Kartla ödəniş hələ aktiv deyil"); }
+  const user = await User.findById(req.user._id).select(
+    "name email +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAt"
+  );
+  if (!user) { res.status(404); throw new Error("İstifadəçi tapılmadı"); }
+  const status = user.stripeSubscriptionStatus;
+  if (status === "trialing") {
+    res.status(409);
+    throw new Error("Əlavələri pulsuz sınaq bitəndən sonra qoşa bilərsən.");
+  }
+  if (!user.stripeSubscriptionId || !["active", "past_due"].includes(status)) {
+    res.status(409);
+    throw new Error("Əlavələr kartla abunəliyə qoşulur: əvvəlcə Pro və ya Premium paketinə abunə ol.");
+  }
+  if (user.stripeCancelAt) {
+    res.status(409);
+    throw new Error("Abunəliyin ləğv edilib. Əlavə qoşmaq üçün əvvəlcə «Abunəliyi idarə et» bölməsində abunəliyi bərpa et.");
+  }
+  const renewal = user.stripeCurrentPeriodEnd ? Math.floor(new Date(user.stripeCurrentPeriodEnd).getTime() / 1000) : 0;
+  if (!renewal || renewal < Math.floor(Date.now() / 1000) + 3600) {
+    res.status(409);
+    throw new Error("Bu gün abunəliyin yenilənmə günüdür. Bir neçə saatdan sonra yenidən cəhd et.");
+  }
+  const price = (await addonPrices())[key];
+  if (!price) { res.status(503); throw new Error("Bu əlavənin qiyməti hələ hazır deyil"); }
+  const customer = await customerFor(user);
+  const metadata = { examopia_user_id: String(user._id), examopia_kind: "addon", addon_key: key };
+  const session = await stripeClient().checkout.sessions.create({
+    mode: "subscription",
+    customer: customer.id,
+    line_items: [{ price, quantity: 1 }],
+    client_reference_id: String(user._id),
+    metadata,
+    subscription_data: { metadata, billing_cycle_anchor: renewal, proration_behavior: "create_prorations" },
+    integration_identifier: `examopia_addon_v1_${Math.random().toString(36).slice(2, 10)}`,
+    success_url: `${frontendUrl()}/plan?addon=success`,
+    cancel_url: `${frontendUrl()}/plan?checkout=cancelled`,
+  });
+  res.json({ url: session.url, sessionId: session.id });
+});
+
 // Not behind the billing gate: whoever subscribed must always be able to cancel.
 const createPortal = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id).select("+stripeCustomerId");
@@ -410,7 +604,7 @@ const createPortal = asyncHandler(async (req, res) => {
 
 const billingStatus = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id).select(
-    "plan planExpiresAt aiCreditsLastSpentAt +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeLastCreditedInvoiceId +stripeRefundedInvoiceId"
+    "role plan planExpiresAt planDowngradedAt aiCreditsLastSpentAt aiCreditsResetAt addonCreditsMonthly cardStorageGb +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeLastCreditedInvoiceId +stripeRefundedInvoiceId +stripeAddons"
   );
   const enabled = billingEnabledFor(req.user);
   res.json({
@@ -428,6 +622,11 @@ const billingStatus = asyncHandler(async (req, res) => {
     trialDays: trialDays(),
     trialCredits: trialCredits(),
     refund: refundStatus(user),
+    paywall: needsSubscription(user),
+    creditsResetAt: user?.aiCreditsResetAt || null,
+    addons: (user?.stripeAddons || []).map((a) => ({ key: a.key, quantity: a.quantity, status: a.status, cancelAt: a.cancelAt, periodEnd: a.periodEnd })),
+    addonCreditsMonthly: user?.addonCreditsMonthly || 0,
+    cardStorageGb: user?.cardStorageGb || 0,
   });
 });
 
@@ -445,4 +644,4 @@ const webhook = asyncHandler(async (req, res) => {
   res.json({ received: true });
 });
 
-module.exports = { createCheckout, createPortal, billingStatus, webhook, handleStripeEvent, syncSubscription };
+module.exports = { createCheckout, createAddonCheckout, createPortal, billingStatus, webhook, handleStripeEvent, syncSubscription };

@@ -337,6 +337,14 @@ const userSchema = Schema(
         stripeLastPaidAt: { type: Date, default: null, select: false },
         stripeLastCreditedAmount: { type: Number, default: 0, select: false },
         stripeRefundedInvoiceId: { type: String, default: null, select: false },
+        // The card add-ons as Stripe holds them (for «Planım»), and the first add-on
+        // invoices whose prorated credits were granted (a replay grants nothing).
+        stripeAddons: {
+          type: [{ _id: false, key: String, subscriptionId: String, status: String, quantity: Number, cancelAt: Date, periodEnd: Date }],
+          default: [],
+          select: false,
+        },
+        stripeAddonCreditedInvoices: { type: [String], default: [], select: false },
         // The plan upgrade whose extra credits were granted (subscription:plan:period end).
         stripeUpgradeCreditKey: { type: String, default: null, select: false },
         stripeRiskStatus: { type: String, default: null, select: false },
@@ -361,6 +369,15 @@ const userSchema = Schema(
         // When AI credits were last spent: a paid month is refundable only if no
         // credits were used after it (see helper/stripeRefund.js).
         aiCreditsLastSpentAt: { type: Date, default: null },
+        // Credits do not roll over: on this date the balance is reset to the month's
+        // allowance (plan + add-ons). Card plans reset on each paid renewal; plans the
+        // admin set are reset monthly by jobs/adminPlanCredits.js.
+        aiCreditsResetAt: { type: Date, default: null },
+        // Monthly add-ons bought by card (each its own Stripe subscription, billed on
+        // the plan's date): credits added to every month's allowance, and storage.
+        addonCreditsMonthly: { type: Number, default: 0, min: 0 },
+        cardStorageGb: { type: Number, default: 0, min: 0 },
+        cardStorageUntil: { type: Date, default: null },
 
         /*
          * How many lesson materials this teacher holds, as an atomically claimed

@@ -1,3 +1,5 @@
+const { paywallBlocks, PAYWALL_MESSAGE } = require("../helper/teacherAccess");
+const { httpError } = require("../utils/appError");
 const asyncHandler = require("express-async-handler");
 const jwt = require("jsonwebtoken");
 const User = require("../models/userModel");
@@ -165,6 +167,8 @@ const parentOnly = asyncHandler(async (req, res, next) => {
 
 const teacherOnly = asyncHandler(async (req, res, next) => {
   if (hasTeacherCapability(req.user)) {
+    // The card wall: a teacher without a paid plan may only reach /api/billing.
+    if (paywallBlocks(req)) throw httpError(402, "subscription_required", PAYWALL_MESSAGE, { reason: "subscription_required" });
     next();
   } else if (req.user && req.user.role === "teacher") {
     // Authenticated as a teacher TYPE but the capability is not yet granted

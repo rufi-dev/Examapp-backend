@@ -98,18 +98,22 @@ const pro = PLANS.pro;
 const premium = PLANS.premium;
 ok("Pro price", P.includes(`Pro — ${pro.priceAzn} AZN/ay`));
 ok("Premium price", P.includes(`Premium — ${premium.priceAzn} AZN/ay`));
-ok("Free limits", P.includes(`Pulsuz: ${free.limits.classes} sinif, ${free.limits.students} şagird, cəmi ${free.limits.examCreations} imtahan`));
-ok("Free tasks and storage", P.includes(`${free.limits.assignments} aktiv tapşırıq, ${free.limits.storageMb} MB yer, qeydiyyatda ${free.credits.welcome} AI krediti`));
-ok("Pro limits", P.includes(`${pro.limits.classes} sinif, ${pro.limits.students} şagird, limitsiz imtahan, ${pro.limits.assignments} tapşırıq, ${pro.limits.storageMb / 1024} GB yer, aktivləşəndə ${pro.credits.monthly} AI krediti`));
-ok("Premium storage and credits", P.includes(`${premium.limits.storageMb / 1024} GB yer, aktivləşəndə ${premium.credits.monthly} AI krediti`));
-ok("top-ups", CREDIT_TOPUPS.every((t) => P.includes(`+${t.credits} kredit ${t.priceAzn} AZN`)));
+// 2026-10-27: teachers work only on a paid plan (card wall); the Free tier is no
+// longer offered, so the prompt must not describe it as an option.
+ok("no Free tier offered to teachers", !P.includes(`Pulsuz: ${free.limits.classes} sinif`) && /abunəsiz müəllim/i.test(P));
+ok("the 7-day trial: once, card on file, nothing charged if cancelled", /7 günlük pulsuz sınaq/.test(P) && /bir dəfə/.test(P) && /heç nə ödəmir/.test(P));
+ok("Pro limits", P.includes(`${pro.limits.classes} sinif, ${pro.limits.students} şagird, limitsiz imtahan, ${pro.limits.assignments} tapşırıq, ${pro.limits.storageMb / 1024} GB yer, hər ay ${pro.credits.monthly} AI krediti`));
+ok("Premium storage and credits", P.includes(`${premium.limits.storageMb / 1024} GB yer, hər ay ${premium.credits.monthly} AI krediti`));
+ok("credit add-ons are monthly, on the plan's date", CREDIT_TOPUPS.every((t) => P.includes(`+${t.credits} kredit ${t.priceAzn} AZN/ay`)) && /paketlə EYNİ gün/.test(P));
 const cost = (op) => AI_OPERATIONS[op].cost;
 ok("exam generation cost", P.includes(`AI ilə imtahan yaratmaq və ya fayldan sual çıxarmaq ${cost("ai.generate.questions")}`) && cost("ai.extract.questions") === cost("ai.generate.questions"));
 ok("rewrite cost", P.includes(`«AI ilə düzəlt» ${cost("ai.regenerate.question")}`));
 ok("answer finding cost", P.includes(`«Cavabları tap» ${cost("ai.solve.answers")}`));
 ok("lesson plan cost", P.includes(`dərs planı ${cost("ai.generate.lessonplan")}`));
 ok("Studio costs", P.includes(`material yaratmaq ${cost("ai.generate.material")}, dəyişmək ${cost("ai.edit.material")}`));
-ok("the free monthly credit that code never grants is not promised", /Pulsuz kredit hər ay avtomatik artmır/.test(P));
+ok("credits do not roll over to the next month", /növbəti aya KEÇMİR/.test(P));
+ok("payment is by card only; transfer, m10 and «Ödədim» are gone", /YALNIZ kartladır/.test(P) && /Köçürmə, m10 və «Ödədim» ilə ödəniş artıq YOXDUR/.test(P));
+ok("the refund rule: 7 days and no AI credits used since the payment", /7 gün ərzində və həmin ödənişdən sonra AI krediti istifadə olunmayıbsa/.test(P));
 
 console.log("\nTurkish is caught, Azerbaijani is not");
 const oct10 = "Maalesef Examopia-da bunun üçün açıq bir seçənəyi yoxdur. YOLU 1: Əl ilə hər sualı düzəlt (daha zahmetli). Doğru cavab onun yanında işaretli olur. böylə bir seçənəyin. Bir kaç yerdə ola bilər.";

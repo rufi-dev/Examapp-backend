@@ -1,5 +1,6 @@
 const { beat } = require("../utils/heartbeat");
 const { sweepExpiredPlans } = require("./planExpiry");
+const { resetAdminPlanCredits } = require("./adminPlanCredits");
 const { rollUpAndPruneVisitors } = require("./visitorRollup");
 const {
   finalizeExpiredAttempts,
@@ -37,6 +38,13 @@ function startBackgroundJobs({
     positiveMs(env.PLAN_SWEEP_INTERVAL_MS, 15 * 60 * 1000),
     positiveMs(env.PLAN_SWEEP_FIRST_MS, 45 * 1000, { allowZero: true }),
     jobs.sweepExpiredPlans || sweepExpiredPlans);
+
+  // Plans the admin set have no renewal event, so their monthly credits are reset
+  // here (card plans reset on each paid renewal). Hourly is close enough to the day.
+  schedule("admin-plan-credits",
+    positiveMs(env.ADMIN_CREDITS_INTERVAL_MS, 60 * 60 * 1000),
+    positiveMs(env.ADMIN_CREDITS_FIRST_MS, 90 * 1000, { allowZero: true }),
+    jobs.resetAdminPlanCredits || resetAdminPlanCredits);
 
   schedule("attempt-finalizer",
     positiveMs(env.FINALIZE_INTERVAL_MS, 60 * 1000),

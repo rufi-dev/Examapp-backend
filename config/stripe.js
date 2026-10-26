@@ -1,4 +1,5 @@
 const Stripe = require("stripe");
+const { CREDIT_TOPUPS, STORAGE_PACKS } = require("./plans");
 
 let client;
 let testClient = null;
@@ -74,9 +75,41 @@ function billingEnabledFor(user) {
   return !!email && testers.includes(email);
 }
 
+/*
+ * Monthly add-ons sold on top of a card subscription: AI credit packs and extra
+ * storage, at the prices the catalog shows. Each is its own small subscription
+ * whose billing date is pinned to the plan's, so a teacher is charged once a
+ * month for everything. Stripe finds the price by lookup key, so sandbox and
+ * live need no extra configuration.
+ */
+const ADDONS = Object.freeze(
+  Object.fromEntries([
+    ...CREDIT_TOPUPS.map((t) => [`credits_${t.credits}`, Object.freeze({ key: `credits_${t.credits}`, credits: t.credits, gb: 0, priceAzn: t.priceAzn })]),
+    ...STORAGE_PACKS.map((t) => [`storage_${t.gb}`, Object.freeze({ key: `storage_${t.gb}`, credits: 0, gb: t.gb, priceAzn: t.priceAzn })]),
+  ])
+);
+const addonLookupKey = (key) => `addon_${key}_v1`;
+
+let addonPriceCache = { key: "", at: 0, prices: null };
+async function addonPrices() {
+  const key = String(process.env.STRIPE_SECRET_KEY || "");
+  if (addonPriceCache.prices && addonPriceCache.key === key && Date.now() - addonPriceCache.at < 10 * 60 * 1000) {
+    return addonPriceCache.prices;
+  }
+  const list = await stripeClient().prices.list({ lookup_keys: Object.keys(ADDONS).map(addonLookupKey), active: true, limit: 20 });
+  const prices = {};
+  for (const price of list.data || []) {
+    const addon = Object.keys(ADDONS).find((k) => addonLookupKey(k) === price.lookup_key);
+    if (addon) prices[addon] = price.id;
+  }
+  addonPriceCache = { key, at: Date.now(), prices };
+  return prices;
+}
+
 // Tests swap in a fake client; nothing else may call this.
 const _setStripeForTest = (fake) => {
   testClient = fake || null;
+  addonPriceCache = { key: "", at: 0, prices: null };
 };
 
 module.exports = {
@@ -90,5 +123,8 @@ module.exports = {
   trialCredits,
   billingOpen,
   billingEnabledFor,
+  ADDONS,
+  addonLookupKey,
+  addonPrices,
   _setStripeForTest,
 };

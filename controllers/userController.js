@@ -1,3 +1,4 @@
+const { needsSubscription } = require("../helper/teacherAccess");
 const asyncHandler = require("express-async-handler");
 const { tiktokEvent } = require("../services/tiktokEvents");
 const User = require("../models/userModel");
@@ -285,6 +286,7 @@ async function buildAuthDTO(user, token) {
     plan: normalizePlan(user.plan),
     planExpiresAt: user.planExpiresAt || null,
     aiCredits: user.aiCredits || 0,
+    paywall: needsSubscription(user),
     ...(loginUsage ? { usage: loginUsage } : {}),
     teacherSuccessJourneyEnabled: isJourneyEnabled(),
     ...(isJourneyEnabled() && user.role === "teacher"
@@ -446,6 +448,7 @@ const loginUser = asyncHandler(async (req, res) => {
         plan: normalizePlan(user.plan),
         planExpiresAt: user.planExpiresAt || null,
         aiCredits: user.aiCredits || 0,
+        paywall: needsSubscription(user),
         ...(loginUsage ? { usage: loginUsage } : {}),
         // Teacher Success Journey — the login DTO carries the same trusted signals
         // as getUser so the header/card render immediately (no getUser round-trip).
@@ -554,6 +557,7 @@ const loginWithCode = asyncHandler(async (req, res) => {
       plan: normalizePlan(user.plan),
       planExpiresAt: user.planExpiresAt || null,
       aiCredits: user.aiCredits || 0,
+      paywall: needsSubscription(user),
       ...(codeUsage ? { usage: codeUsage } : {}),
     });
   }
@@ -721,6 +725,7 @@ const getUser = asyncHandler(async (req, res) => {
         plan: normalizePlan(plan),
         planExpiresAt: planExpiresAt || null,
         aiCredits: user.aiCredits || 0,
+        paywall: needsSubscription(user),
         ...(planUsage ? { usage: planUsage } : {}),
       });
     } else {
@@ -858,6 +863,7 @@ const updateUser = asyncHandler(async (req, res) => {
       hideAssistant: updatedUser.hideAssistant,
       assistantEnabled: updatedUser.assistantEnabled,
       aiCredits: updatedUser.aiCredits || 0, // the header's credit chip, right after the role choice
+      paywall: needsSubscription(updatedUser),
     });
   } else {
     res.status(404);
@@ -1834,7 +1840,7 @@ const setUserStorageAddon = asyncHandler(async (req, res) => {
 // optionally overrides the free exam allowance (e.g. top up a stuck teacher).
 const setUserPlan = asyncHandler(async (req, res) => {
   const user = await User.findById(req.params.id).select(
-    "name email role plan planSince planExpiresAt planSource examCreatesLeft aiCredits"
+    "name email role plan planSince planExpiresAt planSource examCreatesLeft aiCredits aiCreditsResetAt"
   );
   if (!user) {
     res.status(404);
@@ -1861,11 +1867,11 @@ const setUserPlan = asyncHandler(async (req, res) => {
       Number.isFinite(m) && m > 0
         ? new Date(Date.now() + m * 30 * 24 * 60 * 60 * 1000)
         : null; // open-ended until an expiry is set
-    // Grant the plan's monthly AI credit allowance on activation/renewal
-    // (skip when the admin passes an explicit examCreatesLeft-only tweak? no —
-    // any plan set is an activation). Credits stack with the current balance.
-    const monthly = planDef(plan).credits?.monthly || 0;
-    if (monthly > 0) user.aiCredits = (user.aiCredits || 0) + monthly;
+    // The plan's monthly AI credits. They do not roll over (owner's rule,
+    // 2026-10-27): the balance BECOMES the month's allowance, and
+    // jobs/adminPlanCredits.js resets it again every month while the plan lasts.
+    user.aiCredits = planDef(plan).credits?.monthly || 0;
+    user.aiCreditsResetAt = require("../jobs/adminPlanCredits").addMonths(new Date(), 1);
   }
   if (examCreatesLeft !== undefined) {
     const n = Number(examCreatesLeft);

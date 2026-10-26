@@ -86,13 +86,19 @@ function uploadRateLimit(req, res, next) {
  * A null expiry is an open-ended admin grant. A past expiry is worth nothing:
  * the add-on is rent, not a purchase, and the month it covers has ended.
  */
-const addonBytes = (user) => {
-  const gb = Number(user?.storageAddonGb) || 0;
-  if (gb <= 0) return 0;
-  const until = user?.storageAddonExpiresAt;
-  if (until && new Date(until).getTime() < Date.now()) return 0;
-  return gb * 1024 * 1024 * 1024;
+// Storage add-ons in force: one granted by the admin, plus the monthly card
+// add-ons (paid through cardStorageUntil, the plan's renewal plus a little grace).
+const addonGb = (user) => {
+  const now = Date.now();
+  const admin = Number(user?.storageAddonGb) || 0;
+  const adminUntil = user?.storageAddonExpiresAt;
+  const adminLive = admin > 0 && !(adminUntil && new Date(adminUntil).getTime() < now) ? admin : 0;
+  const card = Number(user?.cardStorageGb) || 0;
+  const cardUntil = user?.cardStorageUntil;
+  const cardLive = card > 0 && !(cardUntil && new Date(cardUntil).getTime() < now) ? card : 0;
+  return adminLive + cardLive;
 };
+const addonBytes = (user) => addonGb(user) * 1024 * 1024 * 1024;
 
 const quotaFor = (user) => {
   // The permanent per-teacher override is absolute: it exists for the handful of
@@ -238,7 +244,7 @@ async function storageStatus(user) {
      */
     addon: extra > 0
       ? {
-          gb: Number(user?.storageAddonGb) || 0,
+          gb: addonGb(user),
           label: human(extra),
           expiresAt: user?.storageAddonExpiresAt || null,
           daysLeft: user?.storageAddonExpiresAt

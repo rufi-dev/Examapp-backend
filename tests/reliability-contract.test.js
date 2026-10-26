@@ -38,18 +38,20 @@ const timeouts = [], intervals = [], clearedTimeouts = [], clearedIntervals = []
  * It went the other way when Telegram was retired: runDueExamReports existed
  * only to deliver the end-of-exam report over the bot, so the job and its name
  * left together. The count is the point of this file — change both or neither.
+ * 2026-10-27: admin-plan-credits joined (monthly credit reset for admin plans).
  */
 const jobs = Object.fromEntries([
-  "sweepExpiredPlans", "finalizeExpiredAttempts", "purgeExpiredArchived",
+  "sweepExpiredPlans", "resetAdminPlanCredits", "finalizeExpiredAttempts", "purgeExpiredArchived",
   "purgeOrphanPdfs", "purgeStagedUploads", "rollUpAndPruneVisitors", "purgeAbandonedExams",
 ].map((name) => [name, async () => name]));
-const JOB_COUNT = 7;
+const JOB_COUNT = 8;
 const stop = startBackgroundJobs({
   env: {
     FINALIZE_INTERVAL_MS: "102", FINALIZE_FIRST_MS: "0",
     TRASH_INTERVAL_MS: "103", TRASH_FIRST_MS: "0",
     PDF_SWEEP_INTERVAL_MS: "104", PDF_SWEEP_FIRST_MS: "0",
     PLAN_SWEEP_INTERVAL_MS: "100", PLAN_SWEEP_FIRST_MS: "0",
+    ADMIN_CREDITS_INTERVAL_MS: "101", ADMIN_CREDITS_FIRST_MS: "0",
     ABANDONED_EXAM_INTERVAL_MS: "105", ABANDONED_EXAM_FIRST_MS: "0",
     VISITOR_ROLLUP_INTERVAL_MS: "106", VISITOR_ROLLUP_FIRST_MS: "0",
   },
@@ -63,7 +65,7 @@ const stop = startBackgroundJobs({
 ok(`scheduler owns exactly ${JOB_COUNT} jobs`, timeouts.length === JOB_COUNT && intervals.length === JOB_COUNT);
 ok("zero first-run delays are honored", timeouts.every((x) => x.ms === 0));
 ok("configured intervals are honored",
-  JSON.stringify(intervals.map((x) => x.ms)) === JSON.stringify([100, 102, 103, 104, 104, 106, 105]));
+  JSON.stringify(intervals.map((x) => x.ms)) === JSON.stringify([100, 101, 102, 103, 104, 104, 106, 105]));
 stop(); stop();
 ok("stop is idempotent", clearedTimeouts.length === JOB_COUNT && clearedIntervals.length === JOB_COUNT);
 ok("invalid durations fall back", positiveMs("NaN", 77) === 77 && positiveMs("-1", 77) === 77);

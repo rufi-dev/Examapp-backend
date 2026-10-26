@@ -1,9 +1,10 @@
 const asyncHandler = require("express-async-handler");
 const PlanUpgradeRequest = require("../models/planUpgradeRequestModel");
 const User = require("../models/userModel");
-const { PLANS, PLAN_IDS, CREDIT_TOPUPS, STORAGE_PACKS, AI_ACTION_COSTS, paymentInfo } = require("../config/plans");
+const { PLANS, PLAN_IDS, CREDIT_TOPUPS, STORAGE_PACKS, AI_ACTION_COSTS } = require("../config/plans");
 const { billingOpen, priceForPlan, trialDays } = require("../config/stripe");
 const { refundStatus } = require("../helper/stripeRefund");
+const { paywallOn } = require("../helper/teacherAccess");
 
 // GET /api/plan/catalog — public plan/pricing catalog for the pricing page.
 // (Limits use Infinity → serialize as null = "unlimited" for JSON.)
@@ -26,25 +27,29 @@ const getCatalog = asyncHandler(async (req, res) => {
     // Storage sold on its own, for a teacher who needs room rather than a tier.
     storagePacks: STORAGE_PACKS,
     aiActionCosts: AI_ACTION_COSTS,
-    // The receiving card is meant to be shown to anyone upgrading, so it rides
-    // along on the public catalog — the payment page reads it here without an
-    // auth round-trip (the auth-gated /payment-info stays as a fallback).
-    payment: paymentInfo(),
     // Card subscriptions, only once they are open to every teacher (the pricing
     // page is public, so it cannot ask the per-user billing status).
     cardBilling: billingOpen() && !!priceForPlan("pro") ? { trialDays: trialDays() } : null,
+    // The card wall is up: teachers work only on a paid plan, so the Free tier is
+    // not offered on the pricing page or in the plan comparison.
+    teacherPaywall: paywallOn(),
   });
 });
 
 // GET /api/plan/payment-info — the card a teacher transfers to (auth-gated to
 // keep it off public crawlers). Returns configured card details from env.
+// No transfer card is shown any more (payment is by card through Stripe).
 const getPaymentInfo = asyncHandler(async (req, res) => {
-  res.json(paymentInfo());
+  res.json({});
 });
 
 // POST /api/plan/upgrade-request — teacher asks to move to Pro/Premium, and
 // (when `paid` is set) declares they have transferred the money. Idempotent per
 const requestUpgrade = asyncHandler(async (req, res) => {
+  // Card-to-card payment ended 2026-10-27: plans and add-ons are paid by card
+  // through Stripe («Planım»). Old requests stay readable for the admin.
+  res.status(410);
+  throw new Error("Köçürmə ilə ödəniş artıq qəbul edilmir. «Planım» səhifəsindən kartla ödəyin.");
   const targetPlan = String(req.body?.targetPlan || "");
   if (!["pro", "premium"].includes(targetPlan)) {
     res.status(400);
@@ -89,6 +94,10 @@ const requestUpgrade = asyncHandler(async (req, res) => {
  * applies it with PATCH /api/users/:id/storage.
  */
 const requestStorage = asyncHandler(async (req, res) => {
+  // Card-to-card payment ended 2026-10-27: plans and add-ons are paid by card
+  // through Stripe («Planım»). Old requests stay readable for the admin.
+  res.status(410);
+  throw new Error("Köçürmə ilə ödəniş artıq qəbul edilmir. «Planım» səhifəsindən kartla ödəyin.");
   const gb = Math.round(Number(req.body?.gb) || 0);
   const pack = STORAGE_PACKS.find((t) => t.gb === gb);
   if (!pack) {
@@ -128,6 +137,10 @@ const requestStorage = asyncHandler(async (req, res) => {
 // POST /api/plan/credit-request — teacher buys a credit top-up pack (manual
 // payment). `paid` records the "Ödədim" claim; admin verifies and adds credits.
 const requestCredit = asyncHandler(async (req, res) => {
+  // Card-to-card payment ended 2026-10-27: plans and add-ons are paid by card
+  // through Stripe («Planım»). Old requests stay readable for the admin.
+  res.status(410);
+  throw new Error("Köçürmə ilə ödəniş artıq qəbul edilmir. «Planım» səhifəsindən kartla ödəyin.");
   const credits = Math.round(Number(req.body?.credits) || 0);
   const pack = CREDIT_TOPUPS.find((t) => t.credits === credits);
   if (!pack) {
