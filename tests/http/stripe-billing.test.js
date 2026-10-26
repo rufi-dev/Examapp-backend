@@ -49,6 +49,7 @@ const near = (date, ms) => !!date && Math.abs(new Date(date).getTime() - ms) < 5
 const signer = new Stripe("rk_" + "test_signer").webhooks;
 const subs = new Map();
 const sessions = [];
+const portals = [];
 const fake = {
   webhooks: signer,
   customers: {
@@ -56,7 +57,7 @@ const fake = {
     create: async () => ({ id: `cus_${sessions.length + 1}_${Math.random().toString(36).slice(2, 6)}` }),
   },
   checkout: { sessions: { create: async (p) => { sessions.push(p); return { id: `cs_${sessions.length}`, url: `https://checkout.stripe.test/${sessions.length}` }; } } },
-  billingPortal: { sessions: { create: async () => ({ url: "https://billing.stripe.test/p" }) } },
+  billingPortal: { sessions: { create: async (p) => { portals.push(p); return { url: "https://billing.stripe.test/p" }; } } },
   subscriptions: {
     retrieve: async (id) => {
       if (!subs.has(id)) throw Object.assign(new Error("No such subscription"), { code: "resource_missing" });
@@ -201,6 +202,13 @@ async function main() {
   ok("status: trialing, trial end, no second trial", r.body.subscriptionStatus === "trialing" && near(r.body.trialEnd, trialEnd * 1000) && r.body.trialEligible === false);
   r = await call(server, { method: "POST", path: "/api/billing/checkout", token: tok(tester), body: { plan: "premium" } });
   ok("Checkout: refused with 409 while a subscription is live", r.status === 409);
+  await User.updateOne({ _id: tester._id }, { $set: { stripeCustomerId: "cus_t" } });
+  r = await call(server, { method: "POST", path: "/api/billing/portal", token: tok(tester) });
+  ok("portal: Stripe's default configuration when none is set", r.status === 200 && !("configuration" in portals[portals.length - 1]));
+  process.env.STRIPE_PORTAL_CONFIGURATION = "bpc_live_cfg";
+  r = await call(server, { method: "POST", path: "/api/billing/portal", token: tok(tester) });
+  ok("portal: the configured portal (plan switching, cancel at period end) when set", portals[portals.length - 1].configuration === "bpc_live_cfg" && portals[portals.length - 1].return_url.endsWith("/plan"));
+  delete process.env.STRIPE_PORTAL_CONFIGURATION;
 
   // ── trial converts: the first real charge ──
   const end2 = NOW + 37 * DAY;

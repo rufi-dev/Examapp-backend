@@ -40,6 +40,9 @@ const planForPrice = (priceId) => {
 };
 
 const frontendUrl = () => String(process.env.FRONTEND_URL || "https://examopia.com").replace(/\/$/, "");
+// A portal configuration made through the API is not the account default, so the
+// session has to name it; unset = Stripe's default configuration.
+const portalConfiguration = () => String(process.env.STRIPE_PORTAL_CONFIGURATION || "").trim();
 
 const wholeNumber = (value, fallback) => {
   const n = Number(value);
@@ -82,6 +85,7 @@ module.exports = {
   priceForPlan,
   planForPrice,
   frontendUrl,
+  portalConfiguration,
   trialDays,
   trialCredits,
   billingOpen,

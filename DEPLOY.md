@@ -54,6 +54,9 @@ Key values in `.env`:
 - Trial: `BILLING_TRIAL_DAYS` (default 7, 0 = no trial) and `BILLING_TRIAL_CREDITS`
   (default 100 AI credits at trial start; the plan's monthly credits come with
   each paid invoice). One trial per teacher, ever.
+- `STRIPE_PORTAL_CONFIGURATION`: the Customer Portal configuration (`bpc_...`) to
+  open. Needed when the configuration was created through the API (it is then not
+  the account default); it sets cancel-at-period-end and Pro/Premium switching.
 
 Create one Stripe webhook endpoint at `https://api.examopia.com/api/billing/stripe/webhook`
 and subscribe it to `checkout.session.completed`, `customer.subscription.created`,

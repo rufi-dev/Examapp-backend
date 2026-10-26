@@ -10,6 +10,7 @@ const {
   priceForPlan,
   planForPrice,
   frontendUrl,
+  portalConfiguration,
   trialDays,
   trialCredits,
   billingEnabledFor,
@@ -364,7 +365,12 @@ const createCheckout = asyncHandler(async (req, res) => {
 const createPortal = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id).select("+stripeCustomerId");
   if (!user?.stripeCustomerId) { res.status(400); throw new Error("Stripe müştəri hesabı hələ yoxdur"); }
-  const portal = await stripeClient().billingPortal.sessions.create({ customer: user.stripeCustomerId, return_url: `${frontendUrl()}/plan` });
+  const configuration = portalConfiguration();
+  const portal = await stripeClient().billingPortal.sessions.create({
+    customer: user.stripeCustomerId,
+    return_url: `${frontendUrl()}/plan`,
+    ...(configuration ? { configuration } : {}),
+  });
   res.json({ url: portal.url });
 });
 
