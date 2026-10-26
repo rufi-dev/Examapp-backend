@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const User = require("../models/userModel");
 const StripeEvent = require("../models/stripeEventModel");
 const MaintenanceAudit = require("../models/maintenanceAuditModel");
+const { refundStatus } = require("../helper/stripeRefund");
 const { planDef } = require("../config/plans");
 const {
   required,
@@ -138,14 +139,18 @@ function paysForAMonth(invoice) {
   });
 }
 
-// A paid month brings the plan's monthly credits; the trial has its own grant.
+// A paid month brings the plan's monthly credits (the trial has its own grant) and
+// starts the 7-day refund window, so its date and credits are remembered.
 async function grantInvoiceCredits(userId, invoice, plan) {
-  if (!paysForAMonth(invoice)) return;
+  if (!paysForAMonth(invoice) || !invoice.id) return;
   const amount = planDef(plan).credits?.monthly || 0;
-  if (!amount || !invoice.id) return;
+  const paidAt = toDate(invoice.status_transitions?.paid_at) || new Date();
   const result = await User.updateOne(
     { _id: userId, stripeLastCreditedInvoiceId: { $ne: invoice.id } },
-    { $set: { stripeLastCreditedInvoiceId: invoice.id }, $inc: { aiCredits: amount } }
+    {
+      $set: { stripeLastCreditedInvoiceId: invoice.id, stripeLastPaidAt: paidAt, stripeLastCreditedAmount: amount },
+      $inc: { aiCredits: amount },
+    }
   );
   if (result.modifiedCount) await auditGrant("stripe_invoice_credits", userId, amount, `invoice ${invoice.id}`);
 }
@@ -257,6 +262,34 @@ async function markRiskEvent(object, kind) {
   );
 }
 
+/*
+ * A full refund of the last paid month takes back the credits that month brought
+ * (never below zero, once per invoice). The plan itself ends through the
+ * subscription: refund from Stripe's "Cancel subscription → refund last payment".
+ */
+async function takeBackRefundedCredits(charge) {
+  if (!charge?.refunded || Number(charge.amount_refunded) < Number(charge.amount)) return;
+  const customerId = typeof charge.customer === "string" ? charge.customer : charge.customer?.id;
+  const paymentIntent = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id;
+  if (!customerId || !paymentIntent) return;
+  const payments = await stripeClient().invoicePayments.list({ payment: { type: "payment_intent", payment_intent: paymentIntent }, limit: 1 });
+  const ref = payments?.data?.[0]?.invoice;
+  const invoiceId = typeof ref === "string" ? ref : ref?.id;
+  if (!invoiceId) return;
+  const user = await User.findOne({ stripeCustomerId: customerId }).select("+stripeLastCreditedInvoiceId +stripeLastCreditedAmount");
+  if (!user || user.stripeLastCreditedInvoiceId !== invoiceId) return;
+  const amount = Number(user.stripeLastCreditedAmount) || 0;
+  const result = await User.updateOne({ _id: user._id, stripeRefundedInvoiceId: { $ne: invoiceId } }, [
+    {
+      $set: {
+        aiCredits: { $max: [0, { $subtract: [{ $ifNull: ["$aiCredits", 0] }, amount] }] },
+        stripeRefundedInvoiceId: invoiceId,
+      },
+    },
+  ]);
+  if (result.modifiedCount && amount) await auditGrant("stripe_refund_credits", user._id, -amount, `refund ${invoiceId}`);
+}
+
 async function markEvent(event) {
   try {
     const row = await StripeEvent.create({ eventId: event.id, type: event.type, status: "processing" });
@@ -299,6 +332,7 @@ async function handleStripeEvent(event) {
       await syncInvoice(event.data.object, { paid: false });
     } else if (event.type === "charge.refunded") {
       await markRiskEvent(event.data.object, "refunded");
+      await takeBackRefundedCredits(event.data.object);
     } else if (event.type === "charge.dispute.created") {
       await markRiskEvent(event.data.object, "dispute");
     } else if (event.type === "radar.early_fraud_warning.created") {
@@ -376,7 +410,7 @@ const createPortal = asyncHandler(async (req, res) => {
 
 const billingStatus = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id).select(
-    "plan planExpiresAt +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt"
+    "plan planExpiresAt aiCreditsLastSpentAt +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeLastCreditedInvoiceId +stripeRefundedInvoiceId"
   );
   const enabled = billingEnabledFor(req.user);
   res.json({
@@ -393,6 +427,7 @@ const billingStatus = asyncHandler(async (req, res) => {
     trialEligible: enabled && trialEligible(user),
     trialDays: trialDays(),
     trialCredits: trialCredits(),
+    refund: refundStatus(user),
   });
 });
 

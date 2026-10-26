@@ -28,6 +28,8 @@ else
   sed -i '/^STRIPE_BILLING_ENABLED=/d' .env
   echo "live keys active; billing still gated to admins + testers"
 fi
+# NO_RESTART=1 leaves the restart to a deploy that follows (one restart, not two).
+[ "${NO_RESTART:-}" = "1" ] && { echo "env updated; restart skipped"; exit 0; }
 docker compose up -d --force-recreate backend worker 2>&1 | tail -2
 for i in $(seq 1 30); do
   a=$(docker compose logs --since 3m backend 2>/dev/null | grep -c "6a372c0c6cd1105ac672ec52 client ready" || true)

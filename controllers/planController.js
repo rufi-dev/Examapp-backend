@@ -3,6 +3,7 @@ const PlanUpgradeRequest = require("../models/planUpgradeRequestModel");
 const User = require("../models/userModel");
 const { PLANS, PLAN_IDS, CREDIT_TOPUPS, STORAGE_PACKS, AI_ACTION_COSTS, paymentInfo } = require("../config/plans");
 const { billingOpen, priceForPlan, trialDays } = require("../config/stripe");
+const { refundStatus } = require("../helper/stripeRefund");
 
 // GET /api/plan/catalog — public plan/pricing catalog for the pricing page.
 // (Limits use Infinity → serialize as null = "unlimited" for JSON.)
@@ -167,8 +168,17 @@ const listSubscribers = asyncHandler(async (req, res) => {
     plan: { $in: ["pro", "premium"] },
     deletedAt: null,
   })
-    .select("name email phone role plan planSince planExpiresAt aiCredits planSource +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAt")
+    .select("name email phone role plan planSince planExpiresAt aiCredits planSource aiCreditsLastSpentAt +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAt +stripeLastPaidAt +stripeLastCreditedInvoiceId +stripeRefundedInvoiceId")
     .lean();
+  // Card subscribers carry their refund eligibility, so the admin can answer a
+  // refund request at a glance; the raw dates stay on the server.
+  for (const row of rows) {
+    if (row.planSource === "stripe") row.refund = refundStatus(row);
+    delete row.aiCreditsLastSpentAt;
+    delete row.stripeLastPaidAt;
+    delete row.stripeLastCreditedInvoiceId;
+    delete row.stripeRefundedInvoiceId;
+  }
   rows.sort((a, b) => {
     const av = a.planExpiresAt ? new Date(a.planExpiresAt).getTime() : Infinity;
     const bv = b.planExpiresAt ? new Date(b.planExpiresAt).getTime() : Infinity;

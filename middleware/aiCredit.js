@@ -73,7 +73,7 @@ function meterFor(req, operation) {
       committed = true;
       User.updateOne(
         { _id: req.user._id, aiCredits: { $gte: cost } },
-        { $inc: { aiCredits: -cost } }
+        { $inc: { aiCredits: -cost }, $set: { aiCreditsLastSpentAt: new Date() } }
       ).catch((e) => console.error("[AI_CREDIT] debit failed:", e.message));
     },
   };

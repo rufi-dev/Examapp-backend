@@ -36,6 +36,7 @@ const { _setStripeForTest } = require("../../config/stripe");
 const { webhook } = require("../../controllers/stripeBillingController");
 const { getCatalog } = require("../../controllers/planController");
 const planLimits = require("../../helper/planLimits");
+const { meterFor } = require("../../middleware/aiCredit");
 
 let passed = 0, failed = 0;
 const ok = (n, c) => { if (c) { passed++; console.log("  ✓", n); } else { failed++; console.log("  ✗ FAIL:", n); } };
@@ -65,7 +66,12 @@ const fake = {
     },
   },
   charges: { retrieve: async () => ({}) },
+  // payment_intent → invoice, as Stripe's invoice_payments list answers it.
+  invoicePayments: {
+    list: async ({ payment }) => ({ data: paidBy.has(payment?.payment_intent) ? [{ invoice: paidBy.get(payment.payment_intent) }] : [] }),
+  },
 };
+const paidBy = new Map();
 _setStripeForTest(fake);
 
 function sub(id, userId, { status = "active", price = "price_pro", start = NOW, end = NOW + 30 * DAY, trialEnd = null, cancelAt = null, customer = "cus_x" } = {}) {
@@ -243,6 +249,36 @@ async function main() {
   ok("past_due: the plan holds 7 days from the missed payment, not a whole unpaid month", near(u.planExpiresAt, NOW * 1000 + 7 * DAY * 1000));
   sub("sub_t", tester._id, { status: "active", end: end2, customer: "cus_t" });
   await send(ev("customer.subscription.updated", subs.get("sub_t")));
+
+  // ── refund rule: within 7 days of the payment, and no AI credits spent since ──
+  const refundOf = async () => (await call(server, { path: "/api/billing/status", token: tok(tester) })).body.refund;
+  await send(ev("invoice.paid", invoice("in_4", "sub_t")));
+  let st = await refundOf();
+  ok("refund: a fresh paid month with no AI use is refundable, for 7 days", st.eligible === true && near(st.until, Date.now() + 7 * DAY * 1000));
+  const creditsBeforeRefund = (await fresh(tester)).aiCredits;
+  paidBy.set("pi_4", "in_4");
+  const fullRefund = { id: "ch_4", object: "charge", customer: "cus_t", payment_intent: "pi_4", amount: 1500, amount_refunded: 1500, refunded: true };
+  r = await send(ev("charge.refunded", fullRefund));
+  u = await fresh(tester);
+  ok("refund: a full refund takes back exactly that month's 350 credits", r.status === 200 && creditsBeforeRefund - u.aiCredits === 350);
+  await send(ev("charge.refunded", fullRefund));
+  u = await fresh(tester);
+  ok("refund: a second event for the same refund takes nothing more", creditsBeforeRefund - u.aiCredits === 350);
+  st = await refundOf();
+  ok("refund: the refunded month is no longer offered for refund", st.eligible === false && st.reason === "refunded");
+  await send(ev("invoice.paid", invoice("in_5", "sub_t")));
+  paidBy.set("pi_5", "in_5");
+  const afterIn5 = (await fresh(tester)).aiCredits;
+  await send(ev("charge.refunded", { id: "ch_5", object: "charge", customer: "cus_t", payment_intent: "pi_5", amount: 1500, amount_refunded: 500, refunded: false }));
+  ok("refund: a partial refund takes no credits", (await fresh(tester)).aiCredits === afterIn5);
+  const tUser = await User.findById(tester._id).select("aiCredits role").lean();
+  meterFor({ user: tUser }, "ai.generate.questions").usable();
+  await new Promise((res) => setTimeout(res, 300));
+  st = await refundOf();
+  ok("refund: spending AI credits after the payment ends eligibility", st.eligible === false && st.reason === "credits_used");
+  await User.updateOne({ _id: tester._id }, { $set: { aiCreditsLastSpentAt: null, stripeLastPaidAt: new Date(Date.now() - 8 * DAY * 1000) } });
+  st = await refundOf();
+  ok("refund: after 7 days there is no refund", st.eligible === false && st.reason === "window_passed");
 
   // ── portal cancel: cancel_at, not cancel_at_period_end ──
   sub("sub_t", tester._id, { status: "active", end: end2, cancelAt: end2, customer: "cus_t" });

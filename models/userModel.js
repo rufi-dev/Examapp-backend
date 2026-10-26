@@ -332,6 +332,11 @@ const userSchema = Schema(
         stripeTrialUsedAt: { type: Date, default: null, select: false },
         // The last invoice whose monthly credits were granted, so a replay grants nothing.
         stripeLastCreditedInvoiceId: { type: String, default: null, select: false },
+        // The last paid month: when it was paid and how many credits it brought,
+        // so a refund of that invoice can take exactly those credits back once.
+        stripeLastPaidAt: { type: Date, default: null, select: false },
+        stripeLastCreditedAmount: { type: Number, default: 0, select: false },
+        stripeRefundedInvoiceId: { type: String, default: null, select: false },
         // The plan upgrade whose extra credits were granted (subscription:plan:period end).
         stripeUpgradeCreditKey: { type: String, default: null, select: false },
         stripeRiskStatus: { type: String, default: null, select: false },
@@ -353,6 +358,9 @@ const userSchema = Schema(
         // grant it and teachers buy top-ups; consumption wires in when AI metering
         // is enabled. Simple integer balance, never negative.
         aiCredits: { type: Number, default: 0, min: 0 },
+        // When AI credits were last spent: a paid month is refundable only if no
+        // credits were used after it (see helper/stripeRefund.js).
+        aiCreditsLastSpentAt: { type: Date, default: null },
 
         /*
          * How many lesson materials this teacher holds, as an atomically claimed
