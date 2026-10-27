@@ -809,10 +809,10 @@ const completeDue = asyncHandler(async (req, res) => {
 });
 
 /*
- * Admin («Paket idarəetməsi»): every teacher who has touched card billing, newest
- * first. Who opened the card page and stopped there, who is on the trial, paying,
- * owing a failed charge, cancelling or ended; when the card went in, and the
- * card as far as an admin may see it.
+ * Admin («Paket idarəetməsi»): the teachers who added a card successfully, newest
+ * first (owner, 2026-10-27: only them; who merely opened the card page is not
+ * listed). On the trial, paying, owing a failed charge, cancelling or ended;
+ * when the card went in, and the card as far as an admin may see it.
  */
 const cardStage = (u) => {
   const status = u.stripeSubscriptionStatus;
@@ -820,22 +820,20 @@ const cardStage = (u) => {
   if (status === "active") return u.stripeCancelAt ? "cancelling" : "paying";
   if (status === "past_due") return "past_due";
   if (status && ENDED_STATUSES.has(status)) return "ended";
-  return "opened";
+  return null; // no subscription, or one whose first payment never went through
 };
-const CARD_STAGES = ["opened", "trial", "trial_cancelled", "paying", "cancelling", "past_due", "ended"];
+const CARD_STAGES = ["trial", "trial_cancelled", "paying", "cancelling", "past_due", "ended"];
 
 const adminCardTeachers = asyncHandler(async (req, res) => {
-  const users = await User.find({
-    role: "teacher",
-    $or: [{ stripeCustomerId: { $nin: [null, ""] } }, { stripeCheckoutOpenedAt: { $ne: null } }, { stripeSubscriptionId: { $nin: [null, ""] } }],
-  })
+  const users = await User.find({ role: "teacher", stripeSubscriptionId: { $nin: [null, ""] } })
     .select(
-      "name email phone createdAt plan planExpiresAt aiCredits +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripePriceId +stripeCurrentPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeCheckoutOpenedAt +stripeCheckoutPlan +stripeCheckoutOpens +stripeCard"
+      "name email phone createdAt plan planExpiresAt aiCredits +stripeSubscriptionId +stripeSubscriptionStatus +stripePriceId +stripeCurrentPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeCard"
     )
     .limit(1000)
     .lean();
   const at = (d) => (d ? new Date(d).getTime() : 0);
   const rows = users
+    .filter((u) => cardStage(u))
     .map((u) => {
       const stage = cardStage(u);
       const c = u.stripeCard;
@@ -846,8 +844,7 @@ const adminCardTeachers = asyncHandler(async (req, res) => {
         phone: u.phone,
         signedUpAt: u.createdAt,
         stage,
-        plan: planForPrice(u.stripePriceId) || u.stripeCheckoutPlan || null,
-        checkout: { openedAt: u.stripeCheckoutOpenedAt || null, plan: u.stripeCheckoutPlan || null, opens: u.stripeCheckoutOpens || 0 },
+        plan: planForPrice(u.stripePriceId) || null,
         trialStartedAt: u.stripeTrialUsedAt || null,
         trialEndsAt: stage === "trial" || stage === "trial_cancelled" ? u.stripeTrialEnd || u.stripeCurrentPeriodEnd || null : null,
         nextChargeAt: stage === "trial" || stage === "paying" || stage === "past_due" ? u.stripeCurrentPeriodEnd || null : null,
@@ -856,7 +853,7 @@ const adminCardTeachers = asyncHandler(async (req, res) => {
         card: c ? { brand: c.brand, last4: c.last4, expMonth: c.expMonth, expYear: c.expYear, country: c.country, funding: c.funding, wallet: c.wallet, addedAt: c.addedAt } : null,
         aiCredits: u.aiCredits || 0,
         // Sort key: the latest billing moment of this teacher.
-        latest: Math.max(at(u.stripeCheckoutOpenedAt), at(u.stripeTrialUsedAt), at(u.stripeLastPaidAt), at(c?.addedAt)),
+        latest: Math.max(at(u.stripeTrialUsedAt), at(u.stripeLastPaidAt), at(c?.addedAt)),
       };
     })
     .sort((a, b) => b.latest - a.latest || at(b.signedUpAt) - at(a.signedUpAt));

@@ -566,12 +566,12 @@ async function main() {
   ok("billing panel: a teacher cannot see it", r.status === 401 || r.status === 403, `status ${r.status}`);
   r = await call(server, { path: "/api/billing/admin/teachers", token: tok(admin) });
   const rowOf = (u) => r.body.rows?.find((x) => String(x._id) === String(u._id));
-  ok("billing panel: an admin sees every teacher who touched card billing", r.status === 200 && !!rowOf(tester) && !!rowOf(twoTabs) && !!rowOf(racer) && !rowOf(teacher));
-  ok("billing panel: who opened the card page and stopped (plan, how often)", rowOf(twoTabs).stage === "opened" && rowOf(twoTabs).checkout.opens === 2 && rowOf(twoTabs).checkout.plan === "premium");
+  ok("billing panel: an admin sees the teachers who added a card", r.status === 200 && !!rowOf(tester) && !!rowOf(racer) && !rowOf(teacher));
+  ok("billing panel: who only opened the card page is not listed", !rowOf(twoTabs) && !("opened" in (r.body.counts || {})));
   ok("billing panel: who is on the trial, and until when", rowOf(racer).stage === "trial" && near(rowOf(racer).trialEndsAt, (NOW + 7 * DAY) * 1000));
   ok("billing panel: an ended subscription, with its card and trial start", rowOf(tester).stage === "ended" && rowOf(tester).card?.last4 === "0005" && !!rowOf(tester).trialStartedAt);
   ok("billing panel: the card carries no Stripe id, nothing chargeable", rowOf(tester).card && !("id" in rowOf(tester).card) && !JSON.stringify(r.body).includes("pm_good"));
-  ok("billing panel: counts by stage", r.body.counts?.opened >= 1 && r.body.counts?.trial >= 1 && r.body.counts?.ended >= 1);
+  ok("billing panel: counts by stage", r.body.counts?.trial >= 1 && r.body.counts?.ended >= 1);
 
   // ── what must NOT change a plan ──
   sub("sub_m", manual._id, { status: "incomplete_expired", customer: "cus_m" });
