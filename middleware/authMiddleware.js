@@ -1,4 +1,4 @@
-const { paywallBlocks, PAYWALL_MESSAGE } = require("../helper/teacherAccess");
+const { paywallBlocks, PAYWALL_MESSAGE, beginPendingStarter } = require("../helper/teacherAccess");
 const { httpError } = require("../utils/appError");
 const asyncHandler = require("express-async-handler");
 const jwt = require("jsonwebtoken");
@@ -120,6 +120,9 @@ const protect = asyncHandler(async (req, res, next) => {
       if (req.ip) patch.lastIp = req.ip;
       User.updateOne({ _id: user._id }, { $set: patch }).catch(() => {});
     }
+
+    // A teacher from before the free start who never made an exam: theirs begins now.
+    if (user.starterPending) await beginPendingStarter(user);
 
     req.user = user;
     next();

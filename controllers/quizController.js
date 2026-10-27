@@ -5736,6 +5736,16 @@ async function loadOwnedExam(req) {
   return exam;
 }
 
+// A copy or a B variant is spent like a first save: a lost race marks it
+// blocked-by-plan (visible to its owner, hidden from students) rather than failing.
+async function spendCopyAllowance(user, examId) {
+  try {
+    await consumeExamCreate(user);
+  } catch (e) {
+    await Exam.updateOne({ _id: examId }, { $set: { blockedByPlan: true } });
+  }
+}
+
 const plainItems = (exam) =>
   ((exam.questions && exam.questions.correctAnswers) || []).map((q) =>
     typeof q.toObject === "function" ? q.toObject() : q
@@ -5750,6 +5760,8 @@ const plainItems = (exam) =>
  */
 const duplicateExam = asyncHandler(async (req, res) => {
   const source = await loadOwnedExam(req);
+  // A copy is a new exam, so it spends the plan's allowance like one.
+  await assertExamCreate(req.user);
   const items = plainItems(source);
 
   const base = baseNameOf(source.name);
@@ -5758,6 +5770,7 @@ const duplicateExam = asyncHandler(async (req, res) => {
   const suffix = taken ? ` (dublikat ${taken + 1})` : " (dublikat)";
 
   const twin = await spawnTwin(source, items, `${base}${suffix}`);
+  await spendCopyAllowance(req.user, twin._id);
   res.status(201).json({ exam: { _id: twin._id, name: twin.name }, copied: items.length });
 });
 
@@ -5775,6 +5788,8 @@ const duplicateExam = asyncHandler(async (req, res) => {
  */
 const createVariantB = asyncHandler(async (req, res) => {
   const source = await loadOwnedExam(req);
+  // Checked before the model runs, so a teacher out of exams spends no credits.
+  await assertExamCreate(req.user);
   const items = plainItems(source);
   if (!items.length) {
     throw httpError(422, "exam_empty", "Əvvəlcə suallar yaradın — boş imtahanın variantı olmur.");
@@ -5800,6 +5815,7 @@ const createVariantB = asyncHandler(async (req, res) => {
 
   const base = baseNameOf(source.name);
   const twin = await spawnTwin(source, B, `${base} (B variantı)`);
+  await spendCopyAllowance(req.user, twin._id);
 
   // Label A only AFTER B exists, so a failed generation never leaves a lone exam
   // renamed "(A variantı)" with no partner — which is exactly what happened while

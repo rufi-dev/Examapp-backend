@@ -95,6 +95,20 @@ const PLANS = {
   },
 };
 
+/*
+ * The free start (owner's decision, 2026-10-27). A teacher who never paid gets
+ * STARTER.days to try Examopia for real: ONE exam, sent to their students, on the
+ * free tier's limits (1 class, 10 students). Whichever comes first, the days
+ * running out or reaching past a limit, ends with the card wall and its 7-day
+ * card trial. Seeing their own exam taken by their own students is what
+ * convinced the teachers who paid before (5 of the first 6), so the card is asked
+ * for after that, not before it.
+ */
+const STARTER = {
+  days: num("STARTER_DAYS", 7),
+  exams: num("STARTER_EXAMS", 1),
+};
+
 // One-off credit top-ups (Phase 2 for enforcement; shown on the pricing page now).
 const CREDIT_TOPUPS = [
   { credits: 100, priceAzn: num("PLAN_TOPUP_100_AZN", 5) },
@@ -146,6 +160,7 @@ const isUnlimited = (v) => v === Infinity || v === null || v === undefined;
 module.exports = {
   PLAN_IDS,
   PLANS,
+  STARTER,
   CREDIT_TOPUPS,
   STORAGE_PACKS,
   AI_ACTION_COSTS,

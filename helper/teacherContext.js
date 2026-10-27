@@ -8,7 +8,7 @@
  * Stages (the prompt's MÜƏLLİMİN MƏRHƏLƏSİ):
  *   A registered, nothing built yet
  *   B started and stalled (a class but no exam, or exams no student took)
- *   E working on the free plan (and whether a limit is near)
+ *   E working on the free start (and whether a limit is near), or walled
  *   F on a paid plan
  * C and D (sees no need / finds it too dear) can only be heard in the talk.
  */
@@ -18,13 +18,16 @@ const PLAN_NAMES = { free: "Pulsuz", pro: "Pro", premium: "Premium" };
 const daysSince = (d) => (d ? Math.max(0, Math.floor((Date.now() - new Date(d).getTime()) / 86400000)) : null);
 const firstName = (name) => String(name || "").trim().split(/\s+/)[0] || "";
 
-function stageOf({ paid, classes, exams, students, taken, nearLimit }) {
+function stageOf({ paid, walled, starter, classes, exams, students, taken, nearLimit }) {
   if (paid) return "F (ödənişli paketdədir: satışa sıxma, razılığını soruş, istifadə etmədiyi faydalı imkanı göstər)";
+  if (walled) return "E (abunəsi yoxdur, platforma bağlıdır: heç vaxt ödəməyibsə «Planım»dan 7 günlük pulsuz sınağı, əvvəl ödəyibsə yenidən abunəni nəzakətlə tövsiyə et)";
   if (!classes && !exams) return "A (qeydiyyatdan keçib, hələ heç nə yaratmayıb: məqsəd ilk addımı atdırmaq)";
   if (!exams || !students || !taken) return "B (başlayıb, amma yarımçıq qalıb: dəqiq harada ilişdiyini tap və həll et)";
+  const where = starter ? "pulsuz başlanğıcda" : "pulsuz paketdə";
+  const offer = starter ? "7 günlük pulsuz sınağın" : "Pro/Premium-un";
   return nearLimit
-    ? `E (pulsuz paketdə işləyir və limitə yaxındır: ${nearLimit}; Pro/Premium-un indi nə qatacağını göstər)`
-    : "E (pulsuz paketdə işləyir: Pro/Premium-u yalnız ehtiyac yarananda, faydası ilə göstər)";
+    ? `E (${where} işləyir və limitə yaxındır: ${nearLimit}; ${offer} indi nə qatacağını göstər)`
+    : `E (${where} işləyir: ${starter ? "7 günlük pulsuz sınağı" : "Pro/Premium-u"} yalnız ehtiyac yarananda, faydası ilə göstər)`;
 }
 
 /*
@@ -34,12 +37,17 @@ function stageOf({ paid, classes, exams, students, taken, nearLimit }) {
 async function teacherContext(userId) {
   try {
     if (!userId) return "";
-    const u = await User.findById(userId).select("role name plan planExpiresAt aiCredits examCreatesLeft createdAt lastActiveAt").lean();
+    const u = await User.findById(userId).select("role name plan planExpiresAt starterUntil starterPending aiCredits examCreatesLeft createdAt lastActiveAt").lean();
     if (!u || u.role !== "teacher") return "";
     const { usageFor, effectivePlan } = require("./planLimits");
     const Exam = require("../models/examModel");
     const Result = require("../models/resultModel");
     const plan = effectivePlan(u);
+    // Behind the card wall there is no free plan: either the free start, or nothing.
+    const { paywallOn, needsSubscription, inStarter } = require("./teacherAccess");
+    const walled = needsSubscription(u);
+    const starter = !walled && paywallOn() && plan === "free" && inStarter(u);
+    const daysLeft = starter && u.starterUntil ? Math.max(1, Math.ceil((new Date(u.starterUntil).getTime() - Date.now()) / 86400000)) : null;
     const [usage, examIds] = await Promise.all([usageFor(u), Exam.find({ owner: u._id, deletedAt: null }).distinct("_id")]);
     const taken = examIds.length ? await Result.countDocuments({ examId: { $in: examIds } }) : 0;
     const classes = usage.classes.used;
@@ -56,7 +64,11 @@ async function teacherContext(userId) {
     const fn = firstName(u.name);
     const facts = [
       fn ? `adı ${fn}` : "",
-      `${PLAN_NAMES[plan] || plan} paket${usage.expired ? " (ödənişli paketin vaxtı bitib)" : ""}`,
+      walled
+        ? "abunəsi yoxdur (platforma bağlıdır)"
+        : starter
+          ? `pulsuz başlanğıc${daysLeft ? ` (${daysLeft} gün qalıb)` : ""}`
+          : `${PLAN_NAMES[plan] || plan} paket${usage.expired ? " (ödənişli paketin vaxtı bitib)" : ""}`,
       `sinif ${of(classes, usage.classes.limit)}`,
       `şagird ${of(students, usage.students.limit)}`,
       `imtahan ${exams}`,
@@ -65,7 +77,7 @@ async function teacherContext(userId) {
       daysSince(u.createdAt) != null ? `qeydiyyat ${daysSince(u.createdAt)} gün əvvəl` : "",
       daysSince(u.lastActiveAt) != null ? `son giriş ${daysSince(u.lastActiveAt)} gün əvvəl` : "",
     ].filter(Boolean);
-    const stage = stageOf({ paid: plan !== "free", classes, exams, students, taken, nearLimit: near.join(", ") });
+    const stage = stageOf({ paid: plan !== "free", walled, starter, classes, exams, students, taken, nearLimit: near.join(", ") });
     return `MÜƏLLİM HAQQINDA (yalnız sənin üçün; rəqəmləri müəllimə sadalama, lazım olanda bircə faktı yerində işlət): ${facts.join("; ")}.\nGÜMAN EDİLƏN MƏRHƏLƏ: ${stage}. Söhbətdə başqa şey görünsə (məs. qiyməti baha sayır və ya ehtiyac görmür), söhbətə görə davran.`;
   } catch {
     return "";

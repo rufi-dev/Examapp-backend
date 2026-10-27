@@ -1,4 +1,4 @@
-const { needsSubscription } = require("../helper/teacherAccess");
+const { needsSubscription, starterFields, beginPendingStarter } = require("../helper/teacherAccess");
 const asyncHandler = require("express-async-handler");
 const { tiktokEvent } = require("../services/tiktokEvents");
 const User = require("../models/userModel");
@@ -160,6 +160,8 @@ const registerUser = asyncHandler(async (req, res) => {
       updatesSeenAt: new Date(),
       // Welcome AI credits (free plan bonus) so a new teacher can try AI at once.
       aiCredits: role === "teacher" ? planDef("free").credits.welcome || 0 : 0,
+      // The free start: STARTER.days with one exam before the card is asked for.
+      ...(role === "teacher" ? starterFields() : {}),
       onboarded: true, // role + profile chosen at sign-up, so don't re-prompt
       userAgent,
       isVerified: true,
@@ -213,6 +215,9 @@ const registerUser = asyncHandler(async (req, res) => {
         photo,
         role,
         teacherApproval, // AUD-005: a requested teacher is created "pending" (no capability)
+        // The card wall and the free start, as getUser reports them.
+        paywall: needsSubscription(user),
+        starterUntil: user.starterUntil || null,
         // Teacher Success Journey — same trusted signals as login/getUser so a
         // freshly-registered teacher's header/capabilities render immediately.
         teacherSuccessJourneyEnabled: isJourneyEnabled(),
@@ -269,6 +274,7 @@ async function issueTrustDevice(req, res, user, { drop } = {}) {
 // The login-response DTO, shared by password login and device login so both hand
 // the client an identical, fully-hydrated identity (mirrors loginUser's body).
 async function buildAuthDTO(user, token) {
+  await beginPendingStarter(user);
   const loginUsage = user.role === "teacher" ? await usageFor(user) : null;
   return {
     _id: user._id,
@@ -287,6 +293,7 @@ async function buildAuthDTO(user, token) {
     planExpiresAt: user.planExpiresAt || null,
     aiCredits: user.aiCredits || 0,
     paywall: needsSubscription(user),
+    starterUntil: user.starterUntil || null,
     ...(loginUsage ? { usage: loginUsage } : {}),
     teacherSuccessJourneyEnabled: isJourneyEnabled(),
     ...(isJourneyEnabled() && user.role === "teacher"
@@ -449,6 +456,7 @@ const loginUser = asyncHandler(async (req, res) => {
         planExpiresAt: user.planExpiresAt || null,
         aiCredits: user.aiCredits || 0,
         paywall: needsSubscription(user),
+        starterUntil: user.starterUntil || null,
         ...(loginUsage ? { usage: loginUsage } : {}),
         // Teacher Success Journey — the login DTO carries the same trusted signals
         // as getUser so the header/card render immediately (no getUser round-trip).
@@ -558,6 +566,7 @@ const loginWithCode = asyncHandler(async (req, res) => {
       planExpiresAt: user.planExpiresAt || null,
       aiCredits: user.aiCredits || 0,
       paywall: needsSubscription(user),
+      starterUntil: user.starterUntil || null,
       ...(codeUsage ? { usage: codeUsage } : {}),
     });
   }
@@ -726,6 +735,7 @@ const getUser = asyncHandler(async (req, res) => {
         planExpiresAt: planExpiresAt || null,
         aiCredits: user.aiCredits || 0,
         paywall: needsSubscription(user),
+        starterUntil: user.starterUntil || null,
         ...(planUsage ? { usage: planUsage } : {}),
       });
     } else {
@@ -843,6 +853,8 @@ const updateUser = asyncHandler(async (req, res) => {
       // to buy credits on their first AI question. Runs once (onboarded).
       if (next.role === "teacher") {
         user.aiCredits = (user.aiCredits || 0) + (planDef("free").credits?.welcome || 0);
+        // …and the free start a teacher from the form gets at sign-up.
+        Object.assign(user, starterFields());
       }
     }
 
@@ -864,6 +876,7 @@ const updateUser = asyncHandler(async (req, res) => {
       assistantEnabled: updatedUser.assistantEnabled,
       aiCredits: updatedUser.aiCredits || 0, // the header's credit chip, right after the role choice
       paywall: needsSubscription(updatedUser),
+      starterUntil: updatedUser.starterUntil || null,
     });
   } else {
     res.status(404);

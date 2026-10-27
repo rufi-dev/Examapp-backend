@@ -1,7 +1,7 @@
 const asyncHandler = require("express-async-handler");
 const PlanUpgradeRequest = require("../models/planUpgradeRequestModel");
 const User = require("../models/userModel");
-const { PLANS, PLAN_IDS, CREDIT_TOPUPS, STORAGE_PACKS, AI_ACTION_COSTS } = require("../config/plans");
+const { PLANS, PLAN_IDS, STARTER, CREDIT_TOPUPS, STORAGE_PACKS, AI_ACTION_COSTS } = require("../config/plans");
 const { billingOpen, priceForPlan, trialDays } = require("../config/stripe");
 const { refundStatus } = require("../helper/stripeRefund");
 const { paywallOn } = require("../helper/teacherAccess");
@@ -33,6 +33,10 @@ const getCatalog = asyncHandler(async (req, res) => {
     // The card wall is up: teachers work only on a paid plan, so the Free tier is
     // not offered on the pricing page or in the plan comparison.
     teacherPaywall: paywallOn(),
+    // What a new teacher gets before the wall (only meaningful while it is up).
+    starter: paywallOn()
+      ? { days: STARTER.days, exams: STARTER.exams, classes: PLANS.free.limits.classes, students: PLANS.free.limits.students }
+      : null,
   });
 });
 

@@ -101,6 +101,8 @@ ok("Premium price", P.includes(`Premium — ${premium.priceAzn} AZN/ay`));
 // 2026-10-27: teachers work only on a paid plan (card wall); the Free tier is no
 // longer offered, so the prompt must not describe it as an option.
 ok("no Free tier offered to teachers", !P.includes(`Pulsuz: ${free.limits.classes} sinif`) && /abunəsiz müəllim/i.test(P));
+// 2026-10-27: before the card, a 7-day free start with one exam on the free tier's limits.
+ok("the free start: 7 days, no card, one exam, the free tier's students and class", /7 günlük PULSUZ BAŞLANĞIC \(kartsız\)/.test(P) && /1 imtahan/.test(P) && P.includes(`${free.limits.students}-a qədər şagird`) && /ikinci imtahan, 11-ci şagird, ikinci sinif/.test(P));
 ok("the 7-day trial: once, card on file, nothing charged if cancelled", /7 günlük pulsuz sınaq/.test(P) && /bir dəfə/.test(P) && /heç nə ödəmir/.test(P));
 ok("Pro limits", P.includes(`${pro.limits.classes} sinif, ${pro.limits.students} şagird, limitsiz imtahan, ${pro.limits.assignments} tapşırıq, ${pro.limits.storageMb / 1024} GB yer, hər ay ${pro.credits.monthly} AI krediti`));
 ok("Premium storage and credits", P.includes(`${premium.limits.storageMb / 1024} GB yer, hər ay ${premium.credits.monthly} AI krediti`));

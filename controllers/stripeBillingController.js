@@ -641,7 +641,7 @@ const createPortal = asyncHandler(async (req, res) => {
 
 const billingStatus = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id).select(
-    "role plan planExpiresAt planDowngradedAt aiCreditsLastSpentAt aiCreditsResetAt addonCreditsMonthly cardStorageGb +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeLastCreditedInvoiceId +stripeRefundedInvoiceId +stripeAddons"
+    "role plan planExpiresAt planDowngradedAt starterUntil starterPending aiCreditsLastSpentAt aiCreditsResetAt addonCreditsMonthly cardStorageGb +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeLastCreditedInvoiceId +stripeRefundedInvoiceId +stripeAddons"
   );
   const enabled = billingEnabledFor(req.user);
   res.json({
@@ -660,6 +660,7 @@ const billingStatus = asyncHandler(async (req, res) => {
     trialCredits: trialCredits(),
     refund: refundStatus(user),
     paywall: needsSubscription(user),
+    starterUntil: user?.starterUntil || null,
     creditsResetAt: user?.aiCreditsResetAt || null,
     addons: (user?.stripeAddons || []).map((a) => ({ key: a.key, quantity: a.quantity, status: a.status, cancelAt: a.cancelAt, periodEnd: a.periodEnd })),
     addonCreditsMonthly: user?.addonCreditsMonthly || 0,

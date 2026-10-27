@@ -77,6 +77,20 @@ const freeUsage = (o = {}) => ({
   line = await teacherContext("u");
   ok("paying: F, and no limits shown", /MƏRHƏLƏ: F/.test(line) && /sinif 6;/.test(line) && !/limit/.test(line.split("GÜMAN")[0].replace("limitə", "")), line);
 
+  console.log("\nbehind the card wall");
+  process.env.TEACHER_PAYWALL = "on";
+  user = { _id: "u", role: "teacher", name: "Aysel", plan: "free", aiCredits: 60, starterUntil: new Date(Date.now() + 4.5 * day), createdAt: new Date(Date.now() - 2 * day), lastActiveAt: new Date() };
+  usage = freeUsage({ classes: { used: 1, limit: 1 }, students: { used: 6, limit: 10 }, examCreates: { left: 0, limit: 1 } });
+  examIds = ["e1"];
+  results = 6;
+  line = await teacherContext("u");
+  ok("in the free start: says so, with the days left (not «Pulsuz paket»)", /pulsuz başlanğıc \(5 gün qalıb\)/.test(line) && !/Pulsuz paket/.test(line), line);
+  ok("…its one exam spent: near the limit, and the card trial is what to show", /MƏRHƏLƏ: E \(pulsuz başlanğıcda işləyir və limitə yaxındır: imtahan yaratmaq haqqı qalıb: 0\/1/.test(line) && /7 günlük pulsuz sınağın/.test(line), line);
+  user = { ...user, starterUntil: new Date(Date.now() - day) };
+  line = await teacherContext("u");
+  ok("free start over: walled, and the stage says to offer the trial", /abunəsi yoxdur \(platforma bağlıdır\)/.test(line) && /MƏRHƏLƏ: E \(abunəsi yoxdur/.test(line), line);
+  delete process.env.TEACHER_PAYWALL;
+
   console.log("\nnever in the way");
   user = { _id: "s", role: "student" };
   ok("not a teacher: nothing", (await teacherContext("s")) === "");

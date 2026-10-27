@@ -353,6 +353,12 @@ const userSchema = Schema(
         // visible in a "downgraded" panel (not silently gone from the list).
         // Cleared when they upgrade to a paid plan again.
         planDowngradedAt: { type: Date, default: null },
+        // The free start (config/plans.js STARTER): when it ends. Set at sign-up for
+        // a teacher; null for everyone else, and for a teacher who has had theirs.
+        starterUntil: { type: Date, default: null },
+        // A teacher who joined before the free start existed and never made an
+        // exam: their free start begins on their next visit (helper/teacherAccess).
+        starterPending: { type: Boolean, default: undefined },
         // When the roster was last brought down to the plan's cap. Lets the
         // lapse sweep skip accounts it has already settled.
         planCapEnforcedAt: { type: Date, default: null },

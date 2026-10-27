@@ -14,7 +14,8 @@ const User = require("../models/userModel");
 const Class = require("../models/classModel");
 const Enrollment = require("../models/enrollmentModel");
 const { httpError } = require("../utils/appError");
-const { normalizePlan, limitsFor, planDef } = require("../config/plans");
+const { normalizePlan, limitsFor, planDef, STARTER } = require("../config/plans");
+const { paywallOn, inStarter } = require("./teacherAccess");
 
 const LIMIT_MSG = {
   classes: "Paketinizin sinif limitinə çatdınız. Daha çox sinif üçün paketi yüksəldin.",
@@ -54,6 +55,17 @@ function isExpired(user) {
 // The plan used for ENFORCEMENT — free if the paid plan has lapsed.
 function effectivePlan(user) {
   return isExpired(user) ? "free" : storedPlan(user);
+}
+
+// The caps that apply to this teacher: their plan's, except that the free start
+// (config/plans.js STARTER) allows its own number of exams instead of the free
+// tier's. Only the exam allowance differs; the class and student caps are the
+// free tier's.
+function capsFor(user) {
+  const plan = effectivePlan(user);
+  const limits = limitsFor(plan);
+  if (plan === "free" && paywallOn() && inStarter(user)) return { ...limits, examCreations: STARTER.exams };
+  return limits;
 }
 
 // ── counts (reused by the DTO usage block too) ───────────────────────────────
@@ -371,7 +383,7 @@ async function promoteWaitlisted(ownerId) {
 async function assertExamCreate(user) {
   if (isAdmin(user)) return;
   if (isExpired(user)) throw planLimitError("exams", 0, 0, storedPlan(user), true);
-  const cap = limitsFor(effectivePlan(user)).examCreations;
+  const cap = capsFor(user).examCreations;
   if (!Number.isFinite(cap)) return; // unlimited tier
   const fresh = await User.findById(user._id).select("examCreatesLeft").lean();
   const left = fresh?.examCreatesLeft;
@@ -385,7 +397,7 @@ async function consumeExamCreate(user, session) {
   if (isExpired(user)) {
     throw planLimitError("exams", 0, 0, storedPlan(user), true);
   }
-  const cap = limitsFor(effectivePlan(user)).examCreations;
+  const cap = capsFor(user).examCreations;
   if (!Number.isFinite(cap)) return; // unlimited tier
   const opts = session ? { session } : {};
   await User.updateOne({ _id: user._id, examCreatesLeft: null }, { $set: { examCreatesLeft: cap } }, opts);
@@ -403,7 +415,7 @@ async function consumeExamCreate(user, session) {
 // lapsed), plus the exam allowance left and an `expired` flag.
 async function usageFor(user) {
   const expired = isExpired(user);
-  const limits = limitsFor(effectivePlan(user));
+  const limits = capsFor(user);
   const { storageStatus } = require("../middleware/uploadLimit");
   const [classes, students, frozen, assignments, materials, storage] = await Promise.all([
     classCount(user._id),
@@ -452,6 +464,7 @@ module.exports = {
   planLimitError,
   isExpired,
   effectivePlan,
+  capsFor,
   classCount,
   studentCount,
   assignmentCount,
