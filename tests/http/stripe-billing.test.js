@@ -43,6 +43,7 @@ const { getCatalog } = require("../../controllers/planController");
 const { getUser } = require("../../controllers/userController");
 const { storageStatus } = require("../../middleware/uploadLimit");
 const planLimits = require("../../helper/planLimits");
+const { hasPaidPlan } = require("../../helper/teacherAccess");
 const { meterFor } = require("../../middleware/aiCredit");
 
 let passed = 0, failed = 0;
@@ -66,14 +67,22 @@ const fake = {
   customers: {
     retrieve: async (id) => ({ id }),
     create: async () => ({ id: `cus_${sessions.length + 1}_${Math.random().toString(36).slice(2, 6)}` }),
+    update: async (id, p) => {
+      customerUpdates.push({ id, ...p });
+      return { id };
+    },
   },
   checkout: {
     sessions: {
       create: async (p) => {
         sessions.push(p);
         const id = `cs_${sessions.length}`;
-        checkoutState.set(id, { id, customer: p.customer, mode: p.mode, status: "open" });
+        checkoutState.set(id, { id, object: "checkout.session", customer: p.customer, mode: p.mode, status: "open", metadata: p.metadata });
         return { id, url: `https://checkout.stripe.test/${sessions.length}` };
+      },
+      retrieve: async (id) => {
+        if (!checkoutState.has(id)) throw Object.assign(new Error("No such checkout session"), { code: "resource_missing" });
+        return JSON.parse(JSON.stringify(checkoutState.get(id)));
       },
       list: async ({ customer, status }) => ({ data: [...checkoutState.values()].filter((c) => c.customer === customer && c.status === status) }),
       expire: async (id) => {
@@ -105,6 +114,24 @@ const fake = {
   prices: {
     list: async ({ lookup_keys }) => ({ data: lookup_keys.map((k) => ({ id: `price_${k.replace(/_v1$/, "")}`, lookup_key: k })) }),
   },
+  invoices: {
+    list: async ({ customer, subscription, status }) => ({ data: invoiceStore.filter((i) => i.customer === customer && i.subscription === subscription && i.status === status) }),
+    retrieve: async (id) => JSON.parse(JSON.stringify(invoiceStore.find((i) => i.id === id))),
+    // Charges the card: declined while `declineNext` is set; an invoice is paid once.
+    pay: async (id, p) => {
+      payCalls.push({ id, ...p });
+      const inv = invoiceStore.find((i) => i.id === id);
+      if (inv.status !== "open") throw Object.assign(new Error("Invoice is already paid"), { code: "invoice_not_editable" });
+      if (declineNext) {
+        declineNext = false;
+        throw Object.assign(new Error("Your card was declined."), { type: "StripeCardError", code: "card_declined", decline_code: "insufficient_funds" });
+      }
+      Object.assign(inv, { status: "paid", amount_remaining: 0, amount_paid: inv.subtotal });
+      subs.get(inv.subscription).status = "active";
+      return JSON.parse(JSON.stringify(inv));
+    },
+  },
+  setupIntents: { retrieve: async (id) => ({ id, payment_method: setupCards.get(id) }) },
   charges: { retrieve: async () => ({}) },
   // payment_intent → invoice, as Stripe's invoice_payments list answers it.
   invoicePayments: {
@@ -112,6 +139,11 @@ const fake = {
   },
 };
 const paidBy = new Map();
+const invoiceStore = [];
+const payCalls = [];
+const customerUpdates = [];
+const setupCards = new Map();
+let declineNext = false;
 _setStripeForTest(fake);
 
 function sub(id, userId, { status = "active", price = "price_pro", start = NOW, end = NOW + 30 * DAY, trialEnd = null, cancelAt = null, customer = "cus_x", meta = {}, unitAmount = 1500, quantity = 1 } = {}) {
@@ -346,14 +378,60 @@ async function main() {
   const audits = await MaintenanceAudit.find({ actor: "stripe", "target.userId": String(tester._id) }).lean();
   ok("credits: every Stripe grant leaves an audit row", audits.length === 5);
 
-  // ── card fails at renewal: past_due keeps the plan while Stripe retries ──
+  // ── card fails at renewal: the plan stops at once (owner: a failed charge is not a paid month) ──
   sub("sub_t", tester._id, { status: "past_due", end: end2, customer: "cus_t" });
   await send(ev("invoice.payment_failed", invoice("in_3", "sub_t")));
   u = await fresh(tester);
-  ok("past_due: still Pro, status recorded, no credits", u.plan === "pro" && u.stripeSubscriptionStatus === "past_due" && u.aiCredits === 350);
-  ok("past_due: the plan holds 7 days from the missed payment, not a whole unpaid month", near(u.planExpiresAt, NOW * 1000 + 7 * DAY * 1000));
-  sub("sub_t", tester._id, { status: "active", end: end2, customer: "cus_t" });
-  await send(ev("customer.subscription.updated", subs.get("sub_t")));
+  ok("past_due: status recorded, no new month's credits", u.stripeSubscriptionStatus === "past_due" && u.aiCredits === 350);
+  ok("past_due: the plan stops where the unpaid period starts, no free days", near(u.planExpiresAt, NOW * 1000) && !hasPaidPlan(u));
+  process.env.TEACHER_PAYWALL = "on";
+  r = await call(server, { path: "/api/teach", token: tok(tester) });
+  ok("past_due: the wall is up straight away (402)", r.status === 402 && r.body.code === "subscription_required");
+  r = await call(server, { path: "/api/billing/status", token: tok(tester) });
+  ok("past_due: the status tells the app why (wall + past_due)", r.body.paywall === true && r.body.subscriptionStatus === "past_due");
+  invoiceStore.push({ ...invoice("in_3", "sub_t"), status: "open", customer: "cus_t", subscription: "sub_t", amount_remaining: 1500, amount_paid: 0, currency: "azn", created: NOW, hosted_invoice_url: "https://invoice.stripe.test/in_3" });
+  r = await call(server, { method: "POST", path: "/api/billing/addon", token: tok(tester), body: { addon: "credits_100" } });
+  ok("add-on: none while a payment is owed (409)", r.status === 409 && /ödənişi tamamla/.test(r.body.message || ""));
+
+  // «Ödənişi tamamla»: a card is added on Stripe's page, and the month charged to it
+  const addCard = async (pm) => {
+    const res = await call(server, { method: "POST", path: "/api/billing/pay-due", token: tok(tester) });
+    const id = `cs_${sessions.length}`;
+    Object.assign(checkoutState.get(id), { status: "complete", setup_intent: `seti_${pm}` });
+    setupCards.set(`seti_${pm}`, pm);
+    return { res, id, params: sessions[sessions.length - 1] };
+  };
+  const first = await addCard("pm_also_empty");
+  ok("pay-due: opens Stripe's page to ADD A CARD (setup mode), not a second plan", first.res.status === 200 && first.res.body.kind === "card" && /^https:\/\/checkout/.test(first.res.body.url) && first.params.mode === "setup" && first.params.currency === "azn" && !first.params.line_items && first.res.body.amount === 15);
+  ok("pay-due: the page belongs to this teacher's unpaid invoice", first.params.metadata.examopia_kind === "pay_due" && first.params.metadata.invoice === "in_3" && first.params.metadata.subscription === "sub_t" && first.params.metadata.examopia_user_id === String(tester._id) && first.params.setup_intent_data.metadata.invoice === "in_3");
+  ok("pay-due: it says the month is charged and the card kept, and returns to «Planım»", /dərhal bu kartdan çıxılır/.test(first.params.custom_text.submit.message) && /\/plan\?due=paid&session_id=\{CHECKOUT_SESSION_ID\}$/.test(first.params.success_url));
+  r = await call(server, { method: "POST", path: "/api/billing/pay-due/complete", token: tok(teacher), body: { sessionId: first.id } });
+  ok("complete: another teacher cannot use this page (404), nothing charged", r.status === 404 && payCalls.length === 0);
+  declineNext = true;
+  r = await call(server, { method: "POST", path: "/api/billing/pay-due/complete", token: tok(tester), body: { sessionId: first.id } });
+  u = await fresh(tester);
+  ok("complete: the new card declined too → says so, the plan stays stopped, no credits", r.status === 200 && r.body.paid === false && r.body.reason === "declined" && u.stripeSubscriptionStatus === "past_due" && !hasPaidPlan(u) && u.aiCredits === 350);
+  const reconcilesBeforePay = reconciles;
+  await setCredits(tester, 20);
+  const second = await addCard("pm_good");
+  r = await call(server, { method: "POST", path: "/api/billing/pay-due/complete", token: tok(tester), body: { sessionId: second.id } });
+  u = await fresh(tester);
+  ok("complete: paid with the new card, at once", r.status === 200 && r.body.paid === true && payCalls.at(-1).id === "in_3" && payCalls.at(-1).payment_method === "pm_good" && payCalls.at(-1).off_session === true);
+  ok("complete: the new card becomes the subscription's (and customer's) card for next month", updates.some((x) => x.id === "sub_t" && x.default_payment_method === "pm_good") && customerUpdates.some((c) => c.id === "cus_t" && c.invoice_settings?.default_payment_method === "pm_good"));
+  ok("paid after failing: the plan opens again to the period end", u.plan === "pro" && u.stripeSubscriptionStatus === "active" && near(u.planExpiresAt, end2 * 1000 + GRACE));
+  ok("paid after failing: the month's credits arrive then (reset, not added)", u.aiCredits === 350);
+  ok("paid after failing: students the lapse waitlisted come back (roster reconciled)", reconciles === reconcilesBeforePay + 1);
+  r = await call(server, { path: "/api/teach", token: tok(tester) });
+  ok("paid after failing: the wall lifts", r.status === 200);
+  await setCredits(tester, 77);
+  const chargesBefore = payCalls.length;
+  await send(ev("checkout.session.completed", await fake.checkout.sessions.retrieve(second.id)));
+  await send(ev("invoice.paid", await fake.invoices.retrieve("in_3")));
+  u = await fresh(tester);
+  ok("webhooks for the same page and invoice: no second charge attempt, no second credit reset", payCalls.length === chargesBefore && u.aiCredits === 77);
+  r = await call(server, { method: "POST", path: "/api/billing/pay-due", token: tok(tester) });
+  ok("pay-due: nothing owed → the subscription page instead", r.status === 200 && r.body.kind === "portal" && /billing\.stripe\.test/.test(r.body.url));
+  delete process.env.TEACHER_PAYWALL;
 
   // ── refund rule: within 7 days of the payment, and no AI credits spent since ──
   const refundOf = async () => (await call(server, { path: "/api/billing/status", token: tok(tester) })).body.refund;
@@ -450,11 +528,16 @@ async function main() {
   ok("add-on: none can be added to a plan that is ending (409)", r.status === 409);
 
   // ── subscription ends ──
+  const reconcilesBeforeEnd = reconciles;
+  const lastActive = JSON.parse(JSON.stringify(subs.get("sub_t")));
   sub("sub_t", tester._id, { status: "canceled", end: end2, customer: "cus_t" });
   await send(ev("customer.subscription.deleted", subs.get("sub_t")));
   u = await fresh(tester);
-  ok("ended: back to Free, marked downgraded, no expiry", u.plan === "free" && !!u.planDowngradedAt && u.planExpiresAt === null);
-  ok("ended: roster reconciled on the downgrade", reconciles === 2);
+  ok("ended: back to Free, marked downgraded, no expiry", u.plan === "free" && !!u.planDowngradedAt && u.planExpiresAt === null && u.stripeSubscriptionStatus === "canceled");
+  ok("ended: roster reconciled on the downgrade", reconciles === reconcilesBeforeEnd + 1);
+  await send(ev("customer.subscription.updated", lastActive));
+  u = await fresh(tester);
+  ok("ended: an older 'active' event arriving late does not open the plan again", u.plan === "free" && u.stripeSubscriptionStatus === "canceled");
   const endSoon = (s) => s.cancel_at > NOW && s.cancel_at < Math.floor(Date.now() / 1000) + 400;
   ok("ended: the add-ons end within minutes too", endSoon(subs.get("sub_a1")) && endSoon(subs.get("sub_a2")));
   r = await call(server, { path: "/api/billing/status", token: tok(tester) });

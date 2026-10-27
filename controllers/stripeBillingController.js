@@ -20,16 +20,14 @@ const {
   addonPrices,
 } = require("../config/stripe");
 
-// Statuses that keep the paid plan; past_due keeps it while Stripe retries the card.
+// Statuses of a subscription that is still running. past_due is one (Stripe keeps
+// retrying the card), but its plan is stopped until the payment goes through.
 const LIVE_STATUSES = new Set(["active", "trialing", "past_due"]);
 // Statuses that end it; paused is a trial that ended with no way to pay.
 const ENDED_STATUSES = new Set(["canceled", "unpaid", "incomplete_expired", "paused"]);
 // The plan runs this long past the paid-up date, so a renewal webhook that arrives
 // late never drops a paying teacher to Free in between.
 const GRACE_MS = 2 * 24 * 60 * 60 * 1000;
-// A failed renewal keeps the plan this long from the missed payment while Stripe
-// retries the card, however the Dashboard's retry settings are set.
-const PAST_DUE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 // Invoices that pay for a month of the plan (not a proration or a manual invoice).
 const MONTH_INVOICES = new Set(["subscription_create", "subscription_cycle"]);
 const PLAN_RANK = { free: 0, pro: 1, premium: 2 };
@@ -381,15 +379,17 @@ async function syncSubscription(subscription) {
   const grants = plan && LIVE_STATUSES.has(status) ? plan : null;
   if (grants) {
     const until = cancelAt && expiry && cancelAt < expiry ? cancelAt : expiry;
-    const unpaidFrom = status === "past_due" ? periodStart(subscription) : null;
     update.plan = grants;
     update.planSource = "stripe";
     update.planSince = user.plan === grants && user.planSince ? user.planSince : new Date();
-    update.planExpiresAt = unpaidFrom
-      ? new Date(unpaidFrom.getTime() + PAST_DUE_GRACE_MS)
-      : until
-        ? new Date(until.getTime() + GRACE_MS)
-        : null;
+    // A failed charge is not a paid month (owner, 2026-10-27): the plan stops where
+    // the unpaid period starts, and opens again the moment Stripe takes the payment.
+    update.planExpiresAt =
+      status === "past_due"
+        ? periodStart(subscription) || new Date()
+        : until
+          ? new Date(until.getTime() + GRACE_MS)
+          : null;
     update.planDowngradedAt = null;
   } else if (ENDED_STATUSES.has(status) && user.planSource === "stripe") {
     // Only a plan Stripe granted is taken away; a plan the admin set by hand stays.
@@ -404,7 +404,10 @@ async function syncSubscription(subscription) {
     grants && status === "active" && user.planSource === "stripe" && user.stripeSubscriptionId === subscription.id &&
     user.plan !== "free" && PLAN_RANK[grants] > (PLAN_RANK[user.plan] || 0);
   if (upgraded) await grantUpgradeCredits(user._id, subscription, user.plan, grants);
-  if (update.plan && update.plan !== user.plan) await reconcile(user._id);
+  // A plan that opens again after a failed charge brings back the students the
+  // lapse moved to the waitlist, as an upgrade does.
+  const reopened = grants && !hasPaidPlanNow(user) && hasPaidPlanNow({ plan: grants, planExpiresAt: update.planExpiresAt });
+  if ((update.plan && update.plan !== user.plan) || reopened) await reconcile(user._id);
   // Add-ons follow the plan (end with it, un-end with it).
   if ((user.stripeAddons || []).length) {
     await alignAddons(customerId, subscription);
@@ -482,6 +485,63 @@ async function syncInvoice(invoice, { paid }) {
   }
 }
 
+/*
+ * Stripe does not promise to deliver events in order, so a subscription event is
+ * applied as the subscription stands NOW: an "active" that arrives after the
+ * cancellation can never open the plan again. A subscription Stripe no longer
+ * has falls back to the event's own copy.
+ */
+async function currentSubscription(snapshot) {
+  try {
+    return await stripeClient().subscriptions.retrieve(snapshot.id);
+  } catch (error) {
+    if (error?.code === "resource_missing") return snapshot;
+    throw error;
+  }
+}
+
+/*
+ * The card a teacher added to pay a failed charge («Ödənişi tamamla»): it becomes
+ * the subscription's card (so next month is charged to it, not to the card that
+ * failed) and the unpaid invoice is charged to it now. Runs on the teacher's way
+ * back and again from Stripe's webhook, whichever comes first; an invoice can be
+ * paid only once, so the second run finds it paid. Returns { paid, ... }.
+ */
+async function settleDue(sessionOrId) {
+  const stripe = stripeClient();
+  const session = typeof sessionOrId === "string" ? await stripe.checkout.sessions.retrieve(sessionOrId) : sessionOrId;
+  const meta = session?.metadata || {};
+  if (session?.mode !== "setup" || meta.examopia_kind !== "pay_due") return { paid: false, reason: "not_a_due_payment" };
+  if (session.status !== "complete") return { paid: false, reason: "not_completed" };
+  const intentRef = session.setup_intent;
+  const intent = typeof intentRef === "string" ? await stripe.setupIntents.retrieve(intentRef) : intentRef;
+  const card = typeof intent?.payment_method === "string" ? intent.payment_method : intent?.payment_method?.id;
+  if (!card) return { paid: false, reason: "no_card" };
+  await stripe.subscriptions.update(meta.subscription, { default_payment_method: card });
+  await stripe.customers.update(customerIdOf(session), { invoice_settings: { default_payment_method: card } });
+  let invoice = await stripe.invoices.retrieve(meta.invoice);
+  if (invoice.status === "open") {
+    try {
+      invoice = await stripe.invoices.pay(invoice.id, { payment_method: card, off_session: true });
+    } catch (error) {
+      invoice = await stripe.invoices.retrieve(meta.invoice);
+      if (invoice.status !== "paid") {
+        // The bank wants the teacher to confirm (3-D Secure), or this card was
+        // declined too. The card is kept; Stripe's invoice page can finish it.
+        return {
+          paid: false,
+          reason: error?.code === "invoice_payment_intent_requires_action" || error?.code === "authentication_required" ? "confirm" : "declined",
+          decline: error?.decline_code || error?.code || null,
+          url: invoice.hosted_invoice_url || null,
+        };
+      }
+    }
+  }
+  if (invoice.status !== "paid") return { paid: false, reason: invoice.status };
+  await syncInvoice(invoice, { paid: true });
+  return { paid: true };
+}
+
 async function handleStripeEvent(event) {
   const claim = await markEvent(event);
   if (claim.duplicate) return;
@@ -491,12 +551,14 @@ async function handleStripeEvent(event) {
       if (session.mode === "subscription" && session.subscription) {
         const id = typeof session.subscription === "string" ? session.subscription : session.subscription.id;
         await syncSubscription(await stripeClient().subscriptions.retrieve(id));
+      } else if (session.mode === "setup" && session.metadata?.examopia_kind === "pay_due") {
+        await settleDue(session.id);
       }
     } else if (event.type === "checkout.session.async_payment_failed") {
       // The subscription lifecycle/invoice events remain authoritative. This
       // event is recorded for audit and deliberately does not grant access.
     } else if (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated" || event.type === "customer.subscription.deleted") {
-      await syncSubscription(event.data.object);
+      await syncSubscription(await currentSubscription(event.data.object));
     } else if (event.type === "invoice.paid") {
       await syncInvoice(event.data.object, { paid: true });
     } else if (event.type === "invoice.payment_failed") {
@@ -595,7 +657,11 @@ const createAddonCheckout = asyncHandler(async (req, res) => {
     res.status(409);
     throw new Error("Əlavələri pulsuz sınaq bitəndən sonra qoşa bilərsən.");
   }
-  if (!user.stripeSubscriptionId || !["active", "past_due"].includes(status)) {
+  if (status === "past_due") {
+    res.status(409);
+    throw new Error("Kartından son ödəniş alınmayıb. Əvvəlcə «Planım» səhifəsində ödənişi tamamla.");
+  }
+  if (!user.stripeSubscriptionId || status !== "active") {
     res.status(409);
     throw new Error("Əlavələr kartla abunəliyə qoşulur: əvvəlcə Pro və ya Premium paketinə abunə ol.");
   }
@@ -637,6 +703,66 @@ const createPortal = asyncHandler(async (req, res) => {
     ...(configuration ? { configuration } : {}),
   });
   res.json({ url: portal.url });
+});
+
+/*
+ * A charge that failed: the teacher adds a card on Stripe's page (Checkout in
+ * setup mode: the card is saved and checked, 3-D Secure included), and on the way
+ * back settleDue charges the unpaid invoice to it and keeps it for the months
+ * after. Not Stripe's invoice page: paying there leaves the card unsaved unless
+ * the teacher ticks a box, and next month fails on the old card again (seen on a
+ * test clock). With nothing to pay (or Stripe not answering), the subscription page.
+ */
+const payDue = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id).select("+stripeCustomerId +stripeSubscriptionId");
+  if (!user?.stripeCustomerId) { res.status(400); throw new Error("Stripe müştəri hesabı hələ yoxdur"); }
+  const stripe = stripeClient();
+  let due = null;
+  if (user.stripeSubscriptionId) {
+    try {
+      const open = await stripe.invoices.list({ customer: user.stripeCustomerId, subscription: user.stripeSubscriptionId, status: "open", limit: 10 });
+      due = (open.data || []).filter((invoice) => Number(invoice.amount_remaining) > 0).sort((a, b) => b.created - a.created)[0] || null;
+    } catch (error) {
+      console.warn("[stripe] open invoice lookup failed:", error.message);
+    }
+  }
+  if (due) {
+    const amount = Number(due.amount_remaining) / 100;
+    const metadata = { examopia_user_id: String(user._id), examopia_kind: "pay_due", invoice: due.id, subscription: user.stripeSubscriptionId };
+    const session = await stripe.checkout.sessions.create({
+      mode: "setup",
+      customer: user.stripeCustomerId,
+      currency: due.currency,
+      client_reference_id: String(user._id),
+      metadata,
+      setup_intent_data: { metadata },
+      custom_text: { submit: { message: `Kart yadda saxlanılır və ${amount} ₼ dərhal bu kartdan çıxılır. Sonrakı aylar da bu kartdan ödənilir.` } },
+      success_url: `${frontendUrl()}/plan?due=paid&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${frontendUrl()}/plan?due=cancelled`,
+    });
+    return res.json({ url: session.url, kind: "card", amount, currency: due.currency });
+  }
+  const configuration = portalConfiguration();
+  const portal = await stripe.billingPortal.sessions.create({
+    customer: user.stripeCustomerId,
+    return_url: `${frontendUrl()}/plan`,
+    ...(configuration ? { configuration } : {}),
+  });
+  res.json({ url: portal.url, kind: "portal" });
+});
+
+// Back from adding the card: charge the unpaid invoice to it now, so the plan is
+// open by the time the page loads (the webhook does the same if they never return).
+const completeDue = asyncHandler(async (req, res) => {
+  const sessionId = String(req.body?.sessionId || "");
+  if (!/^cs_[A-Za-z0-9_]+$/.test(sessionId)) { res.status(400); throw new Error("Yanlış sessiya"); }
+  const user = await User.findById(req.user._id).select("+stripeCustomerId");
+  const session = await stripeClient().checkout.sessions.retrieve(sessionId).catch(() => null);
+  if (!session || !user?.stripeCustomerId || customerIdOf(session) !== user.stripeCustomerId || session.metadata?.examopia_user_id !== String(user._id)) {
+    res.status(404);
+    throw new Error("Ödəniş tapılmadı");
+  }
+  res.json(await settleDue(session));
 });
 
 const billingStatus = asyncHandler(async (req, res) => {
@@ -682,4 +808,4 @@ const webhook = asyncHandler(async (req, res) => {
   res.json({ received: true });
 });
 
-module.exports = { createCheckout, createAddonCheckout, createPortal, billingStatus, webhook, handleStripeEvent, syncSubscription };
+module.exports = { createCheckout, createAddonCheckout, createPortal, payDue, completeDue, billingStatus, webhook, handleStripeEvent, syncSubscription };

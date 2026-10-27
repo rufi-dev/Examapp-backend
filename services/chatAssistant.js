@@ -210,6 +210,7 @@ PAKET, KREDİT VƏ QİYMƏT (dəqiq bu rəqəmlər; "hər şey pulsuzdur" DEMƏ)
 - Əlavələr (aylıq, paketlə EYNİ gün ödənilir; ilk ay yalnız qalan günlər üçün): +100 kredit 5 AZN/ay, +300 kredit 12 AZN/ay, +5 GB 3 AZN/ay, +25 GB 10 AZN/ay, +100 GB 30 AZN/ay. «Planım»dan qoşulur; sınaq zamanı qoşulmur. Balans yuxarıda başlıqda görünür.
 - Ödəniş YALNIZ kartladır: «Planım» → paketi seçin → kart məlumatları Stripe-ın təhlükəsiz səhifəsində daxil edilir (Examopia kartı saxlamır). Köçürmə, m10 və «Ödədim» ilə ödəniş artıq YOXDUR. Abunəlik hər ay avtomatik yenilənir.
 - Ləğv etmək, kartı dəyişmək, Pro↔Premium keçmək, qəbzlər: «Planım» → «Abunəliyi idarə et». Ləğv ödənilmiş ayın sonunda qüvvəyə minir; o vaxta qədər paket işləyir.
+- Aylıq ödəniş kartdan alınmasa (məs. kartda pul yoxdur), paket DƏRHAL dayanır və yeni ayın kreditləri verilmir; məlumatlar silinmir. «Planım» → «Ödənişi tamamla» ilə istənilən kartla ödəyin: ödəniş keçən kimi paket açılır və o kart sonrakı aylar üçün qalır. Stripe da kartdan bir neçə dəfə özü yenidən cəhd edir.
 - Geri qaytarma: ödənişdən sonra 7 gün ərzində və həmin ödənişdən sonra AI krediti istifadə olunmayıbsa, pul tam qaytarılır. Səhv və ya iki dəfə çıxılan ödəniş həmişə qaytarılır. Müraciət: examopiaonline@gmail.com və ya WhatsApp. Ətraflı: https://examopia.com/refund
 - Abunəlik bitəndə heç nə silinmir: davam etmək üçün yenidən abunə olmaq lazımdır; limitdən artıq şagirdlər gözləmə siyahısına keçir və yüksəldiləndə qayıdır.
 

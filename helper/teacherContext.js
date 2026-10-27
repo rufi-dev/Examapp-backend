@@ -37,7 +37,7 @@ function stageOf({ paid, walled, starter, classes, exams, students, taken, nearL
 async function teacherContext(userId) {
   try {
     if (!userId) return "";
-    const u = await User.findById(userId).select("role name plan planExpiresAt starterUntil starterPending aiCredits examCreatesLeft createdAt lastActiveAt").lean();
+    const u = await User.findById(userId).select("role name plan planExpiresAt starterUntil starterPending aiCredits examCreatesLeft createdAt lastActiveAt +stripeSubscriptionStatus").lean();
     if (!u || u.role !== "teacher") return "";
     const { usageFor, effectivePlan } = require("./planLimits");
     const Exam = require("../models/examModel");
@@ -65,7 +65,9 @@ async function teacherContext(userId) {
     const facts = [
       fn ? `adı ${fn}` : "",
       walled
-        ? "abunəsi yoxdur (platforma bağlıdır)"
+        ? u.stripeSubscriptionStatus === "past_due"
+          ? "aylıq ödəniş kartdan alınmayıb, paket dayanıb («Planım» → «Ödənişi tamamla»)"
+          : "abunəsi yoxdur (platforma bağlıdır)"
         : starter
           ? `pulsuz başlanğıc${daysLeft ? ` (${daysLeft} gün qalıb)` : ""}`
           : `${PLAN_NAMES[plan] || plan} paket${usage.expired ? " (ödənişli paketin vaxtı bitib)" : ""}`,
