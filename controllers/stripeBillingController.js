@@ -339,6 +339,36 @@ async function syncAddonSubscription(subscription) {
 }
 
 /*
+ * The card a subscription is charged to, as the admin's billing panel shows it,
+ * or null when it is the one already stored (or there is none yet). Brand, last
+ * four, expiry, country, debit/credit, wallet: nothing that could charge it.
+ */
+async function cardFor(subscription, stored) {
+  const stripe = stripeClient();
+  let ref = subscription?.default_payment_method;
+  if (!ref) {
+    const customerId = customerIdOf(subscription);
+    const customer = customerId ? await stripe.customers.retrieve(customerId) : null;
+    ref = customer?.invoice_settings?.default_payment_method || null;
+  }
+  const id = typeof ref === "string" ? ref : ref?.id;
+  if (!id || id === stored?.id) return null;
+  const method = typeof ref === "object" && ref?.card ? ref : await stripe.paymentMethods.retrieve(id);
+  const c = method?.card || {};
+  return {
+    id,
+    brand: c.brand || method?.type || null,
+    last4: c.last4 || null,
+    expMonth: c.exp_month || null,
+    expYear: c.exp_year || null,
+    country: c.country || null,
+    funding: c.funding || null,
+    wallet: c.wallet?.type || null,
+    addedAt: toDate(method?.created) || new Date(),
+  };
+}
+
+/*
  * Writes a Stripe subscription onto its teacher. Returns { userId, plan } where
  * plan is the paid plan the subscription grants right now (null when it grants none).
  */
@@ -349,7 +379,7 @@ async function syncSubscription(subscription) {
   const customerId = customerIdOf(subscription);
   const user = await userFor(
     subscription,
-    "+stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt +stripeAddons plan planSource planSince planExpiresAt"
+    "+stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt +stripeAddons +stripeCard plan planSource planSince planExpiresAt"
   );
   if (!user) return null;
 
@@ -396,6 +426,14 @@ async function syncSubscription(subscription) {
     update.plan = "free";
     update.planExpiresAt = null;
     if (user.plan !== "free") update.planDowngradedAt = new Date();
+  }
+  if (LIVE_STATUSES.has(status)) {
+    // A card that cannot be read never holds up the plan itself.
+    const card = await cardFor(subscription, user.stripeCard).catch((error) => {
+      console.warn("[stripe] card lookup failed:", error.message);
+      return null;
+    });
+    if (card) update.stripeCard = card;
   }
   await User.updateOne({ _id: user._id }, { $set: update });
 
@@ -635,6 +673,11 @@ const createCheckout = asyncHandler(async (req, res) => {
     cancel_url: `${frontendUrl()}/plan?checkout=cancelled`,
     allow_promotion_codes: true,
   });
+  // For the admin's billing panel: who reached the card page, even if they stop there.
+  await User.updateOne(
+    { _id: user._id },
+    { $set: { stripeCheckoutOpenedAt: new Date(), stripeCheckoutPlan: targetPlan }, $inc: { stripeCheckoutOpens: 1 } }
+  ).catch((error) => console.warn("[stripe] checkout stamp failed:", error.message));
   res.json({ url: session.url, sessionId: session.id, trialDays: trial });
 });
 
@@ -765,6 +808,63 @@ const completeDue = asyncHandler(async (req, res) => {
   res.json(await settleDue(session));
 });
 
+/*
+ * Admin («Paket idarəetməsi»): every teacher who has touched card billing, newest
+ * first. Who opened the card page and stopped there, who is on the trial, paying,
+ * owing a failed charge, cancelling or ended; when the card went in, and the
+ * card as far as an admin may see it.
+ */
+const cardStage = (u) => {
+  const status = u.stripeSubscriptionStatus;
+  if (status === "trialing") return u.stripeCancelAt ? "trial_cancelled" : "trial";
+  if (status === "active") return u.stripeCancelAt ? "cancelling" : "paying";
+  if (status === "past_due") return "past_due";
+  if (status && ENDED_STATUSES.has(status)) return "ended";
+  return "opened";
+};
+const CARD_STAGES = ["opened", "trial", "trial_cancelled", "paying", "cancelling", "past_due", "ended"];
+
+const adminCardTeachers = asyncHandler(async (req, res) => {
+  const users = await User.find({
+    role: "teacher",
+    $or: [{ stripeCustomerId: { $nin: [null, ""] } }, { stripeCheckoutOpenedAt: { $ne: null } }, { stripeSubscriptionId: { $nin: [null, ""] } }],
+  })
+    .select(
+      "name email phone createdAt plan planExpiresAt aiCredits +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripePriceId +stripeCurrentPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeCheckoutOpenedAt +stripeCheckoutPlan +stripeCheckoutOpens +stripeCard"
+    )
+    .limit(1000)
+    .lean();
+  const at = (d) => (d ? new Date(d).getTime() : 0);
+  const rows = users
+    .map((u) => {
+      const stage = cardStage(u);
+      const c = u.stripeCard;
+      return {
+        _id: u._id,
+        name: u.name,
+        email: u.email,
+        phone: u.phone,
+        signedUpAt: u.createdAt,
+        stage,
+        plan: planForPrice(u.stripePriceId) || u.stripeCheckoutPlan || null,
+        checkout: { openedAt: u.stripeCheckoutOpenedAt || null, plan: u.stripeCheckoutPlan || null, opens: u.stripeCheckoutOpens || 0 },
+        trialStartedAt: u.stripeTrialUsedAt || null,
+        trialEndsAt: stage === "trial" || stage === "trial_cancelled" ? u.stripeTrialEnd || u.stripeCurrentPeriodEnd || null : null,
+        nextChargeAt: stage === "trial" || stage === "paying" || stage === "past_due" ? u.stripeCurrentPeriodEnd || null : null,
+        endsAt: u.stripeCancelAt || null,
+        lastPaidAt: u.stripeLastPaidAt || null,
+        card: c ? { brand: c.brand, last4: c.last4, expMonth: c.expMonth, expYear: c.expYear, country: c.country, funding: c.funding, wallet: c.wallet, addedAt: c.addedAt } : null,
+        aiCredits: u.aiCredits || 0,
+        // Sort key: the latest billing moment of this teacher.
+        latest: Math.max(at(u.stripeCheckoutOpenedAt), at(u.stripeTrialUsedAt), at(u.stripeLastPaidAt), at(c?.addedAt)),
+      };
+    })
+    .sort((a, b) => b.latest - a.latest || at(b.signedUpAt) - at(a.signedUpAt));
+  const counts = Object.fromEntries(CARD_STAGES.map((k) => [k, rows.filter((r) => r.stage === k).length]));
+  for (const r of rows) delete r.latest;
+  res.json({ rows, counts });
+});
+
 const billingStatus = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id).select(
     "role plan planExpiresAt planDowngradedAt starterUntil starterPending aiCreditsLastSpentAt aiCreditsResetAt addonCreditsMonthly cardStorageGb +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeLastCreditedInvoiceId +stripeRefundedInvoiceId +stripeAddons"
@@ -808,4 +908,4 @@ const webhook = asyncHandler(async (req, res) => {
   res.json({ received: true });
 });
 
-module.exports = { createCheckout, createAddonCheckout, createPortal, payDue, completeDue, billingStatus, webhook, handleStripeEvent, syncSubscription };
+module.exports = { createCheckout, createAddonCheckout, createPortal, payDue, completeDue, adminCardTeachers, billingStatus, webhook, handleStripeEvent, syncSubscription };

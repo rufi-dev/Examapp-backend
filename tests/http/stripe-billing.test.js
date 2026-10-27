@@ -104,6 +104,7 @@ const fake = {
       const s = subs.get(id);
       if (!s) throw Object.assign(new Error("No such subscription"), { code: "resource_missing" });
       if ("cancel_at" in p) s.cancel_at = p.cancel_at === "" ? null : p.cancel_at;
+      if ("default_payment_method" in p) s.default_payment_method = p.default_payment_method;
       for (const [k, v] of Object.entries(p.metadata || {})) {
         if (v === "") delete s.metadata[k];
         else s.metadata[k] = v;
@@ -132,6 +133,14 @@ const fake = {
     },
   },
   setupIntents: { retrieve: async (id) => ({ id, payment_method: setupCards.get(id) }) },
+  // A card as Stripe describes it (never the number): the one added with the
+  // trial, then the one added to pay a failed month.
+  paymentMethods: {
+    retrieve: async (id) => {
+      cardReads.push(id);
+      return { id, type: "card", created: NOW - 60, card: { brand: "visa", last4: id === "pm_good" ? "0005" : "4242", exp_month: 12, exp_year: 2034, country: "AZ", funding: "debit", wallet: null } };
+    },
+  },
   charges: { retrieve: async () => ({}) },
   // payment_intent → invoice, as Stripe's invoice_payments list answers it.
   invoicePayments: {
@@ -143,6 +152,7 @@ const invoiceStore = [];
 const payCalls = [];
 const customerUpdates = [];
 const setupCards = new Map();
+const cardReads = [];
 let declineNext = false;
 _setStripeForTest(fake);
 
@@ -206,7 +216,7 @@ async function main() {
   const dropped = await mk({ name: "D", email: "d@e.com", plan: "free", planDowngradedAt: new Date(Date.now() - 40 * DAY * 1000) });
   const student = await mk({ name: "St", email: "st@e.com", role: "student", teacherApproval: undefined });
   const tok = (u) => generateToken(u._id, u.sessionVersion);
-  const fresh = (u) => User.findById(u._id).select("+stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastCreditedInvoiceId +stripeAddons plan planSource planExpiresAt planDowngradedAt aiCredits aiCreditsResetAt addonCreditsMonthly cardStorageGb cardStorageUntil").lean();
+  const fresh = (u) => User.findById(u._id).select("+stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastCreditedInvoiceId +stripeAddons +stripeCard +stripeCheckoutOpenedAt +stripeCheckoutPlan +stripeCheckoutOpens plan planSource planExpiresAt planDowngradedAt aiCredits aiCreditsResetAt addonCreditsMonthly cardStorageGb cardStorageUntil").lean();
   const setCredits = (u, n) => User.updateOne({ _id: u._id }, { $set: { aiCredits: n } });
 
   const app = express();
@@ -297,6 +307,8 @@ async function main() {
   const firstTab = `cs_${sessions.length}`;
   r = await call(server, { method: "POST", path: "/api/billing/checkout", token: tok(twoTabs), body: { plan: "premium" } });
   ok("Checkout: a page still open from an earlier click is closed before a new one opens", r.status === 200 && expired.includes(firstTab) && checkoutState.get(`cs_${sessions.length}`).status === "open");
+  const tabsRow = await fresh(twoTabs);
+  ok("Checkout: each opening of the card page is noted for the admin (when, which plan, how often)", tabsRow.stripeCheckoutOpens === 2 && tabsRow.stripeCheckoutPlan === "premium" && near(tabsRow.stripeCheckoutOpenedAt, Date.now()));
   const racer = await mk({ name: "Racer", email: "racer@e.com", stripeCustomerId: "cus_race" });
   sub("sub_race", racer._id, { status: "trialing", customer: "cus_race", trialEnd: NOW + 7 * DAY, end: NOW + 7 * DAY });
   const before = sessions.length;
@@ -318,10 +330,12 @@ async function main() {
   // ── trial starts ──
   const trialEnd = NOW + 7 * DAY;
   sub("sub_t", tester._id, { status: "trialing", end: trialEnd, trialEnd, customer: "cus_t" });
+  subs.get("sub_t").default_payment_method = "pm_trial_card";
   r = await send(ev("customer.subscription.created", subs.get("sub_t")));
   let u = await fresh(tester);
   ok("trial: webhook 200", r.status === 200);
   ok("trial: teacher is on Pro from Stripe", u.plan === "pro" && u.planSource === "stripe" && u.stripeSubscriptionStatus === "trialing");
+  ok("trial: the card's restricted details are kept (brand, last 4, expiry, country, debit), and when it was added", u.stripeCard?.brand === "visa" && u.stripeCard.last4 === "4242" && u.stripeCard.expMonth === 12 && u.stripeCard.expYear === 2034 && u.stripeCard.country === "AZ" && u.stripeCard.funding === "debit" && near(u.stripeCard.addedAt, (NOW - 60) * 1000));
   ok("trial: plan runs to the trial end + 2 days grace", near(u.planExpiresAt, trialEnd * 1000 + GRACE));
   ok("trial: period end read from the subscription item", near(u.stripeCurrentPeriodEnd, trialEnd * 1000));
   ok("trial: trial end stored", near(u.stripeTrialEnd, trialEnd * 1000));
@@ -418,6 +432,10 @@ async function main() {
   u = await fresh(tester);
   ok("complete: paid with the new card, at once", r.status === 200 && r.body.paid === true && payCalls.at(-1).id === "in_3" && payCalls.at(-1).payment_method === "pm_good" && payCalls.at(-1).off_session === true);
   ok("complete: the new card becomes the subscription's (and customer's) card for next month", updates.some((x) => x.id === "sub_t" && x.default_payment_method === "pm_good") && customerUpdates.some((c) => c.id === "cus_t" && c.invoice_settings?.default_payment_method === "pm_good"));
+  ok("complete: the admin sees the new card (last 4 changed)", u.stripeCard?.last4 === "0005");
+  const readsBefore = cardReads.length;
+  await send(ev("customer.subscription.updated", subs.get("sub_t")));
+  ok("the same card is not asked of Stripe again on every event", cardReads.length === readsBefore);
   ok("paid after failing: the plan opens again to the period end", u.plan === "pro" && u.stripeSubscriptionStatus === "active" && near(u.planExpiresAt, end2 * 1000 + GRACE));
   ok("paid after failing: the month's credits arrive then (reset, not added)", u.aiCredits === 350);
   ok("paid after failing: students the lapse waitlisted come back (roster reconciled)", reconciles === reconcilesBeforePay + 1);
@@ -542,6 +560,18 @@ async function main() {
   ok("ended: the add-ons end within minutes too", endSoon(subs.get("sub_a1")) && endSoon(subs.get("sub_a2")));
   r = await call(server, { path: "/api/billing/status", token: tok(tester) });
   ok("ended: no second trial for this teacher", r.body.trialEligible === false);
+
+  // ── the admin's billing panel («Paket idarəetməsi») ──
+  r = await call(server, { path: "/api/billing/admin/teachers", token: tok(tester) });
+  ok("billing panel: a teacher cannot see it", r.status === 401 || r.status === 403, `status ${r.status}`);
+  r = await call(server, { path: "/api/billing/admin/teachers", token: tok(admin) });
+  const rowOf = (u) => r.body.rows?.find((x) => String(x._id) === String(u._id));
+  ok("billing panel: an admin sees every teacher who touched card billing", r.status === 200 && !!rowOf(tester) && !!rowOf(twoTabs) && !!rowOf(racer) && !rowOf(teacher));
+  ok("billing panel: who opened the card page and stopped (plan, how often)", rowOf(twoTabs).stage === "opened" && rowOf(twoTabs).checkout.opens === 2 && rowOf(twoTabs).checkout.plan === "premium");
+  ok("billing panel: who is on the trial, and until when", rowOf(racer).stage === "trial" && near(rowOf(racer).trialEndsAt, (NOW + 7 * DAY) * 1000));
+  ok("billing panel: an ended subscription, with its card and trial start", rowOf(tester).stage === "ended" && rowOf(tester).card?.last4 === "0005" && !!rowOf(tester).trialStartedAt);
+  ok("billing panel: the card carries no Stripe id, nothing chargeable", rowOf(tester).card && !("id" in rowOf(tester).card) && !JSON.stringify(r.body).includes("pm_good"));
+  ok("billing panel: counts by stage", r.body.counts?.opened >= 1 && r.body.counts?.trial >= 1 && r.body.counts?.ended >= 1);
 
   // ── what must NOT change a plan ──
   sub("sub_m", manual._id, { status: "incomplete_expired", customer: "cus_m" });

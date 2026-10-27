@@ -15,8 +15,19 @@ const User = require("../models/userModel");
 
 const DIR = () => process.env.RECORDINGS_DIR || path.join(process.cwd(), "recordings");
 const RID = /^[a-f0-9]{24}$/;
-const KEEP_DAYS = 30;
+const KEEP_DAYS = Math.max(1, Number(process.env.RECORDINGS_KEEP_DAYS) || 30);
+// Since every visitor is recorded (2026-10-27), the volume has a ceiling: past
+// it no new visit is kept, and the sweep removes the oldest until it is back
+// under 80% of it. The server disk had ~8 GB free when this was set.
+const MAX_BYTES = () => Math.max(100, Number(process.env.RECORDINGS_MAX_MB) || 4000) * 1024 * 1024;
 const MAX_UNPACKED = 200 * 1024 * 1024; // a recording larger than this is cut off when read
+
+/*
+ * The accounts whose visits are kept: teachers. Students and parents are not
+ * recorded (the privacy page promises it for children); SESSION_RECORDING_STUDENTS=on
+ * adds them. Admins never are. A visitor who has not signed in is.
+ */
+const RECORDED_ROLES = () => (process.env.SESSION_RECORDING_STUDENTS === "on" ? ["teacher", "student", "parent"] : ["teacher"]);
 
 const newId = () => crypto.randomBytes(12).toString("hex");
 const isId = (rid) => RID.test(String(rid || ""));
@@ -125,23 +136,48 @@ async function removeRecording(rid) {
   await SessionRecording.deleteOne({ _id: rid });
 }
 
+// The bytes all recordings hold, as their index counts them (re-read at most
+// once a minute: every visit start asks).
+let usedCache = { at: 0, bytes: 0 };
+async function usedBytes(now = Date.now()) {
+  if (now - usedCache.at < 60000) return usedCache.bytes;
+  const [row] = await SessionRecording.aggregate([{ $group: { _id: null, bytes: { $sum: "$bytes" } } }]);
+  usedCache = { at: now, bytes: row?.bytes || 0 };
+  return usedCache.bytes;
+}
+const isFull = async () => (await usedBytes()) >= MAX_BYTES();
+
 /*
- * Keep it temporary: drop recordings older than KEEP_DAYS, recordings whose
- * account did not end up a teacher (a visitor who registered as a student or
- * parent), and folders nothing points to.
+ * Keep it temporary: drop recordings older than KEEP_DAYS, the oldest ones while
+ * the volume is past its ceiling, recordings whose account ended up a student or
+ * parent (a fresh account is a "student" until its role is picked, so it gets
+ * three hours), and folders nothing points to. A visitor who never signed in
+ * (user null) is kept like anyone else.
  */
 async function sweep(now = Date.now()) {
   const cutoff = new Date(now - KEEP_DAYS * 86400000);
   const old = await SessionRecording.find({ startedAt: { $lt: cutoff } }).select("_id").lean();
   for (const r of old) await removeRecording(r._id);
 
+  usedCache.at = 0;
+  if ((await usedBytes(now)) > MAX_BYTES()) {
+    let over = usedCache.bytes - MAX_BYTES() * 0.8;
+    const oldest = SessionRecording.find({}).sort({ startedAt: 1 }).select("_id bytes").lean().cursor();
+    for await (const r of oldest) {
+      if (over <= 0) break;
+      await removeRecording(r._id);
+      over -= r.bytes || 0;
+    }
+    usedCache.at = 0;
+  }
+
   const settled = new Date(now - 3 * 3600000); // give a fresh sign-up time to pick their role
-  const recent = await SessionRecording.find({ startedAt: { $lt: settled } }).select("_id user").lean();
+  const recent = await SessionRecording.find({ startedAt: { $lt: settled }, user: { $ne: null } }).select("_id user").lean();
   if (recent.length) {
-    const teachers = new Set(
-      (await User.find({ _id: { $in: [...new Set(recent.map((r) => String(r.user)))] }, role: "teacher" }).select("_id").lean()).map((u) => String(u._id))
+    const kept = new Set(
+      (await User.find({ _id: { $in: [...new Set(recent.map((r) => String(r.user)))] }, role: { $in: RECORDED_ROLES() } }).select("_id").lean()).map((u) => String(u._id))
     );
-    for (const r of recent) if (!teachers.has(String(r.user))) await removeRecording(r._id);
+    for (const r of recent) if (!kept.has(String(r.user))) await removeRecording(r._id);
   }
 
   let names = [];
@@ -170,4 +206,4 @@ function maybeSweep() {
   sweep().catch(() => {});
 }
 
-module.exports = { newId, isId, issueToken, checkToken, writeChunk, readEvents, readEventsAfter, removeRecording, sweep, maybeSweep, KEEP_DAYS };
+module.exports = { newId, isId, issueToken, checkToken, writeChunk, readEvents, readEventsAfter, removeRecording, sweep, maybeSweep, isFull, usedBytes, RECORDED_ROLES, KEEP_DAYS };

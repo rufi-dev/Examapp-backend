@@ -349,6 +349,30 @@ const userSchema = Schema(
         stripeUpgradeCreditKey: { type: String, default: null, select: false },
         stripeRiskStatus: { type: String, default: null, select: false },
         stripeLastRiskEventAt: { type: Date, default: null, select: false },
+        // When the teacher last opened Stripe's card page for a plan (and how
+        // often), so the admin sees who started and stopped before adding a card.
+        stripeCheckoutOpenedAt: { type: Date, default: null, select: false },
+        stripeCheckoutPlan: { type: String, default: null, select: false },
+        stripeCheckoutOpens: { type: Number, default: 0, select: false },
+        // The card the subscription is charged to, as the admin may see it: brand,
+        // last four digits, expiry, issuing country, debit/credit, wallet. Never
+        // the number or the CVC (Stripe keeps those; we never receive them).
+        stripeCard: {
+          type: {
+            _id: false,
+            id: String,
+            brand: String,
+            last4: String,
+            expMonth: Number,
+            expYear: Number,
+            country: String,
+            funding: String,
+            wallet: String,
+            addedAt: Date,
+          },
+          default: null,
+          select: false,
+        },
         // Set when an admin downgrades a PAID teacher back to free, so they stay
         // visible in a "downgraded" panel (not silently gone from the list).
         // Cleared when they upgrade to a paid plan again.
