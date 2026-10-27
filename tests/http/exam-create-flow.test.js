@@ -242,6 +242,50 @@ async function main() {
   const secondId = (await read(second))?.data?._id;
   ok("a new attempt still makes a new exam", !!secondId && String(secondId) !== String(examId));
 
+  /*
+   * The exam allowance, through the builder's real calls. Exams stopped being
+   * created provisional on 2026-09-25 and the allowance was spent only when a
+   * provisional one became real, so a free-start teacher could make exam after
+   * exam (found 2026-10-27). The free start's ONE exam must hold.
+   */
+  console.log("\nthe free start's one exam, made in the builder:");
+  process.env.TEACHER_PAYWALL = "on";
+  const { starterFields } = require("../../helper/teacherAccess");
+  const starter = await User.create({
+    name: "S", email: "s@create.test", password: "xxxxxxxxxxxx", role: "teacher", teacherApproval: "approved", isVerified: true, ...starterFields(),
+  });
+  const sCls = await Class.create({ name: "5-B", owner: starter._id });
+  const sAuth = { Authorization: `Bearer ${generateToken(starter._id, starter.sessionVersion)}` };
+  const sPost = (extra) => fetch(`${base}/addExam/${sCls._id}`, { method: "POST", headers: sAuth, body: form(extra) });
+  const sSave = (id) =>
+    fetch(`${base}/addQuestion/${id}`, {
+      method: "POST",
+      headers: { ...sAuth, "Content-Type": "application/json" },
+      body: JSON.stringify({ correctAnswers: [QUESTION], questionsPerPage: 1, forwardOnly: false, typePoints: null, listeningAudio: "", aiPrompt: "", deferPublish: true }),
+    });
+  const left = async () => (await User.findById(starter._id).select("examCreatesLeft").lean()).examCreatesLeft;
+  ok("a free-start teacher has one exam to make", (await left()) === 1);
+  const s1 = await sPost({ clientMutationId: `${KEY}-s1` });
+  const s1Id = (await read(s1))?.data?._id;
+  ok("…creating it is allowed", s1.status === 201 && !!s1Id, `got ${s1.status}`);
+  ok("…the empty exam spends nothing yet", (await left()) === 1);
+  const q1 = await sSave(s1Id);
+  ok("…its first question spends the free start's one exam", (q1.status === 200 || q1.status === 201) && (await left()) === 0, `left ${await left()}`);
+  const s1Row = await Exam.findById(s1Id).lean();
+  ok("…the exam is fine (not blocked) and marked as spent", s1Row.allowanceSpent === true && !s1Row.blockedByPlan);
+  await sSave(s1Id);
+  ok("saving its questions again spends nothing more", (await left()) === 0 && !(await Exam.findById(s1Id).lean()).blockedByPlan);
+  const s2 = await sPost({ clientMutationId: `${KEY}-s2`, name: "İkinci" });
+  const s2Body = await read(s2);
+  ok("a second exam is refused with the plan-limit 402 (the app shows the wall)", s2.status === 402 && /plan_limit|limit/i.test(JSON.stringify(s2Body)), `got ${s2.status} ${JSON.stringify(s2Body).slice(0, 120)}`);
+  ok("…and no second exam was written", (await Exam.countDocuments({ owner: starter._id, deletedAt: null })) === 1);
+  // An exam from before the fix (marked by the migration) costs nothing to edit.
+  await User.updateOne({ _id: starter._id }, { $set: { examCreatesLeft: 1 } });
+  await Exam.updateOne({ _id: s1Id }, { $set: { allowanceSpent: true } });
+  await sSave(s1Id);
+  ok("editing an exam already counted never spends an allowance", (await left()) === 1);
+  delete process.env.TEACHER_PAYWALL;
+
   await new Promise((r) => server.close(r));
   await mongoose.disconnect();
   await mem.stop();

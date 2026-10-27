@@ -71,14 +71,23 @@ ok("and clears both fields", /provisional: false/.test(ctl) && /provisionalSince
 
 console.log("\n3. The allowance is spent on exams that exist:");
 ok("create only checks", /await assertExamCreate\(req\.user\);/.test(ctl));
-ok("the first saved question spends", /if \(becomesReal\) \{[\s\S]{0,120}consumeExamCreate\(req\.user, session\)/.test(ctl));
+/*
+ * Spent on the first saved question of EVERY exam, not only one that was
+ * provisional: exams stopped being created provisional, and tying the spend to
+ * `becomesReal` meant no builder exam spent anything (2026-09-25 → 2026-10-27,
+ * the free start's one exam was no limit). Once per exam, by its own flag.
+ */
+ok("the first saved question spends, whatever the exam was created as",
+  /if \(correctAnswers\.length > 0\) await spendExamAllowance\(req\.user, exam\._id, session\);/.test(ctl));
+ok("...once per exam (the allowanceSpent flag is claimed before spending)",
+  /allowanceSpent: \{ \$ne: true \} \}, \{ \$set: \{ allowanceSpent: true \} \}/.test(ctl) && /await consumeExamCreate\(user, session\);/.test(ctl));
 /*
  * An exhausted allowance must not throw away a paper that is already written.
  * blockedByPlan already means "visible to its owner with a badge, invisible to
  * students", which is exactly the right answer here.
  */
 ok("and an exhausted allowance blocks rather than discards",
-  /blockedByPlan: true/.test(ctl) && /allowance exhausted at first save/.test(ctl));
+  /blockedByPlan: true/.test(ctl) && /exam allowance exhausted/.test(ctl));
 
 console.log("\n4. Listed everywhere its owner looks:");
 /*

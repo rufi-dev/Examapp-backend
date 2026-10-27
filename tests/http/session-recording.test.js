@@ -87,6 +87,12 @@ async function main() {
   ok("so is a teacher of 40 days (the 14-day limit is gone)", vet.status === 201 && store.isId(vetRec.rid), `status ${vet.status}`);
   await store.removeRecording(vetRec.rid);
   ok("a student is not", (await start(pupil)).status === 204);
+  const newPupil = await mk({ name: "Yeni şagird", email: "ns@rec.test", role: "student", grade: "7", onboarded: true });
+  ok("nor a student who signed up a minute ago on the form (role chosen)", (await start(newPupil)).status === 204);
+  const googleNew = await mk({ name: "Google", email: "g@rec.test", role: "student", onboarded: false });
+  const gStart = await start(googleNew);
+  ok("a Google sign-up still picking its role is (it may be a teacher)", gStart.status === 201);
+  await store.removeRecording((await gStart.json()).rid);
   ok("an admin is not", (await start(admin)).status === 204);
 
   ok("nobody signed out can start one", (await fetch(`${base}/start`, { method: "POST" })).status === 401);

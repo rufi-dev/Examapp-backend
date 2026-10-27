@@ -26,9 +26,10 @@ const MAX_RECORDING_BYTES = 150 * 1024 * 1024;
 const eligible = (user, now = Date.now()) => {
   if (!user || user.role === "admin" || user.role === "parent") return false;
   if (user.role === "teacher") return true;
-  // A fresh account is a "student" until its role is picked (a Google sign-up),
-  // so it is kept for now; the sweep removes it if it stays a student.
-  return now - new Date(user.createdAt || 0).getTime() <= 2 * 3600000;
+  // A Google sign-up is a "student" until it picks its role (onboarded false),
+  // so a fresh one is kept for now; the sweep removes it if it stays a student.
+  // A student who chose "student" on the form (onboarded) is never recorded.
+  return !user.onboarded && now - new Date(user.createdAt || 0).getTime() <= 2 * 3600000;
 };
 
 // The visitor tracker's id for this visit: where the teacher came from.

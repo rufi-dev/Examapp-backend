@@ -143,6 +143,10 @@ const examSchema = Schema({
      * abandoned drafts can never reach the historical ones.
      */
     provisional: { type: Boolean, default: undefined, index: true },
+    // The plan's exam allowance was spent for this exam (its first question, or
+    // made as a copy). Set once, so later saves never spend again; every exam
+    // that existed on 2026-10-27 was marked by that day's exam-allowance migration.
+    allowanceSpent: { type: Boolean, default: undefined },
     provisionalSince: { type: Date, default: undefined },
     // Who archived it (audit trail for accidental/disputed deletions).
     deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },

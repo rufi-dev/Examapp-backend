@@ -2017,22 +2017,16 @@ const addQuestion = asyncHandler(async (req, res) => {
     }
     /*
      * The allowance is spent here rather than at create, because THIS is the
-     * creation as far as the teacher and the plan are concerned. It cannot throw
-     * the work away: an exhausted allowance marks the exam blocked-by-plan —
-     * visible to its owner with a badge, invisible to students, exactly as an
-     * over-limit exam already behaves — instead of refusing a paper that is
-     * already written.
+     * creation as far as the teacher and the plan are concerned: the first save
+     * that puts a question in, once per exam (spendExamAllowance). It used to
+     * be spent only when a PROVISIONAL exam became real, and exams stopped
+     * being created provisional on 2026-09-25 — so from then until 2026-10-27
+     * no exam made in the builder spent anything, and the free start's one exam
+     * was not a limit at all. It cannot throw the work away: an exhausted
+     * allowance marks the exam blocked-by-plan — visible to its owner with a
+     * badge, invisible to students — instead of refusing a paper already written.
      */
-    if (becomesReal) {
-      if (shouldPromote) {
-        try {
-          await consumeExamCreate(req.user, session);
-        } catch (e) {
-          console.error("[EXAM] allowance exhausted at first save:", exam._id, e?.message);
-          await Exam.updateOne({ _id: exam._id }, { $set: { blockedByPlan: true } }, writeOpts);
-        }
-      }
-    }
+    if (correctAnswers.length > 0) await spendExamAllowance(req.user, exam._id, session);
     return question;
   });
 
@@ -5052,10 +5046,9 @@ const editExam = asyncHandler(async (req, res) => {
       }
       if (examExists.provisional) {
         await Exam.updateOne({ _id: examId }, { $set: { provisional: false }, $unset: { provisionalSince: "" } });
-        try { await consumeExamCreate(req.user); } catch (e) {
-          await Exam.updateOne({ _id: examId }, { $set: { blockedByPlan: true } });
-        }
       }
+      // Once per exam: a no-op when its first question already spent it.
+      await spendExamAllowance(req.user, examId);
       pub = await republishExam(examId);
     } else if (examExists.activeVersionId && !examExists.provisional) {
       /*
@@ -5683,6 +5676,9 @@ const COPY_STRIP = [
    * hide a finished variant from every list. Stripped rather than trusted.
    */
   "provisional", "provisionalSince",
+  // A copy is an exam of its own: it spends its own allowance (spendCopyAllowance),
+  // never inheriting the source's "already spent", and starts unblocked.
+  "allowanceSpent", "blockedByPlan",
 ];
 
 /*
@@ -5736,14 +5732,29 @@ async function loadOwnedExam(req) {
   return exam;
 }
 
-// A copy or a B variant is spent like a first save: a lost race marks it
-// blocked-by-plan (visible to its owner, hidden from students) rather than failing.
-async function spendCopyAllowance(user, examId) {
+/*
+ * One of the plan's exam creations, spent ONCE per exam: when it first holds a
+ * question, or when it is made as a copy. The `allowanceSpent` flag is claimed
+ * first, so a second save, a publish after the save, or a retry spends nothing
+ * more. An exhausted allowance (a lost race with assertExamCreate) marks the
+ * exam blocked-by-plan — visible to its owner, hidden from students — rather
+ * than failing a paper already written.
+ */
+async function spendExamAllowance(user, examId, session) {
+  const opts = session ? { session } : {};
+  const claimed = await Exam.updateOne({ _id: examId, allowanceSpent: { $ne: true } }, { $set: { allowanceSpent: true } }, opts);
+  if (claimed.modifiedCount !== 1) return;
   try {
-    await consumeExamCreate(user);
+    await consumeExamCreate(user, session);
   } catch (e) {
-    await Exam.updateOne({ _id: examId }, { $set: { blockedByPlan: true } });
+    console.error("[EXAM] exam allowance exhausted:", String(examId), e?.message);
+    await Exam.updateOne({ _id: examId }, { $set: { blockedByPlan: true } }, opts);
   }
+}
+
+// A copy or a B variant is spent like a first save.
+async function spendCopyAllowance(user, examId) {
+  await spendExamAllowance(user, examId);
 }
 
 const plainItems = (exam) =>
