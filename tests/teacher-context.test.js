@@ -77,18 +77,32 @@ const freeUsage = (o = {}) => ({
   line = await teacherContext("u");
   ok("paying: F, and no limits shown", /MƏRHƏLƏ: F/.test(line) && /sinif 6;/.test(line) && !/limit/.test(line.split("GÜMAN")[0].replace("limitə", "")), line);
 
-  console.log("\nbehind the card wall");
+  console.log("\nbehind the card wall: looking only (owner, 2026-10-28)");
   process.env.TEACHER_PAYWALL = "on";
   user = { _id: "u", role: "teacher", name: "Aysel", plan: "free", aiCredits: 60, starterUntil: new Date(Date.now() + 4.5 * day), createdAt: new Date(Date.now() - 2 * day), lastActiveAt: new Date() };
   usage = freeUsage({ classes: { used: 1, limit: 1 }, students: { used: 6, limit: 10 }, examCreates: { left: 0, limit: 1 } });
   examIds = ["e1"];
   results = 6;
   line = await teacherContext("u");
+  ok("no plan: can look, cannot work, students cannot start exams (yesterday's free start days count for nothing)", /planı yoxdur: platformaya baxa bilir, amma nəsə yarada, dəyişə bilmir və şagirdləri imtahana başlaya bilmir/.test(line) && !/pulsuz başlanğıc/.test(line), line);
+  ok("…stage E: offer the card trial (or re-subscribing)", /MƏRHƏLƏ: E \(planı yoxdur: baxa bilər, amma işləyə bilmir/.test(line) && /kartla 7 günlük pulsuz sınağı/.test(line), line);
+  const built = { usage, examIds, results };
+  usage = freeUsage({ classes: { used: 0, limit: 1 }, students: { used: 0, limit: 10 }, examCreates: { left: 0, limit: 1 } });
+  examIds = [];
+  results = 0;
+  line = await teacherContext("u");
+  ok("no plan and nothing built: stage A, the first step is the card trial", /MƏRHƏLƏ: A \(qeydiyyatdan keçib, hələ heç nə yaratmayıb və planı yoxdur/.test(line) && /kartla 7 günlük pulsuz sınağı/.test(line), line);
+  ({ usage, examIds, results } = built);
+
+  console.log("\nthe free start, when it is switched back on (STARTER_DAYS)");
+  process.env.STARTER_DAYS = "7";
+  line = await teacherContext("u");
   ok("in the free start: says so, with the days left (not «Pulsuz paket»)", /pulsuz başlanğıc \(5 gün qalıb\)/.test(line) && !/Pulsuz paket/.test(line), line);
   ok("…its one exam spent: near the limit, and the card trial is what to show", /MƏRHƏLƏ: E \(pulsuz başlanğıcda işləyir və limitə yaxındır: imtahan yaratmaq haqqı qalıb: 0\/1/.test(line) && /7 günlük pulsuz sınağın/.test(line), line);
   user = { ...user, starterUntil: new Date(Date.now() - day) };
   line = await teacherContext("u");
-  ok("free start over: walled, and the stage says to offer the trial", /abunəsi yoxdur \(platforma bağlıdır\)/.test(line) && /MƏRHƏLƏ: E \(abunəsi yoxdur/.test(line), line);
+  ok("free start over: no plan, and the stage says to offer the trial", /planı yoxdur: platformaya baxa bilir/.test(line) && /MƏRHƏLƏ: E \(planı yoxdur/.test(line), line);
+  delete process.env.STARTER_DAYS;
   delete process.env.TEACHER_PAYWALL;
 
   console.log("\nnever in the way");

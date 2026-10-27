@@ -19,8 +19,6 @@
  *    an admin are unchanged. The ONLY thing the flag adds is auto-granting
  *    own-scope to a not-yet-approved teacher.
  */
-const { paywallBlocks, PAYWALL_MESSAGE } = require("./teacherAccess");
-const { httpError } = require("../utils/appError");
 const asyncHandler = require("express-async-handler");
 const { isJourneyEnabled } = require("../config/teacherSuccess/flag");
 
@@ -97,8 +95,7 @@ function requireCapability(cap) {
   if (!isCapability(cap)) throw new Error(`requireCapability: unknown capability "${cap}"`);
   const mw = asyncHandler(async (req, res, next) => {
     if (hasCapability(req.user, cap, { journeyEnabled: isJourneyEnabled() })) {
-      // The card wall applies to every teacher capability (see helper/teacherAccess.js).
-      if (paywallBlocks(req)) throw httpError(402, "subscription_required", PAYWALL_MESSAGE, { reason: "subscription_required" });
+      // The card wall already ran in protect (helper/teacherAccess.js).
       return next();
     }
     if (req.user && req.user.role === "teacher") {

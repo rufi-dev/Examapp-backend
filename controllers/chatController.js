@@ -11,6 +11,7 @@ const typing = require("../helper/chatTyping");
 const ui = require("../helper/uiCatalog");
 const { VOICE_MAX_SEC, VOICE_PER_DAY, isVoiceUrl, voicePreview, hearVoice } = require("../helper/chatVoice");
 const actions = require("../helper/teacherActions");
+const { needsSubscription, PAYWALL_MESSAGE } = require("../helper/teacherAccess");
 
 // The card a reply carries (helper/teacherActions), as the client sees it.
 const actionView = (a) =>
@@ -554,6 +555,10 @@ const decideAction = asyncHandler(async (req, res) => {
     ).lean();
     return res.json({ action: actionView((done || msg).action) });
   }
+
+  // Running a card is doing something, so it asks for the card wall's plan
+  // (the chat itself stays open). The card stays pending for after they subscribe.
+  if (needsSubscription(req.user)) throw httpError(402, "subscription_required", PAYWALL_MESSAGE, { reason: "subscription_required" });
 
   const claimed = await Message.findOneAndUpdate(
     { _id: msg._id, "action.status": "pending" },

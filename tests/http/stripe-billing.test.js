@@ -230,8 +230,8 @@ async function main() {
   app.use("/api/billing", require("../../routes/stripeBillingRoute"));
   app.get("/api/plan/catalog", getCatalog);
   app.get("/api/users/getUser", protect, getUser);
-  app.get("/api/teach", protect, teacherOnly, (req, res) => res.json({ ok: true }));
-  app.get("/api/cap", protect, requireCapability("exam:manage:own"), (req, res) => res.json({ ok: true }));
+  app.all("/api/teach", protect, teacherOnly, (req, res) => res.json({ ok: true }));
+  app.all("/api/cap", protect, requireCapability("exam:manage:own"), (req, res) => res.json({ ok: true }));
   app.use(errorHandler);
   const server = http.createServer(app);
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -270,24 +270,26 @@ async function main() {
   delete process.env.STRIPE_BILLING_ENABLED;
 
   // ── the card wall (TEACHER_PAYWALL=on) ──
-  r = await call(server, { path: "/api/teach", token: tok(teacher) });
+  r = await call(server, { method: "POST", path: "/api/teach", token: tok(teacher) });
   ok("wall off: a teacher without a plan works as before", r.status === 200);
   process.env.TEACHER_PAYWALL = "on";
-  r = await call(server, { path: "/api/teach", token: tok(teacher) });
-  ok("wall: a teacher without a plan is stopped on teacher routes (402 subscription_required)", r.status === 402 && r.body.code === "subscription_required");
-  r = await call(server, { path: "/api/cap", token: tok(teacher) });
+  r = await call(server, { method: "POST", path: "/api/teach", token: tok(teacher) });
+  ok("wall: a teacher without a plan is stopped when doing something (402 subscription_required)", r.status === 402 && r.body.code === "subscription_required");
+  r = await call(server, { method: "POST", path: "/api/cap", token: tok(teacher) });
   ok("wall: …and on capability routes (AI, exams)", r.status === 402);
+  r = await call(server, { path: "/api/teach", token: tok(teacher) });
+  ok("wall: looking around stays open (reads pass, owner 2026-10-28)", r.status === 200);
   r = await call(server, { path: "/api/billing/status", token: tok(teacher) });
   ok("wall: subscribing itself stays open, and says the wall is up", r.status === 200 && r.body.paywall === true);
   r = await call(server, { path: "/api/users/getUser", token: tok(teacher) });
   ok("wall: the account data tells the app to show the wall", r.status === 200 && r.body.paywall === true);
-  r = await call(server, { path: "/api/teach", token: tok(manual) });
+  r = await call(server, { method: "POST", path: "/api/teach", token: tok(manual) });
   ok("wall: a plan the admin set gets through without paying", r.status === 200);
   r = await call(server, { path: "/api/users/getUser", token: tok(manual) });
   ok("wall: …and is not shown the wall", r.body.paywall === false);
-  r = await call(server, { path: "/api/teach", token: tok(lapsed) });
+  r = await call(server, { method: "POST", path: "/api/teach", token: tok(lapsed) });
   ok("wall: an admin plan that has ended is stopped", r.status === 402);
-  r = await call(server, { path: "/api/cap", token: tok(admin) });
+  r = await call(server, { method: "POST", path: "/api/cap", token: tok(admin) });
   ok("wall: admins are never stopped", r.status === 200);
   r = await call(server, { path: "/api/users/getUser", token: tok(student) });
   ok("wall: students are never walled", r.status === 200 && r.body.paywall === false);
@@ -444,7 +446,7 @@ async function main() {
   ok("past_due: status recorded, no new month's credits", u.stripeSubscriptionStatus === "past_due" && u.aiCredits === 350);
   ok("past_due: the plan stops where the unpaid period starts, no free days", near(u.planExpiresAt, NOW * 1000) && !hasPaidPlan(u));
   process.env.TEACHER_PAYWALL = "on";
-  r = await call(server, { path: "/api/teach", token: tok(tester) });
+  r = await call(server, { method: "POST", path: "/api/teach", token: tok(tester) });
   ok("past_due: the wall is up straight away (402)", r.status === 402 && r.body.code === "subscription_required");
   r = await call(server, { path: "/api/billing/status", token: tok(tester) });
   ok("past_due: the status tells the app why (wall + past_due)", r.body.paywall === true && r.body.subscriptionStatus === "past_due");
@@ -484,7 +486,7 @@ async function main() {
   ok("paid after failing: the plan opens again to the period end", u.plan === "pro" && u.stripeSubscriptionStatus === "active" && near(u.planExpiresAt, end2 * 1000 + GRACE));
   ok("paid after failing: the month's credits arrive then (reset, not added)", u.aiCredits === 350);
   ok("paid after failing: students the lapse waitlisted come back (roster reconciled)", reconciles === reconcilesBeforePay + 1);
-  r = await call(server, { path: "/api/teach", token: tok(tester) });
+  r = await call(server, { method: "POST", path: "/api/teach", token: tok(tester) });
   ok("paid after failing: the wall lifts", r.status === 200);
   await setCredits(tester, 77);
   const chargesBefore = payCalls.length;

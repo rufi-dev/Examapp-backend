@@ -250,6 +250,9 @@ async function main() {
    */
   console.log("\nthe free start's one exam, made in the builder:");
   process.env.TEACHER_PAYWALL = "on";
+  // The free start is off since 2026-10-28; the allowance it relied on still has
+  // to hold whenever it is switched back on.
+  process.env.STARTER_DAYS = "7";
   const { starterFields } = require("../../helper/teacherAccess");
   const starter = await User.create({
     name: "S", email: "s@create.test", password: "xxxxxxxxxxxx", role: "teacher", teacherApproval: "approved", isVerified: true, ...starterFields(),
@@ -285,6 +288,7 @@ async function main() {
   await sSave(s1Id);
   ok("editing an exam already counted never spends an allowance", (await left()) === 1);
   delete process.env.TEACHER_PAYWALL;
+  delete process.env.STARTER_DAYS;
 
   await new Promise((r) => server.close(r));
   await mongoose.disconnect();

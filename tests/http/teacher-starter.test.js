@@ -13,6 +13,9 @@ process.env.NODE_ENV = "test";
 process.env.JWT_SECRET = process.env.JWT_SECRET || "test-secret-starter";
 process.env.CRYPTR_KEY = process.env.CRYPTR_KEY || "test-cryptr-starter";
 process.env.TEACHER_PAYWALL = "on";
+// The free start is off since 2026-10-28 (teacher-look-only.test.js); this file
+// keeps the switch that turns it back on working.
+process.env.STARTER_DAYS = "7";
 
 const http = require("http");
 const path = require("path");
@@ -54,7 +57,7 @@ function buildServer() {
   app.use(express.json());
   app.use(cookieParser());
   app.use("/api/users", require("../../routes/userRoute"));
-  app.get("/probe/teacher", protect, teacherOnly, (req, res) => res.json({ ok: true }));
+  app.post("/probe/teacher", protect, teacherOnly, (req, res) => res.json({ ok: true }));
   app.use(errorHandler);
   return http.createServer(app);
 }
@@ -77,7 +80,7 @@ async function main() {
   ok("a new teacher gets the free start: 7 days", r.status === 201 && near(u.starterUntil, Date.now() + 7 * DAY));
   ok("…one exam, and the welcome credits for writing it with AI", u.examCreatesLeft === 1 && u.aiCredits === 60);
   ok("…and the app is told: no wall, and when the free start ends", r.body.paywall === false && near(r.body.starterUntil, Date.now() + 7 * DAY));
-  r = await request(server, { method: "GET", path: "/probe/teacher", token: tok(u) });
+  r = await request(server, { method: "POST", path: "/probe/teacher", token: tok(u) });
   ok("…so teacher routes are open to them", r.status === 200);
   r = await request(server, { method: "GET", path: "/api/users/getUser", token: tok(u) });
   ok("…and the account data says the same", r.status === 200 && r.body.paywall === false && !!r.body.starterUntil);
@@ -100,7 +103,7 @@ async function main() {
   // ── the days run out ──
   console.log("\nthe days run out");
   await User.updateOne({ _id: u._id }, { $set: { starterUntil: new Date(Date.now() - 1000) } });
-  r = await request(server, { method: "GET", path: "/probe/teacher", token: tok(u) });
+  r = await request(server, { method: "POST", path: "/probe/teacher", token: tok(u) });
   ok("after 7 days the wall is up on teacher routes", r.status === 402 && r.body.code === "subscription_required");
   r = await request(server, { method: "GET", path: "/api/users/getUser", token: tok(u) });
   ok("…and the account data tells the app to show it", r.body.paywall === true && !!r.body.starterUntil);
@@ -108,23 +111,23 @@ async function main() {
   // ── a teacher from before the free start ──
   console.log("\na teacher from before");
   const old = await User.create({ name: "Köhnə", email: "old@e.com", password: "passWord12", role: "teacher", teacherApproval: "approved", starterPending: true, aiCredits: 5, examCreatesLeft: 3 });
-  r = await request(server, { method: "GET", path: "/probe/teacher", token: tok(old) });
+  r = await request(server, { method: "POST", path: "/probe/teacher", token: tok(old) });
   let o = await User.findById(old._id).lean();
   ok("their next visit gets through", r.status === 200);
   ok("…and starts their 7 days from now", near(o.starterUntil, Date.now() + 7 * DAY) && o.starterPending === undefined);
   ok("…with one exam and at least the welcome credits", o.examCreatesLeft === 1 && o.aiCredits === 60);
   const rich = await User.create({ name: "Kreditli", email: "rich@e.com", password: "passWord12", role: "teacher", teacherApproval: "approved", starterPending: true, aiCredits: 200 });
-  await request(server, { method: "GET", path: "/probe/teacher", token: tok(rich) });
+  await request(server, { method: "POST", path: "/probe/teacher", token: tok(rich) });
   o = await User.findById(rich._id).lean();
   ok("credits they already had are kept, not cut to the welcome amount", o.aiCredits === 200 && !!o.starterUntil);
-  r = await request(server, { method: "GET", path: "/probe/teacher", token: tok(old) });
+  r = await request(server, { method: "POST", path: "/probe/teacher", token: tok(old) });
   o = await User.findById(old._id).lean();
   ok("a second visit does not restart the days", r.status === 200 && near(o.starterUntil, Date.now() + 7 * DAY) && o.examCreatesLeft === 1);
 
   // ── who the free start is not for ──
   console.log("\nnot for everyone");
   const lapsed = await User.create({ name: "Ödəmiş", email: "paid@e.com", password: "passWord12", role: "teacher", teacherApproval: "approved", plan: "pro", planExpiresAt: new Date(Date.now() - DAY) });
-  r = await request(server, { method: "GET", path: "/probe/teacher", token: tok(lapsed) });
+  r = await request(server, { method: "POST", path: "/probe/teacher", token: tok(lapsed) });
   ok("a teacher whose paid plan ended gets no free start: walled", r.status === 402);
   const payer = await User.create({ name: "Pro", email: "pro@e.com", password: "passWord12", role: "teacher", teacherApproval: "approved", plan: "pro", planExpiresAt: new Date(Date.now() + 20 * DAY), starterUntil: new Date(Date.now() + 3 * DAY) });
   ok("a paying teacher's exams stay unlimited even with a free start on record", (await PL.usageFor(payer)).examCreates.limit === null);

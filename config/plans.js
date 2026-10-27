@@ -96,17 +96,16 @@ const PLANS = {
 };
 
 /*
- * The free start (owner's decision, 2026-10-27). A teacher who never paid gets
- * STARTER.days to try Examopia for real: ONE exam, sent to their students, on the
- * free tier's limits (1 class, 10 students). Whichever comes first, the days
- * running out or reaching past a limit, ends with the card wall and its 7-day
- * card trial. Seeing their own exam taken by their own students is what
- * convinced the teachers who paid before (5 of the first 6), so the card is asked
- * for after that, not before it.
+ * The free start: STARTER.days with ONE exam on the free tier's limits, before
+ * the card is asked for. It ran 2026-10-27 only. OFF since 2026-10-28 (owner):
+ * a teacher without a card may look around every page, and the card (with its
+ * 7-day trial) is asked for the moment they do something. STARTER_DAYS > 0
+ * turns it back on, for teachers who already have their days as well. Read on
+ * every use, so the switch needs no code change.
  */
 const STARTER = {
-  days: num("STARTER_DAYS", 7),
-  exams: num("STARTER_EXAMS", 1),
+  get days() { return num("STARTER_DAYS", 0); },
+  get exams() { return num("STARTER_EXAMS", 1); },
 };
 
 // One-off credit top-ups (Phase 2 for enforcement; shown on the pricing page now).

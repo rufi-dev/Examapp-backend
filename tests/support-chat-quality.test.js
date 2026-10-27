@@ -101,8 +101,11 @@ ok("Premium price", P.includes(`Premium — ${premium.priceAzn} AZN/ay`));
 // 2026-10-27: teachers work only on a paid plan (card wall); the Free tier is no
 // longer offered, so the prompt must not describe it as an option.
 ok("no Free tier offered to teachers", !P.includes(`Pulsuz: ${free.limits.classes} sinif`) && /abunəsiz müəllim/i.test(P));
-// 2026-10-27: before the card, a 7-day free start with one exam on the free tier's limits.
-ok("the free start: 7 days, no card, one exam, the free tier's students and class", /7 günlük PULSUZ BAŞLANĞIC \(kartsız\)/.test(P) && /1 imtahan/.test(P) && P.includes(`${free.limits.students}-a qədər şagird`) && /ikinci imtahan, 11-ci şagird, ikinci sinif/.test(P));
+// 2026-10-28: no free start any more. Looking around is free; doing something asks
+// for the card (its 7-day trial); students sit exams only while the teacher has a plan.
+ok("looking around is free, doing something asks for the card", /BAXMAQ PULSUZDUR \(kartsız\)/.test(P) && /Nəsə ETMƏK istəyəndə/.test(P) && /lövhəni açmaq/.test(P) && /«Geri qayıt»/.test(P));
+ok("the free start is gone and must not be promised", /pulsuz başlanğıc» artıq YOXDUR, vəd etmə/.test(P) && !/PULSUZ BAŞLANĞIC/.test(P) && !/kartsız bir imtahan/.test(P));
+ok("students sit exams only while the teacher has a plan", /imtahanı YALNIZ müəllimin planı aktiv olanda/.test(P) && /başlamış imtahanı isə bitirə bilər/.test(P));
 ok("the 7-day trial: once, card on file, nothing charged if cancelled", /7 günlük pulsuz sınaq/.test(P) && /bir dəfə/.test(P) && /heç nə ödəmir/.test(P));
 ok("Pro limits", P.includes(`${pro.limits.classes} sinif, ${pro.limits.students} şagird, limitsiz imtahan, ${pro.limits.assignments} tapşırıq, ${pro.limits.storageMb / 1024} GB yer, hər ay ${pro.credits.monthly} AI krediti`));
 ok("Premium storage and credits", P.includes(`${premium.limits.storageMb / 1024} GB yer, hər ay ${premium.credits.monthly} AI krediti`));

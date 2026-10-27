@@ -125,7 +125,6 @@ const protect = asyncHandler(async (req, res, next) => {
     if (user.starterPending) await beginPendingStarter(user);
 
     req.user = user;
-    next();
   } catch (error) {
     if (res.statusCode === 200) {
       res.status(401);
@@ -133,6 +132,11 @@ const protect = asyncHandler(async (req, res, next) => {
     }
     throw error;
   }
+  // The card wall (helper/teacherAccess.js), here so it covers every signed-in
+  // route, not only the teacher ones. Outside the try: the catch above would
+  // turn its 402 into a 401, which signs the teacher out.
+  if (paywallBlocks(req)) throw httpError(402, "subscription_required", PAYWALL_MESSAGE, { reason: "subscription_required" });
+  next();
 });
 
 const adminOnly = asyncHandler(async (req, res, next) => {
@@ -170,8 +174,7 @@ const parentOnly = asyncHandler(async (req, res, next) => {
 
 const teacherOnly = asyncHandler(async (req, res, next) => {
   if (hasTeacherCapability(req.user)) {
-    // The card wall: a teacher without a paid plan may only reach /api/billing.
-    if (paywallBlocks(req)) throw httpError(402, "subscription_required", PAYWALL_MESSAGE, { reason: "subscription_required" });
+    // The card wall already ran in protect.
     next();
   } else if (req.user && req.user.role === "teacher") {
     // Authenticated as a teacher TYPE but the capability is not yet granted

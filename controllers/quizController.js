@@ -18,6 +18,7 @@ const { publishExam, resolveActiveVersionForStart, verifyIntegrity, VersionInteg
 const { computePointsPlan } = require("../helper/scoring");
 const { attemptTiming, timingForResults } = require("../helper/attemptTiming");
 const { assertUnderClassCap, assertExamCreate, consumeExamCreate } = require("../helper/planLimits");
+const { paywallOn, needsSubscription, OWNER_WALLED_MESSAGE } = require("../helper/teacherAccess");
 const mongoose = require("mongoose");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
@@ -2373,6 +2374,12 @@ const startAttempt = asyncHandler(async (req, res) => {
   // A legally-started attempt already resumed/finalized above regardless of these,
   // so archival / hidden / ownership changes never strand an in-flight student.
   const isStaff = isStaffUser(user);
+  // The teacher's plan (helper/teacherAccess.js): no new start while the exam's
+  // teacher has none. An attempt already under way finished or resumed above.
+  if (paywallOn() && exam.owner && !isAdminUser(user)) {
+    const owner = await User.findById(exam.owner).select("role plan planExpiresAt starterUntil starterPending").lean();
+    if (needsSubscription(owner)) return res.status(403).json({ reason: "teacher_plan", message: OWNER_WALLED_MESSAGE });
+  }
   // Archived (trashed) exams can't be freshly started.
   if (exam.deletedAt) return res.status(403).json({ reason: "finished" });
   // Hidden (draft) exams are not accessible to students.

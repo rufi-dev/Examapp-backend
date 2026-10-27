@@ -8,7 +8,8 @@
  * Stages (the prompt's MÜƏLLİMİN MƏRHƏLƏSİ):
  *   A registered, nothing built yet
  *   B started and stalled (a class but no exam, or exams no student took)
- *   E working on the free start (and whether a limit is near), or walled
+ *   E no plan (can look around, cannot work), or on the free start (and
+ *     whether a limit is near); a teacher with no plan and nothing built is A
  *   F on a paid plan
  * C and D (sees no need / finds it too dear) can only be heard in the talk.
  */
@@ -20,7 +21,10 @@ const firstName = (name) => String(name || "").trim().split(/\s+/)[0] || "";
 
 function stageOf({ paid, walled, starter, classes, exams, students, taken, nearLimit }) {
   if (paid) return "F (ödənişli paketdədir: satışa sıxma, razılığını soruş, istifadə etmədiyi faydalı imkanı göstər)";
-  if (walled) return "E (abunəsi yoxdur, platforma bağlıdır: heç vaxt ödəməyibsə «Planım»dan 7 günlük pulsuz sınağı, əvvəl ödəyibsə yenidən abunəni nəzakətlə tövsiyə et)";
+  // Without a plan a teacher can look around but not work (helper/teacherAccess.js).
+  const subscribe = "heç vaxt ödəməyibsə «Planım»dan kartla 7 günlük pulsuz sınağı, əvvəl ödəyibsə yenidən abunəni";
+  if (walled && !classes && !exams) return `A (qeydiyyatdan keçib, hələ heç nə yaratmayıb və planı yoxdur: platformaya baxa bilər; işləməyə başlamaq üçün ${subscribe} tövsiyə et, sonra ilk addım sinif və ilk imtahandır)`;
+  if (walled) return `E (planı yoxdur: baxa bilər, amma işləyə bilmir və şagirdləri imtahana başlaya bilmir; ${subscribe} nəzakətlə tövsiyə et)`;
   if (!classes && !exams) return "A (qeydiyyatdan keçib, hələ heç nə yaratmayıb: məqsəd ilk addımı atdırmaq)";
   if (!exams || !students || !taken) return "B (başlayıb, amma yarımçıq qalıb: dəqiq harada ilişdiyini tap və həll et)";
   const where = starter ? "pulsuz başlanğıcda" : "pulsuz paketdə";
@@ -43,7 +47,7 @@ async function teacherContext(userId) {
     const Exam = require("../models/examModel");
     const Result = require("../models/resultModel");
     const plan = effectivePlan(u);
-    // Behind the card wall there is no free plan: either the free start, or nothing.
+    // Behind the card wall there is no free plan: a plan, the free start (when on), or looking only.
     const { paywallOn, needsSubscription, inStarter } = require("./teacherAccess");
     const walled = needsSubscription(u);
     const starter = !walled && paywallOn() && plan === "free" && inStarter(u);
@@ -66,8 +70,8 @@ async function teacherContext(userId) {
       fn ? `adı ${fn}` : "",
       walled
         ? u.stripeSubscriptionStatus === "past_due"
-          ? "aylıq ödəniş kartdan alınmayıb, paket dayanıb («Planım» → «Ödənişi tamamla»)"
-          : "abunəsi yoxdur (platforma bağlıdır)"
+          ? "aylıq ödəniş kartdan alınmayıb, paket dayanıb: baxa bilir, amma işləyə bilmir və şagirdləri imtahana başlaya bilmir («Planım» → «Ödənişi tamamla»)"
+          : "planı yoxdur: platformaya baxa bilir, amma nəsə yarada, dəyişə bilmir və şagirdləri imtahana başlaya bilmir"
         : starter
           ? `pulsuz başlanğıc${daysLeft ? ` (${daysLeft} gün qalıb)` : ""}`
           : `${PLAN_NAMES[plan] || plan} paket${usage.expired ? " (ödənişli paketin vaxtı bitib)" : ""}`,

@@ -33,8 +33,9 @@ const getCatalog = asyncHandler(async (req, res) => {
     // The card wall is up: teachers work only on a paid plan, so the Free tier is
     // not offered on the pricing page or in the plan comparison.
     teacherPaywall: paywallOn(),
-    // What a new teacher gets before the wall (only meaningful while it is up).
-    starter: paywallOn()
+    // What a new teacher gets before the wall: only while the wall is up and the
+    // free start is on (it is off since 2026-10-28: looking around is free instead).
+    starter: paywallOn() && STARTER.days > 0
       ? { days: STARTER.days, exams: STARTER.exams, classes: PLANS.free.limits.classes, students: PLANS.free.limits.students }
       : null,
   });
