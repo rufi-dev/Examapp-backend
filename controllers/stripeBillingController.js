@@ -163,6 +163,33 @@ async function addonState(customerId) {
   return state;
 }
 
+// The customer's live plan subscription as Stripe sees it (add-ons aside). A
+// failed lookup answers "none": the database check before it still stands, and
+// a Stripe hiccup must not block a teacher from paying.
+async function liveMainSubscription(customerId) {
+  try {
+    const subs = await stripeClient().subscriptions.list({ customer: customerId, status: "all", limit: 100 });
+    return (subs.data || []).find((sub) => !isAddon(sub) && LIVE_STATUSES.has(sub.status)) || null;
+  } catch (error) {
+    console.warn("[stripe] subscription lookup failed:", error.message);
+    return null;
+  }
+}
+
+// A Checkout page left open in another tab could still start a second plan, so
+// a new one closes the old ones first.
+async function expireOpenCheckouts(customerId) {
+  try {
+    const open = await stripeClient().checkout.sessions.list({ customer: customerId, status: "open", limit: 20 });
+    for (const session of open.data || []) {
+      if (session.mode !== "subscription") continue;
+      await stripeClient().checkout.sessions.expire(session.id).catch((error) => console.warn("[stripe] expire checkout failed:", error.message));
+    }
+  } catch (error) {
+    console.warn("[stripe] open checkout lookup failed:", error.message);
+  }
+}
+
 async function saveAddonState(userId, state) {
   await User.updateOne(
     { _id: userId },
@@ -512,8 +539,18 @@ const createCheckout = asyncHandler(async (req, res) => {
     res.status(409);
     throw new Error("Artıq kartla abunəliyin var. Paketi «Abunəliyi idarə et» bölməsindən dəyiş.");
   }
-  const trial = trialEligible(user) ? trialDays() : 0;
   const customer = await customerFor(user);
+  // Our record can be a few seconds behind Stripe: a teacher back from Checkout
+  // before the webhook landed still looks unsubscribed here. Ask Stripe, so one
+  // teacher never ends up with two plans (and two charges).
+  const existing = await liveMainSubscription(customer.id);
+  if (existing) {
+    await syncSubscription(existing).catch((error) => console.warn("[stripe] checkout pre-sync failed:", error.message));
+    res.status(409);
+    throw new Error("Abunəliyin artıq qeydə alınıb. Bir neçə saniyəyə paketin aktiv olacaq.");
+  }
+  await expireOpenCheckouts(customer.id);
+  const trial = trialEligible(user) ? trialDays() : 0;
   const suffix = Math.random().toString(36).slice(2, 10);
   const metadata = { examopia_user_id: String(user._id), target_plan: targetPlan };
   const session = await stripeClient().checkout.sessions.create({

@@ -59,13 +59,30 @@ const subs = new Map();
 const sessions = [];
 const portals = [];
 const updates = [];
+const checkoutState = new Map();
+const expired = [];
 const fake = {
   webhooks: signer,
   customers: {
     retrieve: async (id) => ({ id }),
     create: async () => ({ id: `cus_${sessions.length + 1}_${Math.random().toString(36).slice(2, 6)}` }),
   },
-  checkout: { sessions: { create: async (p) => { sessions.push(p); return { id: `cs_${sessions.length}`, url: `https://checkout.stripe.test/${sessions.length}` }; } } },
+  checkout: {
+    sessions: {
+      create: async (p) => {
+        sessions.push(p);
+        const id = `cs_${sessions.length}`;
+        checkoutState.set(id, { id, customer: p.customer, mode: p.mode, status: "open" });
+        return { id, url: `https://checkout.stripe.test/${sessions.length}` };
+      },
+      list: async ({ customer, status }) => ({ data: [...checkoutState.values()].filter((c) => c.customer === customer && c.status === status) }),
+      expire: async (id) => {
+        expired.push(id);
+        checkoutState.get(id).status = "expired";
+        return checkoutState.get(id);
+      },
+    },
+  },
   billingPortal: { sessions: { create: async (p) => { portals.push(p); return { url: "https://billing.stripe.test/p" }; } } },
   subscriptions: {
     retrieve: async (id) => {
@@ -240,6 +257,23 @@ async function main() {
   ok("Checkout: no payment_method_types pinned (dynamic methods)", !("payment_method_types" in s1));
   r = await call(server, { method: "POST", path: "/api/billing/checkout", token: tok(manual), body: { plan: "premium" } });
   ok("Checkout: a teacher already on a paid plan (by transfer) pays now, no trial", r.status === 200 && r.body.trialDays === 0 && !("trial_period_days" in sessions[sessions.length - 1].subscription_data) && !sessions[sessions.length - 1].custom_text);
+
+  // ── Stripe is a step ahead of our record: never a second plan ──
+  process.env.STRIPE_BILLING_ENABLED = "true";
+  const twoTabs = await mk({ name: "Tabs", email: "tabs@e.com", stripeCustomerId: "cus_tabs" });
+  r = await call(server, { method: "POST", path: "/api/billing/checkout", token: tok(twoTabs), body: { plan: "pro" } });
+  const firstTab = `cs_${sessions.length}`;
+  r = await call(server, { method: "POST", path: "/api/billing/checkout", token: tok(twoTabs), body: { plan: "premium" } });
+  ok("Checkout: a page still open from an earlier click is closed before a new one opens", r.status === 200 && expired.includes(firstTab) && checkoutState.get(`cs_${sessions.length}`).status === "open");
+  const racer = await mk({ name: "Racer", email: "racer@e.com", stripeCustomerId: "cus_race" });
+  sub("sub_race", racer._id, { status: "trialing", customer: "cus_race", trialEnd: NOW + 7 * DAY, end: NOW + 7 * DAY });
+  const before = sessions.length;
+  r = await call(server, { method: "POST", path: "/api/billing/checkout", token: tok(racer), body: { plan: "pro" } });
+  let raced = await fresh(racer);
+  ok("Checkout: Stripe already has their plan (webhook not here yet) → 409, no second Checkout", r.status === 409 && sessions.length === before);
+  ok("Checkout: …and the account is brought up to date from Stripe right then", raced.plan === "pro" && raced.stripeSubscriptionId === "sub_race" && raced.stripeSubscriptionStatus === "trialing");
+  delete process.env.STRIPE_BILLING_ENABLED;
+  reconciles = 0; // the racer's sync reconciled its roster; the checks below count from here
 
   // ── webhook signatures ──
   r = await call(server, { method: "POST", path: "/api/billing/stripe/webhook", raw: JSON.stringify(ev("invoice.paid", {})) });
