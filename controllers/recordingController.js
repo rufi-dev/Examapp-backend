@@ -1,4 +1,3 @@
-const crypto = require("crypto");
 const asyncHandler = require("express-async-handler");
 const SessionRecording = require("../models/sessionRecordingModel");
 const VisitorSession = require("../models/visitorSessionModel");
@@ -6,56 +5,41 @@ const store = require("../services/recordingStore");
 const { stuckStateForOwners } = require("../helper/stuckTeachers");
 
 /*
- * Session recordings, so an admin can watch what people actually did on the
- * site: every page, every click, every error and failed request.
+ * Session recordings of teachers, so an admin can watch what someone actually
+ * did on the site: every page, every click, every error and failed request.
  *
- * Since 2026-10-27 (owner: "every single one visiting") that is every visitor,
- * signed in or not, and every teacher however long they have been here; it used
- * to be only teachers in their first 14 days. Not recorded: admins, and students
- * and parents (the privacy page promises it for children; SESSION_RECORDING_STUDENTS
- * =on changes that). A visitor's recording becomes their account's when they
- * sign up or log in during the visit (claim); if that account is a student's or
- * a parent's, the recording is deleted there and then.
- *
- * Guards for recording strangers: known bots are not recorded, one IP address
- * gets at most MAX_VISITOR_PER_DAY recordings a day, and once the volume is full
- * (RECORDINGS_MAX_MB) nothing new is kept until the sweep makes room.
+ * Who is recorded is decided twice. The browser buffers a visitor's visit in
+ * memory and throws it away unless they sign up or log in as a teacher; once
+ * signed in, it asks here before sending anything. Since 2026-10-27 (owner:
+ * "every teacher, not students") that is every teacher, however long they have
+ * been here (it was their first 14 days), or an account made in the last two
+ * hours, whose role may still be settling. Never admins, students or parents:
+ * the sweep removes any recording whose account did not end up a teacher.
+ * Recordings are kept 3 days (recordingStore.KEEP_DAYS).
  */
 
 const ENABLED = () => process.env.SESSION_RECORDING !== "off";
 const MAX_PER_DAY = 40;
-const MAX_VISITOR_PER_DAY = 30;
 const MAX_CHUNK_BYTES = 3 * 1024 * 1024;
 const MAX_RECORDING_BYTES = 150 * 1024 * 1024;
 
 const eligible = (user, now = Date.now()) => {
-  if (!user || user.role === "admin") return false;
-  if (store.RECORDED_ROLES().includes(user.role)) return true;
+  if (!user || user.role === "admin" || user.role === "parent") return false;
+  if (user.role === "teacher") return true;
   // A fresh account is a "student" until its role is picked (a Google sign-up),
-  // so it is kept for now; the sweep removes it if it stays a student or parent.
-  return now - new Date(user.createdAt || 0).getTime() <= 2 * 3600000 && user.role !== "parent";
+  // so it is kept for now; the sweep removes it if it stays a student.
+  return now - new Date(user.createdAt || 0).getTime() <= 2 * 3600000;
 };
 
-// Crawlers, link previews, headless browsers and speed tests are not visitors.
-// (People inside WhatsApp's, TikTok's or Instagram's own browser are: those
-// identify as an ordinary phone browser; only the preview fetchers match here.)
-const BOT = /bot\b|bot\/|crawl|spider|slurp|headless|lighthouse|pagespeed|facebookexternalhit|whatsapp\/|python|curl\/|wget|axios\/|node-fetch|go-http|java\//i;
-const isBot = (ua) => !ua || BOT.test(String(ua));
-const hashIp = (ip) => crypto.createHash("sha256").update(`rec-ip.${process.env.JWT_SECRET || ""}.${ip || ""}`).digest("hex").slice(0, 24);
+// The visitor tracker's id for this visit: where the teacher came from.
 const cleanVisit = (v) => (/^[A-Za-z0-9_-]{6,64}$/.test(String(v || "")) ? String(v) : null);
 
-// POST /api/rec/start — a browser asks to keep this visit (signed in or not).
+// POST /api/rec/start — a signed-in teacher's browser asks to keep this visit.
 const startRecording = asyncHandler(async (req, res) => {
-  if (!ENABLED()) return res.status(204).end();
+  if (!ENABLED() || !eligible(req.user)) return res.status(204).end();
   const since = new Date(Date.now() - 86400000);
-  let ipHash = null;
-  if (req.user) {
-    if (!eligible(req.user)) return res.status(204).end();
-    if ((await SessionRecording.countDocuments({ user: req.user._id, startedAt: { $gte: since } })) >= MAX_PER_DAY) return res.status(204).end();
-  } else {
-    if (isBot(req.headers["user-agent"])) return res.status(204).end();
-    ipHash = hashIp(req.ip);
-    if ((await SessionRecording.countDocuments({ ipHash, startedAt: { $gte: since } })) >= MAX_VISITOR_PER_DAY) return res.status(204).end();
+  if ((await SessionRecording.countDocuments({ user: req.user._id, startedAt: { $gte: since } })) >= MAX_PER_DAY) {
+    return res.status(204).end();
   }
   if (await store.isFull()) {
     store.maybeSweep();
@@ -65,9 +49,8 @@ const startRecording = asyncHandler(async (req, res) => {
   const rid = store.newId();
   await SessionRecording.create({
     _id: rid,
-    user: req.user?._id || null,
+    user: req.user._id,
     visit: cleanVisit(b.visit),
-    ipHash,
     startedAt: new Date(),
     firstEventAt: Number.isFinite(Number(b.t0)) ? Number(b.t0) : null,
     registeredInSession: !!b.registered,
@@ -77,27 +60,6 @@ const startRecording = asyncHandler(async (req, res) => {
   });
   store.maybeSweep();
   res.status(201).json({ rid, token: store.issueToken(rid) });
-});
-
-/*
- * POST /api/rec/:rid/claim — the visitor whose visit this is has just signed up
- * or logged in: the visit becomes their account's (the part before is kept), or,
- * if that account is not recorded (a student, a parent, an admin), the recording
- * is deleted now. Proven by the recording's upload token, plus the login.
- */
-const claimRecording = asyncHandler(async (req, res) => {
-  const { rid } = req.params;
-  const b = req.body || {};
-  if (!store.isId(rid) || !store.checkToken(rid, b.token)) return res.status(403).end();
-  const rec = await SessionRecording.findById(rid).select("user").lean();
-  if (!rec) return res.status(404).end();
-  if (rec.user && String(rec.user) !== String(req.user._id)) return res.status(409).json({ kept: false });
-  if (!eligible(req.user)) {
-    await store.removeRecording(rid);
-    return res.json({ kept: false });
-  }
-  await SessionRecording.updateOne({ _id: rid }, { $set: { user: req.user._id, ...(b.registered ? { registeredInSession: true } : {}) } });
-  res.json({ kept: true });
 });
 
 // What the browser says the chunk held: counts and the pages passed through.
@@ -156,7 +118,7 @@ const isLive = (r, now = Date.now()) => !r.endedAt && !!r.lastChunkAt && now - n
 const listDto = (r, source = null) => ({
   _id: r._id,
   user: r.user && typeof r.user === "object" ? { _id: r.user._id, name: r.user.name, email: r.user.email, role: r.user.role, createdAt: r.user.createdAt } : r.user,
-  // A visitor (no account): where the visit came from, per the visitor tracker.
+  // Where the visit came from (ad, campaign, country), per the visitor tracker.
   source: source ? { affiliate: source.affiliate || null, campaign: source.campaign || null, country: source.country || null, referrer: source.referrer || null } : null,
   startedAt: r.startedAt,
   endedAt: r.endedAt,
@@ -184,14 +146,12 @@ async function sourcesFor(rows) {
   return new Map(found.map((v) => [v.sessionId, v]));
 }
 
-// GET /api/rec?user=&who=visitors|accounts&problems=1&stuck=1 — admin: the recordings, newest first.
+// GET /api/rec?user=&problems=1&stuck=1 — admin: the recordings, newest first.
 const listRecordings = asyncHandler(async (req, res) => {
   store.maybeSweep();
   const q = req.query || {};
   const filter = { chunks: { $gt: 0 } };
   if (q.user) filter.user = q.user;
-  else if (q.who === "visitors") filter.user = null;
-  else if (q.who === "accounts") filter.user = { $ne: null };
   if (q.problems === "1") filter.$or = [{ jsErrors: { $gt: 0 } }, { apiErrors: { $gt: 0 } }, { toasts: { $gt: 0 } }];
   const limit = Math.min(200, Math.max(1, Number(q.limit) || 100));
   let rows = await SessionRecording.find(filter)
@@ -220,9 +180,8 @@ const getRecording = asyncHandler(async (req, res) => {
   // next within seconds, and the admin should be able to step across.
   const end = rec.endedAt || rec.lastChunkAt || rec.startedAt;
   const userId = rec.user?._id || rec.user;
-  // The same person: their account, or for a visitor the same visit (a reload
-  // keeps the tab's visit id). A visitor without one is not linked to anybody.
-  const same = userId ? { user: userId } : rec.visit ? { user: null, visit: rec.visit } : null;
+  // The same person: their account (a deleted account's visits are not linked).
+  const same = userId ? { user: userId } : null;
   const [next, prev, sources] = await Promise.all([
     same
       ? SessionRecording.findOne({ ...same, _id: { $ne: rid }, startedAt: { $gte: new Date(new Date(rec.startedAt).getTime()), $lte: new Date(new Date(end).getTime() + 60 * 1000) } })
@@ -265,4 +224,4 @@ const deleteRecording = asyncHandler(async (req, res) => {
   res.status(204).end();
 });
 
-module.exports = { startRecording, claimRecording, addChunk, listRecordings, getRecording, liveEvents, deleteRecording, eligible, isLive, isBot };
+module.exports = { startRecording, addChunk, listRecordings, getRecording, liveEvents, deleteRecording, eligible, isLive };

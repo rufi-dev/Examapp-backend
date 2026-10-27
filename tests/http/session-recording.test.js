@@ -1,9 +1,9 @@
 /*
- * Session recordings over the real router and a real (in-memory) database: who
- * may be recorded (since 2026-10-27 every visitor and every teacher; never an
- * admin, a student or a parent, nor a bot), a visitor's visit becoming their
- * account's when they sign up, how slices are authorised and stored, that only an
- * admin can watch, and that the sweep keeps it temporary and under its ceiling.
+ * Session recordings of teachers, over the real router and a real (in-memory)
+ * database: who may be recorded (since 2026-10-27 every teacher, however long
+ * they have been here; never an admin, a student or a parent), how slices are
+ * authorised and stored, that only an admin can watch, and that the sweep keeps
+ * it to 3 days and under its ceiling.
  */
 process.env.NODE_ENV = "test";
 process.env.JWT_SECRET = process.env.JWT_SECRET || "test-secret-recording";
@@ -89,40 +89,14 @@ async function main() {
   ok("a student is not", (await start(pupil)).status === 204);
   ok("an admin is not", (await start(admin)).status === 204);
 
-  // ── visitors who are not signed in ──
-  const PHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
-  const anon = (body = {}, ua = PHONE) => fetch(`${base}/start`, { method: "POST", headers: { "Content-Type": "application/json", "User-Agent": ua }, body: JSON.stringify(body) });
-  const claim = (u, r, t, registered = false) => fetch(`${base}/${r}/claim`, { method: "POST", headers: { "Content-Type": "application/json", ...auth(u) }, body: JSON.stringify({ token: t, registered }) });
-  const v1r = await anon({ t0: 1, entry: "/", visit: "vsid_abc123" });
-  const v1 = await v1r.json();
-  ok("a visitor who is not signed in is recorded", v1r.status === 201 && store.isId(v1.rid) && !!v1.token, `status ${v1r.status}`);
-  const v1row = await SessionRecording.findById(v1.rid).lean();
-  ok("as a visitor: no account, the tracker's visit id, and only a hash of the IP", v1row.user === null && v1row.visit === "vsid_abc123" && /^[a-f0-9]{24}$/.test(v1row.ipHash || "") && !String(v1row.ipHash).includes("127."));
-  ok("a search engine bot is not", (await anon({}, "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)")).status === 204);
-  ok("nor a link preview", (await anon({}, "WhatsApp/2.23.20.0 A")).status === 204);
-  ok("nor a script", (await anon({}, "python-requests/2.31")).status === 204);
-  ok("someone inside TikTok's own browser is", (await anon({}, "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36 trill_33 BytedanceWebview/d8a21c6")).status === 201);
-  await SessionRecording.insertMany(Array.from({ length: 30 }, () => ({ _id: store.newId(), ipHash: v1row.ipHash, startedAt: new Date() })));
-  ok("one address gets at most 30 recorded visits a day", (await anon({})).status === 204);
-  await SessionRecording.deleteMany({ ipHash: v1row.ipHash, _id: { $ne: v1.rid } });
-  await chunk(v1.rid, v1.token, 0, [{ type: 4, timestamp: 1 }, { type: 2, timestamp: 2 }], { m: { c: 1, p: ["/", "/register"], t1: 2 } });
-  ok("the visit becomes the account's only with its token", (await claim(fresh, v1.rid, "1.bad", true)).status === 403);
-  const cl = await claim(fresh, v1.rid, v1.token, true);
-  const claimed = await SessionRecording.findById(v1.rid).lean();
-  ok("a visitor who signs up as a teacher: the visit is theirs, the part before included", cl.status === 200 && (await cl.json()).kept === true && String(claimed.user) === String(fresh._id) && claimed.registeredInSession === true && claimed.chunks === 1);
-  ok("and nobody else can take it afterwards", (await claim(veteran, v1.rid, v1.token)).status === 409);
-  const v2 = await (await anon({ t0: 1, entry: "/join/abc" })).json();
-  await chunk(v2.rid, v2.token, 0, [{ type: 4, timestamp: 1 }]);
-  const cl2 = await claim(pupil, v2.rid, v2.token);
-  ok("a visitor who logs in as a student: the visit is deleted, files and all", cl2.status === 200 && (await cl2.json()).kept === false && !(await SessionRecording.exists({ _id: v2.rid })) && !fs.existsSync(path.join(process.env.RECORDINGS_DIR, v2.rid)));
+  ok("nobody signed out can start one", (await fetch(`${base}/start`, { method: "POST" })).status === 401);
+  const sv = await (await start(fresh, { t0: 1, visit: "vsid_tiktok01" })).json();
   await VisitorSession.create({ sessionId: "vsid_tiktok01", affiliate: "tiktok", campaign: "oktyabr", country: "AZ", landing: "/" });
-  const v3 = await (await anon({ t0: 1, entry: "/", visit: "vsid_tiktok01" })).json();
-  await chunk(v3.rid, v3.token, 0, [{ type: 4, timestamp: 1 }], { m: { p: ["/"], t1: 1 } });
-  const visitors = await (await fetch(`${base}?who=visitors`, { headers: auth(admin) })).json();
-  const v3row = visitors.recordings?.find((r) => r._id === v3.rid);
-  ok("the admin can list only visitors, with where they came from (ad, campaign, country)", !!v3row && v3row.user === null && v3row.source?.affiliate === "tiktok" && v3row.source?.campaign === "oktyabr" && v3row.source?.country === "AZ" && !visitors.recordings.some((r) => r.user));
-  const accounts = await (await fetch(`${base}?who=accounts`, { headers: auth(admin) })).json();
-  ok("or only accounts", accounts.recordings?.length > 0 && accounts.recordings.every((r) => r.user));
+  await chunk(sv.rid, sv.token, 0, [{ type: 4, timestamp: 1 }], { m: { p: ["/"], t1: 1 } });
+  const srcList = await (await fetch(base, { headers: auth(admin) })).json();
+  const svRow = srcList.recordings?.find((r) => r._id === sv.rid);
+  ok("the admin sees where the teacher's visit came from (ad, campaign, country)", svRow?.source?.affiliate === "tiktok" && svRow.source.campaign === "oktyabr" && svRow.source.country === "AZ", JSON.stringify(svRow?.source));
+  await store.removeRecording(sv.rid);
 
   // ── slices: authorised by the token, stored compressed, counted ──
   ok("a slice without the token is refused", (await chunk(rid, "1.bad", 0, [{ type: 4, timestamp: 1000 }])).status === 403);
@@ -196,7 +170,10 @@ async function main() {
   // ── temporary ──
   const s2 = await (await start(fresh)).json();
   await chunk(s2.rid, s2.token, 0, [{ type: 4, timestamp: 1 }]);
-  await SessionRecording.updateOne({ _id: s2.rid }, { $set: { startedAt: days(31) } });
+  await SessionRecording.updateOne({ _id: s2.rid }, { $set: { startedAt: days(3.1) } });
+  const s4 = await (await start(fresh)).json();
+  await chunk(s4.rid, s4.token, 0, [{ type: 4, timestamp: 1 }]);
+  await SessionRecording.updateOne({ _id: s4.rid }, { $set: { startedAt: days(2) } });
   const s3 = await (await start(fresh)).json();
   await chunk(s3.rid, s3.token, 0, [{ type: 4, timestamp: 1 }]);
   await SessionRecording.updateOne({ _id: s3.rid }, { $set: { user: pupil._id, startedAt: new Date(Date.now() - 4 * 3600000) } });
@@ -205,8 +182,8 @@ async function main() {
   const old = (Date.now() - 2 * 86400000) / 1000;
   fs.utimesSync(orphan, old, old);
   await store.sweep();
-  ok("a visitor's recording (no account) stays", !!(await SessionRecording.exists({ _id: v3.rid })));
-  ok("a recording older than 30 days is removed, files and all", !(await SessionRecording.exists({ _id: s2.rid })) && !fs.existsSync(path.join(process.env.RECORDINGS_DIR, s2.rid)));
+  ok("a recording 2 days old stays", !!(await SessionRecording.exists({ _id: s4.rid })) && fs.existsSync(path.join(process.env.RECORDINGS_DIR, s4.rid)));
+  ok("one older than 3 days is removed completely, files and all", !(await SessionRecording.exists({ _id: s2.rid })) && !fs.existsSync(path.join(process.env.RECORDINGS_DIR, s2.rid)));
   ok("so is one whose account ended up a student", !(await SessionRecording.exists({ _id: s3.rid })));
   ok("and a folder nothing points to", !fs.existsSync(orphan));
   ok("the teacher's recent one stays", !!(await SessionRecording.exists({ _id: rid })) && fs.existsSync(path.join(process.env.RECORDINGS_DIR, rid)));
@@ -214,12 +191,12 @@ async function main() {
   // ── a ceiling on the volume ──
   process.env.RECORDINGS_MAX_MB = "100";
   const big = store.newId();
-  await SessionRecording.create({ _id: big, user: null, startedAt: days(2), chunks: 1, bytes: 150 * 1024 * 1024 });
+  await SessionRecording.create({ _id: big, user: veteran._id, startedAt: days(2), chunks: 1, bytes: 150 * 1024 * 1024 });
   await store.usedBytes(Date.now() + 61000); // re-read now, not from the minute-old figure
-  ok("past the ceiling no new visit is kept", (await anon({ t0: 1 })).status === 204);
+  ok("past the ceiling no new visit is kept", (await start(veteran, { t0: 1 })).status === 204);
   await store.sweep();
-  ok("and the sweep removes the oldest until it is back under it", !(await SessionRecording.exists({ _id: big })) && !!(await SessionRecording.exists({ _id: rid })) && !!(await SessionRecording.exists({ _id: v3.rid })));
-  ok("then visits are kept again", (await anon({ t0: 1 })).status === 201);
+  ok("and the sweep removes the oldest until it is back under it", !(await SessionRecording.exists({ _id: big })) && !!(await SessionRecording.exists({ _id: rid })));
+  ok("then visits are kept again", (await start(veteran, { t0: 1 })).status === 201);
   delete process.env.RECORDINGS_MAX_MB;
 
   await new Promise((r) => server.close(r));

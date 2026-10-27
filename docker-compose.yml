@@ -17,7 +17,7 @@ services:
       EXAM_PDF_DIR: /app/examPdfs
       BOARD_FILES_DIR: /app/boardFiles
       GUIDES_DIR: /app/guide-videos
-      # Temporary session recordings of new teachers (30 days, swept by the app).
+      # Temporary session recordings of teachers (3 days, swept hourly by the app).
       RECORDINGS_DIR: /app/recordings
       # Curriculum sources are the bytes every textbook CITATION is pinned to, so
       # they must outlive a rebuild: the startup preflight refuses a non-absolute

@@ -506,6 +506,16 @@ mongoose
         track(setTimeout(healthTick, 90 * 1000))
         track(setInterval(healthTick, 5 * 60 * 1000))
 
+        // Session recordings are kept 3 days (owner, 2026-10-27; RECORDINGS_KEEP_DAYS)
+        // and then removed completely, files and index, every hour whether or not
+        // anyone visits. Here, because the recordings volume is on this container.
+        const recordingSweepTick = beat("recording-sweep", 60 * 60 * 1000, async () => {
+            try { await require("./services/recordingStore").sweep() }
+            catch (e) { console.warn("[REC] sweep error:", e && e.message) }
+        })
+        track(setTimeout(recordingSweepTick, 4 * 60 * 1000))
+        track(setInterval(recordingSweepTick, 60 * 60 * 1000))
+
         // Auto-outreach watcher: every ~2 min, message NEW teachers who signed
         // up but didn't finish setting up (empty exam/class or nothing) within
         // the grace window, from the admin's linked WhatsApp. No-op unless an

@@ -15,19 +15,14 @@ const User = require("../models/userModel");
 
 const DIR = () => process.env.RECORDINGS_DIR || path.join(process.cwd(), "recordings");
 const RID = /^[a-f0-9]{24}$/;
-const KEEP_DAYS = Math.max(1, Number(process.env.RECORDINGS_KEEP_DAYS) || 30);
-// Since every visitor is recorded (2026-10-27), the volume has a ceiling: past
-// it no new visit is kept, and the sweep removes the oldest until it is back
-// under 80% of it. The server disk had ~8 GB free when this was set.
+// Owner, 2026-10-27: recordings stay 2-3 days, then go completely (the server's
+// hourly sweep removes the files and the index entry).
+const KEEP_DAYS = Math.max(1, Number(process.env.RECORDINGS_KEEP_DAYS) || 3);
+// Since every teacher is recorded (2026-10-27), the volume has a ceiling: past it
+// no new visit is kept, and the sweep removes the oldest until it is back under
+// 80% of it. The server disk had ~8 GB free when this was set.
 const MAX_BYTES = () => Math.max(100, Number(process.env.RECORDINGS_MAX_MB) || 4000) * 1024 * 1024;
 const MAX_UNPACKED = 200 * 1024 * 1024; // a recording larger than this is cut off when read
-
-/*
- * The accounts whose visits are kept: teachers. Students and parents are not
- * recorded (the privacy page promises it for children); SESSION_RECORDING_STUDENTS=on
- * adds them. Admins never are. A visitor who has not signed in is.
- */
-const RECORDED_ROLES = () => (process.env.SESSION_RECORDING_STUDENTS === "on" ? ["teacher", "student", "parent"] : ["teacher"]);
 
 const newId = () => crypto.randomBytes(12).toString("hex");
 const isId = (rid) => RID.test(String(rid || ""));
@@ -149,10 +144,9 @@ const isFull = async () => (await usedBytes()) >= MAX_BYTES();
 
 /*
  * Keep it temporary: drop recordings older than KEEP_DAYS, the oldest ones while
- * the volume is past its ceiling, recordings whose account ended up a student or
- * parent (a fresh account is a "student" until its role is picked, so it gets
- * three hours), and folders nothing points to. A visitor who never signed in
- * (user null) is kept like anyone else.
+ * the volume is past its ceiling, recordings whose account did not end up a
+ * teacher (a fresh account is a "student" until its role is picked, so it gets
+ * three hours), and folders nothing points to.
  */
 async function sweep(now = Date.now()) {
   const cutoff = new Date(now - KEEP_DAYS * 86400000);
@@ -172,12 +166,12 @@ async function sweep(now = Date.now()) {
   }
 
   const settled = new Date(now - 3 * 3600000); // give a fresh sign-up time to pick their role
-  const recent = await SessionRecording.find({ startedAt: { $lt: settled }, user: { $ne: null } }).select("_id user").lean();
+  const recent = await SessionRecording.find({ startedAt: { $lt: settled } }).select("_id user").lean();
   if (recent.length) {
-    const kept = new Set(
-      (await User.find({ _id: { $in: [...new Set(recent.map((r) => String(r.user)))] }, role: { $in: RECORDED_ROLES() } }).select("_id").lean()).map((u) => String(u._id))
+    const teachers = new Set(
+      (await User.find({ _id: { $in: [...new Set(recent.map((r) => String(r.user)))] }, role: "teacher" }).select("_id").lean()).map((u) => String(u._id))
     );
-    for (const r of recent) if (!kept.has(String(r.user))) await removeRecording(r._id);
+    for (const r of recent) if (!teachers.has(String(r.user))) await removeRecording(r._id);
   }
 
   let names = [];
@@ -206,4 +200,4 @@ function maybeSweep() {
   sweep().catch(() => {});
 }
 
-module.exports = { newId, isId, issueToken, checkToken, writeChunk, readEvents, readEventsAfter, removeRecording, sweep, maybeSweep, isFull, usedBytes, RECORDED_ROLES, KEEP_DAYS };
+module.exports = { newId, isId, issueToken, checkToken, writeChunk, readEvents, readEventsAfter, removeRecording, sweep, maybeSweep, isFull, usedBytes, KEEP_DAYS };
