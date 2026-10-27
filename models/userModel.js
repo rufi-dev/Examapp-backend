@@ -358,6 +358,9 @@ const userSchema = Schema(
         // them, or finds the plan one of them already made (no customer exists
         // before a card is added, so there is nothing else to look them up by).
         stripeCheckoutSessions: { type: [String], default: [], select: false },
+        // The trial was refused because the card was already used on another
+        // account (one trial per card): the first month was charged at once.
+        stripeTrialCardReused: { type: Boolean, default: undefined, select: false },
         // The card the subscription is charged to, as the admin may see it: brand,
         // last four digits, expiry, issuing country, debit/credit, wallet. Never
         // the number or the CVC (Stripe keeps those; we never receive them).
@@ -373,6 +376,7 @@ const userSchema = Schema(
             funding: String,
             wallet: String,
             addedAt: Date,
+            fingerprint: String,
           },
           default: null,
           select: false,

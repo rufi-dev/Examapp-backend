@@ -80,10 +80,13 @@ const hasPaidPlanNow = (user) =>
 /*
  * Who gets the 7-day trial: a teacher who has never paid. Anyone who had a plan
  * (by card, by transfer, or set by the admin — the stored plan stays "pro" or
- * "premium" after it lapses) or a card subscription before pays straight away.
+ * "premium" after it lapses, and planSince stays set), a trial, or a card
+ * subscription before (one whose charge failed or that was cancelled included)
+ * pays straight away. The same card on another account is caught when the
+ * trial starts (trialCardUsedBefore).
  */
 const everPaid = (user) =>
-  !!(user?.stripeTrialUsedAt || user?.stripeSubscriptionId || user?.planDowngradedAt || ["pro", "premium"].includes(user?.plan));
+  !!(user?.stripeTrialUsedAt || user?.stripeSubscriptionId || user?.planDowngradedAt || user?.planSince || ["pro", "premium"].includes(user?.plan));
 const trialEligible = (user) => trialDays() > 0 && !!user && !everPaid(user);
 
 // Credits granted by Stripe leave a trail like an admin adjustment does; the guard
@@ -402,6 +405,9 @@ async function cardFor(subscription, stored) {
     funding: c.funding || null,
     wallet: c.wallet?.type || null,
     addedAt: toDate(method?.created) || new Date(),
+    // Stripe's id for the card itself (the same on every account it is added
+    // to): how a trial already had with this card is recognised. Never shown.
+    fingerprint: c.fingerprint || null,
   };
 }
 
@@ -472,6 +478,25 @@ async function syncSubscription(subscription) {
     });
     if (card) update.stripeCard = card;
   }
+  /*
+   * One trial per card, not only per account (owner, 2026-10-27: "make sure it
+   * is a charge"): a trial starting on a card that another account already used
+   * for a subscription ends at once, so Stripe charges the first month now, and
+   * no trial credits are given. A failed charge then stops the plan like any
+   * other. Thrown on a Stripe error, so the webhook is retried, never skipped.
+   */
+  let cardUsedBefore = false;
+  if (status === "trialing" && !user.stripeTrialUsedAt) {
+    const fingerprint = (update.stripeCard || user.stripeCard)?.fingerprint;
+    if (fingerprint && (await User.exists({ _id: { $ne: user._id }, "stripeCard.fingerprint": fingerprint }))) {
+      await stripeClient().subscriptions.update(subscription.id, { trial_end: "now", proration_behavior: "none" });
+      cardUsedBefore = true;
+      update.stripeTrialUsedAt = new Date();
+      update.stripeTrialCardReused = true;
+      update.stripeTrialEnd = null;
+      console.warn("[stripe] trial refused: card already used on another account; charging now:", String(user._id));
+    }
+  }
   await User.updateOne({ _id: user._id }, { $set: update });
   // A customer Checkout made when the card went in: give it the teacher's name and
   // id, as the ones made here used to carry (Stripe's lists, and userFor).
@@ -481,7 +506,7 @@ async function syncSubscription(subscription) {
       .catch((error) => console.warn("[stripe] customer label failed:", error.message));
   }
 
-  if (status === "trialing" && !user.stripeTrialUsedAt) await grantTrialCredits(user._id, subscription.id, toDate(subscription.trial_end));
+  if (status === "trialing" && !user.stripeTrialUsedAt && !cardUsedBefore) await grantTrialCredits(user._id, subscription.id, toDate(subscription.trial_end));
   const upgraded =
     grants && status === "active" && user.planSource === "stripe" && user.stripeSubscriptionId === subscription.id &&
     user.plan !== "free" && PLAN_RANK[grants] > (PLAN_RANK[user.plan] || 0);
@@ -676,7 +701,7 @@ const createCheckout = asyncHandler(async (req, res) => {
     throw new Error("Stripe qiyməti hələ konfiqurasiya edilməyib");
   }
   const user = await User.findById(req.user._id).select(
-    "name email plan planExpiresAt planDowngradedAt +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt +stripeCheckoutSessions"
+    "name email plan planSince planExpiresAt planDowngradedAt +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt +stripeCheckoutSessions"
   );
   if (!user) { res.status(404); throw new Error("İstifadəçi tapılmadı"); }
   if (user.stripeSubscriptionId && LIVE_STATUSES.has(user.stripeSubscriptionStatus)) {
@@ -713,7 +738,7 @@ const createCheckout = asyncHandler(async (req, res) => {
         : {}),
     },
     ...(trial > 0
-      ? { custom_text: { submit: { message: `İlk ${trial} gün pulsuzdur. Sınaq bitməmiş ləğv etsən, kartdan pul çıxılmayacaq.` } } }
+      ? { custom_text: { submit: { message: `İlk ${trial} gün pulsuzdur. Sınaq bitməmiş ləğv etsən, kartdan pul çıxılmayacaq. Sınaq hər karta bir dəfə verilir: bu kartla əvvəl Examopia-da abunəlik olubsa, ödəniş dərhal alınır.` } } }
       : {}),
     integration_identifier: `examopia_billing_v1_${suffix}`,
     success_url: `${frontendUrl()}/plan?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
@@ -916,7 +941,7 @@ const adminCardTeachers = asyncHandler(async (req, res) => {
 
 const billingStatus = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id).select(
-    "role plan planExpiresAt planDowngradedAt starterUntil starterPending aiCreditsLastSpentAt aiCreditsResetAt addonCreditsMonthly cardStorageGb +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeLastCreditedInvoiceId +stripeRefundedInvoiceId +stripeAddons"
+    "role plan planSince planExpiresAt planDowngradedAt starterUntil starterPending +stripeTrialCardReused aiCreditsLastSpentAt aiCreditsResetAt addonCreditsMonthly cardStorageGb +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeLastCreditedInvoiceId +stripeRefundedInvoiceId +stripeAddons"
   );
   const enabled = billingEnabledFor(req.user);
   res.json({
@@ -930,6 +955,7 @@ const billingStatus = asyncHandler(async (req, res) => {
     cancelAtPeriodEnd: !!user?.stripeCancelAtPeriodEnd,
     cancelAt: user?.stripeCancelAt || null,
     trialEnd: user?.stripeTrialEnd || null,
+    trialCardReused: !!user?.stripeTrialCardReused,
     trialEligible: enabled && trialEligible(user),
     trialDays: trialDays(),
     trialCredits: trialCredits(),

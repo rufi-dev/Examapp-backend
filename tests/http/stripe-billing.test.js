@@ -141,7 +141,8 @@ const fake = {
   paymentMethods: {
     retrieve: async (id) => {
       cardReads.push(id);
-      return { id, type: "card", created: NOW - 60, card: { brand: "visa", last4: id === "pm_good" ? "0005" : "4242", exp_month: 12, exp_year: 2034, country: "AZ", funding: "debit", wallet: null } };
+      // The same physical card has the same fingerprint on every account.
+      return { id, type: "card", created: NOW - 60, card: { brand: "visa", last4: id === "pm_good" ? "0005" : "4242", exp_month: 12, exp_year: 2034, country: "AZ", funding: "debit", wallet: null, fingerprint: id === "pm_good" ? "fp_0005" : "fp_4242" } };
     },
   },
   charges: { retrieve: async () => ({}) },
@@ -361,6 +362,25 @@ async function main() {
   ok("trial: webhook 200", r.status === 200);
   ok("trial: teacher is on Pro from Stripe", u.plan === "pro" && u.planSource === "stripe" && u.stripeSubscriptionStatus === "trialing");
   ok("trial: the card's restricted details are kept (brand, last 4, expiry, country, debit), and when it was added", u.stripeCard?.brand === "visa" && u.stripeCard.last4 === "4242" && u.stripeCard.expMonth === 12 && u.stripeCard.expYear === 2034 && u.stripeCard.country === "AZ" && u.stripeCard.funding === "debit" && near(u.stripeCard.addedAt, (NOW - 60) * 1000));
+  ok("trial: a first card gets its trial (no other account has used it)", !updates.some((x) => x.id === "sub_t" && x.trial_end === "now"));
+
+  // ── one trial per CARD: the same card on a new account is charged, not trialled ──
+  const reconcilesBeforeTwin = reconciles; // the twin's plan reconciles its own roster; the trial checks below count the tester's
+  const cardTwin = await mk({ name: "Twin", email: "twin@e.com", aiCredits: 60 });
+  sub("sub_twin", cardTwin._id, { status: "trialing", end: NOW + 7 * DAY, trialEnd: NOW + 7 * DAY, customer: "cus_twin" });
+  subs.get("sub_twin").default_payment_method = "pm_same_card_new_account";
+  r = await send(ev("customer.subscription.created", subs.get("sub_twin")));
+  const tw = await User.findById(cardTwin._id).select("+stripeTrialUsedAt +stripeTrialCardReused +stripeTrialEnd aiCredits").lean();
+  ok("one trial per card: the trial on a card another account used ends at once (Stripe charges now)", r.status === 200 && updates.some((x) => x.id === "sub_twin" && x.trial_end === "now" && x.proration_behavior === "none"));
+  ok("…no trial credits are given, and it counts as their trial", tw.aiCredits === 60 && !!tw.stripeTrialUsedAt && tw.stripeTrialCardReused === true && !tw.stripeTrialEnd);
+  process.env.STRIPE_BILLING_ENABLED = "true";
+  r = await call(server, { path: "/api/billing/status", token: tok(cardTwin) });
+  ok("…and the app is told why there was no trial", r.body.trialCardReused === true && r.body.trialEligible === false);
+  const hadPlan = await mk({ name: "Had plan", email: "hadplan@e.com", plan: "free", planSince: new Date(Date.now() - 90 * DAY * 1000) });
+  r = await call(server, { path: "/api/billing/status", token: tok(hadPlan) });
+  ok("a teacher who had a plan before (planSince) is not offered a trial", r.body.trialEligible === false);
+  delete process.env.STRIPE_BILLING_ENABLED;
+  reconciles = reconcilesBeforeTwin;
   ok("trial: plan runs to the trial end + 2 days grace", near(u.planExpiresAt, trialEnd * 1000 + GRACE));
   ok("trial: period end read from the subscription item", near(u.stripeCurrentPeriodEnd, trialEnd * 1000));
   ok("trial: trial end stored", near(u.stripeTrialEnd, trialEnd * 1000));
