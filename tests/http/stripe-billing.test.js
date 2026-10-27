@@ -66,7 +66,10 @@ const fake = {
   webhooks: signer,
   customers: {
     retrieve: async (id) => ({ id }),
-    create: async () => ({ id: `cus_${sessions.length + 1}_${Math.random().toString(36).slice(2, 6)}` }),
+    create: async (p) => {
+      createdCustomers.push(p);
+      return { id: `cus_${sessions.length + 1}_${Math.random().toString(36).slice(2, 6)}` };
+    },
     update: async (id, p) => {
       customerUpdates.push({ id, ...p });
       return { id };
@@ -153,6 +156,7 @@ const payCalls = [];
 const customerUpdates = [];
 const setupCards = new Map();
 const cardReads = [];
+const createdCustomers = [];
 let declineNext = false;
 _setStripeForTest(fake);
 
@@ -316,6 +320,27 @@ async function main() {
   let raced = await fresh(racer);
   ok("Checkout: Stripe already has their plan (webhook not here yet) → 409, no second Checkout", r.status === 409 && sessions.length === before);
   ok("Checkout: …and the account is brought up to date from Stripe right then", raced.plan === "pro" && raced.stripeSubscriptionId === "sub_race" && raced.stripeSubscriptionStatus === "trialing");
+
+  // ── no Stripe customer until a card is added (owner, 2026-10-27) ──
+  const newbie = await mk({ name: "Nəzrin Quliyeva", email: "nezrin@e.com" });
+  const customersBefore = createdCustomers.length;
+  r = await call(server, { method: "POST", path: "/api/billing/checkout", token: tok(newbie), body: { plan: "pro" } });
+  const n1 = sessions[sessions.length - 1];
+  const n1Id = `cs_${sessions.length}`;
+  ok("no customer: the card page opens with the teacher's email, and no Stripe customer is made", r.status === 200 && n1.customer_email === "nezrin@e.com" && !("customer" in n1) && createdCustomers.length === customersBefore);
+  ok("no customer: the teacher's record still has none", !(await User.findById(newbie._id).select("+stripeCustomerId").lean()).stripeCustomerId);
+  r = await call(server, { method: "POST", path: "/api/billing/checkout", token: tok(newbie), body: { plan: "premium" } });
+  ok("no customer: opening the card page again closes the earlier one (no second plan from another tab)", r.status === 200 && checkoutState.get(n1Id).status === "expired" && createdCustomers.length === customersBefore);
+  const n2Id = `cs_${sessions.length}`;
+  // The teacher added the card on that page; Stripe made the customer and the plan, but the webhook is not here yet.
+  sub("sub_newbie", newbie._id, { status: "trialing", customer: "cus_made_by_checkout", trialEnd: NOW + 7 * DAY, end: NOW + 7 * DAY });
+  Object.assign(checkoutState.get(n2Id), { status: "complete", subscription: "sub_newbie" });
+  const before3 = sessions.length;
+  r = await call(server, { method: "POST", path: "/api/billing/checkout", token: tok(newbie), body: { plan: "pro" } });
+  const nb = await fresh(newbie);
+  ok("card added, webhook late: a third click finds the plan the page made (409), no new page", r.status === 409 && sessions.length === before3);
+  ok("…and the account takes the customer Checkout made, with the trial", nb.stripeSubscriptionId === "sub_newbie" && nb.stripeSubscriptionStatus === "trialing" && (await User.findById(newbie._id).select("+stripeCustomerId").lean()).stripeCustomerId === "cus_made_by_checkout");
+  ok("…and that customer gets the teacher's name and id at Stripe", customerUpdates.some((c) => c.id === "cus_made_by_checkout" && c.name === "Nəzrin Quliyeva" && c.metadata?.examopia_user_id === String(newbie._id)));
   delete process.env.STRIPE_BILLING_ENABLED;
   reconciles = 0; // the racer's sync reconciled its roster; the checks below count from here
 

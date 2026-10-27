@@ -105,16 +105,53 @@ async function reconcile(userId) {
   }
 }
 
-async function customerFor(user) {
-  const stripe = stripeClient();
-  if (user.stripeCustomerId) {
+/*
+ * The teacher's Stripe customer if one already exists, or null. Never makes one:
+ * since 2026-10-27 (owner) a customer exists only once a card was added, and the
+ * plan's Checkout creates it at that moment itself.
+ */
+async function existingCustomer(user) {
+  if (!user.stripeCustomerId) return null;
+  try {
+    const customer = await stripeClient().customers.retrieve(user.stripeCustomerId);
+    return customer && !customer.deleted ? customer : null;
+  } catch (error) {
+    if (error?.code === "resource_missing") return null;
+    throw error;
+  }
+}
+
+/*
+ * The card pages this teacher opened before. One already completed (its webhook
+ * not here yet) is their plan, and is returned; one still open is closed, so a
+ * page left in another tab can never start a second plan. Read from the session
+ * ids noted on the teacher, because a teacher without a customer has nothing
+ * else to look them up by. A Stripe hiccup skips the page rather than block.
+ */
+async function settleEarlierCheckouts(user) {
+  for (const id of [...(user.stripeCheckoutSessions || [])].reverse()) {
     try {
-      const customer = await stripe.customers.retrieve(user.stripeCustomerId);
-      if (!customer.deleted) return customer;
+      const session = await stripeClient().checkout.sessions.retrieve(id);
+      if (session.status === "complete" && session.mode === "subscription" && session.subscription) {
+        const subId = typeof session.subscription === "string" ? session.subscription : session.subscription.id;
+        const subscription = await stripeClient().subscriptions.retrieve(subId);
+        if (LIVE_STATUSES.has(subscription.status)) return subscription;
+      } else if (session.status === "open") {
+        await stripeClient().checkout.sessions.expire(id);
+      }
     } catch (error) {
-      if (error?.code !== "resource_missing") throw error;
+      console.warn("[stripe] earlier checkout check failed:", error.message);
     }
   }
+  return null;
+}
+
+// For an add-on: the subscriber already has a customer; one is made only if it
+// was deleted at Stripe since.
+async function customerFor(user) {
+  const stripe = stripeClient();
+  const found = await existingCustomer(user);
+  if (found) return found;
   const customer = await stripe.customers.create({
     email: user.email,
     name: user.name || undefined,
@@ -379,7 +416,7 @@ async function syncSubscription(subscription) {
   const customerId = customerIdOf(subscription);
   const user = await userFor(
     subscription,
-    "+stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt +stripeAddons +stripeCard plan planSource planSince planExpiresAt"
+    "name +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt +stripeAddons +stripeCard plan planSource planSince planExpiresAt"
   );
   if (!user) return null;
 
@@ -436,6 +473,13 @@ async function syncSubscription(subscription) {
     if (card) update.stripeCard = card;
   }
   await User.updateOne({ _id: user._id }, { $set: update });
+  // A customer Checkout made when the card went in: give it the teacher's name and
+  // id, as the ones made here used to carry (Stripe's lists, and userFor).
+  if (customerId && customerId !== user.stripeCustomerId) {
+    await stripeClient()
+      .customers.update(customerId, { name: user.name || undefined, metadata: { examopia_user_id: String(user._id) } })
+      .catch((error) => console.warn("[stripe] customer label failed:", error.message));
+  }
 
   if (status === "trialing" && !user.stripeTrialUsedAt) await grantTrialCredits(user._id, subscription.id, toDate(subscription.trial_end));
   const upgraded =
@@ -632,30 +676,33 @@ const createCheckout = asyncHandler(async (req, res) => {
     throw new Error("Stripe qiyməti hələ konfiqurasiya edilməyib");
   }
   const user = await User.findById(req.user._id).select(
-    "name email plan planExpiresAt planDowngradedAt +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt"
+    "name email plan planExpiresAt planDowngradedAt +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt +stripeCheckoutSessions"
   );
   if (!user) { res.status(404); throw new Error("İstifadəçi tapılmadı"); }
   if (user.stripeSubscriptionId && LIVE_STATUSES.has(user.stripeSubscriptionStatus)) {
     res.status(409);
     throw new Error("Artıq kartla abunəliyin var. Paketi «Abunəliyi idarə et» bölməsindən dəyiş.");
   }
-  const customer = await customerFor(user);
+  // No customer is made here: Checkout makes one only when the card goes in.
+  // A teacher who paid before keeps theirs.
+  const customer = await existingCustomer(user);
   // Our record can be a few seconds behind Stripe: a teacher back from Checkout
-  // before the webhook landed still looks unsubscribed here. Ask Stripe, so one
-  // teacher never ends up with two plans (and two charges).
-  const existing = await liveMainSubscription(customer.id);
+  // before the webhook landed still looks unsubscribed here. Ask Stripe (their
+  // customer's plans, and the card pages they opened), so one teacher never ends
+  // up with two plans (and two charges).
+  const existing = (customer && (await liveMainSubscription(customer.id))) || (await settleEarlierCheckouts(user));
   if (existing) {
     await syncSubscription(existing).catch((error) => console.warn("[stripe] checkout pre-sync failed:", error.message));
     res.status(409);
     throw new Error("Abunəliyin artıq qeydə alınıb. Bir neçə saniyəyə paketin aktiv olacaq.");
   }
-  await expireOpenCheckouts(customer.id);
+  if (customer) await expireOpenCheckouts(customer.id);
   const trial = trialEligible(user) ? trialDays() : 0;
   const suffix = Math.random().toString(36).slice(2, 10);
   const metadata = { examopia_user_id: String(user._id), target_plan: targetPlan };
   const session = await stripeClient().checkout.sessions.create({
     mode: "subscription",
-    customer: customer.id,
+    ...(customer ? { customer: customer.id } : user.email ? { customer_email: user.email } : {}),
     line_items: [{ price, quantity: 1 }],
     client_reference_id: String(user._id),
     metadata,
@@ -673,10 +720,15 @@ const createCheckout = asyncHandler(async (req, res) => {
     cancel_url: `${frontendUrl()}/plan?checkout=cancelled`,
     allow_promotion_codes: true,
   });
-  // For the admin's billing panel: who reached the card page, even if they stop there.
+  // Who reached the card page (even if they stop there), and the page itself, so
+  // the next one can close it or find the plan it made (settleEarlierCheckouts).
   await User.updateOne(
     { _id: user._id },
-    { $set: { stripeCheckoutOpenedAt: new Date(), stripeCheckoutPlan: targetPlan }, $inc: { stripeCheckoutOpens: 1 } }
+    {
+      $set: { stripeCheckoutOpenedAt: new Date(), stripeCheckoutPlan: targetPlan },
+      $inc: { stripeCheckoutOpens: 1 },
+      $push: { stripeCheckoutSessions: { $each: [session.id], $slice: -5 } },
+    }
   ).catch((error) => console.warn("[stripe] checkout stamp failed:", error.message));
   res.json({ url: session.url, sessionId: session.id, trialDays: trial });
 });

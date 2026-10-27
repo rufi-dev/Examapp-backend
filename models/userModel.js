@@ -354,6 +354,10 @@ const userSchema = Schema(
         stripeCheckoutOpenedAt: { type: Date, default: null, select: false },
         stripeCheckoutPlan: { type: String, default: null, select: false },
         stripeCheckoutOpens: { type: Number, default: 0, select: false },
+        // The last card pages opened (Checkout session ids): the next one closes
+        // them, or finds the plan one of them already made (no customer exists
+        // before a card is added, so there is nothing else to look them up by).
+        stripeCheckoutSessions: { type: [String], default: [], select: false },
         // The card the subscription is charged to, as the admin may see it: brand,
         // last four digits, expiry, issuing country, debit/credit, wallet. Never
         // the number or the CVC (Stripe keeps those; we never receive them).
