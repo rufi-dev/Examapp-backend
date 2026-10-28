@@ -496,6 +496,41 @@ async function main() {
   ok("webhooks for the same page and invoice: no second charge attempt, no second credit reset", payCalls.length === chargesBefore && u.aiCredits === 77);
   r = await call(server, { method: "POST", path: "/api/billing/pay-due", token: tok(tester) });
   ok("pay-due: nothing owed → the subscription page instead", r.status === 200 && r.body.kind === "portal" && /billing\.stripe\.test/.test(r.body.url));
+
+  // «Kartı dəyiş» (owner, 2026-10-28): a different card for the months ahead, for
+  // the plan AND its add-ons (each subscription keeps its own card), nothing charged now.
+  sub("sub_addon_t", tester._id, { customer: "cus_t", meta: { examopia_kind: "addon", addon_key: "credits_100" } });
+  subs.get("sub_addon_t").default_payment_method = "pm_good";
+  r = await call(server, { method: "POST", path: "/api/billing/card", token: tok(teacher) });
+  ok("card: a teacher without a subscription has no card to change (409)", r.status === 409);
+  r = await call(server, { method: "POST", path: "/api/billing/card", token: tok(tester) });
+  const cc = sessions[sessions.length - 1];
+  const ccId = `cs_${sessions.length}`;
+  ok("card: opens Stripe's page to save a card (setup mode), for this teacher's subscription", r.status === 200 && /^https:\/\/checkout/.test(r.body.url) && cc.mode === "setup" && cc.customer === "cus_t" && !cc.line_items && cc.currency === "azn" && cc.metadata.examopia_kind === "card_update" && cc.metadata.subscription === "sub_t" && cc.metadata.examopia_user_id === String(tester._id));
+  ok("card: it says nothing is charged now, and returns to «Planım»", /indi pul çıxılmır/.test(cc.custom_text.submit.message) && /\/plan\?card=changed&session_id=\{CHECKOUT_SESSION_ID\}$/.test(cc.success_url));
+  r = await call(server, { method: "POST", path: "/api/billing/card/complete", token: tok(tester), body: { sessionId: ccId } });
+  ok("card: back before finishing Stripe's page → nothing changes", r.status === 200 && r.body.changed === false && subs.get("sub_t").default_payment_method === "pm_good");
+  Object.assign(checkoutState.get(ccId), { status: "complete", setup_intent: "seti_pm_new" });
+  setupCards.set("seti_pm_new", "pm_new");
+  r = await call(server, { method: "POST", path: "/api/billing/card/complete", token: tok(teacher), body: { sessionId: ccId } });
+  ok("card: another teacher cannot use this page (404)", r.status === 404 && subs.get("sub_t").default_payment_method === "pm_good");
+  const paysBeforeCard = payCalls.length;
+  r = await call(server, { method: "POST", path: "/api/billing/card/complete", token: tok(tester), body: { sessionId: ccId } });
+  u = await fresh(tester);
+  ok("card: the new card becomes the plan's, every add-on's and the customer's", r.status === 200 && r.body.changed === true && subs.get("sub_t").default_payment_method === "pm_new" && subs.get("sub_addon_t").default_payment_method === "pm_new" && customerUpdates.at(-1).id === "cus_t" && customerUpdates.at(-1).invoice_settings?.default_payment_method === "pm_new");
+  ok("card: nothing charged and the plan unchanged", payCalls.length === paysBeforeCard && u.stripeSubscriptionStatus === "active" && hasPaidPlan(u));
+  r = await call(server, { path: "/api/billing/status", token: tok(tester) });
+  ok("card: «Planım» and the admin see the new card at once (never its id or fingerprint)", u.stripeCard?.last4 === "4242" && r.body.card?.last4 === "4242" && r.body.card.brand === "visa" && !("fingerprint" in r.body.card) && !("id" in r.body.card));
+  const cardUpdatesBefore = updates.filter((x) => "default_payment_method" in x).length;
+  await send(ev("checkout.session.completed", await fake.checkout.sessions.retrieve(ccId)));
+  ok("card: Stripe's webhook for the same page changes nothing more", updates.filter((x) => "default_payment_method" in x).length === cardUpdatesBefore);
+  subs.get("sub_t").status = "past_due";
+  await User.updateOne({ _id: tester._id }, { $set: { stripeSubscriptionStatus: "past_due" } });
+  r = await call(server, { method: "POST", path: "/api/billing/card", token: tok(tester) });
+  ok("card: while a payment is owed, «Ödənişi tamamla» is the way (409, it pays the month too)", r.status === 409 && /Ödənişi tamamla/.test(r.body.message || ""));
+  subs.get("sub_t").status = "active";
+  await User.updateOne({ _id: tester._id }, { $set: { stripeSubscriptionStatus: "active" } });
+  subs.delete("sub_addon_t");
   delete process.env.TEACHER_PAYWALL;
 
   // ── refund rule: within 7 days of the payment, and no AI credits spent since ──
@@ -616,7 +651,7 @@ async function main() {
   ok("billing panel: an admin sees the teachers who added a card", r.status === 200 && !!rowOf(tester) && !!rowOf(racer) && !rowOf(teacher));
   ok("billing panel: who only opened the card page is not listed", !rowOf(twoTabs) && !("opened" in (r.body.counts || {})));
   ok("billing panel: who is on the trial, and until when", rowOf(racer).stage === "trial" && near(rowOf(racer).trialEndsAt, (NOW + 7 * DAY) * 1000));
-  ok("billing panel: an ended subscription, with its card and trial start", rowOf(tester).stage === "ended" && rowOf(tester).card?.last4 === "0005" && !!rowOf(tester).trialStartedAt);
+  ok("billing panel: an ended subscription, with its card (the one «Kartı dəyiş» put on) and trial start", rowOf(tester).stage === "ended" && rowOf(tester).card?.last4 === "4242" && !!rowOf(tester).trialStartedAt);
   ok("billing panel: the card carries no Stripe id, nothing chargeable", rowOf(tester).card && !("id" in rowOf(tester).card) && !JSON.stringify(r.body).includes("pm_good"));
   ok("billing panel: counts by stage", r.body.counts?.trial >= 1 && r.body.counts?.ended >= 1);
 

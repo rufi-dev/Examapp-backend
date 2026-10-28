@@ -608,6 +608,30 @@ async function currentSubscription(snapshot) {
 }
 
 /*
+ * A card the teacher added becomes the card of EVERYTHING they pay for: each live
+ * subscription (the plan and every add-on, since each subscription Checkout made
+ * keeps its own card and is charged to that one before the customer's default)
+ * and the customer's default.
+ */
+async function useCard(customerId, card) {
+  const stripe = stripeClient();
+  const subs = await stripe.subscriptions.list({ customer: customerId, status: "all", limit: 100 });
+  for (const sub of subs.data || []) {
+    if (!LIVE_STATUSES.has(sub.status)) continue;
+    const current = typeof sub.default_payment_method === "string" ? sub.default_payment_method : sub.default_payment_method?.id;
+    if (current !== card) await stripe.subscriptions.update(sub.id, { default_payment_method: card });
+  }
+  await stripe.customers.update(customerId, { invoice_settings: { default_payment_method: card } });
+}
+
+// The card a setup-mode Checkout saved, or null.
+async function setupCard(session) {
+  const intentRef = session.setup_intent;
+  const intent = typeof intentRef === "string" ? await stripeClient().setupIntents.retrieve(intentRef) : intentRef;
+  return typeof intent?.payment_method === "string" ? intent.payment_method : intent?.payment_method?.id || null;
+}
+
+/*
  * The card a teacher added to pay a failed charge («Ödənişi tamamla»): it becomes
  * the subscription's card (so next month is charged to it, not to the card that
  * failed) and the unpaid invoice is charged to it now. Runs on the teacher's way
@@ -620,12 +644,9 @@ async function settleDue(sessionOrId) {
   const meta = session?.metadata || {};
   if (session?.mode !== "setup" || meta.examopia_kind !== "pay_due") return { paid: false, reason: "not_a_due_payment" };
   if (session.status !== "complete") return { paid: false, reason: "not_completed" };
-  const intentRef = session.setup_intent;
-  const intent = typeof intentRef === "string" ? await stripe.setupIntents.retrieve(intentRef) : intentRef;
-  const card = typeof intent?.payment_method === "string" ? intent.payment_method : intent?.payment_method?.id;
+  const card = await setupCard(session);
   if (!card) return { paid: false, reason: "no_card" };
-  await stripe.subscriptions.update(meta.subscription, { default_payment_method: card });
-  await stripe.customers.update(customerIdOf(session), { invoice_settings: { default_payment_method: card } });
+  await useCard(customerIdOf(session), card);
   let invoice = await stripe.invoices.retrieve(meta.invoice);
   if (invoice.status === "open") {
     try {
@@ -649,6 +670,26 @@ async function settleDue(sessionOrId) {
   return { paid: true };
 }
 
+/*
+ * «Kartı dəyiş»: the card the teacher added on Stripe's page is charged from the
+ * next payment on, for the plan and every add-on; nothing is charged now. Runs on
+ * the way back and from the webhook, whichever comes first (the same card twice
+ * changes nothing). The subscription is read again so the admin panel and
+ * «Planım» show the new card at once.
+ */
+async function settleCardChange(sessionOrId) {
+  const stripe = stripeClient();
+  const session = typeof sessionOrId === "string" ? await stripe.checkout.sessions.retrieve(sessionOrId) : sessionOrId;
+  const meta = session?.metadata || {};
+  if (session?.mode !== "setup" || meta.examopia_kind !== "card_update") return { changed: false, reason: "not_a_card_change" };
+  if (session.status !== "complete") return { changed: false, reason: "not_completed" };
+  const card = await setupCard(session);
+  if (!card) return { changed: false, reason: "no_card" };
+  await useCard(customerIdOf(session), card);
+  if (meta.subscription) await syncSubscription(await stripe.subscriptions.retrieve(meta.subscription));
+  return { changed: true };
+}
+
 async function handleStripeEvent(event) {
   const claim = await markEvent(event);
   if (claim.duplicate) return;
@@ -660,6 +701,8 @@ async function handleStripeEvent(event) {
         await syncSubscription(await stripeClient().subscriptions.retrieve(id));
       } else if (session.mode === "setup" && session.metadata?.examopia_kind === "pay_due") {
         await settleDue(session.id);
+      } else if (session.mode === "setup" && session.metadata?.examopia_kind === "card_update") {
+        await settleCardChange(session.id);
       }
     } else if (event.type === "checkout.session.async_payment_failed") {
       // The subscription lifecycle/invoice events remain authoritative. This
@@ -873,16 +916,63 @@ const payDue = asyncHandler(async (req, res) => {
 
 // Back from adding the card: charge the unpaid invoice to it now, so the plan is
 // open by the time the page loads (the webhook does the same if they never return).
-const completeDue = asyncHandler(async (req, res) => {
+// A Checkout page this teacher opened (the session id they came back with), or a 404.
+async function ownSession(req, res, notFound) {
   const sessionId = String(req.body?.sessionId || "");
   if (!/^cs_[A-Za-z0-9_]+$/.test(sessionId)) { res.status(400); throw new Error("Yanlış sessiya"); }
   const user = await User.findById(req.user._id).select("+stripeCustomerId");
   const session = await stripeClient().checkout.sessions.retrieve(sessionId).catch(() => null);
   if (!session || !user?.stripeCustomerId || customerIdOf(session) !== user.stripeCustomerId || session.metadata?.examopia_user_id !== String(user._id)) {
     res.status(404);
-    throw new Error("Ödəniş tapılmadı");
+    throw new Error(notFound);
   }
+  return session;
+}
+
+const completeDue = asyncHandler(async (req, res) => {
+  const session = await ownSession(req, res, "Ödəniş tapılmadı");
   res.json(await settleDue(session));
+});
+
+/*
+ * «Kartı dəyiş» (owner, 2026-10-28): a different card for the months ahead, on
+ * Stripe's page (Checkout in setup mode, 3-D Secure included; nothing charged
+ * now). Not the billing portal's card section: that sets the customer's default,
+ * while each subscription keeps the card it was started with and is charged to it.
+ * A teacher whose last charge failed adds the card with «Ödənişi tamamla», which
+ * pays the month as well.
+ */
+const changeCard = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.user._id).select("+stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus");
+  const status = user?.stripeSubscriptionStatus;
+  if (status === "past_due") {
+    res.status(409);
+    throw new Error("Son ödəniş kartından alınmayıb: yeni kartı «Ödənişi tamamla» ilə əlavə et, ödəniş də ondan çıxılır.");
+  }
+  if (!user?.stripeCustomerId || !user.stripeSubscriptionId || !LIVE_STATUSES.has(status)) {
+    res.status(409);
+    throw new Error("Kart abunəliyə qoşulur: əvvəlcə Pro və ya Premium paketinə abunə ol.");
+  }
+  const sub = await stripeClient().subscriptions.retrieve(user.stripeSubscriptionId);
+  const metadata = { examopia_user_id: String(user._id), examopia_kind: "card_update", subscription: user.stripeSubscriptionId };
+  const session = await stripeClient().checkout.sessions.create({
+    mode: "setup",
+    customer: user.stripeCustomerId,
+    currency: sub.currency || sub.items?.data?.[0]?.price?.currency || "azn",
+    client_reference_id: String(user._id),
+    metadata,
+    setup_intent_data: { metadata },
+    custom_text: { submit: { message: "Kart yadda saxlanılır: indi pul çıxılmır, növbəti ödənişlər bu kartdan çıxılır." } },
+    success_url: `${frontendUrl()}/plan?card=changed&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${frontendUrl()}/plan?card=cancelled`,
+  });
+  res.json({ url: session.url });
+});
+
+// Back from adding the card: make it the card now (the webhook does the same if they never return).
+const completeCardChange = asyncHandler(async (req, res) => {
+  const session = await ownSession(req, res, "Kart tapılmadı");
+  res.json(await settleCardChange(session));
 });
 
 /*
@@ -941,7 +1031,7 @@ const adminCardTeachers = asyncHandler(async (req, res) => {
 
 const billingStatus = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id).select(
-    "role plan planSince planExpiresAt planDowngradedAt starterUntil starterPending +stripeTrialCardReused aiCreditsLastSpentAt aiCreditsResetAt addonCreditsMonthly cardStorageGb +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeLastCreditedInvoiceId +stripeRefundedInvoiceId +stripeAddons"
+    "role plan planSince planExpiresAt planDowngradedAt starterUntil starterPending +stripeTrialCardReused aiCreditsLastSpentAt aiCreditsResetAt addonCreditsMonthly cardStorageGb +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeLastCreditedInvoiceId +stripeRefundedInvoiceId +stripeAddons +stripeCard"
   );
   const enabled = billingEnabledFor(req.user);
   res.json({
@@ -966,6 +1056,10 @@ const billingStatus = asyncHandler(async (req, res) => {
     addons: (user?.stripeAddons || []).map((a) => ({ key: a.key, quantity: a.quantity, status: a.status, cancelAt: a.cancelAt, periodEnd: a.periodEnd })),
     addonCreditsMonthly: user?.addonCreditsMonthly || 0,
     cardStorageGb: user?.cardStorageGb || 0,
+    // The card the months ahead are charged to, as the teacher may see it.
+    card: user?.stripeCard?.last4
+      ? { brand: user.stripeCard.brand || "", last4: user.stripeCard.last4, expMonth: user.stripeCard.expMonth || null, expYear: user.stripeCard.expYear || null }
+      : null,
   });
 });
 
@@ -983,4 +1077,4 @@ const webhook = asyncHandler(async (req, res) => {
   res.json({ received: true });
 });
 
-module.exports = { createCheckout, createAddonCheckout, createPortal, payDue, completeDue, adminCardTeachers, billingStatus, webhook, handleStripeEvent, syncSubscription };
+module.exports = { createCheckout, createAddonCheckout, createPortal, payDue, completeDue, changeCard, completeCardChange, adminCardTeachers, billingStatus, webhook, handleStripeEvent, syncSubscription };

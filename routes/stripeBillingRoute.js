@@ -14,5 +14,7 @@ router.post("/addon", controller.createAddonCheckout);
 router.post("/portal", controller.createPortal);
 router.post("/pay-due", controller.payDue);
 router.post("/pay-due/complete", controller.completeDue);
+router.post("/card", controller.changeCard);
+router.post("/card/complete", controller.completeCardChange);
 
 module.exports = router;
