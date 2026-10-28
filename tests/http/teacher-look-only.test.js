@@ -101,7 +101,7 @@ async function main() {
     ["POST", "/api/quiz/addClass"], ["POST", "/api/quiz/addExam/c1"], ["POST", "/api/quiz/duplicate/e1"],
     ["PATCH", "/api/quiz/editExam/e1"], ["DELETE", "/api/quiz/deleteExam/e1"], ["POST", "/api/quiz/class/c1/addStudent"],
     ["POST", "/api/materials"], ["POST", "/api/boards"], ["PATCH", "/api/boards/b1"], ["POST", "/api/lesson-docs"],
-    ["POST", "/api/lesson-plans"], ["POST", "/api/assignments"], ["PATCH", "/api/assignments/a1/submissions/s1"],
+    ["POST", "/api/lesson-plans"], ["POST", "/api/lesson-plans/p1/generate"], ["POST", "/api/lesson-plans/p1/worksheetX"], ["POST", "/api/assignments"], ["PATCH", "/api/assignments/a1/submissions/s1"],
     ["POST", "/api/quiz/generateQuestions"], ["POST", "/api/quiz/exam/e1/start"],
   ];
   for (const [method, p] of doing) {
@@ -122,6 +122,8 @@ async function main() {
     ["POST", "/api/chat/conversations/c1/messages"], ["POST", "/api/rec/start"], ["POST", "/api/updates/seen"],
     ["POST", "/api/teacher-success/welcome-seen"], ["POST", "/api/assignments/a1/submissions/s1/seen"],
     ["POST", "/api/whatsapp/teacher/logout"],
+    // Opening a lesson plan builds its worksheet (a POST that stores nothing).
+    ["POST", "/api/lesson-plans/p1/worksheet"],
   ];
   for (const [method, p] of open) {
     // /api/users/* are the real routes (an empty body may get their own 400): the wall's 402 is what must not come.

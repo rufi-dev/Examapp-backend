@@ -90,6 +90,8 @@ const OPEN_WRITES = [
   /^\/api\/updates\/seen(\?|$)/,
   /^\/api\/teacher-success\/welcome-seen(\?|$)/,
   /^\/api\/assignments\/[^/]+\/submissions\/[^/]+\/seen(\?|$)/,
+  // A plan's worksheet: built from its tasks on every opening, stores nothing.
+  /^\/api\/lesson-plans\/[^/]+\/worksheet(\?|$)/,
   /^\/api\/whatsapp\/teacher\/logout(\?|$)/,
 ];
 
