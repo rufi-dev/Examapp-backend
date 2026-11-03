@@ -11,6 +11,8 @@ router.use(protect, teacherOnly);
 router.get("/status", controller.billingStatus);
 router.post("/checkout", controller.createCheckout);
 router.post("/addon", controller.createAddonCheckout);
+router.post("/addon/quote", controller.quoteAddon);
+router.post("/addon/charge", controller.chargeAddon);
 router.post("/portal", controller.createPortal);
 router.post("/pay-due", controller.payDue);
 router.post("/pay-due/complete", controller.completeDue);

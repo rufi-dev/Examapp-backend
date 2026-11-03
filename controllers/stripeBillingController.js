@@ -827,7 +827,9 @@ const createCheckout = asyncHandler(async (req, res) => {
  * year renews once a year, so its add-ons join its monthly date instead (the day
  * its credits renew).
  */
-const createAddonCheckout = asyncHandler(async (req, res) => {
+// Who may add an add-on now, and on what terms: shared by the card page and the
+// one-tap charge. Throws with the status set, as the handlers do.
+async function addonRequest(req, res) {
   const key = String(req.body?.addon || "");
   const addon = ADDONS[key];
   if (!addon) { res.status(400); throw new Error("Yanlış əlavə"); }
@@ -862,8 +864,13 @@ const createAddonCheckout = asyncHandler(async (req, res) => {
   }
   const price = (await addonPrices())[key];
   if (!price) { res.status(503); throw new Error("Bu əlavənin qiyməti hələ hazır deyil"); }
-  const customer = await customerFor(user);
   const metadata = { examopia_user_id: String(user._id), examopia_kind: "addon", addon_key: key };
+  return { key, addon, user, anchor, renewal, price, metadata };
+}
+
+const createAddonCheckout = asyncHandler(async (req, res) => {
+  const { user, renewal, price, metadata } = await addonRequest(req, res);
+  const customer = await customerFor(user);
   const session = await stripeClient().checkout.sessions.create({
     mode: "subscription",
     customer: customer.id,
@@ -876,6 +883,117 @@ const createAddonCheckout = asyncHandler(async (req, res) => {
     cancel_url: `${frontendUrl()}/plan?checkout=cancelled`,
   });
   res.json({ url: session.url, sessionId: session.id });
+});
+
+/*
+ * One tap for an add-on (owner, 2026-11-03: "they need to put card details all
+ * the time"). The plan's own card is charged, so no card page: the quote says
+ * what today costs (the days until the plan's date) and on which card, and the
+ * charge makes the same add-on subscription the card page would, paid at once.
+ * A card the bank wants confirmed (3-D Secure) or declines is not charged: the
+ * answer says so (fallback "checkout") and the teacher pays on the card page.
+ */
+async function planCard(user) {
+  const stripe = stripeClient();
+  let ref = null;
+  if (user.stripeSubscriptionId) {
+    const plan = await stripe.subscriptions.retrieve(user.stripeSubscriptionId).catch(() => null);
+    ref = plan?.default_payment_method || null;
+  }
+  if (!ref && user.stripeCustomerId) {
+    const customer = await stripe.customers.retrieve(user.stripeCustomerId).catch(() => null);
+    ref = customer?.invoice_settings?.default_payment_method || null;
+  }
+  const id = typeof ref === "string" ? ref : ref?.id;
+  if (!id) return null;
+  const method = typeof ref === "object" && ref?.card ? ref : await stripe.paymentMethods.retrieve(id).catch(() => null);
+  const c = method?.card || {};
+  // A card past its month cannot be charged: the card page asks for another.
+  if (c.exp_year && c.exp_month && new Date(c.exp_year, c.exp_month, 1) <= new Date()) return null;
+  return { id, brand: c.brand || method?.type || null, last4: c.last4 || null, expMonth: c.exp_month || null, expYear: c.exp_year || null };
+}
+
+const publicCard = (card) => (card ? { brand: card.brand, last4: card.last4, expMonth: card.expMonth, expYear: card.expYear } : null);
+
+const quoteAddon = asyncHandler(async (req, res) => {
+  const { key, addon, user, anchor, renewal, price } = await addonRequest(req, res);
+  const card = await planCard(user);
+  let amount = null;
+  let currency = "azn";
+  if (user.stripeCustomerId) {
+    try {
+      const preview = await stripeClient().invoices.createPreview({
+        customer: user.stripeCustomerId,
+        // API 2026: the preview takes the anchor as { type: "timestamp", timestamp }.
+        subscription_details: { items: [{ price, quantity: 1 }], billing_cycle_anchor: { type: "timestamp", timestamp: renewal }, proration_behavior: "create_prorations" },
+      });
+      amount = Number(preview.amount_due) / 100;
+      currency = preview.currency || currency;
+    } catch (error) {
+      console.warn("[stripe] add-on preview failed:", error.message);
+    }
+  }
+  res.json({ addon: key, card: publicCard(card), oneTap: !!card, amountToday: amount, currency, monthly: addon.priceAzn, nextDate: anchor });
+});
+
+const chargeAddon = asyncHandler(async (req, res) => {
+  const { key, addon, user, renewal, price, metadata } = await addonRequest(req, res);
+  const card = await planCard(user);
+  if (!card || !user.stripeCustomerId) {
+    res.status(409);
+    return res.json({ message: "Kart tapılmadı: ödəniş səhifəsində kartını daxil et.", fallback: "checkout" });
+  }
+  // The same tap sent twice charges once.
+  const requestId = String(req.body?.requestId || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64);
+  const idempotencyKey = `addon_${user._id}_${key}_${requestId || Math.floor(Date.now() / 60000)}`;
+  let subscription;
+  try {
+    subscription = await stripeClient().subscriptions.create(
+      {
+        customer: user.stripeCustomerId,
+        items: [{ price, quantity: 1 }],
+        default_payment_method: card.id,
+        billing_cycle_anchor: renewal,
+        proration_behavior: "create_prorations",
+        payment_behavior: "error_if_incomplete",
+        metadata,
+        expand: ["latest_invoice"],
+      },
+      { idempotencyKey }
+    );
+  } catch (error) {
+    const declined = error?.type === "StripeCardError" || error?.statusCode === 402 || /requires_action|authentication_required|card_declined/.test(String(error?.code || ""));
+    console.warn("[stripe] one-tap add-on not charged:", error?.code || error?.type || error?.message, String(user._id));
+    // Anything else Stripe refuses (a permission, an API change) is not the
+    // teacher's problem: the card page still works.
+    if (!declined) {
+      res.status(503);
+      return res.json({ message: "Ödəniş səhifəsi açılır…", fallback: "checkout" });
+    }
+    res.status(402);
+    return res.json({
+      message: /authentication|requires_action/.test(String(error?.code || error?.message || ""))
+        ? "Bankın ödənişi təsdiqləməyini istəyir: ödəniş səhifəsi açılır."
+        : "Kartdan ödəniş alınmadı: başqa kartla ödəniş səhifəsində cəhd et.",
+      fallback: "checkout",
+    });
+  }
+  // Grant at once; the webhook arriving after finds it done (both are idempotent).
+  const synced = await syncAddonSubscription(subscription);
+  const invoice = subscription.latest_invoice && typeof subscription.latest_invoice === "object" ? subscription.latest_invoice : null;
+  const before = await User.findById(user._id).select("aiCredits").lean();
+  if (synced && invoice?.status === "paid") await grantAddonFirstCredits(synced.userId, invoice, subscription);
+  const after = await User.findById(user._id).select("aiCredits addonCreditsMonthly cardStorageGb").lean();
+  res.json({
+    ok: true,
+    addon: key,
+    paid: invoice ? Number(invoice.amount_paid) / 100 : null,
+    creditsAdded: Math.max(0, (after?.aiCredits || 0) - (before?.aiCredits || 0)),
+    aiCredits: after?.aiCredits ?? null,
+    storageGb: after?.cardStorageGb ?? null,
+    card: publicCard(card),
+    gb: addon.gb,
+  });
 });
 
 // Not behind the billing gate: whoever subscribed must always be able to cancel.
@@ -1103,4 +1221,4 @@ const webhook = asyncHandler(async (req, res) => {
   res.json({ received: true });
 });
 
-module.exports = { createCheckout, createAddonCheckout, createPortal, payDue, completeDue, changeCard, completeCardChange, adminCardTeachers, billingStatus, webhook, handleStripeEvent, syncSubscription };
+module.exports = { createCheckout, createAddonCheckout, quoteAddon, chargeAddon, createPortal, payDue, completeDue, changeCard, completeCardChange, adminCardTeachers, billingStatus, webhook, handleStripeEvent, syncSubscription };

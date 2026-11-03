@@ -99,6 +99,34 @@ const fake = {
   },
   billingPortal: { sessions: { create: async (p) => { portals.push(p); return { url: "https://billing.stripe.test/p" }; } } },
   subscriptions: {
+    // The one-tap add-on: charged at once on the given card, or refused like
+    // Stripe's error_if_incomplete (declined / the bank wants 3-D Secure).
+    create: async (p, opts = {}) => {
+      createCalls.push({ ...p, idempotencyKey: opts.idempotencyKey });
+      if (opts.idempotencyKey && createdByKey.has(opts.idempotencyKey)) return JSON.parse(JSON.stringify(subs.get(createdByKey.get(opts.idempotencyKey))));
+      if (createFails === "declined") {
+        createFails = null;
+        throw Object.assign(new Error("Your card was declined."), { type: "StripeCardError", statusCode: 402, code: "card_declined" });
+      }
+      if (createFails === "3ds") {
+        createFails = null;
+        // The code real Stripe answers with (sandbox, 2026-11-03).
+        throw Object.assign(new Error("This payment requires authentication."), { type: "StripeCardError", statusCode: 402, code: "subscription_payment_intent_requires_action" });
+      }
+      const n = createCalls.length;
+      const unit = UNIT[p.items[0].price] || 1000;
+      const id = `sub_c${n}`;
+      const s = {
+        id, object: "subscription", status: "active", customer: p.customer, metadata: { ...p.metadata }, default_payment_method: p.default_payment_method,
+        cancel_at: null, cancel_at_period_end: false, trial_end: null,
+        items: { data: [{ id: `si_${id}`, quantity: 1, current_period_start: NOW, current_period_end: p.billing_cycle_anchor, price: { id: p.items[0].price, unit_amount: unit } }] },
+      };
+      subs.set(id, s);
+      if (opts.idempotencyKey) createdByKey.set(opts.idempotencyKey, id);
+      const inv = { id: `in_c${n}`, object: "invoice", status: "paid", customer: p.customer, subscription: id, billing_reason: "subscription_create", subtotal: unit / 2, amount_paid: unit / 2, amount_remaining: 0, parent: { subscription_details: { subscription: id } } };
+      invoiceStore.push(inv);
+      return JSON.parse(JSON.stringify({ ...s, latest_invoice: inv }));
+    },
     retrieve: async (id) => {
       if (!subs.has(id)) throw Object.assign(new Error("No such subscription"), { code: "resource_missing" });
       return JSON.parse(JSON.stringify(subs.get(id)));
@@ -121,6 +149,10 @@ const fake = {
     list: async ({ lookup_keys }) => ({ data: lookup_keys.map((k) => ({ id: `price_${k.replace(/_v1$/, "")}`, lookup_key: k })) }),
   },
   invoices: {
+    createPreview: async (p) => {
+      previews.push(p);
+      return { amount_due: Math.round((UNIT[p.subscription_details.items[0].price] || 1000) / 2), currency: "azn" };
+    },
     list: async ({ customer, subscription, status }) => ({ data: invoiceStore.filter((i) => i.customer === customer && i.subscription === subscription && i.status === status) }),
     retrieve: async (id) => JSON.parse(JSON.stringify(invoiceStore.find((i) => i.id === id))),
     // Charges the card: declined while `declineNext` is set; an invoice is paid once.
@@ -154,6 +186,11 @@ const fake = {
   },
 };
 const paidBy = new Map();
+const createCalls = [];
+const createdByKey = new Map();
+const previews = [];
+let createFails = null;
+const UNIT = { price_addon_credits_100: 500, price_addon_credits_300: 1200, price_addon_storage_5: 300, price_addon_storage_25: 1000 };
 const invoiceStore = [];
 const payCalls = [];
 const customerUpdates = [];
@@ -609,6 +646,43 @@ async function main() {
   r = await call(server, { path: "/api/billing/status", token: tok(tester) });
   ok("status: add-ons, their monthly credits, storage and the reset date for «Planım»", r.body.addons.length === 2 && r.body.addonCreditsMonthly === 100 && r.body.cardStorageGb === 5 && near(r.body.creditsResetAt, end2 * 1000));
 
+  // ── one tap: the plan's card is charged for an add-on, no card page (2026-11-03) ──
+  subs.get("sub_t").default_payment_method = "pm_good";
+  r = await call(server, { method: "POST", path: "/api/billing/addon/quote", token: tok(tester), body: { addon: "credits_300" } });
+  ok("one tap: the quote names the plan's card (brand, last 4), never more", r.status === 200 && r.body.oneTap === true && r.body.card.brand === "visa" && r.body.card.last4 === "0005" && !("id" in r.body.card));
+  ok("one tap: the quote is Stripe's own preview of today's prorated charge", r.body.amountToday === 6 && r.body.monthly === 12 && near(r.body.nextDate, end2 * 1000));
+  ok("one tap: …previewed on the plan's date, prorated", previews.at(-1).subscription_details.billing_cycle_anchor?.type === "timestamp" && previews.at(-1).subscription_details.billing_cycle_anchor?.timestamp === end2 && previews.at(-1).subscription_details.proration_behavior === "create_prorations" && previews.at(-1).customer === "cus_t");
+  const creditsBeforeTap = (await fresh(tester)).aiCredits;
+  r = await call(server, { method: "POST", path: "/api/billing/addon/charge", token: tok(tester), body: { addon: "credits_300", requestId: "tap1" } });
+  const made = createCalls.at(-1);
+  ok("one tap: charged at once, on the plan's card", r.status === 200 && r.body.ok === true && made.default_payment_method === "pm_good" && made.payment_behavior === "error_if_incomplete");
+  ok("one tap: the same add-on subscription the card page makes (plan's date, prorated, tagged)", made.billing_cycle_anchor === end2 && made.proration_behavior === "create_prorations" && made.metadata.examopia_kind === "addon" && made.metadata.addon_key === "credits_300" && made.metadata.examopia_user_id === String(tester._id));
+  ok("one tap: a double tap cannot charge twice (idempotency key)", /tap1$/.test(made.idempotencyKey));
+  u = await fresh(tester);
+  ok("one tap: access at once: +300 a month recorded and half the pack for the half month paid", u.addonCreditsMonthly === 400 && u.aiCredits - creditsBeforeTap === 150 && r.body.creditsAdded === 150);
+  r = await call(server, { method: "POST", path: "/api/billing/addon/charge", token: tok(tester), body: { addon: "credits_300", requestId: "tap1" } });
+  ok("one tap: the same tap again makes nothing new and grants nothing more", r.status === 200 && createdByKey.size === 1 && (await fresh(tester)).aiCredits - creditsBeforeTap === 150);
+  const tapped = [...createdByKey.values()][0];
+  await send(ev("invoice.paid", invoiceStore.find((i) => i.subscription === tapped)));
+  ok("one tap: Stripe's webhook for that payment afterwards grants nothing twice", (await fresh(tester)).aiCredits - creditsBeforeTap === 150);
+  createFails = "declined";
+  r = await call(server, { method: "POST", path: "/api/billing/addon/charge", token: tok(tester), body: { addon: "storage_25", requestId: "tap2" } });
+  ok("one tap: a declined card is not charged; the answer sends them to the card page (402)", r.status === 402 && r.body.fallback === "checkout" && /alınmadı/.test(r.body.message) && (await fresh(tester)).cardStorageGb === 5);
+  createFails = "3ds";
+  r = await call(server, { method: "POST", path: "/api/billing/addon/charge", token: tok(tester), body: { addon: "storage_25", requestId: "tap3" } });
+  ok("one tap: a card the bank wants confirmed (3-D Secure) goes to the card page instead", r.status === 402 && r.body.fallback === "checkout" && /təsdiq/.test(r.body.message));
+  subs.get("sub_t").default_payment_method = null;
+  r = await call(server, { method: "POST", path: "/api/billing/addon/quote", token: tok(tester), body: { addon: "storage_25" } });
+  ok("one tap: with no card on file the quote says so (no one-tap)", r.status === 200 && r.body.oneTap === false && r.body.card === null);
+  const callsBefore = createCalls.length;
+  r = await call(server, { method: "POST", path: "/api/billing/addon/charge", token: tok(tester), body: { addon: "storage_25", requestId: "tap4" } });
+  ok("one tap: …and the charge refuses, to the card page, without calling Stripe", r.status === 409 && r.body.fallback === "checkout" && createCalls.length === callsBefore);
+  // Put the account back as the tests below expect it.
+  subs.delete(tapped);
+  await send(ev("customer.subscription.deleted", { ...subs.get("sub_a1"), id: tapped, status: "canceled" }));
+  await setCredits(tester, creditsBeforeTap);
+  ok("one tap: (test reset) back to the two add-ons", (await fresh(tester)).addonCreditsMonthly === 100);
+
   // add-ons end with the plan, and come back if the plan's cancellation is withdrawn
   sub("sub_t", tester._id, { status: "active", end: end2, cancelAt: end2, customer: "cus_t" });
   await send(ev("customer.subscription.updated", subs.get("sub_t")));
@@ -628,6 +702,8 @@ async function main() {
   ok("status: cancelAtPeriodEnd + cancelAt for the UI", r.body.cancelAtPeriodEnd === true && near(r.body.cancelAt, end2 * 1000));
   r = await call(server, { method: "POST", path: "/api/billing/addon", token: tok(tester), body: { addon: "storage_25" } });
   ok("add-on: none can be added to a plan that is ending (409)", r.status === 409);
+  r = await call(server, { method: "POST", path: "/api/billing/addon/charge", token: tok(tester), body: { addon: "storage_25", requestId: "tap5" } });
+  ok("one tap: nor charged in one tap to a plan that is ending (409)", r.status === 409 && !r.body.fallback);
 
   // ── subscription ends ──
   const reconcilesBeforeEnd = reconciles;
