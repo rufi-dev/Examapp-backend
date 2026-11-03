@@ -39,12 +39,15 @@ const timeouts = [], intervals = [], clearedTimeouts = [], clearedIntervals = []
  * only to deliver the end-of-exam report over the bot, so the job and its name
  * left together. The count is the point of this file — change both or neither.
  * 2026-10-27: admin-plan-credits joined (monthly credit reset for admin plans).
+ * 2026-10-31: stripe-empty-customers joined (empty Stripe customers from an
+ * unfinished card step).
  */
 const jobs = Object.fromEntries([
   "sweepExpiredPlans", "resetAdminPlanCredits", "finalizeExpiredAttempts", "purgeExpiredArchived",
   "purgeOrphanPdfs", "purgeStagedUploads", "rollUpAndPruneVisitors", "purgeAbandonedExams",
+  "sweepEmptyStripeCustomers",
 ].map((name) => [name, async () => name]));
-const JOB_COUNT = 8;
+const JOB_COUNT = 9;
 const stop = startBackgroundJobs({
   env: {
     FINALIZE_INTERVAL_MS: "102", FINALIZE_FIRST_MS: "0",
@@ -54,6 +57,7 @@ const stop = startBackgroundJobs({
     ADMIN_CREDITS_INTERVAL_MS: "101", ADMIN_CREDITS_FIRST_MS: "0",
     ABANDONED_EXAM_INTERVAL_MS: "105", ABANDONED_EXAM_FIRST_MS: "0",
     VISITOR_ROLLUP_INTERVAL_MS: "106", VISITOR_ROLLUP_FIRST_MS: "0",
+    STRIPE_EMPTY_CUSTOMERS_INTERVAL_MS: "107", STRIPE_EMPTY_CUSTOMERS_FIRST_MS: "0",
   },
   jobs,
   wrap: (_name, _ms, fn) => fn,
@@ -65,7 +69,7 @@ const stop = startBackgroundJobs({
 ok(`scheduler owns exactly ${JOB_COUNT} jobs`, timeouts.length === JOB_COUNT && intervals.length === JOB_COUNT);
 ok("zero first-run delays are honored", timeouts.every((x) => x.ms === 0));
 ok("configured intervals are honored",
-  JSON.stringify(intervals.map((x) => x.ms)) === JSON.stringify([100, 101, 102, 103, 104, 104, 106, 105]));
+  JSON.stringify(intervals.map((x) => x.ms)) === JSON.stringify([100, 101, 107, 102, 103, 104, 104, 106, 105]));
 stop(); stop();
 ok("stop is idempotent", clearedTimeouts.length === JOB_COUNT && clearedIntervals.length === JOB_COUNT);
 ok("invalid durations fall back", positiveMs("NaN", 77) === 77 && positiveMs("-1", 77) === 77);

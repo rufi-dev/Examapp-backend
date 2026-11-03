@@ -174,6 +174,7 @@
   "tests/error-contract.test.js",
   "tests/pagination-contract.test.js",
   "tests/relationship-arrays-migration.test.js",
+  "tests/stripe-empty-customers.test.js",
   "tests/reliability-contract.test.js",
   "tests/reliability-worker.test.js",
   "tests/result-metrics-migration.test.js",

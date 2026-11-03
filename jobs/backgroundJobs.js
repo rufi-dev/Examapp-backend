@@ -2,6 +2,7 @@ const { beat } = require("../utils/heartbeat");
 const { sweepExpiredPlans } = require("./planExpiry");
 const { resetAdminPlanCredits } = require("./adminPlanCredits");
 const { rollUpAndPruneVisitors } = require("./visitorRollup");
+const { sweepEmptyStripeCustomers } = require("./stripeEmptyCustomers");
 const {
   finalizeExpiredAttempts,
   purgeExpiredArchived,
@@ -45,6 +46,14 @@ function startBackgroundJobs({
     positiveMs(env.ADMIN_CREDITS_INTERVAL_MS, 60 * 60 * 1000),
     positiveMs(env.ADMIN_CREDITS_FIRST_MS, 90 * 1000, { allowZero: true }),
     jobs.resetAdminPlanCredits || resetAdminPlanCredits);
+
+  // A Stripe customer only for a teacher whose card went in: Checkout leaves an
+  // empty one behind when the card step is not finished, and this removes it once
+  // its page has expired (jobs/stripeEmptyCustomers.js).
+  schedule("stripe-empty-customers",
+    positiveMs(env.STRIPE_EMPTY_CUSTOMERS_INTERVAL_MS, 60 * 60 * 1000),
+    positiveMs(env.STRIPE_EMPTY_CUSTOMERS_FIRST_MS, 3 * 60 * 1000, { allowZero: true }),
+    jobs.sweepEmptyStripeCustomers || (() => sweepEmptyStripeCustomers()));
 
   schedule("attempt-finalizer",
     positiveMs(env.FINALIZE_INTERVAL_MS, 60 * 1000),
