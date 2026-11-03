@@ -1152,8 +1152,11 @@ const adminCardTeachers = asyncHandler(async (req, res) => {
         phone: u.phone,
         signedUpAt: u.createdAt,
         stage,
-        plan: planForPrice(u.stripePriceId) || null,
-        interval: u.stripeInterval || planOfPrice(u.stripePriceId)?.interval || null,
+        // The price names the plan; when this server does not know that price (a
+        // local or sandbox env with other price ids) the plan on the account does,
+        // so the admin's monthly revenue never reads 0 ₼ for a paying teacher.
+        plan: planForPrice(u.stripePriceId) || (u.plan === "pro" || u.plan === "premium" ? u.plan : null),
+        interval: u.stripeInterval || planOfPrice(u.stripePriceId)?.interval || "month",
         trialStartedAt: u.stripeTrialUsedAt || null,
         trialEndsAt: stage === "trial" || stage === "trial_cancelled" ? u.stripeTrialEnd || u.stripeCurrentPeriodEnd || null : null,
         nextChargeAt: stage === "trial" || stage === "paying" || stage === "past_due" ? u.stripeCurrentPeriodEnd || null : null,

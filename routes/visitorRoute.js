@@ -1,5 +1,5 @@
 const express = require("express");
-const { track, listVisitors, growth, hourly, visitorDays } = require("../controllers/visitorController");
+const { track, listVisitors, growth, hourly, visitorDays, overview } = require("../controllers/visitorController");
 const { protect, adminOnly } = require("../middleware/authMiddleware");
 const router = express.Router();
 
@@ -25,5 +25,9 @@ router.get("/hourly", protect, adminOnly, hourly);
 // individual visits are deleted. Same shape whatever the age of the range, so
 // the page has something true to show for days the rows no longer cover.
 router.get("/days", protect, adminOnly, visitorDays);
+
+// GET /api/track/overview — ADMIN only: traffic for any range (summaries + today's
+// live rows): per-day visits, the hour histogram, top sources/countries/devices.
+router.get("/overview", protect, adminOnly, overview);
 
 module.exports = router;

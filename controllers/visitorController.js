@@ -513,4 +513,80 @@ const visitorDays = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { track, listVisitors, growth, hourly, visitorDays, isDatacenterIp, looksLikeAdCrawler };
+/*
+ * The analytics page's traffic, for any range (2026-11-03). Every finished day
+ * is a VisitorDay summary (written the moment the day ends); today, and a
+ * finished day the roll-up has not reached yet, are summarised from their rows
+ * on the spot with the same code, so a range of any length draws true numbers
+ * instead of falling to zero a week back. Per day: visits, unique IPs that day,
+ * signed in, page views, time, opened vs rendered. For the whole range: the hour
+ * histogram (both kinds), and the top sources (grouped into the categories the
+ * list filters by), countries, devices and landing pages.
+ *
+ * "unique" is per day: a day's distinct IPs are kept, the addresses are not, so
+ * the same visitor on two days counts twice. The page says so.
+ */
+const SOURCE_KEYS = ["instagram", "facebook", "google", "tiktok", "youtube"];
+const SOURCE_RX = Object.fromEntries(SOURCE_KEYS.map((k) => [k, new RegExp(SOURCE_PATTERNS[k], "i")]));
+function sourceCategory(affiliate) {
+  const a = String(affiliate || "").trim();
+  if (!a || a === "(direct)") return "direct";
+  return SOURCE_KEYS.find((k) => SOURCE_RX[k].test(a)) || "other";
+}
+
+const overview = asyncHandler(async (req, res) => {
+  const { summarizeDay } = require("../jobs/visitorRollup");
+  const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const today = new Date(Date.now() + 4 * 3600 * 1000).toISOString().slice(0, 10);
+  const toKey = req.query.to ? dayKey(req.query.to) : today;
+  const fromKey = req.query.from ? dayKey(req.query.from) : toKey;
+  if (!DAY_RE.test(fromKey) || !DAY_RE.test(toKey) || fromKey > toKey) {
+    res.status(400);
+    throw new Error("Yanlış tarix aralığı");
+  }
+  const keys = dayRange(fromKey, toKey);
+  if (keys.length > 400) {
+    res.status(400);
+    throw new Error("Aralıq ən çox 400 gün ola bilər");
+  }
+  // Rows are kept a week: older days can only come from their summaries.
+  const rowsFrom = new Date(Date.now() + 4 * 3600 * 1000 - 8 * 864e5).toISOString().slice(0, 10);
+  const stored = new Map((await VisitorDay.find({ day: { $gte: fromKey, $lte: toKey } }).lean()).map((d) => [d.day, d]));
+
+  const empty = (day) => ({ day, visits: 0, uniqueIps: 0, signedIn: 0, pageViews: 0, durationSeconds: 0, opened: 0, rendered: 0, hours: [], hoursUnique: [], sources: [], countries: [], devices: [], landings: [] });
+  const days = [];
+  for (const k of keys) {
+    let d = k < today ? stored.get(k) : null;
+    if (!d && k <= today && k >= rowsFrom) d = await summarizeDay(k);
+    days.push(d || empty(k));
+  }
+
+  const sum = (f) => days.reduce((n, d) => n + (Number(d[f]) || 0), 0);
+  const hist = (f) => Array.from({ length: 24 }, (_, h) => days.reduce((n, d) => n + (Number((d[f] || [])[h]) || 0), 0));
+  const merge = (f, keyOf = (k) => k, top = 8) => {
+    const m = new Map();
+    for (const d of days) for (const b of d[f] || []) {
+      const k = keyOf(b.key);
+      if (!k) continue;
+      m.set(k, (m.get(k) || 0) + (Number(b.n) || 0));
+    }
+    return [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, top).map(([key, n]) => ({ key, n }));
+  };
+
+  res.json({
+    from: fromKey,
+    to: toKey,
+    today,
+    keepDays: 7,
+    days: days.map((d) => ({ day: d.day, visits: d.visits || 0, uniqueIps: d.uniqueIps || 0, signedIn: d.signedIn || 0, opened: d.opened || 0, rendered: d.rendered || 0 })),
+    totals: { visits: sum("visits"), uniqueIps: sum("uniqueIps"), signedIn: sum("signedIn"), pageViews: sum("pageViews"), durationSeconds: sum("durationSeconds"), opened: sum("opened"), rendered: sum("rendered") },
+    hours: hist("hours"),
+    hoursUnique: hist("hoursUnique"),
+    sources: merge("sources", sourceCategory, 7),
+    countries: merge("countries"),
+    devices: merge("devices", (k) => k, 6),
+    landings: merge("landings"),
+  });
+});
+
+module.exports = { track, listVisitors, growth, hourly, visitorDays, overview, sourceCategory, isDatacenterIp, looksLikeAdCrawler };

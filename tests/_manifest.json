@@ -182,5 +182,6 @@
   "tests/teacher-overview-contract.test.js",
   "tests/teacher-xp-service.test.js",
   "tests/transaction-boundaries.test.js",
-  "tests/visitor-retention.test.js"
+  "tests/visitor-retention.test.js",
+  "tests/visitor-overview.test.js"
 ]

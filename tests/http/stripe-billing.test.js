@@ -732,6 +732,10 @@ async function main() {
   ok("billing panel: an ended subscription, with its card (the one «Kartı dəyiş» put on) and trial start", rowOf(tester).stage === "ended" && rowOf(tester).card?.last4 === "4242" && !!rowOf(tester).trialStartedAt);
   ok("billing panel: the card carries no Stripe id, nothing chargeable", rowOf(tester).card && !("id" in rowOf(tester).card) && !JSON.stringify(r.body).includes("pm_good"));
   ok("billing panel: counts by stage", r.body.counts?.trial >= 1 && r.body.counts?.ended >= 1);
+  // A price this server does not know (another env's price ids) still names the plan, from the account.
+  await User.updateOne({ _id: racer._id }, { $set: { stripePriceId: "price_from_another_env" } });
+  r = await call(server, { path: "/api/billing/admin/teachers", token: tok(admin) });
+  ok("billing panel: an unknown price falls back to the account's plan (revenue never reads 0 for a payer)", ["pro", "premium"].includes(rowOf(racer).plan) && rowOf(racer).interval === "month");
 
   // ── what must NOT change a plan ──
   sub("sub_m", manual._id, { status: "incomplete_expired", customer: "cus_m" });
