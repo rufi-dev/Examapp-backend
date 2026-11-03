@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node server.js",
-    "backend": "nodemon server.js",
+    "backend": "node scripts/devDbTunnel.cjs && nodemon server.js",
     "dev:localdb": "node dev-local-db.js",
     "audit:prod": "npm audit --omit=dev",
     "audit:ci": "node scripts/auditGate.cjs",
