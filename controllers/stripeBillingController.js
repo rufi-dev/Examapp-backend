@@ -13,6 +13,7 @@ const {
   planForPrice,
   planOfPrice,
   frontendUrl,
+  checkoutBranding,
   portalConfiguration,
   trialDays,
   trialCredits,
@@ -788,6 +789,7 @@ const createCheckout = asyncHandler(async (req, res) => {
   const suffix = Math.random().toString(36).slice(2, 10);
   const metadata = { examopia_user_id: String(user._id), target_plan: targetPlan, target_interval: interval };
   const session = await stripeClient().checkout.sessions.create({
+    ...checkoutBranding(),
     mode: "subscription",
     ...(customer ? { customer: customer.id } : user.email ? { customer_email: user.email } : {}),
     line_items: [{ price, quantity: 1 }],
@@ -872,6 +874,7 @@ const createAddonCheckout = asyncHandler(async (req, res) => {
   const { user, renewal, price, metadata } = await addonRequest(req, res);
   const customer = await customerFor(user);
   const session = await stripeClient().checkout.sessions.create({
+    ...checkoutBranding(),
     mode: "subscription",
     customer: customer.id,
     line_items: [{ price, quantity: 1 }],
@@ -1034,6 +1037,7 @@ const payDue = asyncHandler(async (req, res) => {
     const amount = Number(due.amount_remaining) / 100;
     const metadata = { examopia_user_id: String(user._id), examopia_kind: "pay_due", invoice: due.id, subscription: user.stripeSubscriptionId };
     const session = await stripe.checkout.sessions.create({
+      ...checkoutBranding(),
       mode: "setup",
       customer: user.stripeCustomerId,
       currency: due.currency,
@@ -1097,6 +1101,7 @@ const changeCard = asyncHandler(async (req, res) => {
   const sub = await stripeClient().subscriptions.retrieve(user.stripeSubscriptionId);
   const metadata = { examopia_user_id: String(user._id), examopia_kind: "card_update", subscription: user.stripeSubscriptionId };
   const session = await stripeClient().checkout.sessions.create({
+    ...checkoutBranding(),
     mode: "setup",
     customer: user.stripeCustomerId,
     currency: sub.currency || sub.items?.data?.[0]?.price?.currency || "azn",

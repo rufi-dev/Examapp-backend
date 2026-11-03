@@ -616,6 +616,12 @@ async function main() {
   ok("add-on: pinned to the plan's renewal date, the first month prorated", a1.subscription_data.billing_cycle_anchor === end2 && a1.subscription_data.proration_behavior === "create_prorations");
   ok("add-on: tagged as an add-on of this teacher", a1.subscription_data.metadata.examopia_kind === "addon" && a1.subscription_data.metadata.addon_key === "credits_100" && a1.subscription_data.metadata.examopia_user_id === String(tester._id));
   ok("add-on: no trial on an add-on", !("trial_period_days" in a1.subscription_data));
+  // 2026-11-03: every Stripe page we open carries the Examopia brand, from the public site.
+  ok("branding: the Checkout shows the Examopia logo, icon, blue button, Inter", a1.branding_settings?.display_name === "Examopia" && a1.branding_settings.logo?.url === "https://examopia.com/brand/stripe/logo.png" && a1.branding_settings.icon?.type === "url" && a1.branding_settings.button_color === "#445CCA" && a1.branding_settings.font_family === "inter");
+  ok("branding: plan, card-change and failed-payment pages too", sessions.filter((x) => x.branding_settings?.display_name === "Examopia").length === sessions.length);
+  process.env.STRIPE_CHECKOUT_BRANDING = "off";
+  ok("branding: an off switch drops it", !("branding_settings" in require("../../config/stripe").checkoutBranding()));
+  delete process.env.STRIPE_CHECKOUT_BRANDING;
   const addonMeta = (key) => ({ examopia_kind: "addon", addon_key: key });
   sub("sub_a1", tester._id, { price: "price_addon_credits_100", end: end2, customer: "cus_t", meta: addonMeta("credits_100"), unitAmount: 500 });
   await send(ev("customer.subscription.created", subs.get("sub_a1")));

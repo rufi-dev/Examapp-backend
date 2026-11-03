@@ -57,6 +57,30 @@ const planForPrice = (priceId) => planOfPrice(priceId)?.plan || null;
 const annualConfigured = () => !!priceForPlan("pro", "year") && !!priceForPlan("premium", "year");
 
 const frontendUrl = () => String(process.env.FRONTEND_URL || "https://examopia.com").replace(/\/$/, "");
+
+/*
+ * How every Stripe page we open looks (owner, 2026-11-03: "make it look
+ * professional"): the Examopia logo and icon, the app's blue on the button, its
+ * page background, Inter, rounded corners. The images live on the public site
+ * (Frontend/public/brand/stripe) so Stripe can fetch them from any environment,
+ * a local server included. STRIPE_CHECKOUT_BRANDING=off drops it, should Stripe
+ * ever refuse it.
+ */
+const BRAND_ASSETS = () => String(process.env.STRIPE_BRAND_ASSET_URL || "https://examopia.com").replace(/\/$/, "");
+const checkoutBranding = () =>
+  String(process.env.STRIPE_CHECKOUT_BRANDING || "").toLowerCase() === "off"
+    ? {}
+    : {
+        branding_settings: {
+          display_name: "Examopia",
+          logo: { type: "url", url: `${BRAND_ASSETS()}/brand/stripe/logo.png` },
+          icon: { type: "url", url: `${BRAND_ASSETS()}/brand/stripe/icon-512.png` },
+          button_color: "#445CCA",
+          background_color: "#F4F6F9",
+          border_style: "rounded",
+          font_family: "inter",
+        },
+      };
 // A portal configuration made through the API is not the account default, so the
 // session has to name it; unset = Stripe's default configuration.
 const portalConfiguration = () => String(process.env.STRIPE_PORTAL_CONFIGURATION || "").trim();
@@ -136,6 +160,7 @@ module.exports = {
   planOfPrice,
   annualConfigured,
   frontendUrl,
+  checkoutBranding,
   portalConfiguration,
   trialDays,
   trialCredits,
