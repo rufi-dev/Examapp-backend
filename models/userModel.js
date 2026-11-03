@@ -322,6 +322,9 @@ const userSchema = Schema(
         stripeCustomerId: { type: String, select: false },
         stripeSubscriptionId: { type: String, select: false },
         stripePriceId: { type: String, select: false },
+        // How often the plan is paid: "month", or "year" (30% off, 2026-10-31; its
+        // AI credits still renew monthly, jobs/adminPlanCredits.js).
+        stripeInterval: { type: String, default: null, select: false },
         stripeSubscriptionStatus: { type: String, select: false },
         stripeCurrentPeriodEnd: { type: Date, select: false },
         stripeCancelAtPeriodEnd: { type: Boolean, default: false, select: false },

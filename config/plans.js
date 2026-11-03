@@ -96,6 +96,19 @@ const PLANS = {
 };
 
 /*
+ * Paying for a year (owner, 2026-10-31): 30% off twelve months, charged once a
+ * year in advance. The AI credits still come every month (jobs/adminPlanCredits.js),
+ * so a yearly teacher gets what a monthly one gets, for less. Pro 126 ₼, Premium
+ * 168 ₼. The Stripe prices (STRIPE_PRICE_*_YEARLY) were made at these amounts: a
+ * change here needs a new Stripe price too.
+ */
+const ANNUAL_DISCOUNT_PCT = num("PLAN_ANNUAL_DISCOUNT_PCT", 30);
+const annualPrice = (monthly) => Math.round(monthly * 12 * (100 - ANNUAL_DISCOUNT_PCT)) / 100;
+for (const id of ["pro", "premium"]) {
+  PLANS[id].annualPriceAzn = num(`PLAN_PRICE_${id.toUpperCase()}_YEARLY`, annualPrice(PLANS[id].priceAzn));
+}
+
+/*
  * The free start: STARTER.days with ONE exam on the free tier's limits, before
  * the card is asked for. It ran 2026-10-27 only. OFF since 2026-10-28 (owner):
  * a teacher without a card may look around every page, and the card (with its
@@ -160,6 +173,7 @@ module.exports = {
   PLAN_IDS,
   PLANS,
   STARTER,
+  ANNUAL_DISCOUNT_PCT,
   CREDIT_TOPUPS,
   STORAGE_PACKS,
   AI_ACTION_COSTS,

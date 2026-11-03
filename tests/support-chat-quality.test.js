@@ -98,6 +98,12 @@ const pro = PLANS.pro;
 const premium = PLANS.premium;
 ok("Pro price", P.includes(`Pro — ${pro.priceAzn} AZN/ay`));
 ok("Premium price", P.includes(`Premium — ${premium.priceAzn} AZN/ay`));
+// 2026-11-03: the yearly price (30% off twelve months) and its monthly share.
+const share = (y) => String(Math.round((y / 12) * 100) / 100).replace(".", ",");
+ok("Pro yearly price", P.includes(`Pro — ${pro.priceAzn} AZN/ay və ya ${pro.annualPriceAzn} AZN/il (ayda ${share(pro.annualPriceAzn)} AZN-ə düşür)`));
+ok("Premium yearly price", P.includes(`Premium — ${premium.priceAzn} AZN/ay və ya ${premium.annualPriceAzn} AZN/il (ayda ${share(premium.annualPriceAzn)} AZN-ə düşür)`));
+ok("the yearly discount is the config's", P.includes(`İLLİK ÖDƏNİŞ ${require("../config/plans").ANNUAL_DISCOUNT_PCT}% ucuzdur`));
+ok("yearly credits still come monthly", /İllik paketdə də AI kreditləri HƏR AY yenilənir/.test(P));
 // 2026-10-27: teachers work only on a paid plan (card wall); the Free tier is no
 // longer offered, so the prompt must not describe it as an option.
 ok("no Free tier offered to teachers", !P.includes(`Pulsuz: ${free.limits.classes} sinif`) && /abunəsiz müəllim/i.test(P));

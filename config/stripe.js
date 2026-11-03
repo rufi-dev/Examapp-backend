@@ -27,18 +27,34 @@ function stripeClient() {
   return client;
 }
 
-const priceForPlan = (plan) => {
-  if (plan === "pro") return String(process.env.STRIPE_PRICE_PRO_MONTHLY || "").trim();
-  if (plan === "premium") return String(process.env.STRIPE_PRICE_PREMIUM_MONTHLY || "").trim();
-  return "";
+// Each plan is sold by the month and, 30% off, by the year (2026-10-31).
+const PRICE_ENV = {
+  pro: { month: "STRIPE_PRICE_PRO_MONTHLY", year: "STRIPE_PRICE_PRO_YEARLY" },
+  premium: { month: "STRIPE_PRICE_PREMIUM_MONTHLY", year: "STRIPE_PRICE_PREMIUM_YEARLY" },
+};
+const INTERVALS = ["month", "year"];
+
+const priceForPlan = (plan, interval = "month") => {
+  const name = PRICE_ENV[plan]?.[interval === "year" ? "year" : "month"];
+  return name ? String(process.env[name] || "").trim() : "";
 };
 
-const planForPrice = (priceId) => {
+// Which plan, and how often it is paid, a Stripe price stands for.
+const planOfPrice = (priceId) => {
   const id = String(priceId || "");
-  if (id && id === priceForPlan("pro")) return "pro";
-  if (id && id === priceForPlan("premium")) return "premium";
+  if (!id) return null;
+  for (const plan of Object.keys(PRICE_ENV)) {
+    for (const interval of INTERVALS) {
+      if (id === priceForPlan(plan, interval)) return { plan, interval };
+    }
+  }
   return null;
 };
+
+const planForPrice = (priceId) => planOfPrice(priceId)?.plan || null;
+
+// Yearly is offered only once both plans have their yearly price.
+const annualConfigured = () => !!priceForPlan("pro", "year") && !!priceForPlan("premium", "year");
 
 const frontendUrl = () => String(process.env.FRONTEND_URL || "https://examopia.com").replace(/\/$/, "");
 // A portal configuration made through the API is not the account default, so the
@@ -117,6 +133,8 @@ module.exports = {
   stripeClient,
   priceForPlan,
   planForPrice,
+  planOfPrice,
+  annualConfigured,
   frontendUrl,
   portalConfiguration,
   trialDays,

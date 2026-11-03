@@ -19,6 +19,8 @@ process.env.STRIPE_SECRET_KEY = "rk_" + "test_fake";
 process.env.STRIPE_WEBHOOK_SECRET = "whsec_" + "testfake";
 process.env.STRIPE_PRICE_PRO_MONTHLY = "price_pro";
 process.env.STRIPE_PRICE_PREMIUM_MONTHLY = "price_premium";
+process.env.STRIPE_PRICE_PRO_YEARLY = "price_pro_year";
+process.env.STRIPE_PRICE_PREMIUM_YEARLY = "price_premium_year";
 process.env.STRIPE_BILLING_TESTERS = "Tester@e.com, m@e.com";
 delete process.env.STRIPE_BILLING_ENABLED;
 delete process.env.BILLING_TRIAL_DAYS;
@@ -681,6 +683,77 @@ async function main() {
   await send(ev("customer.subscription.updated", subs.get("sub_new")));
   u = await fresh(switcher);
   ok("upgrade: the proration invoice and later events grant nothing more", u.aiCredits - creditsBefore === 825);
+
+  // ── paying by the year: 30% off, the credits still a month at a time (2026-10-31) ──
+  const { addMonths, nextMonthlyBefore } = require("../../helper/calendarMonths");
+  const { resetAdminPlanCredits } = require("../../jobs/adminPlanCredits");
+  const intervalOfUser = async (x) => (await User.findById(x._id).select("+stripeInterval").lean()).stripeInterval;
+  process.env.STRIPE_BILLING_ENABLED = "true";
+  r = await call(server, { path: "/api/plan/catalog" });
+  const catalogPlan = (id) => r.body.plans.find((p) => p.id === id);
+  ok("yearly: the catalog offers it, 30% off twelve months (Pro 126 ₼, Premium 168 ₼)", r.body.cardBilling?.annual?.discountPct === 30 && catalogPlan("pro").annualPriceAzn === 126 && catalogPlan("premium").annualPriceAzn === 168 && catalogPlan("free").annualPriceAzn === null);
+  const yearly = await mk({ name: "Yearly", email: "yearly@e.com" });
+  r = await call(server, { method: "POST", path: "/api/billing/checkout", token: tok(yearly), body: { plan: "premium", interval: "year" } });
+  const ys = sessions[sessions.length - 1];
+  ok("yearly: Checkout uses the yearly price, with the trial a never-paid teacher gets", r.status === 200 && r.body.interval === "year" && ys.line_items[0].price === "price_premium_year" && ys.metadata.target_interval === "year" && ys.subscription_data.trial_period_days === 7);
+  r = await call(server, { method: "POST", path: "/api/billing/checkout", token: tok(teacher), body: { plan: "pro" } });
+  ok("monthly stays the default", sessions[sessions.length - 1].line_items[0].price === "price_pro" && r.body.interval === "month");
+  delete process.env.STRIPE_PRICE_PRO_YEARLY;
+  r = await call(server, { path: "/api/plan/catalog" });
+  ok("yearly is not offered until both plans have their yearly price", r.body.cardBilling && r.body.cardBilling.annual === null);
+  r = await call(server, { method: "POST", path: "/api/billing/checkout", token: tok(teacher), body: { plan: "pro", interval: "year" } });
+  ok("…and a yearly Checkout without its price is refused (503)", r.status === 503);
+  process.env.STRIPE_PRICE_PRO_YEARLY = "price_pro_year";
+
+  const yStart = NOW;
+  const yEnd = Math.floor(addMonths(new Date(NOW * 1000), 12).getTime() / 1000);
+  sub("sub_y", yearly._id, { status: "active", price: "price_premium_year", start: yStart, end: yEnd, customer: "cus_y", unitAmount: 16800 });
+  await send(ev("customer.subscription.created", subs.get("sub_y")));
+  u = await fresh(yearly);
+  ok("yearly: Premium for the year, and remembered as yearly", u.plan === "premium" && near(u.planExpiresAt, yEnd * 1000 + GRACE) && (await intervalOfUser(yearly)) === "year");
+  await setCredits(yearly, 7);
+  await send(ev("invoice.paid", invoice("in_y1", "sub_y", { reason: "subscription_create", subtotal: 16800 })));
+  u = await fresh(yearly);
+  const firstReset = addMonths(new Date(yStart * 1000), 1);
+  ok("yearly: the year's payment brings ONE month of credits (2000, reset, not added)", u.aiCredits === 2000);
+  ok("yearly: the next credits are due in a month, not in a year", near(u.aiCreditsResetAt, firstReset.getTime()));
+  r = await call(server, { path: "/api/billing/status", token: tok(yearly) });
+  ok("yearly: «Planım» is told it is yearly", r.body.interval === "year");
+  r = await call(server, { path: "/api/billing/status", token: tok(tester) });
+  ok("…and a monthly plan is monthly", r.body.interval === "month");
+
+  await setCredits(yearly, 40);
+  let job = await resetAdminPlanCredits({ now: new Date(firstReset.getTime() + 3600 * 1000) });
+  u = await fresh(yearly);
+  ok("yearly: a month on, the job renews the credits (2000 again, no rollover)", u.aiCredits === 2000 && job.reset >= 1);
+  ok("…and sets the following month", near(u.aiCreditsResetAt, addMonths(firstReset, 1).getTime()));
+  await setCredits(yearly, 40);
+  job = await resetAdminPlanCredits({ now: new Date(firstReset.getTime() + 2 * 3600 * 1000) });
+  ok("…once a month: running again the same day gives nothing", (await fresh(yearly)).aiCredits === 40);
+  await User.updateOne({ _id: yearly._id }, { $set: { stripeSubscriptionStatus: "trialing", aiCreditsResetAt: new Date(Date.now() - 3600 * 1000) } });
+  await resetAdminPlanCredits({ now: new Date() });
+  ok("yearly: never during the trial (nothing paid yet)", (await fresh(yearly)).aiCredits === 40);
+  await User.updateOne({ _id: yearly._id }, { $set: { stripeSubscriptionStatus: "active", aiCreditsResetAt: new Date(yEnd * 1000) } });
+  await resetAdminPlanCredits({ now: new Date(yEnd * 1000 + 3600 * 1000) });
+  ok("yearly: never on the renewal day (that month comes with the renewal's payment)", (await fresh(yearly)).aiCredits === 40);
+  await User.updateOne({ _id: yearly._id }, { $set: { aiCreditsResetAt: firstReset } });
+
+  // Add-ons are monthly: on a yearly plan they join its monthly date, not the year's end.
+  r = await call(server, { method: "POST", path: "/api/billing/addon", token: tok(yearly), body: { addon: "credits_100" } });
+  const ya = sessions[sessions.length - 1];
+  const monthlyDate = Math.floor(nextMonthlyBefore(new Date(yEnd * 1000), new Date()).getTime() / 1000);
+  ok("yearly: an add-on is billed on the plan's monthly date", r.status === 200 && ya.subscription_data.billing_cycle_anchor === monthlyDate && monthlyDate < NOW + 32 * DAY);
+
+  // Pro yearly → Premium yearly mid-month: the extra credits for what is left of THIS month.
+  const proYear = await mk({ name: "ProYear", email: "proyear@e.com" });
+  sub("sub_py", proYear._id, { status: "active", price: "price_pro_year", start: NOW - 100 * DAY, end: NOW + 265 * DAY, customer: "cus_py", unitAmount: 12600 });
+  await send(ev("customer.subscription.created", subs.get("sub_py")));
+  await User.updateOne({ _id: proYear._id }, { $set: { aiCredits: 300, aiCreditsResetAt: new Date((NOW + 15 * DAY) * 1000) } });
+  sub("sub_py", proYear._id, { status: "active", price: "price_premium_year", start: NOW - 100 * DAY, end: NOW + 265 * DAY, customer: "cus_py", unitAmount: 16800 });
+  await send(ev("customer.subscription.updated", subs.get("sub_py")));
+  u = await fresh(proYear);
+  ok("yearly upgrade: about half of this month's extra 1650 credits, not a share of the year", u.plan === "premium" && u.aiCredits - 300 >= 780 && u.aiCredits - 300 <= 860, String(u.aiCredits - 300));
+  delete process.env.STRIPE_BILLING_ENABLED;
 
   r = await send(ev("customer.subscription.updated", { ...sub("sub_ghost", "not-an-id", {}), customer: "cus_nobody" }));
   ok("an event for an unknown teacher is accepted and ignored", r.status === 200);

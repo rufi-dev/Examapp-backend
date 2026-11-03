@@ -1,8 +1,8 @@
 const asyncHandler = require("express-async-handler");
 const PlanUpgradeRequest = require("../models/planUpgradeRequestModel");
 const User = require("../models/userModel");
-const { PLANS, PLAN_IDS, STARTER, CREDIT_TOPUPS, STORAGE_PACKS, AI_ACTION_COSTS } = require("../config/plans");
-const { billingOpen, priceForPlan, trialDays } = require("../config/stripe");
+const { PLANS, PLAN_IDS, STARTER, CREDIT_TOPUPS, STORAGE_PACKS, AI_ACTION_COSTS, ANNUAL_DISCOUNT_PCT } = require("../config/plans");
+const { billingOpen, priceForPlan, annualConfigured, trialDays } = require("../config/stripe");
 const { refundStatus } = require("../helper/stripeRefund");
 const { paywallOn } = require("../helper/teacherAccess");
 
@@ -19,6 +19,8 @@ const getCatalog = asyncHandler(async (req, res) => {
       id,
       label: PLANS[id].label,
       priceAzn: PLANS[id].priceAzn,
+      // Paid once a year, 30% off twelve months (paid plans only).
+      annualPriceAzn: PLANS[id].annualPriceAzn ?? null,
       limits: jsonLimits(PLANS[id].limits),
       credits: PLANS[id].credits,
       features: PLANS[id].features,
@@ -29,7 +31,9 @@ const getCatalog = asyncHandler(async (req, res) => {
     aiActionCosts: AI_ACTION_COSTS,
     // Card subscriptions, only once they are open to every teacher (the pricing
     // page is public, so it cannot ask the per-user billing status).
-    cardBilling: billingOpen() && !!priceForPlan("pro") ? { trialDays: trialDays() } : null,
+    cardBilling: billingOpen() && !!priceForPlan("pro")
+      ? { trialDays: trialDays(), annual: annualConfigured() ? { discountPct: ANNUAL_DISCOUNT_PCT } : null }
+      : null,
     // The card wall is up: teachers work only on a paid plan, so the Free tier is
     // not offered on the pricing page or in the plan comparison.
     teacherPaywall: paywallOn(),

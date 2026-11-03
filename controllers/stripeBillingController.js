@@ -11,6 +11,7 @@ const {
   stripeClient,
   priceForPlan,
   planForPrice,
+  planOfPrice,
   frontendUrl,
   portalConfiguration,
   trialDays,
@@ -19,6 +20,7 @@ const {
   ADDONS,
   addonPrices,
 } = require("../config/stripe");
+const { addMonths, nextMonthlyBefore } = require("../helper/calendarMonths");
 
 // Statuses of a subscription that is still running. past_due is one (Stripe keeps
 // retrying the card), but its plan is stopped until the payment goes through.
@@ -70,6 +72,15 @@ const isAddon = (subscription) => subscription?.metadata?.examopia_kind === "add
 
 function priceFromSubscription(subscription) {
   return subscription?.items?.data?.map((item) => item?.price?.id).find(Boolean) || "";
+}
+
+// How often the plan is paid: Stripe says it on the price; our own price list is
+// the fallback (an event without the recurring block).
+function intervalOf(subscription) {
+  const price = subscription?.items?.data?.map((item) => item?.price).find(Boolean);
+  const said = price?.recurring?.interval;
+  if (said === "year" || said === "month") return said;
+  return planOfPrice(price?.id)?.interval || "month";
 }
 
 const monthlyCredits = (plan) => planDef(plan).credits?.monthly || 0;
@@ -316,12 +327,15 @@ async function startPaidMonth(userId, invoice, plan, subscription) {
   const addons = await saveAddonState(userId, await addonState(customerIdOf(subscription)));
   const amount = monthlyCredits(plan) + addons.credits;
   const paidAt = toDate(invoice.status_transitions?.paid_at) || new Date();
+  // A year paid at once still brings its credits a month at a time: the next ones
+  // are due a month from the period's start (jobs/adminPlanCredits.js), not in a year.
+  const nextReset = intervalOf(subscription) === "year" ? addMonths(periodStart(subscription) || paidAt, 1) : periodEnd(subscription);
   const result = await User.updateOne(
     { _id: userId, stripeLastCreditedInvoiceId: { $ne: invoice.id } },
     {
       $set: {
         aiCredits: amount,
-        aiCreditsResetAt: periodEnd(subscription),
+        aiCreditsResetAt: nextReset,
         stripeLastCreditedInvoiceId: invoice.id,
         stripeLastPaidAt: paidAt,
         stripeLastCreditedAmount: amount,
@@ -333,11 +347,13 @@ async function startPaidMonth(userId, invoice, plan, subscription) {
 
 // Pro → Premium mid-month: the teacher paid the prorated difference, so they get the
 // same share of the extra monthly credits now; the full amount comes at renewal.
-async function grantUpgradeCredits(userId, subscription, from, to) {
+// A yearly plan's credits run a month at a time, so its share is of this month.
+async function grantUpgradeCredits(userId, subscription, from, to, { creditsResetAt = null } = {}) {
   const extra = monthlyCredits(to) - monthlyCredits(from);
   const item = subscription?.items?.data?.[0];
-  const start = Number(item?.current_period_start);
-  const end = Number(item?.current_period_end);
+  const monthly = intervalOf(subscription) === "year" && creditsResetAt;
+  const start = monthly ? Math.floor(addMonths(creditsResetAt, -1).getTime() / 1000) : Number(item?.current_period_start);
+  const end = monthly ? Math.floor(new Date(creditsResetAt).getTime() / 1000) : Number(item?.current_period_end);
   if (!(extra > 0) || !(end > start)) return;
   const left = Math.min(1, Math.max(0, (end - Date.now() / 1000) / (end - start)));
   const amount = Math.round(extra * left);
@@ -422,7 +438,7 @@ async function syncSubscription(subscription) {
   const customerId = customerIdOf(subscription);
   const user = await userFor(
     subscription,
-    "name +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt +stripeAddons +stripeCard plan planSource planSince planExpiresAt"
+    "name +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt +stripeAddons +stripeCard plan planSource planSince planExpiresAt aiCreditsResetAt"
   );
   if (!user) return null;
 
@@ -443,6 +459,7 @@ async function syncSubscription(subscription) {
     stripeCustomerId: customerId || user.stripeCustomerId,
     stripeSubscriptionId: subscription.id,
     stripePriceId: priceId,
+    stripeInterval: intervalOf(subscription),
     stripeSubscriptionStatus: status,
     stripeCurrentPeriodEnd: expiry,
     stripeCancelAtPeriodEnd: !!cancelAt,
@@ -510,7 +527,7 @@ async function syncSubscription(subscription) {
   const upgraded =
     grants && status === "active" && user.planSource === "stripe" && user.stripeSubscriptionId === subscription.id &&
     user.plan !== "free" && PLAN_RANK[grants] > (PLAN_RANK[user.plan] || 0);
-  if (upgraded) await grantUpgradeCredits(user._id, subscription, user.plan, grants);
+  if (upgraded) await grantUpgradeCredits(user._id, subscription, user.plan, grants, { creditsResetAt: user.aiCreditsResetAt });
   // A plan that opens again after a failed charge brings back the students the
   // lapse moved to the waitlist, as an upgrade does.
   const reopened = grants && !hasPaidPlanNow(user) && hasPaidPlanNow({ plan: grants, planExpiresAt: update.planExpiresAt });
@@ -738,10 +755,12 @@ const createCheckout = asyncHandler(async (req, res) => {
     res.status(403);
     throw new Error("Kartla ödəniş hələ aktiv deyil");
   }
-  const price = priceForPlan(targetPlan);
+  // By the month, or by the year at 30% off (2026-10-31).
+  const interval = req.body?.interval === "year" ? "year" : "month";
+  const price = priceForPlan(targetPlan, interval);
   if (!price) {
     res.status(503);
-    throw new Error("Stripe qiyməti hələ konfiqurasiya edilməyib");
+    throw new Error(interval === "year" ? "İllik ödəniş hələ hazır deyil" : "Stripe qiyməti hələ konfiqurasiya edilməyib");
   }
   const user = await User.findById(req.user._id).select(
     "name email plan planSince planExpiresAt planDowngradedAt +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeTrialUsedAt +stripeCheckoutSessions"
@@ -767,7 +786,7 @@ const createCheckout = asyncHandler(async (req, res) => {
   if (customer) await expireOpenCheckouts(customer.id);
   const trial = trialEligible(user) ? trialDays() : 0;
   const suffix = Math.random().toString(36).slice(2, 10);
-  const metadata = { examopia_user_id: String(user._id), target_plan: targetPlan };
+  const metadata = { examopia_user_id: String(user._id), target_plan: targetPlan, target_interval: interval };
   const session = await stripeClient().checkout.sessions.create({
     mode: "subscription",
     ...(customer ? { customer: customer.id } : user.email ? { customer_email: user.email } : {}),
@@ -798,13 +817,15 @@ const createCheckout = asyncHandler(async (req, res) => {
       $push: { stripeCheckoutSessions: { $each: [session.id], $slice: -5 } },
     }
   ).catch((error) => console.warn("[stripe] checkout stamp failed:", error.message));
-  res.json({ url: session.url, sessionId: session.id, trialDays: trial });
+  res.json({ url: session.url, sessionId: session.id, trialDays: trial, interval });
 });
 
 /*
  * A monthly add-on (credit pack or storage). It joins the plan's billing date:
  * the first payment covers only the days left until the plan renews, and from then
- * on it is charged together with the plan, on the same day.
+ * on it is charged together with the plan, on the same day. A plan paid by the
+ * year renews once a year, so its add-ons join its monthly date instead (the day
+ * its credits renew).
  */
 const createAddonCheckout = asyncHandler(async (req, res) => {
   const key = String(req.body?.addon || "");
@@ -812,7 +833,7 @@ const createAddonCheckout = asyncHandler(async (req, res) => {
   if (!addon) { res.status(400); throw new Error("Yanlış əlavə"); }
   if (!billingEnabledFor(req.user)) { res.status(403); throw new Error("Kartla ödəniş hələ aktiv deyil"); }
   const user = await User.findById(req.user._id).select(
-    "name email +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAt"
+    "name email +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAt +stripeInterval"
   );
   if (!user) { res.status(404); throw new Error("İstifadəçi tapılmadı"); }
   const status = user.stripeSubscriptionStatus;
@@ -832,7 +853,9 @@ const createAddonCheckout = asyncHandler(async (req, res) => {
     res.status(409);
     throw new Error("Abunəliyin ləğv edilib. Əlavə qoşmaq üçün əvvəlcə «Abunəliyi idarə et» bölməsində abunəliyi bərpa et.");
   }
-  const renewal = user.stripeCurrentPeriodEnd ? Math.floor(new Date(user.stripeCurrentPeriodEnd).getTime() / 1000) : 0;
+  const periodEndAt = user.stripeCurrentPeriodEnd ? new Date(user.stripeCurrentPeriodEnd) : null;
+  const anchor = periodEndAt && user.stripeInterval === "year" ? nextMonthlyBefore(periodEndAt, new Date()) : periodEndAt;
+  const renewal = anchor ? Math.floor(anchor.getTime() / 1000) : 0;
   if (!renewal || renewal < Math.floor(Date.now() / 1000) + 3600) {
     res.status(409);
     throw new Error("Bu gün abunəliyin yenilənmə günüdür. Bir neçə saatdan sonra yenidən cəhd et.");
@@ -994,7 +1017,7 @@ const CARD_STAGES = ["trial", "trial_cancelled", "paying", "cancelling", "past_d
 const adminCardTeachers = asyncHandler(async (req, res) => {
   const users = await User.find({ role: "teacher", stripeSubscriptionId: { $nin: [null, ""] } })
     .select(
-      "name email phone createdAt plan planExpiresAt aiCredits +stripeSubscriptionId +stripeSubscriptionStatus +stripePriceId +stripeCurrentPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeCard"
+      "name email phone createdAt plan planExpiresAt aiCredits +stripeSubscriptionId +stripeSubscriptionStatus +stripePriceId +stripeInterval +stripeCurrentPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeCard"
     )
     .limit(1000)
     .lean();
@@ -1012,6 +1035,7 @@ const adminCardTeachers = asyncHandler(async (req, res) => {
         signedUpAt: u.createdAt,
         stage,
         plan: planForPrice(u.stripePriceId) || null,
+        interval: u.stripeInterval || planOfPrice(u.stripePriceId)?.interval || null,
         trialStartedAt: u.stripeTrialUsedAt || null,
         trialEndsAt: stage === "trial" || stage === "trial_cancelled" ? u.stripeTrialEnd || u.stripeCurrentPeriodEnd || null : null,
         nextChargeAt: stage === "trial" || stage === "paying" || stage === "past_due" ? u.stripeCurrentPeriodEnd || null : null,
@@ -1031,7 +1055,7 @@ const adminCardTeachers = asyncHandler(async (req, res) => {
 
 const billingStatus = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user._id).select(
-    "role plan planSince planExpiresAt planDowngradedAt starterUntil starterPending +stripeTrialCardReused aiCreditsLastSpentAt aiCreditsResetAt addonCreditsMonthly cardStorageGb +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeLastCreditedInvoiceId +stripeRefundedInvoiceId +stripeAddons +stripeCard"
+    "role plan planSince planExpiresAt planDowngradedAt starterUntil starterPending +stripeTrialCardReused aiCreditsLastSpentAt aiCreditsResetAt addonCreditsMonthly cardStorageGb +stripeCustomerId +stripeSubscriptionId +stripeSubscriptionStatus +stripeCurrentPeriodEnd +stripeCancelAtPeriodEnd +stripeCancelAt +stripeTrialEnd +stripeTrialUsedAt +stripeLastPaidAt +stripeLastCreditedInvoiceId +stripeRefundedInvoiceId +stripeAddons +stripeCard +stripeInterval"
   );
   const enabled = billingEnabledFor(req.user);
   res.json({
@@ -1041,6 +1065,8 @@ const billingStatus = asyncHandler(async (req, res) => {
     plan: user?.plan || "free",
     expiresAt: user?.planExpiresAt || null,
     subscriptionStatus: user?.stripeSubscriptionStatus || null,
+    // "month" or "year" (null without a card plan).
+    interval: user?.stripeSubscriptionId ? user?.stripeInterval || "month" : null,
     currentPeriodEnd: user?.stripeCurrentPeriodEnd || null,
     cancelAtPeriodEnd: !!user?.stripeCancelAtPeriodEnd,
     cancelAt: user?.stripeCancelAt || null,
