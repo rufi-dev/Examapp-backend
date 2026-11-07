@@ -3963,6 +3963,11 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
 
   const hasInstr = !!(instructions && String(instructions).trim());
   const className = await classNameFor(req);
+  // A question's image lives on the CDN as a URL in the saved exam. Fetch it
+  // through the same allow-listed figure collector used by answer checking, so
+  // the rewrite model receives the actual pixels instead of only the URL.
+  const { collectFigures } = require("../helper/questionFigures");
+  const { parts: figureParts, labels: figureLabels } = await collectFigures([question], { signal: req.signal });
   // The MODEL decides how to treat the instruction — we don't keyword-match it.
   // It reads the teacher's request and chooses: apply a specific edit surgically,
   // OR (for a vague "find and fix / improve / check") diagnose and fix the
@@ -3982,6 +3987,9 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     "",
     "MÖVCUD SUAL (JSON):",
     JSON.stringify(question).slice(0, 4000),
+    figureParts.length
+      ? `ƏLAVƏ EDİLMİŞ ŞƏKİLLƏR: ${figureLabels.join("; ")} — şəkillərə bax və sualın cavabını/izahını onlara əsasən yaz.`
+      : "",
     "",
     examPrompt ? `İMTAHANIN ÜMUMİ TƏSVİRİ: ${String(examPrompt).slice(0, 500)}` : "",
     className ? `SİNİF: «${className}» (sual bu sinfin fənnindən olsun).` : "",
@@ -4014,7 +4022,7 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
 
   let out = null;
   try {
-    out = await runGeneration({ prompt: ask, preset: req.body?.preset, model: PLATFORM_MODEL });
+    out = await runGeneration({ prompt: ask, preset: req.body?.preset, model: PLATFORM_MODEL, parts: figureParts });
   } catch (e) {
     res.status(e?.aiStatus || 502);
     throw new Error(e?.userMessage || "Sual yenidən yazıla bilmədi");
