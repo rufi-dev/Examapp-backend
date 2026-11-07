@@ -3955,7 +3955,16 @@ const solveAnswers = asyncHandler(async (req, res) => {
 });
 
 const regenerateQuestion = asyncHandler(async (req, res) => {
-  const { question, instructions, examPrompt } = req.body || {};
+  const rawQuestion = req.body?.question;
+  let question = rawQuestion;
+  if (typeof rawQuestion === "string") {
+    try {
+      question = JSON.parse(rawQuestion);
+    } catch {
+      question = null;
+    }
+  }
+  const { instructions, examPrompt } = req.body || {};
   if (!question || typeof question !== "object") {
     res.status(400);
     throw new Error("Sual göndərilmədi");
@@ -3968,6 +3977,13 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
   // the rewrite model receives the actual pixels instead of only the URL.
   const { collectFigures } = require("../helper/questionFigures");
   const { parts: figureParts, labels: figureLabels } = await collectFigures([question], { signal: req.signal });
+  const teacherParts = (Array.isArray(req.files) ? req.files : []).map((file, index) => ({
+    name: `muellimin-fayli-${index + 1}-${String(file.originalname || "fayl").replace(/[^a-zA-Z0-9._-]/g, "_")}`,
+    data: file.buffer.toString("base64"),
+    mime: file.mimetype || "application/octet-stream",
+    isPdf: file.mimetype === "application/pdf",
+  }));
+  const visionParts = [...figureParts, ...teacherParts];
   // The MODEL decides how to treat the instruction — we don't keyword-match it.
   // It reads the teacher's request and chooses: apply a specific edit surgically,
   // OR (for a vague "find and fix / improve / check") diagnose and fix the
@@ -3989,6 +4005,9 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
     JSON.stringify(question).slice(0, 4000),
     figureParts.length
       ? `ƏLAVƏ EDİLMİŞ ŞƏKİLLƏR: ${figureLabels.join("; ")} — şəkillərə bax və sualın cavabını/izahını onlara əsasən yaz.`
+      : "",
+    teacherParts.length
+      ? `MÜƏLLİMİN BU DÜZƏLİŞ ÜÇÜN AYRICA YÜKLƏDİYİ FAYLLAR: ${teacherParts.map((p) => p.name).join(", ")} — bunları sual şəklindən ayrı mənbə kimi oxu və müəllimin istəyinə uyğun istifadə et.`
       : "",
     "",
     examPrompt ? `İMTAHANIN ÜMUMİ TƏSVİRİ: ${String(examPrompt).slice(0, 500)}` : "",
@@ -4022,7 +4041,7 @@ const regenerateQuestion = asyncHandler(async (req, res) => {
 
   let out = null;
   try {
-    out = await runGeneration({ prompt: ask, preset: req.body?.preset, model: PLATFORM_MODEL, parts: figureParts });
+    out = await runGeneration({ prompt: ask, preset: req.body?.preset, model: PLATFORM_MODEL, parts: visionParts });
   } catch (e) {
     res.status(e?.aiStatus || 502);
     throw new Error(e?.userMessage || "Sual yenidən yazıla bilmədi");

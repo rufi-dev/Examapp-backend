@@ -196,7 +196,7 @@ router.post("/generateQuestionsStream/:examId", protect, requireCapability("ai:u
 
 // Which engines the builder may offer for question generation.
 // Rewrite a single question in the builder.
-router.post("/regenerateQuestion/:examId", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, chargeAi("ai.regenerate.question"), regenerateQuestion);
+router.post("/regenerateQuestion/:examId", protect, requireCapability("ai:use:own"), aiRateLimit, aiBudgetGuard, memUpload.array("attachment", 10), chargeAi("ai.regenerate.question"), regenerateQuestion);
 // "Cavabları tap" — solve this paper's answer key, looking at the figures the
 // teacher attached and at the source PDF when the exam still has one. Two
 // routes so a paper still being composed (examId "new") can use it too; only the
