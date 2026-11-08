@@ -4,7 +4,7 @@ const AnthropicPkg = require("@anthropic-ai/sdk");
 const Anthropic = AnthropicPkg.default || AnthropicPkg;
 const AiUsage = require("../models/aiUsageModel");
 const User = require("../models/userModel");
-const { aiExecution, cliOrder, isCoolingDown, standDown, runCliStructured } = require("../helper/cliAi");
+const { aiExecution, cliOrder, isCoolingDown, standDown, runCliStructured, fixJsonEscapes } = require("../helper/cliAi");
 
 // Lazy client so the server still boots without the key (the feature just
 // returns a clear error until ANTHROPIC_API_KEY is set in the env).
@@ -198,7 +198,15 @@ async function extractWithCli(base64, instructions, { onText, signal } = {}) {
         schema: EXTRACTION_SCHEMA,
         files: [{ name: "exam.pdf", mime: "application/pdf", data: base64 }],
         validate: (doc) => !!doc && Array.isArray(doc.questions),
-        onText: typeof onText === "function" ? onText() : undefined,
+        // The live preview parses the same hand-written JSON, so it gets the
+        // same stray-backslash repair (else one `\sqrt` stalls the preview).
+        onText:
+          typeof onText === "function"
+            ? (() => {
+                const emit = onText();
+                return (full) => emit(fixJsonEscapes(full));
+              })()
+            : undefined,
         signal,
       });
       const questions = out.doc.questions

@@ -285,32 +285,38 @@ function jsonSample(text) {
   return t.length <= 600 ? t : `${t.slice(0, 300)} …[${t.length} chars]… ${t.slice(-300)}`;
 }
 
-/* The answer as JSON: bare, inside a ```json fence, or between the outer braces. */
+/*
+ * Inside a JSON string a backslash may only start \" \\ \/ \b \f \n \r \t or
+ * \uXXXX. A model writing LaTeX by hand often leaves `\sqrt`, `\end`, `\cdot`
+ * single, and one of those makes the WHOLE answer unparseable. Every backslash
+ * that does not start a valid escape is doubled. (The valid-looking ones - \frac
+ * read as a form-feed - parse, and are put back after parsing, in the controller.)
+ */
+function fixJsonEscapes(text) {
+  return String(text).replace(/\\(["\\/bfnrt]|u[0-9a-fA-F]{4})|\\/g, (m, ok) => (ok ? m : "\\\\"));
+}
+
+/* The answer as JSON: bare, inside a ```json fence, or between the outer braces -
+ * each as written first, then with its stray LaTeX backslashes doubled. */
 function parseJsonText(raw) {
   const text = String(raw || "").trim();
   if (!text) throw Object.assign(new Error("cli_empty_output"), { code: "cli_invalid_json" });
-  try {
-    return JSON.parse(text);
-  } catch {
-    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (fenced) {
+  const candidates = [text];
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced) candidates.push(fenced[1]);
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) candidates.push(text.slice(start, end + 1));
+  for (const c of candidates) {
+    for (const v of [c, fixJsonEscapes(c)]) {
       try {
-        return JSON.parse(fenced[1]);
+        return JSON.parse(v);
       } catch {
-        /* fall through */
+        /* next */
       }
     }
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(text.slice(start, end + 1));
-      } catch {
-        /* fall through */
-      }
-    }
-    throw Object.assign(new Error("cli_invalid_json"), { code: "cli_invalid_json", sample: jsonSample(text) });
   }
+  throw Object.assign(new Error("cli_invalid_json"), { code: "cli_invalid_json", sample: jsonSample(text) });
 }
 
 /*
@@ -622,6 +628,7 @@ module.exports = {
   limitFromText,
   claudeEnvelope,
   parseJsonText,
+  fixJsonEscapes,
   isSchemaEcho,
   resetFromText,
   childEnv,
