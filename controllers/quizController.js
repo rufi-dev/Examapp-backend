@@ -136,7 +136,7 @@ const addTag = asyncHandler(async (req, res) => {
 
 // Add Class
 const addClass = asyncHandler(async (req, res) => {
-  const { name, level, requireCode } = req.body;
+  const { name, level, requireCode, coverImage } = req.body;
 
   try {
     // A class needs a label: a text name (preferred) or the legacy numeric level.
@@ -155,6 +155,7 @@ const addClass = asyncHandler(async (req, res) => {
       owner: req.user._id,
       joinCode: await uniqueJoinCode(),
       requireCode: requireCode === true || requireCode === "true",
+      coverImage: typeof coverImage === "string" ? coverImage.trim() : "",
     });
 
     res.status(201).json({ message: "Class has been saved", newClass });
@@ -2800,7 +2801,7 @@ const editTag = asyncHandler(async (req, res) => {
 
 const editClass = asyncHandler(async (req, res) => {
   const { classId } = req.params;
-  const { name, level, requireCode, regenerateCode } = req.body;
+  const { name, level, requireCode, regenerateCode, coverImage } = req.body;
   const label = typeof name === "string" ? name.trim() : "";
   if (!label && !level) {
     res.status(400);
@@ -2818,6 +2819,9 @@ const editClass = asyncHandler(async (req, res) => {
   const update = {};
   if (typeof name === "string") update.name = label;
   if (level !== undefined && level !== "") update.level = level;
+  // Cover image: a string sets it ("" removes it); absent leaves it alone, so the
+  // regenerate-code call (which sends no cover) never wipes it.
+  if (typeof coverImage === "string") update.coverImage = coverImage.trim();
   // Visibility toggle — written as a strict boolean (public when false).
   if (requireCode !== undefined) {
     update.requireCode = requireCode === true || requireCode === "true";
