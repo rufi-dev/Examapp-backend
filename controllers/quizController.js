@@ -1143,6 +1143,8 @@ function applyResultVisibility(result, vis) {
   }
   if (!vis.canSeeAnswers) {
     obj.correctAnswers = null;
+    // Per-question right/wrong reveals the key just as much.
+    obj.grades = null;
     // Per-result solution/feedback photos (teacher-added) also reveal answers —
     // hide them until answers are allowed to be shown.
     obj.photos = [];
@@ -1606,16 +1608,85 @@ const reportViolation = asyncHandler(async (req, res) => {
     });
   }
 
-  attempt.violations = (attempt.violations || 0) + 1;
-  if (attempt.violations >= ANTICHEAT_LIMIT) attempt.terminated = true;
-  await attempt.save();
+  // What the runner tells us about this absence. Older runners send only
+  // {reason, attemptId} — every one of those reports COUNTS, exactly as before.
+  const b = req.body || {};
+  const counted = b.count !== false;
+  const awayMs = Math.max(0, Math.min(Number(b.awayMs) || 0, 24 * 3600 * 1000));
+  const reason = String(b.reason || "hidden").replace(/[^a-z_]/gi, "").slice(0, 24) || "hidden";
+  const entry = {
+    at: new Date(),
+    reason,
+    awayMs: Math.round(awayMs),
+    counted,
+    ...(b.autoOff ? { autoOff: true } : {}),
+    ...(b.stillAway ? { stillAway: true } : {}),
+  };
+  // "back" closes an absence that already counted (it carries the whole length);
+  // it is not a second absence.
+  const isNewAbsence = reason !== "back";
+  const update = {
+    $push: { awayLog: { $each: [entry], $slice: -60 } },
+    ...(isNewAbsence || counted
+      ? {
+          $inc: {
+            ...(isNewAbsence ? { awayCount: 1, awayMs: entry.awayMs } : {}),
+            ...(counted ? { violations: 1 } : {}),
+          },
+        }
+      : {}),
+  };
+  // Atomic: two reports landing together can never lose an increment.
+  const after = await Attempt.findOneAndUpdate({ _id: attempt._id, submitted: false }, update, {
+    new: true,
+  });
+  if (!after) {
+    // Submitted in between — nothing more to count.
+    return res.status(200).json({
+      violations: attempt.violations || 0,
+      terminated: !!attempt.terminated,
+      limit: ANTICHEAT_LIMIT,
+    });
+  }
+  if (counted && after.violations >= ANTICHEAT_LIMIT && !after.terminated) {
+    await Attempt.updateOne({ _id: after._id }, { $set: { terminated: true } });
+    after.terminated = true;
+  }
 
   res.status(200).json({
-    violations: attempt.violations,
-    terminated: attempt.terminated,
+    violations: after.violations || 0,
+    terminated: !!after.terminated,
     limit: ANTICHEAT_LIMIT,
   });
 });
+
+// A FORGIVEN absence (the student came back within the grace): logged on the
+// attempt for the teacher, never counted. Same checks as reportViolation.
+const reportAway = (req, res, next) => {
+  req.body = { ...(req.body || {}), count: false };
+  return reportViolation(req, res, next);
+};
+
+// A short, teacher-facing digest of an attempt's absences (live view + results).
+function awaySummary(a) {
+  if (!a) return null;
+  const log = Array.isArray(a.awayLog) ? a.awayLog : [];
+  if (!log.length && !a.awayCount && !a.fsUnavailable) return null;
+  return {
+    count: a.awayCount || log.filter((e) => e.reason !== "back").length,
+    totalMs: a.awayMs || 0,
+    forgiven: log.filter((e) => e.reason !== "back" && !e.counted).length,
+    fsUnavailable: !!a.fsUnavailable,
+    log: log.slice(-12).map((e) => ({
+      at: e.at,
+      reason: e.reason,
+      awayMs: e.awayMs || 0,
+      counted: !!e.counted,
+      autoOff: !!e.autoOff,
+      stillAway: !!e.stillAway,
+    })),
+  };
+}
 
 // Trim surrounding whitespace before comparing (a trailing space/newline on a
 // typed answer shouldn't mark it wrong). Letters/indices are unaffected.
@@ -1776,12 +1847,19 @@ function gradeSelections(exam, sel) {
   const until = exam.negMarkUntil > 0 ? Math.min(exam.negMarkUntil, correct.length) : correct.length;
 
   const counts = { Cm: 0, Cs: 0, Co: 0, Cd: 0, Cma: 0, Cmu: 0 };
+  // The scorer's own verdict per question: null = left blank, otherwise the
+  // fraction earned (1 = right, 0 = wrong, between = partial credit). Stored on the
+  // Result so EVERY report (PDF, Excel, analytics, cards) shows exactly what was
+  // scored instead of re-guessing it in the browser — 2026-11-08 the results PDF
+  // marked a 25/25 student "3 wrong" because it compared "5" to the key "5 / m=5".
+  const grades = correct.map(() => null);
   let earnedPoints = 0;
   let wrongCount = 0;
   correct.forEach((ca, i) => {
     const s = picks[i];
     if (!isAnswered(s)) return;
     const frac = answerScore(ca, s, exam.partialCredit);
+    grades[i] = Math.round(frac * 10000) / 10000;
     earnedPoints += (points[i] || 0) * frac;
     if (frac >= 1) {
       if (counts[ca.type] !== undefined) counts[ca.type]++;
@@ -1802,7 +1880,16 @@ function gradeSelections(exam, sel) {
     earnedPoints = Math.max(0, earnedPoints - cancelledCorrects * avgPerQuestion);
   }
   earnedPoints = Math.round(earnedPoints * 100) / 100;
-  return { earnedPoints, counts };
+  return { earnedPoints, counts, grades };
+}
+
+// Per-question verdicts for a result: the stored ones, or — for results scored
+// before they were stored — the same scorer run now against the exam's key
+// (`exam` must have its questions populated).
+function resultGrades(result, exam) {
+  if (Array.isArray(result.grades)) return result.grades;
+  if (!exam || !Array.isArray(exam.questions?.correctAnswers)) return undefined;
+  return gradeSelections(exam, result.selectedAnswers || []).grades;
 }
 
 // Idempotently link a Result into the exam's + user's result arrays. $addToSet so
@@ -1859,7 +1946,9 @@ async function reconcileExistingResult(existing, exam, user, attempt, opts = {})
     set.violations = newViol;
     existing.violations = newViol;
   }
-  if (wantTerminated && !existing.terminated) {
+  // A termination the teacher has cancelled stays cancelled: a queued/retried
+  // submit still carrying `terminated: true` must not zero it again.
+  if (wantTerminated && !existing.terminated && !existing.pardonedAt) {
     set.terminated = true;
     set.earnPoints = 0;
     existing.terminated = true;
@@ -1930,7 +2019,7 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
     });
   }
 
-  let { earnedPoints, counts } = gradeSelections(exam, sel);
+  let { earnedPoints, counts, grades } = gradeSelections(exam, sel);
 
   const isTerminated =
     !!attempt.terminated || terminated === true || terminated === "true";
@@ -1953,6 +2042,8 @@ async function scoreAndCreateResult(exam, user, attempt, selectedAnswers, opts =
         : {}),
     })),
     correctAnswers: correct.map((a) => ({ type: a.type, answer: renderableCorrect(a) })),
+    // The true per-question verdict, even for a terminated (0-point) result.
+    grades,
     correctAnswersByType: [
       { type: "Cm", count: counts.Cm },
       { type: "Cs", count: counts.Cs },
@@ -2095,7 +2186,7 @@ const addResult = asyncHandler(async (req, res) => {
 // stores the draft only (no scoring). Touches only the owner's OWN live attempt.
 const autosaveAttempt = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const { selectedAnswers, attemptId, currentQuestion, answeredCount } = req.body;
+  const { selectedAnswers, attemptId, currentQuestion, answeredCount, fsUnavailable } = req.body;
   if (!Array.isArray(selectedAnswers)) {
     return res.status(200).json({ ok: false });
   }
@@ -2158,6 +2249,8 @@ const autosaveAttempt = asyncHandler(async (req, res) => {
     lastSeenAt: new Date(),
     answeredCount: answers.filter(hasAns).length,
   };
+  // Recorded, not hidden: this attempt runs without the fullscreen lock (one-way).
+  if (fsUnavailable === true) set.fsUnavailable = true;
   if (Number.isFinite(currentQuestion) && currentQuestion > 0) {
     // Newer client reports the exact page being viewed.
     set.currentQuestion = Math.floor(currentQuestion);
@@ -2328,6 +2421,7 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
       total,
       violations: a.violations || 0,
       terminated: !!a.terminated,
+      away: awaySummary(a),
       startedAt: a.startedAt,
       expiresAt: a.expiresAt,
       lastSeenAt: a.lastSeenAt || null,
@@ -2349,7 +2443,7 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   // (cards stay on the board until the page is closed). Ordered oldest→newest so
   // each student's attempts can be numbered 1..N. ──
   const resultRows = await Result.find({ examId })
-    .select("attemptId userId earnPoints pendingReview terminated violations createdAt")
+    .select("attemptId userId earnPoints pendingReview terminated violations createdAt pardonedAt")
     .populate("userId", "name email grade")
     .sort({ createdAt: 1 })
     .lean();
@@ -2373,7 +2467,7 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
   const attById = new Map(
     (finAttemptIds.length
       ? await Attempt.find({ _id: { $in: finAttemptIds } })
-          .select("answers answeredCount violations startedAt")
+          .select("answers answeredCount violations startedAt awayLog awayCount awayMs fsUnavailable")
           .lean()
       : []
     ).map((a) => [String(a._id), a])
@@ -2391,6 +2485,8 @@ const getLiveAttempts = asyncHandler(async (req, res) => {
       total,
       violations: (r.violations != null ? r.violations : a?.violations) || 0,
       terminated: !!r.terminated,
+      pardoned: !!r.pardonedAt,
+      away: awaySummary(a),
       startedAt: a?.startedAt || null,
       expiresAt: null,
       lastSeenAt: null,
@@ -2587,7 +2683,9 @@ const getResultsByUser = asyncHandler(async (req, res) => {
 // gating, so it MUST never be exposed on a student-reachable route.
 const getResultsByExam = asyncHandler(async (req, res) => {
   const { examId } = req.params;
-  const exam = await Exam.findById(examId);
+  // Questions populated: older results get their per-question verdicts from the
+  // same scorer (see resultGrades).
+  const exam = await Exam.findById(examId).populate("questions");
 
   if (!exam) {
     res.status(404);
@@ -2610,7 +2708,87 @@ const getResultsByExam = asyncHandler(async (req, res) => {
     throw new Error("No results found!");
   }
 
-  res.status(200).json(results);
+  // Each result's absence digest (when/why/how long the student left the exam
+  // screen), so a teacher can tell an accidental screen-off from real leaving.
+  const attIds = results.map((r) => r.attemptId).filter(Boolean);
+  const awayByAttempt = new Map(
+    (attIds.length
+      ? await Attempt.find({ _id: { $in: attIds } })
+          .select("awayLog awayCount awayMs fsUnavailable")
+          .lean()
+      : []
+    ).map((a) => [String(a._id), awaySummary(a)])
+  );
+  res.status(200).json(
+    results.map((r) => {
+      const o = r.toObject();
+      const grades = resultGrades(o, exam);
+      if (grades) o.grades = grades;
+      const away = r.attemptId ? awayByAttempt.get(String(r.attemptId)) : null;
+      return away ? { ...o, away } : o;
+    })
+  );
+});
+
+// Teacher cancels an anti-cheat termination ("Nəticəni bərpa et"). The student's
+// SAVED answers are scored again exactly as a normal submit would score them, the
+// result counts normally (ranks, reports) and can never be re-terminated by a late
+// or retried submit. Exam owner or admin only.
+const pardonResult = asyncHandler(async (req, res) => {
+  const { resultId } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(resultId)) {
+    res.status(400);
+    throw new Error("Nəticə tapılmadı");
+  }
+  const result = await Result.findById(resultId);
+  if (!result) {
+    res.status(404);
+    throw new Error("Nəticə tapılmadı");
+  }
+  // Populated exactly like the submit path: gradeSelections reads the answer key
+  // from exam.questions.correctAnswers.
+  const exam = await Exam.findById(result.examId).populate("questions");
+  if (!exam) {
+    res.status(404);
+    throw new Error("İmtahan tapılmadı");
+  }
+  if (!isAdminUser(req.user) && String(exam.owner || "") !== String(req.user._id)) {
+    res.status(403);
+    throw new Error("Bu imtahan sizə aid deyil");
+  }
+  if (!result.terminated) {
+    return res.status(200).json({ ok: true, already: true, earnPoints: result.earnPoints });
+  }
+  const { earnedPoints, counts, grades } = gradeSelections(exam, result.selectedAnswers || []);
+  const set = {
+    terminated: false,
+    earnPoints: earnedPoints,
+    grades,
+    correctAnswersByType: [
+      { type: "Cm", count: counts.Cm },
+      { type: "Cs", count: counts.Cs },
+      { type: "Co", count: counts.Co },
+      { type: "Cd", count: counts.Cd },
+      { type: "Cma", count: counts.Cma },
+      { type: "Cmu", count: counts.Cmu },
+    ],
+    pardonedAt: new Date(),
+    pardonedBy: req.user._id,
+  };
+  // Only flip a still-terminated result (two clicks can't both apply).
+  const upd = await Result.updateOne({ _id: result._id, terminated: true }, { $set: set });
+  if (!upd.modifiedCount) {
+    const fresh = await Result.findById(result._id).select("earnPoints");
+    return res.status(200).json({ ok: true, already: true, earnPoints: fresh?.earnPoints });
+  }
+  // The attempt is the other source a reconcile reads `terminated` from.
+  if (result.attemptId) {
+    await Attempt.updateOne({ _id: result.attemptId }, { $set: { terminated: false } });
+  }
+  console.log(
+    `[ANTICHEAT] pardon result ${result._id} exam ${exam._id} by ${req.user._id} -> ${earnedPoints}`
+  );
+  res.status(200).json({ ok: true, earnPoints: earnedPoints });
 });
 
 const getResultsByUserByExam = asyncHandler(async (req, res) => {
@@ -3741,7 +3919,7 @@ const savePaperResult = asyncHandler(async (req, res) => {
   }
 
   const sel = normalizePaperSelections(key, answers);
-  const { earnedPoints, counts } = gradeSelections(exam, sel);
+  const { earnedPoints, counts, grades } = gradeSelections(exam, sel);
   const correctCount = sel.filter((s, i) => answerScore(key[i], s, exam.partialCredit) >= 1).length;
   const answeredCount = sel.filter(isAnswered).length;
 
@@ -3775,6 +3953,7 @@ const savePaperResult = asyncHandler(async (req, res) => {
     attempts: answeredCount,
     selectedAnswers: sel.map((a) => ({ type: a.type, answer: storableAnswer(a.answer) })),
     correctAnswers: key.map((a) => ({ type: a.type, answer: renderableCorrect(a) })),
+    grades,
     correctAnswersByType: CORRECT_TYPES.map((t) => ({ type: t, count: counts[t] || 0 })),
     source: "paper",
     sheetPhotos: cleanSheetPhotos(photos),
@@ -4296,7 +4475,7 @@ const submitMyPaper = asyncHandler(async (req, res) => {
     key,
     literal.map((answer) => ({ answer }))
   );
-  const { earnedPoints, counts } = gradeSelections(exam, sel);
+  const { earnedPoints, counts, grades } = gradeSelections(exam, sel);
   const ai = Array.isArray(draft?.aiAnswers) ? draft.aiAnswers : null;
   const studentEdited = ai
     ? key.reduce((acc, q, i) => (sameSheetAnswer(q, literal[i], ai[i]?.answer) ? acc : [...acc, i]), [])
@@ -4316,6 +4495,7 @@ const submitMyPaper = asyncHandler(async (req, res) => {
       attempts: sel.filter(isAnswered).length,
       selectedAnswers: sel.map((a) => ({ type: a.type, answer: storableAnswer(a.answer) })),
       correctAnswers: key.map((a) => ({ type: a.type, answer: renderableCorrect(a) })),
+      grades,
       correctAnswersByType: CORRECT_TYPES.map((t) => ({ type: t, count: counts[t] || 0 })),
       source: "paper",
       submittedBy: "student",
@@ -4401,6 +4581,7 @@ module.exports = {
   finalizeExpiredAttempts,
   finalizeAttempt,
   scoreAndCreateResult,
+  gradeSelections, // exported for tests (the per-question verdicts every report reads)
   effectiveExpiry,
   startAttempt,
   attemptStatus,
@@ -4423,4 +4604,6 @@ module.exports = {
   deleteAllQuestions,
   getExamTagandClass,
   getResultsByExam,
+  pardonResult,
+  reportAway,
 };

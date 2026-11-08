@@ -15,6 +15,38 @@ const attemptSchema = new Schema(
     // The client can't lower these by editing storage/JS or by reloading.
     violations: { type: Number, default: 0 },
     terminated: { type: Boolean, default: false },
+    // Every time the student left the exam screen (screen off, another app/tab,
+    // focus lost): when, why, for how long and whether it COUNTED. A short absence
+    // (an accidental screen-off, a notification) is forgiven — not a violation —
+    // but it is still written here so the teacher sees it and can judge. Only the
+    // newest 60 are kept.
+    awayLog: {
+      type: [
+        new Schema(
+          {
+            at: Date,
+            // hidden (screen off / another app or tab) | blur (another window took
+            // focus) | photo_timeout | reload (came back via a reload) | back
+            // (returned after a counted absence; awayMs = the whole absence)
+            reason: String,
+            awayMs: Number,
+            counted: Boolean,
+            // The phone's own screen time-out (no screen lock held + no touch for a
+            // while before it), so a longer grace applied.
+            autoOff: Boolean,
+            // Counted by the timer while the student was STILL away.
+            stillAway: Boolean,
+          },
+          { _id: false }
+        ),
+      ],
+      default: undefined,
+    },
+    awayCount: { type: Number, default: 0 }, // absences (forgiven + counted)
+    awayMs: { type: Number, default: 0 }, // their total length
+    // The device could not keep fullscreen; the exam ran without it (reported by
+    // the runner so the teacher knows it was a weaker session). One-way.
+    fsUnavailable: { type: Boolean, default: false },
     // Terminal exception to the "every submitted attempt has a Result" invariant:
     // an attempt that can never be scored (its exam/user was deleted, or it was a
     // retired duplicate / a legacy ghost). Excluded from ALL counts. NOTE: only

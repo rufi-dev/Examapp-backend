@@ -66,7 +66,9 @@ const {
   addClass,
   getClass,
   getExamTagandClass,
-  getResultsByExam
+  getResultsByExam,
+  pardonResult,
+  reportAway,
 } = require("../controllers/quizController");
 const {
   extractQuestions,
@@ -162,6 +164,8 @@ router.get("/getPdfByExam/:examId", protect, getPdfByExam);
 router.post("/uploadPdf", protect, teacherOnly, pdfUpload.single("file"), uploadPdf);
 router.get("/getExamTagandClass/:examId", protect, getExamTagandClass);
 router.get("/getResultsByExam/:examId", protect, teacherOnly, getResultsByExam);
+// Cancel an anti-cheat termination: re-score the saved answers (owner/admin).
+router.post("/result/:resultId/pardon", protect, teacherOnly, pardonResult);
 router.get("/getExamsByClass/:classId", protect, getExamsByClass);
 router.get("/getClassesByTag/:tagId", protect, getClassesByTag);
 router.get("/getClasses", protect, getAllClasses);
@@ -216,6 +220,8 @@ router.post("/exam/:examId/paper/me/read", protect, verifiedOnly, readMyPaper);
 router.post("/exam/:examId/paper/me/read/ai", protect, verifiedOnly, readMyPaperAi);
 router.post("/exam/:examId/paper/me/submit", protect, verifiedOnly, submitMyPaper);
 router.post("/exam/:examId/violation", protect, reportViolation);
+// A forgiven absence (back within the grace): logged for the teacher, not counted.
+router.post("/exam/:examId/away", protect, reportAway);
 router.get("/exam/:examId/rank", protect, getExamRank);
 router.post("/addResult/:examId", protect, verifiedOnly, addResult);
 router.get("/getResultsByUser", protect, verifiedOnly, getResultsByUser);

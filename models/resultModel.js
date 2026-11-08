@@ -57,6 +57,11 @@ const resultSchema = Schema(
         required: false,
       }
     ],
+    // The scorer's verdict per question (canonical order): null = blank, else the
+    // fraction earned (1 right, 0 wrong, between = partial credit). Every report
+    // reads this instead of re-checking answers itself. Results scored before
+    // 2026-11-08 lack it; the teacher's results endpoint fills it in on read.
+    grades: { type: Schema.Types.Mixed, default: undefined },
     correctAnswersByType: [
       {
         type: {
@@ -135,6 +140,11 @@ const resultSchema = Schema(
       type: Date,
       default: null,
     },
+    // The teacher cancelled an anti-cheat termination ("Nəticəni bərpa et"): the
+    // saved answers were scored again and the result counts normally. Once set, a
+    // late/retried submit can never terminate (zero) this result again.
+    pardonedAt: { type: Date, default: null },
+    pardonedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
   },
   {
     timestamps: true,
