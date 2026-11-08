@@ -4,6 +4,7 @@ const AnthropicPkg = require("@anthropic-ai/sdk");
 const Anthropic = AnthropicPkg.default || AnthropicPkg;
 const AiUsage = require("../models/aiUsageModel");
 const User = require("../models/userModel");
+const { aiExecution, cliOrder, isCoolingDown, standDown, runCliStructured } = require("../helper/cliAi");
 
 // Lazy client so the server still boots without the key (the feature just
 // returns a clear error until ANTHROPIC_API_KEY is set in the env).
@@ -119,6 +120,135 @@ const instructionBlock = (instr) =>
   instr
     ? `\n\n--- MÜƏLLİMİN ƏLAVƏ TƏLİMATLARI (bunlara əməl et, amma yuxarıdakı JSON sxemini və qaydaları POZMA) ---\n${instr}`
     : "";
+
+// ---- Subscription CLIs (Claude Code, Codex) before any paid API ----
+//
+// The API can REQUIRE the schema; a CLI turn can only be SHOWN it, so what comes
+// back is checked and reshaped here into exactly what the API path returns - the
+// builder cannot tell which route produced the questions.
+
+// A model writing JSON by hand must double every LaTeX backslash. When it
+// doesn't, JSON.parse turns `\frac` into a form-feed + "rac" and `\begin` into a
+// backspace + "egin" without complaint. Those control characters never belong in
+// a question, so they are put back. Only the unambiguous ones are touched; a raw
+// newline is restored to `\n...` only INSIDE a $...$ math segment.
+const repairLatexEscapes = (s) => {
+  if (typeof s !== "string" || !/[\u0008\u0009\u000c\u000d\n]/.test(s)) return s;
+  let out = s
+    .replace(/\u000c/g, "\\f")
+    .replace(/\u0008/g, "\\b")
+    .replace(/\u0009(?=[A-Za-z])/g, "\\t")
+    .replace(/\u000d(?=[A-Za-z])/g, "\\r");
+  out = out.replace(/\$[^$]*\$/g, (seg) => seg.replace(/\n(?=[A-Za-z])/g, "\\n"));
+  return out;
+};
+const cliStr = (v) => repairLatexEscapes(typeof v === "string" ? v : v == null ? "" : String(v));
+const Q_TYPES = new Set(["Cm", "Cs", "Co", "Cd", "Cma"]);
+const choiceIndex = (v, n) => {
+  // "B" / "b" → 1 (a model may answer with the letter); numbers as given.
+  const i = typeof v === "string" && /^\s*[A-Ja-j]\s*$/.test(v) ? v.trim().toUpperCase().charCodeAt(0) - 65 : Number(v);
+  return Number.isInteger(i) && i >= 0 && i < n ? i : null;
+};
+function normalizeCliQuestion(q) {
+  const o = q && typeof q === "object" ? q : {};
+  const choices = Array.isArray(o.choices)
+    ? o.choices.map((c) => (typeof c === "string" ? { text: cliStr(c), latex: "" } : { text: cliStr(c?.text), latex: cliStr(c?.latex) }))
+    : [];
+  const type = Q_TYPES.has(o.type) ? o.type : choices.length ? "Cm" : "Co";
+  const correct = Array.isArray(o.correct)
+    ? [...new Set(o.correct.map((v) => choiceIndex(v, choices.length)).filter((v) => v !== null))]
+    : [];
+  return {
+    type,
+    text: cliStr(o.text),
+    latex: cliStr(o.latex),
+    choices,
+    correct,
+    pairs: Array.isArray(o.pairs)
+      ? o.pairs.map((p) => ({ left: cliStr(p?.left), leftLatex: cliStr(p?.leftLatex), right: cliStr(p?.right), rightLatex: cliStr(p?.rightLatex) }))
+      : [],
+    hasFigure: o.hasFigure === true,
+    openAnswer: cliStr(o.openAnswer),
+    openAnswers: Array.isArray(o.openAnswers) ? o.openAnswers.map(cliStr).filter(Boolean) : [],
+    explanation: cliStr(o.explanation),
+  };
+}
+
+const CLI_EXTRACT_RULE =
+  "JSON YAZARKƏN: LaTeX-dakı hər tərs xətti İKİ dəfə yaz (məs. \"$\\\\frac{1}{2}$\", \"$\\\\sqrt{x}$\") — " +
+  "əks halda JSON pozulur. Sətir sonu üçün \\n yaz.";
+
+/*
+ * Try the subscription CLIs in AI_CLI_ORDER. Returns { questions, cost, provider }
+ * from the first that produces questions, or null so the caller continues on the
+ * paid API (or fails, in AI_EXECUTION=cli). `onText()` makes a fresh streamer for
+ * each route, so questions appear live while Claude writes them.
+ */
+async function extractWithCli(base64, instructions, { onText, signal } = {}) {
+  if (aiExecution() === "api") return null;
+  for (const cli of cliOrder()) {
+    if (signal?.aborted) return null;
+    if (isCoolingDown(cli)) continue;
+    const started = Date.now();
+    try {
+      const out = await runCliStructured({
+        provider: cli,
+        system: `${SYSTEM_PROMPT}\n\n${CLI_EXTRACT_RULE}${instructionBlock(instructions)}`,
+        prompt: "Bu PDF-dəki BÜTÜN sualları, sənəddəki sırası ilə, sxemə uyğun JSON-a çıxar.",
+        schema: EXTRACTION_SCHEMA,
+        files: [{ name: "exam.pdf", mime: "application/pdf", data: base64 }],
+        validate: (doc) => !!doc && Array.isArray(doc.questions),
+        onText: typeof onText === "function" ? onText() : undefined,
+        signal,
+      });
+      const questions = out.doc.questions
+        .map(normalizeCliQuestion)
+        .filter((q) => q.text.trim() || q.choices.length || q.pairs.length);
+      const secs = Math.round((Date.now() - started) / 1000);
+      if (!questions.length) {
+        // An unreadable page and a failed read look the same; another route may manage.
+        console.warn(`[AI-CLI] ${cli} read the PDF but returned no questions (${secs}s) — trying the next route`);
+        continue;
+      }
+      console.log(`[AI-CLI] ${cli} extracted ${questions.length} questions in ${secs}s (${out.model})`);
+      return {
+        questions,
+        provider: out.provider,
+        cost: { model: `${out.provider}:${out.model}`, inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, totalTokens: 0, usd: 0, cli: true },
+      };
+    } catch (e) {
+      if (e?.code === "cli_cancelled") return null;
+      if (e?.code === "cli_limit_reached" || e?.code === "cli_unavailable") standDown(cli, e);
+      console.warn(
+        `[AI-CLI] ${cli} failed after ${Math.round((Date.now() - started) / 1000)}s: ${e?.code || ""} ${String(e?.message || "").slice(0, 200)}` +
+          (e?.stderr ? ` | stderr: ${String(e.stderr).slice(-300).replace(/\s+/g, " ")}` : "")
+      );
+    }
+  }
+  return null;
+}
+
+const CLI_ONLY_UNAVAILABLE = "Abunə AI-ları (Claude / Codex) hazırda əlçatan deyil. Bir az sonra yenidən cəhd edin.";
+
+async function logAiUsage(req, cost, questions) {
+  if (!cost || !req.user?._id) return;
+  try {
+    await AiUsage.create({
+      user: req.user._id,
+      exam: req.params.examId,
+      model: cost.model,
+      inputTokens: cost.inputTokens,
+      outputTokens: cost.outputTokens,
+      cacheWriteTokens: cost.cacheWriteTokens,
+      cacheReadTokens: cost.cacheReadTokens,
+      totalTokens: cost.totalTokens,
+      usd: cost.usd,
+      questions,
+    });
+  } catch (e) {
+    console.error("AiUsage log failed:", e?.message);
+  }
+}
 
 // Claude Opus 4.8 pricing (USD per 1M tokens). Cache write (5-min ephemeral) is
 // 1.25x base input; cache read is 0.1x base input. Output includes thinking.
@@ -401,6 +531,19 @@ const extractQuestions = asyncHandler(async (req, res) => {
     String(req.body?.provider || "").toLowerCase() === "gemini" ? "gemini" : "claude";
   const instructions = clampInstr(req.body?.instructions);
 
+  // The owner's subscriptions first; the paid API only if neither can do it.
+  const viaCli = await extractWithCli(base64, instructions);
+  if (viaCli) {
+    await logAiUsage(req, viaCli.cost, viaCli.questions.length);
+    return res
+      .status(200)
+      .json({ success: true, questions: viaCli.questions, usage: null, cost: { model: viaCli.cost.model, cli: true }, provider: viaCli.provider, fellBack: false });
+  }
+  if (aiExecution() === "cli") {
+    res.status(503);
+    throw new Error(CLI_ONLY_UNAVAILABLE);
+  }
+
   let questions = [];
   let usage = null;
   let cost = null;
@@ -681,6 +824,31 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
       for (const q of streamer(full)) sse("question", q);
     };
   };
+
+  // A teacher who closes the page stops the CLI turn too (no ten-minute orphan).
+  const cliAbort = new AbortController();
+  res.on("close", () => {
+    if (!res.writableEnded) cliAbort.abort();
+  });
+
+  // The owner's subscriptions first (questions stream live from Claude); the
+  // paid API below runs only if neither CLI produced questions.
+  const viaCli = await extractWithCli(base64, instructions, { onText: mkOnText, signal: cliAbort.signal });
+  if (viaCli) {
+    clearInterval(hb);
+    await logAiUsage(req, viaCli.cost, viaCli.questions.length);
+    sse("done", { questions: viaCli.questions, cost: { model: viaCli.cost.model, cli: true }, provider: viaCli.provider, fellBack: false });
+    return res.end();
+  }
+  if (cliAbort.signal.aborted) {
+    clearInterval(hb);
+    return res.end();
+  }
+  if (aiExecution() === "cli") {
+    clearInterval(hb);
+    sse("error", { message: CLI_ONLY_UNAVAILABLE });
+    return res.end();
+  }
 
   let result;
   let usedProvider = provider;
