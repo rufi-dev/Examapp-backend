@@ -47,7 +47,10 @@ const args = process.argv.slice(2);
 let stdin = ""; try { stdin = fs.readFileSync(0, "utf8"); } catch {}
 const sys = args[args.indexOf("--system-prompt") + 1] || "";
 const mode = JSON.parse(fs.readFileSync(${JSON.stringify(MODE)}, "utf8")).claude;
-fs.appendFileSync(${JSON.stringify(LOG)}, JSON.stringify({ bin: "claude", args, apiKey: process.env.ANTHROPIC_API_KEY !== undefined, token: !!process.env.CLAUDE_CODE_OAUTH_TOKEN, insist: /SXEMİN ÖZÜNÜ|JSON DEYİLDİ/.test(sys), stdinHasSchema: stdin.includes('"questions"') }) + "\\n");
+const job = /CAVABINI tapan/.test(sys) ? "solve" : /YOXLAYAN/.test(sys) ? "review" : /YARADAN/.test(sys) ? "generate" : "extract";
+const flag = (f) => (args.indexOf(f) >= 0 ? args[args.indexOf(f) + 1] : null);
+fs.appendFileSync(${JSON.stringify(LOG)}, JSON.stringify({ bin: "claude", job, model: flag("--model"), effort: flag("--effort"), args, apiKey: process.env.ANTHROPIC_API_KEY !== undefined, token: !!process.env.CLAUDE_CODE_OAUTH_TOKEN, insist: /SXEMİN ÖZÜNÜ|JSON DEYİLDİ/.test(sys), stdinHasSchema: stdin.includes('"questions"'), topUp: /ARTIQ \\d+ sual/.test(stdin) }) + "\\n");
+const Q = (text, correct) => ({ type: "Cm", text, latex: "", choices: [{ text: "4", latex: "" }, { text: "5", latex: "" }, { text: "6", latex: "" }], correct, pairs: [], hasFigure: false, openAnswer: "", openAnswers: [], explanation: "" });
 const out = (t) => process.stdout.write(JSON.stringify(t) + "\\n");
 const answer = (text) => {
   for (let i = 0; i < text.length; i += 40) out({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: text.slice(i, i + 40) } } });
@@ -61,6 +64,13 @@ else if (mode === "prose") answer(second ? ${JSON.stringify(GOOD("after prose"))
 else if (mode === "prose2") answer("Bağışlayın, aydın deyil.");
 else if (mode === "limit") answer("Claude AI usage limit reached|" + Math.floor(Date.now() / 1000 + 3600));
 else if (mode === "nologin") { out({ type: "result", subtype: "success", is_error: true, result: "Not logged in · Please run /login" }); process.exit(1); }
+// the paper gives no answer; the solver answers (and tries to reword the question)
+else if (mode === "nokey") answer(JSON.stringify(job === "solve" ? { questions: [Q("REWORDED BY AI", [2])] } : { documentKind: "questions", questions: [Q("Teacher wording", [])] }));
+else if (mode === "unreadable") answer(JSON.stringify({ documentKind: "unreadable", questions: [] }));
+// "3 sual" comes back as 1; the top-up adds 2 new ones
+else if (mode === "short") answer(JSON.stringify({ questions: /ARTIQ 1 sual/.test(stdin) ? [Q("ikinci", [0]), Q("üçüncü", [2])] : [Q("birinci", [1])] }));
+// a single-choice with two answers: the reviewer fixes it
+else if (mode === "bad") answer(JSON.stringify({ questions: [job === "review" ? Q("düzəldilmiş", [1]) : Q("iki cavablı", [0, 1])] }));
 `;
 const fakeCodex = `#!/usr/bin/env node
 const fs = require("fs");
@@ -218,6 +228,57 @@ const ok = (cond, msg) => {
     gen.extractQuestionsStream({ files: [{ buffer: Buffer.from("x"), mimetype: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", originalname: "a.docx" }], body: {}, params: { examId: "x" } }, res, (e) => resolve({ code: res.code, msg: e && e.message }));
   });
   ok(bad.code === 400 && /PDF/.test(bad.msg || ""), "a Word file is refused with a clear message");
+
+  // ---- Examopia's quality steps (ported 2026-11-08) ----
+  const sseRun = (handler, req) =>
+    new Promise((resolve) => {
+      let body = "";
+      const res = { statusCode: 200, writableEnded: false, status() { return this; }, writeHead() {}, flushHeaders() {}, on() {}, write(s) { body += s; },
+        end() { resolve(body.split("\n\n").map((b) => [/^event: (\w+)$/m.exec(b)?.[1], /^data: (.*)$/m.exec(b)?.[1]]).filter((x) => x[0]).map(([e, j]) => [e, JSON.parse(j)])); } };
+      handler(req, res, (e) => resolve([["thrown", { message: e && e.message }]]));
+    });
+  const statuses = (ev) => ev.filter((e) => e[0] === "status").map((e) => e[1].message);
+  for (const k of Object.keys(require.cache)) if (/controllers|helper/.test(k)) delete require.cache[k];
+  const qc = require("../controllers/aiController");
+  const pdfReq = (body = {}) => ({ files: [{ buffer: PDF, mimetype: "application/pdf", originalname: "x.pdf" }], body, params: { examId: "x" } });
+
+  // 8a. The paper gives no answer: the AI solves it WITH the pages, and only the
+  //     answer is taken — the teacher's wording stays.
+  setMode("nokey", "good");
+  ev = await sseRun(qc.extractQuestionsStream, pdfReq());
+  d = done(ev);
+  c = calls();
+  const solveCall = c.find((x) => x.job === "solve");
+  ok(d && d.answersSolved === 1 && d.answersMissing === 0 && d.questions[0].correct[0] === 2, "missing answer solved by the AI and reported (answersSolved)");
+  ok(d && d.questions[0].text === "Teacher wording", "the solver cannot reword the teacher's question");
+  ok(solveCall && solveCall.args.includes("--add-dir") && solveCall.model === "opus", "the solver sees the pages and runs on the writing model");
+  ok(statuses(ev).some((m) => /cavabı vərəqdə yoxdur/.test(m)), "status line says the AI is solving");
+  ok(c.find((x) => x.job === "extract")?.model === "sonnet", "reading the file runs on sonnet");
+
+  // 8b. An unreadable file is never answered with invented questions: next engine.
+  setMode("unreadable", "good");
+  d = done(await sseRun(qc.extractQuestionsStream, pdfReq()));
+  ok(d && d.provider === "codex-cli", "documentKind=unreadable on claude → codex reads it instead");
+
+  // 8c. "3 sual" that came back as 1 is topped up to 3.
+  setMode("short", "good");
+  ev = await sseRun(qc.generateQuestionsStream, { body: { prompt: "kəsrlər, 3 sual" }, params: { examId: "x" } });
+  d = done(ev);
+  c = calls();
+  ok(d && d.questions.length === 3 && d.countInfo && d.countInfo.requested === 3 && d.countInfo.short === 0, "short set topped up to the requested count");
+  ok(c.some((x) => x.topUp) && statuses(ev).some((m) => /Çatışmayan/.test(m)), "top-up asked for the missing ones, with a status line");
+  ok(c.find((x) => x.job === "generate")?.model === "opus" && c.find((x) => x.job === "generate")?.effort === "high", "writing runs on opus at high effort");
+
+  // 8d. A rule the AI broke (two answers on a single-choice) is reviewed and fixed.
+  setMode("bad", "good");
+  ev = await sseRun(qc.generateQuestionsStream, { body: { prompt: "kəsrlər, 1 sual" }, params: { examId: "x" } });
+  d = done(ev);
+  ok(d && d.questions[0].correct.length === 1 && d.questions[0].text === "düzəldilmiş" && d.issues === 0 && d.verified === true, "flagged question reviewed, fixed, and only then called verified");
+  ok(statuses(ev).some((m) => /yoxlanılır/.test(m)), "status line says the questions are being checked");
+  // a clean set is not sent for review (and not claimed as verified)
+  setMode("good", "good");
+  d = done(await sseRun(qc.generateQuestionsStream, { body: { prompt: "kəsrlər, 1 sual" }, params: { examId: "x" } }));
+  ok(d && d.verified === false && !calls().some((x) => x.job === "review"), "a clean set skips the review and is not claimed verified");
 
   // 7. Both spent (codex's refusal buried after 30KB of stderr) → the paid API path.
   //    Fresh module state so claude is tried again.

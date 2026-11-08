@@ -110,9 +110,26 @@ const safeModel = (model) => {
   return value;
 };
 
-function cliModel(provider) {
-  if (provider === "claude") return safeModel(process.env.CLAUDE_CLI_MODEL || "sonnet");
+/* The model for a job: the caller's choice (a Claude alias such as "opus" or
+ * "sonnet" means nothing to Codex, so it is never passed there), else the env
+ * default. Codex keeps its own account default unless CODEX_CLI_MODEL is set. */
+function cliModel(provider, wanted) {
+  if (provider === "claude") return safeModel(wanted || process.env.CLAUDE_CLI_MODEL || "sonnet");
   return process.env.CODEX_CLI_MODEL ? safeModel(process.env.CODEX_CLI_MODEL) : null;
+}
+
+/*
+ * How hard the model thinks. Claude takes low|medium|high|xhigh|max directly
+ * (`--effort`); Codex's scale stops at high, so xhigh/max become high there.
+ * Codex's own default on a ChatGPT account is "none", which is quick but
+ * careless on the maths a paper's answer key depends on.
+ */
+const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+function effortArgs(provider, effort) {
+  const e = String(effort || "").toLowerCase();
+  if (!EFFORTS.has(e)) return [];
+  if (provider === "claude") return ["--effort", e];
+  return ["-c", `model_reasoning_effort="${e === "xhigh" || e === "max" ? "high" : e}"`];
 }
 
 /*
@@ -493,7 +510,7 @@ function pdfToPages(pdfFile, dir, prefix, signal) {
  * `validate(doc)` returns false for an answer that is JSON but not the answer
  * (that earns the same single retry as prose). Returns { doc, provider, model }.
  */
-async function runCliStructured({ provider, system, prompt, schema, files: parts = [], validate, onText, signal }) {
+async function runCliStructured({ provider, system, prompt, schema, files: parts = [], validate, onText, signal, model: wantedModel, effort }) {
   if (provider !== "claude" && provider !== "codex") {
     throw Object.assign(new Error("cli_provider_unavailable"), { code: "cli_provider_unavailable" });
   }
@@ -522,7 +539,7 @@ async function runCliStructured({ provider, system, prompt, schema, files: parts
       if (!images.length) throw Object.assign(new Error("no page could be drawn for codex"), { code: "cli_unreadable_document" });
     }
 
-    const model = cliModel(provider);
+    const model = cliModel(provider, wantedModel);
     const answerFile = path.join(job, "answer.json");
 
     const attempt = async (insist) => {
@@ -535,6 +552,7 @@ async function runCliStructured({ provider, system, prompt, schema, files: parts
           ...CLAUDE_BASE_ARGS,
           "--max-turns", String(claudeTurns(files.length)),
           ...(model ? ["--model", model] : []),
+          ...effortArgs("claude", effort),
           "--system-prompt", systemPrompt,
           // Read, and only Read, inside this turn's own folder.
           ...(files.length ? ["--tools", "Read", "--add-dir", job] : ["--tools", ""]),
@@ -556,6 +574,7 @@ async function runCliStructured({ provider, system, prompt, schema, files: parts
           "--sandbox", "read-only",
           "--skip-git-repo-check",
           ...(model ? ["--model", model] : []),
+          ...effortArgs("codex", effort),
           "--output-last-message", answerFile,
           `${systemPrompt}\n\n${userPrompt}`,
         ];

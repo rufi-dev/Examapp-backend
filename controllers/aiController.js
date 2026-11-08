@@ -5,6 +5,16 @@ const Anthropic = AnthropicPkg.default || AnthropicPkg;
 const AiUsage = require("../models/aiUsageModel");
 const User = require("../models/userModel");
 const { aiExecution, cliOrder, isCoolingDown, standDown, runCliStructured, fixJsonEscapes } = require("../helper/cliAi");
+const {
+  cleanQuestions,
+  auditQuestions,
+  unansweredIndexes,
+  answerOnly,
+  parseRequestedCount,
+  questionKey,
+  REVIEW_SYSTEM_PROMPT,
+  SOLVE_SYSTEM_PROMPT,
+} = require("../helper/aiQuality");
 
 // Lazy client so the server still boots without the key (the feature just
 // returns a clear error until ANTHROPIC_API_KEY is set in the env).
@@ -86,28 +96,72 @@ const EXTRACTION_SCHEMA = {
   required: ["questions"],
 };
 
-const SYSTEM_PROMPT = `You extract exam questions from a PDF into structured data for a math exam platform. The exam content is in Azerbaijani; keep all text in its original language.
+// The extraction rules: Examopia's (ported 2026-11-08) without its reading-passage,
+// text-formatting, manual-grading and Az-dili-paper rules, plus an explicit
+// "never correct the teacher's spelling" and BunkerMath's explanation field.
+const SYSTEM_PROMPT = `You turn a teacher's uploaded document into an exam, for a platform used for ANY school subject (maths, physics, chemistry, biology, history, geography, IT, literature, languages, …). The content is in Azerbaijani; keep all text in its original language.
+
+FIRST decide what the document is, and set "documentKind" to say so. This decides everything that follows:
+
+- "questions" — the document ALREADY contains exam questions (a test paper, a question bank, a past paper, an exercise set). COPY them. This is the normal case and the rest of this prompt is about doing it faithfully. Never rewrite, improve, reorder or invent anything; if the paper has 21 questions, return 21.
+
+- "material" — the document is TEACHING CONTENT with no ready questions: grammar rules, a topic summary, a theory page, a vocabulary list, worked examples, a textbook section, notes. Then WRITE the exam yourself FROM THAT CONTENT. Only from that content: every question must be answerable by someone who has read this document, and must test what the document actually teaches — not the general subject. Follow the document's own examples and level. Produce a sensible paper (about 10–15 questions unless the teacher asked otherwise), mostly "Cm" with 4–5 plausible options, and because YOU wrote them you DO know the answers, so fill "correct" / "openAnswer" properly. Cover the document's main points rather than one paragraph of it.
+
+- "unreadable" — you could NOT see the content: the Read tool errored, the file was refused for its size, the pages came back blank, or the scan is too poor to make out. Then set documentKind to "unreadable" and return an EMPTY questions array.
+  THIS IS IMPORTANT AND NOT OPTIONAL: when you cannot read the document you must NOT fall back to writing questions about what you guess the topic might be, and you must NOT report it as "material". A teacher who uploaded their own test and received twenty invented questions instead has been given something worse than an error. Say you could not read it and stop.
+
+A page whose questions are PICTURES — a scan, a photograph, a screenshot, an image-only PDF — is still "questions". Read the text out of the image and copy it. Only genuine illegibility is "unreadable".
+
+Everything below describes how to write each question. It applies to BOTH copied and written questions, except where it says the PDF must state something (an answer key, a marked option) — those rules exist to stop you inventing answers for a paper you are copying, and they do not apply when documentKind is "material", where the answers are yours to give.
 
 Output one item per question, in document order, using these types:
 - "Cm": single correct answer among options.
 - "Cs": multiple correct answers among options (only when the question clearly allows more than one).
 - "Co": open / free-text answer (no options) — a SHORT written answer (a number, expression, word).
-- "Cd": open question that REQUIRES A WRITTEN SOLUTION / working ("Həlli tələb olunan açıq sual"). Use "Cd" (NOT "Co") for questions in a "detailed answer" / "ətraflı yazın" / "həllini yazın" / "show your work" section — e.g. a DİM Buraxılış paper's final "…saylı tapşırıqları ətraflı yazın" block. These are still open answers; fill openAnswer/openAnswers the same way as Co when the PDF states the answer.
+- "Cd": open question that REQUIRES A WRITTEN SOLUTION / working ("Həlli tələb olunan açıq sual"). Use "Cd" (NOT "Co") for questions in a "detailed answer" / "ətraflı yazın" / "həllini yazın" / "show your work" section — e.g. a DİM Buraxılış paper's final "…saylı tapşırıqları ətraflı yazın" block. Still open answers; fill openAnswer/openAnswers the same way as Co when the PDF states the answer.
 - "Cma": matching (left column items paired with right column items).
+
+TYPE DECISION — check in this order, stop at the first match:
+1. Does the question offer UPPERCASE A–E answer variants? → "Cm" (or "Cs" if it asks for several). Those A–E texts, and ONLY those, become "choices".
+2. No A–E variants, but there is a numbered list (1., 2., 3. …) AND a separate lowercase-lettered list (a., b., c. …)? → "Cma". Build "pairs" (1→its letter). The lowercase a., b., c. items are the RIGHT-HAND column of a matching table — they are NEVER "choices". Emitting them as choices is WRONG.
+3. No A–E variants, just one numbered list the student picks from? → "Cs", each numbered item a choice.
+4. Nothing to pick from — the student writes the answer? → "Co" (or "Cd" in a detailed-solution section).
 
 Rules:
 - "text": the question STATEMENT ONLY — do NOT include the multiple-choice answer options (the A/B/C/D/E choices) here; those go in "choices". Write every mathematical formula INLINE, at the EXACT position it appears, as LaTeX wrapped in single dollar signs ($...$). Keep the math in the same order and place as the document — do NOT move formulas to the end. Examples:
   - "3500-ün $\\\\frac{5}{7}$ hissəsini tapın."
   - "$\\\\begin{cases}x^{2}y-xy^{2}=12\\\\\\\\xy=6\\\\end{cases}$ tənliklər sistemindən $x^{2}+y^{2}$-nın cəmini tapın."
   - "$\\\\sqrt{3}=a$ və $\\\\sqrt{5}=b$ olarsa, $\\\\sqrt{540}$ ədədini $a$ və $b$ ilə əvəz edin."
-  Use $$...$$ only for a big standalone display formula. Write a literal dollar sign as \\\\$.
+  Use $$...$$ only for a big standalone display formula. Write a literal dollar sign as \\\\$. IMPORTANT: use $...$ ONLY for genuine mathematical expressions/formulas — NEVER for plain numbers, numeric ranges (e.g. 20–30), measurements, percentages, years or dates; write those as ordinary text ("20–30 santimetr", not "$20-30$").
+- FAITHFUL TEXT: reproduce the wording EXACTLY as printed — same words, same order, same punctuation. Do NOT correct spelling, grammar or typos and never reword, shorten or drop a word — copy it exactly as printed, even where it looks wrong. Keep every special symbol/marker exactly where it appears in the line: paragraph icons/bullets (▲ ■ ● ► ◆ ★ • ♦), Roman-numeral paragraph labels (I, II, III, IV …), and footnote/superscript numbers. Never drop, move, or normalize any of these.
 - PRESERVE LINE BREAKS inside "text": keep the document's line structure for the question STATEMENT. Put each numbered statement item that is PART OF THE QUESTION (e.g. 1., 2., 3., … or I., II., III. sub-statements) on its own line using a real newline (\\n), and keep a blank line between distinct statement groups. NEVER collapse a multi-line question into a single line. Do NOT put the answer options (the A/B/C/D/E choices) in "text" at all — they belong ONLY in "choices".
+- TABLES & DIAGRAMS → PHOTO (do NOT reproduce them): if a question contains a TABLE/grid (Doğrudur/Yanlışdır, Səbəb/Nəticə, Müddəa/Faktlar, "cədvəli tamamlayın", müqayisə cədvəli, any column grid), a Venn/Euler diagram, a chart/graph, or a syntactic-analysis scheme, set "hasFigure": true and DO NOT try to rebuild it as text or markdown — the teacher will add a photo of it from the PDF. Still extract the question's instruction text (and the A–E "choices" if the question has them). This keeps extraction simple and accurate.
 - "latex": ALWAYS return an empty string "". All math now lives inline inside the text fields, never in a separate field.
 - "choices": for Cm/Cs, one object per option in the order shown (drop the A/B/C labels — they are implicit by position). Put each option's text in "text" with any math inline via $...$ (e.g. "$9ab$", "2500"). Set the choice "latex" to "". The options live ONLY here — never repeat them inside the question "text". For Co/Cma, use an empty array.
+- OPTION CONTENT (important): each answer option's FULL text goes in its "choices" entry EXACTLY as printed — even if the option is long or spans several lines (e.g. a poem couplet, a whole sentence). NEVER replace an option with just its letter, and NEVER dump the list of options into the question "text". The question "text" holds only the instruction (+ any numbered items the question asks about).
+- DIAGRAM / SCHEME OPTIONS: if the answer options THEMSELVES are pictures (e.g. the A–E syntactic-analysis line/arc schemes under a sentence), you cannot transcribe them — set "hasFigure": true and output each choice as JUST its letter ("A", "B", "C", "D", "E") so the teacher can add the picture of the options.
 - "correct": indices (0-based) into "choices" of the correct option(s) — ONLY if the PDF itself marks/states the correct answer (e.g. an answer key, a highlighted option, or a stated solution). If the correct answer is NOT given in the PDF, return an EMPTY array. NEVER guess or solve the question to fill this — leave it empty for the teacher to mark.
-- "pairs": for Cma matching, one object per LEFT item (e.g. one per number 1, 2, 3 …) in order. Put math inline in "left"/"right" via $...$ and set "leftLatex"/"rightLatex" to "". Empty array otherwise. For a numbers→letters correspondence, "left" is the number/item and "right" is its correct letter(s): if ONE left matches SEVERAL letters, list them comma-separated in that one right value (e.g. "a, d"). A letter may repeat across different lefts. The app turns this into a grid where each letter is selected individually.
+- NEVER PACK A SET OR A PAIRING INTO AN OPEN ANSWER. If the correct answer can only be written as a list of item numbers ("2,5"), or as a number–letter sequence ("1b2d3c", "1-b, 2-d"), the question is NOT open (Co/Cd). Pick the structured type instead — the app marks those automatically, while an open answer forces the student to type the exact string:
+  • A numbered list (1., 2., 3. …) that the student must pick from, with NO uppercase A–E answer variants → "Cs", NOT "Cm". Each numbered item becomes its own "choices" entry, IN ORDER, WITHOUT its number; "correct" holds the 0-based indexes (answer "2,5" over five items → correct: [1, 4]). Do not leave the items in "text". Use "Cs" even when you cannot tell how many are correct: the paper only shows A–E variants when exactly one answer is wanted, so a bare numbered list means "select every one that applies". "Cm" REQUIRES uppercase A–E variants to choose between.
+  • A numbered list PLUS a separate lettered list (a., b., c. …) with NO uppercase A–E answer variants → "Cma", one "pairs" entry per number (answer "1b2d3c" → pairs 1→b, 2→d, 3→c).
+  Reserve Co/Cd for answers a student genuinely writes out: a number, a word, a formula.
+- MATCHING WITH ANSWER VARIANTS → CLOSED, NOT Cma: a question may say "Uyğunluğu müəyyən(ləşdir)in" yet PROVIDE lettered answer variants A–E that each encode a pairing (e.g. "A) 1 – a, b; 2 – d"  "B) 1 – a, c; 2 – b, e"). That is a CLOSED single-choice question: use type "Cm". Put the items being matched (the 1., 2., … list AND the a., b., c., … list) in "text", and put each A–E variant as a "choices" entry with its exact text (e.g. "1 – a, b; 2 – d"). Do NOT output "Cma"/pairs for these. Use "Cma" ONLY when the question gives NO answer variants and the student must build the pairing themselves. (The lowercase a., b., c. items belong in "text" — they are content to match, NOT the answer choices; only the uppercase A–E variants are choices.)
+- "pairs" — READ THIS CAREFULLY, IT IS THE MOST COMMONLY GOT WRONG. The app renders a Cma question as a BARE number→letter grid:
+      1 →  A B C D E
+      2 →  A B C D E
+  The student sees ONLY the numbers and the letters. NOTHING you put in "pairs" is ever displayed — it is the answer key, not content. So the ITEMS THEMSELVES (the numbered list AND the lettered list, with their full wording) MUST appear in "text", or the question is unanswerable.
+  • "text" = the instruction + the numbered list (each item on its own line) + the lettered list (each item on its own line).
+  • "pairs" = the mapping only: "left" is just the number ("1"), "right" is just its correct letter(s) ("b", or "a, d" when one number matches several). A letter may repeat across lefts.
+  • NEVER empty for a "Cma" question — emit one object per LEFT item even when the paper does not reveal the correct letters (leave "right" as "" then), so the teacher gets a grid with the right number of rows to fill in, in order.
+  CORRECT:   text: "Uyğunluğu müəyyən edin.\\n1. [p]\\n2. [m]\\n\\na) dodaq\\nb) burun"   pairs: [{"left":"1","right":"a"},{"left":"2","right":"b"}]
+  WRONG:     text: "Uyğunluğu müəyyən edin."                                        pairs: [{"left":"1. [p]","right":"a"}]
+  • LETTERS: use only the English-alphabet letters a, b, c, d, e … as labels. Never use the Azerbaijani-only letters ç, ə, ğ, ı, ö, ş, ü as a matching label — the app does not recognise them. If the PDF itself labels the list with them, relabel in order (a, b, c, d, e) in BOTH the text and "right".
+  Put math inline in "left"/"right" via $...$ and set "leftLatex"/"rightLatex" to "". Empty array for non-matching questions.
 - "openAnswer" / "openAnswers": for open (Co) questions, the correct answer(s). Write them as PLAIN TEXT exactly as a student types on a keyboard — NO LaTeX, NO $...$ dollar signs, NO markup. Examples: write x+2 (NOT $x + 2$), 3/4 (NOT $\\\\frac{3}{4}$), x=5, 25. Put the primary answer in "openAnswer" AND list EVERY acceptable form in the "openAnswers" ARRAY, each variant as its own element — include the spaced and unspaced forms (x+2 AND x + 2), reordered equivalents (2+x), and common synonyms/notations students would realistically type. A typed answer is marked correct if it matches ANY item (compared case- and space-insensitively), so cover the realistic variations. Fill these ONLY if the PDF states the answer; otherwise openAnswer="" and openAnswers=[]. For non-open questions: openAnswer="" and openAnswers=[].
-- "hasFigure": true if the question depends on a diagram, graph, geometric figure, or image that cannot be represented as text/LaTeX (the teacher will add the image). Still extract the surrounding text.
+- "hasFigure": true whenever the question relies on anything that is not plain text — a geometric figure, graph/chart, image, ANY table/grid, a Venn/Euler diagram, or a syntactic-analysis scheme. Set hasFigure=true and still extract the instruction text (+ A–E choices if any); the teacher crops the figure/table from the PDF.
+- NEVER repeat the answer options inside "text". The A/B/C/D/E choices a student selects belong ONLY in "choices" (for Cm/Cs) — never in "text". "text" holds the question statement plus any items that are PART of it (e.g. the numbered 1-5 statements being asked about, or the a-e items of a matching list), but NOT the final lettered answer choices.
+- SCOPE / FILTER: the teacher's extra instructions (provided separately) take priority over plain document order. If they ask for only a specific subject, section, page range, or question range, extract ONLY what they ask for and SKIP everything else in the PDF — even content that appears in between. If they give no such limit, extract every question in document order as usual.
+
 - "explanation": a worked solution/explanation (math inline via $...$) ONLY if the PDF provides one; otherwise "".
 
 Transcribe faithfully. Do not invent questions, options, or answers. If the PDF is a question bank with no answer key, every "correct" array is empty and that is correct.`;
@@ -179,12 +233,37 @@ const CLI_EXTRACT_RULE =
   "əks halda JSON pozulur. Sətir sonu üçün \\n yaz.";
 
 /*
- * Try the subscription CLIs in AI_CLI_ORDER. Returns { questions, cost, provider }
- * from the first that produces questions, or null so the caller continues on the
- * paid API (or fails). `onText()` makes a fresh streamer for each route, so
- * questions appear live while Claude writes them.
+ * Which model does what (all on the subscriptions):
+ *   reading a file   CLAUDE_CLI_MODEL       (default sonnet: copying is quick work)
+ *   writing / review CLAUDE_CLI_GEN_MODEL   (default opus: it must solve its own key)
+ *   solving answers  CLAUDE_CLI_SOLVE_MODEL (default = the writing model)
+ * Effort: CLAUDE_CLI_GEN_EFFORT for writing / review / solving; Codex runs at
+ * CODEX_CLI_EFFORT (default medium — its own default, "none", is careless at maths).
  */
-async function questionsViaCli({ label, system, prompt, files = [], onText, signal }) {
+const READ_MODEL = () => process.env.CLAUDE_CLI_MODEL || "sonnet";
+const GEN_MODEL = () => process.env.CLAUDE_CLI_GEN_MODEL || "opus";
+const GEN_EFFORT = () => process.env.CLAUDE_CLI_GEN_EFFORT || "high";
+const SOLVE_MODEL = () => process.env.CLAUDE_CLI_SOLVE_MODEL || GEN_MODEL();
+const CODEX_EFFORT = () => process.env.CODEX_CLI_EFFORT || "medium";
+
+// Extraction also says WHAT the document is (Examopia's documentKind): a paper to
+// copy, teaching material to write questions from, or something it could not read
+// — which must never be answered with invented questions.
+const DOCUMENT_SCHEMA = {
+  ...EXTRACTION_SCHEMA,
+  properties: {
+    documentKind: { type: "string", enum: ["questions", "material", "unreadable"] },
+    ...EXTRACTION_SCHEMA.properties,
+  },
+  required: ["documentKind", "questions"],
+};
+
+/*
+ * One structured turn on the first subscription CLI that can do it (AI_CLI_ORDER,
+ * skipping a stood-down plan). `accept(doc)` returns a reason to try the next
+ * route instead ("" = keep). Returns { doc, provider, model } or null.
+ */
+async function cliTurn({ label, system, prompt, files = [], schema = EXTRACTION_SCHEMA, model, effort, onText, signal, validate, accept }) {
   if (aiExecution() === "api") return null;
   for (const cli of cliOrder()) {
     if (signal?.aborted) return null;
@@ -195,11 +274,13 @@ async function questionsViaCli({ label, system, prompt, files = [], onText, sign
         provider: cli,
         system,
         prompt,
-        schema: EXTRACTION_SCHEMA,
+        schema,
         files,
-        validate: (doc) => !!doc && Array.isArray(doc.questions),
-        // The live preview parses the same hand-written JSON, so it gets the
-        // same stray-backslash repair (else one `\sqrt` stalls the preview).
+        model: cli === "claude" ? model : undefined,
+        effort: cli === "claude" ? effort : effort || CODEX_EFFORT(),
+        validate,
+        // The live preview parses the same hand-written JSON, so it gets the same
+        // stray-backslash repair (else one `\sqrt` stalls the preview).
         onText:
           typeof onText === "function"
             ? (() => {
@@ -209,21 +290,14 @@ async function questionsViaCli({ label, system, prompt, files = [], onText, sign
             : undefined,
         signal,
       });
-      const questions = out.doc.questions
-        .map(normalizeCliQuestion)
-        .filter((q) => q.text.trim() || q.choices.length || q.pairs.length);
       const secs = Math.round((Date.now() - started) / 1000);
-      if (!questions.length) {
-        // An unreadable page and a failed read look the same; another route may manage.
-        console.warn(`[AI-CLI] ${cli} ${label}: no questions (${secs}s) — trying the next route`);
+      const why = typeof accept === "function" ? accept(out.doc) : "";
+      if (why) {
+        console.warn(`[AI-CLI] ${cli} ${label}: ${why} (${secs}s) — trying the next route`);
         continue;
       }
-      console.log(`[AI-CLI] ${cli} ${label}: ${questions.length} questions in ${secs}s (${out.model})`);
-      return {
-        questions,
-        provider: out.provider,
-        cost: { model: `${out.provider}:${out.model}`, inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, totalTokens: 0, usd: 0, cli: true },
-      };
+      console.log(`[AI-CLI] ${cli} ${label}: ok in ${secs}s (${out.model})`);
+      return { doc: out.doc, provider: out.provider, model: out.model };
     } catch (e) {
       if (e?.code === "cli_cancelled") return null;
       if (e?.code === "cli_limit_reached" || e?.code === "cli_unavailable") standDown(cli, e);
@@ -236,18 +310,222 @@ async function questionsViaCli({ label, system, prompt, files = [], onText, sign
   return null;
 }
 
+const cliCost = (out) => ({
+  model: `${out.provider}:${out.model}`,
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheWriteTokens: 0,
+  cacheReadTokens: 0,
+  totalTokens: 0,
+  usd: 0,
+  cli: true,
+});
+
+// The API's exact question shape, then Examopia's clean-up (LaTeX escapes,
+// prose wrapped in $, θ-for-Ə, matching items / letters).
+const shapeQuestions = (list) =>
+  cleanQuestions(
+    (Array.isArray(list) ? list : [])
+      .map(normalizeCliQuestion)
+      .filter((q) => q.text.trim() || q.choices.length || q.pairs.length)
+  );
+
+/* A CLI turn that must produce questions. Returns { questions, provider, cost, doc } or null. */
+async function questionsViaCli({ label, system, prompt, files = [], schema, model, effort, onText, signal, accept }) {
+  const out = await cliTurn({
+    label,
+    system,
+    prompt,
+    files,
+    schema,
+    model,
+    effort,
+    onText,
+    signal,
+    validate: (d) => !!d && Array.isArray(d.questions),
+    accept: (d) => {
+      const why = typeof accept === "function" ? accept(d) : "";
+      if (why) return why;
+      return shapeQuestions(d.questions).length ? "" : "no questions";
+    },
+  });
+  if (!out) return null;
+  return { questions: shapeQuestions(out.doc.questions), provider: out.provider, cost: cliCost(out), doc: out.doc };
+}
+
 /* Questions out of the teacher's files (a PDF, or photos of a worksheet). */
-function extractWithCli(parts, instructions, opts = {}) {
+async function extractWithCli(parts, instructions, opts = {}) {
   const several = parts.length > 1 || parts.some((p) => p.mime !== "application/pdf");
-  return questionsViaCli({
+  const r = await questionsViaCli({
     label: "extract",
     system: `${SYSTEM_PROMPT}\n\n${CLI_EXTRACT_RULE}${instructionBlock(instructions)}`,
     prompt: several
       ? "Əlavə olunmuş fayllardakı (PDF səhifələri və/və ya şəkillər) BÜTÜN sualları, sırası ilə, sxemə uyğun JSON-a çıxar."
       : "Bu PDF-dəki BÜTÜN sualları, sənəddəki sırası ilə, sxemə uyğun JSON-a çıxar.",
     files: parts,
+    schema: DOCUMENT_SCHEMA,
+    model: READ_MODEL(),
+    // Unreadable is a failure to pass on (another engine may read it), never a
+    // licence to write questions about a guessed topic.
+    accept: (d) => (d && d.documentKind === "unreadable" ? "could not read the document" : ""),
     ...opts,
   });
+  if (!r) return null;
+  return { ...r, documentKind: r.doc && r.doc.documentKind === "material" ? "material" : "questions" };
+}
+
+/* New questions from the teacher's request. */
+function generateWithCli(prompt, instructions, opts = {}) {
+  return questionsViaCli({
+    label: "generate",
+    system: `${GEN_SYSTEM_PROMPT}\n\n${CLI_EXTRACT_RULE}${instructionBlock(instructions)}`,
+    prompt: `MÜƏLLİMİN İSTƏYİ:\n${prompt}\n\nBu istəyə uyğun sualları YARAT.`,
+    files: [],
+    model: GEN_MODEL(),
+    effort: GEN_EFFORT(),
+    ...opts,
+  });
+}
+
+/*
+ * Request fidelity: "20 sual" means 20. When the set came back short, the
+ * missing ones are asked for (twice at most), de-duplicated by text.
+ */
+async function topUpGenerated({ prompt, questions, target, signal }) {
+  const acc = [...questions];
+  const seen = new Set(acc.map(questionKey));
+  for (let r = 0; r < 2 && acc.length < target; r += 1) {
+    if (signal?.aborted) break;
+    const need = target - acc.length;
+    const more = await generateWithCli(
+      `${String(prompt).slice(0, 3000)}\n\nARTIQ ${acc.length} sual hazırlandı. İNDİ onlardan FƏRQLİ, eyni mövzu və çətinlikdə DAHA ${need} sual yaz (təkrar OLMASIN, cavabları da doldur). Yalnız yeni sualları qaytar.`,
+      "",
+      { signal }
+    );
+    if (!more) break;
+    let added = 0;
+    for (const q of more.questions) {
+      if (acc.length >= target) break;
+      const k = questionKey(q);
+      if (k && seen.has(k)) continue;
+      seen.add(k);
+      acc.push(q);
+      added += 1;
+    }
+    if (!added) break;
+  }
+  return acc;
+}
+
+/*
+ * The AI checks its own work only where the rules found something wrong
+ * (Examopia's "light" review): the flagged questions go to a reviewer with the
+ * findings and come back in place. Discarded if it changes the count or makes
+ * the audit worse, so it can never leave the set worse than it was.
+ */
+async function reviewGenerated({ questions, prompt, signal, onStatus }) {
+  let best = questions;
+  let bestIssues = auditQuestions(best, { requireAnswers: true });
+  const off = ["off", "false", "0", "no"].includes(String(process.env.AI_VERIFY || "").trim().toLowerCase());
+  if (!bestIssues.length || off || signal?.aborted) return { questions: best, issues: bestIssues, rounds: 0 };
+  onStatus?.("Suallar yoxlanılır…");
+  const flagged = [...new Set(bestIssues.map((x) => x.index))]
+    .filter((i) => Number.isInteger(i) && i >= 0 && i < best.length)
+    .sort((x, y) => x - y);
+  const at = new Map(flagged.map((orig, k) => [orig, k]));
+  const sub = flagged.map((i) => best[i]);
+  const findings = bestIssues
+    .filter((x) => at.has(x.index))
+    .slice(0, 40)
+    .map((x) => `#${at.get(x.index) + 1} ${x.code}: ${x.detail}`)
+    .join("\n");
+  const payload = [
+    `İLK TAPŞIRIQ: ${String(prompt).slice(0, 1500)}`,
+    "",
+    "YOXLANACAQ SUALLAR (JSON):",
+    JSON.stringify({ questions: sub }).slice(0, 60000),
+    "",
+    `AVTOMATİK YOXLAMANIN TAPDIĞI PROBLEMLƏR (mütləq düzəlt):\n${findings}`,
+  ].join("\n");
+  const out = await questionsViaCli({
+    label: "review",
+    system: `${REVIEW_SYSTEM_PROMPT}\n\n${CLI_EXTRACT_RULE}`,
+    prompt: payload,
+    model: GEN_MODEL(),
+    effort: GEN_EFFORT(),
+    signal,
+  });
+  if (!out || out.questions.length !== sub.length) return { questions: best, issues: bestIssues, rounds: out ? 1 : 0 };
+  const merged = best.slice();
+  flagged.forEach((orig, k) => {
+    merged[orig] = out.questions[k];
+  });
+  const candIssues = auditQuestions(merged, { requireAnswers: true });
+  if (candIssues.length <= bestIssues.length) {
+    best = merged;
+    bestIssues = candIssues;
+  }
+  return { questions: best, issues: bestIssues, rounds: 1 };
+}
+
+/*
+ * The answers a paper does not give, worked out by the AI WITH the pages to look
+ * at (Examopia's "auto" mode): only the unanswered questions go, in a few
+ * parallel batches, and only the ANSWER comes back onto the teacher's own
+ * question, so the paper's wording cannot change. A paper that marks every
+ * answer costs nothing extra.
+ */
+const SOLVE_PARALLEL = () => Math.max(1, Number(process.env.AI_SOLVE_PARALLEL) || 3);
+async function solveMissingAnswers({ questions, parts, signal, onStatus }) {
+  const list = questions.slice();
+  const targets = [...unansweredIndexes(list)].sort((x, y) => x - y);
+  if (!targets.length || aiExecution() === "api" || signal?.aborted) return { questions: list, solved: 0, missing: targets.length };
+  onStatus?.(`${targets.length} sualın cavabı vərəqdə yoxdur — AI həll edir…`);
+  const size = targets.length <= 8 ? targets.length : Math.max(4, Math.ceil(targets.length / SOLVE_PARALLEL()));
+  const batches = [];
+  for (let k = 0; k < targets.length; k += size) batches.push(targets.slice(k, k + size));
+  let next = 0;
+  let done = 0;
+  const runBatch = async (batch) => {
+    const sub = batch.map((i) => questions[i]);
+    const ask = [
+      "Aşağıdakı sualların DÜZGÜN CAVABINI tap. Sualları dəyişmə — yalnız cavab sahələrini doldur.",
+      `Əlavə olunmuş sənəddə bunlar ${batch.map((i) => i + 1).join(", ")} nömrəli suallardır (nömrə fərqlidirsə, mətnə görə tap).`,
+      "",
+      "SUALLAR (JSON):",
+      JSON.stringify({ questions: sub }).slice(0, 60000),
+    ].join("\n");
+    const out = await questionsViaCli({
+      label: "solve",
+      system: `${SOLVE_SYSTEM_PROMPT}\n\n${CLI_EXTRACT_RULE}`,
+      prompt: ask,
+      files: parts || [],
+      model: SOLVE_MODEL(),
+      effort: GEN_EFFORT(),
+      signal,
+    });
+    // A reply that dropped or added a question cannot be mapped back by position.
+    if (!out || out.questions.length !== sub.length) return;
+    batch.forEach((orig, k) => {
+      list[orig] = answerOnly(questions[orig], out.questions[k]);
+    });
+    done += batch.length;
+    onStatus?.(`Cavablar tapılır… ${Math.min(done, targets.length)}/${targets.length}`);
+  };
+  const worker = async () => {
+    while (next < batches.length && !signal?.aborted) {
+      const batch = batches[next];
+      next += 1;
+      try {
+        await runBatch(batch);
+      } catch (e) {
+        console.error("[AI-CLI] solve batch failed (left for the teacher):", e?.message);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(SOLVE_PARALLEL(), batches.length) }, worker));
+  const still = unansweredIndexes(list);
+  return { questions: list, solved: targets.filter((i) => !still.has(i)).length, missing: still.size };
 }
 
 /*
@@ -632,10 +910,19 @@ const extractQuestions = asyncHandler(async (req, res) => {
   // The owner's subscriptions first; the paid API only if neither can do it.
   const viaCli = await extractWithCli(up.parts, instructions);
   if (viaCli) {
-    await logAiUsage(req, viaCli.cost, viaCli.questions.length);
-    return res
-      .status(200)
-      .json({ success: true, questions: viaCli.questions, usage: null, cost: { model: viaCli.cost.model, cli: true }, provider: viaCli.provider, fellBack: false });
+    const solved = await solveMissingAnswers({ questions: viaCli.questions, parts: up.parts });
+    await logAiUsage(req, viaCli.cost, solved.questions.length);
+    return res.status(200).json({
+      success: true,
+      questions: solved.questions,
+      usage: null,
+      cost: { model: viaCli.cost.model, cli: true },
+      provider: viaCli.provider,
+      fellBack: false,
+      documentKind: viaCli.documentKind,
+      answersSolved: solved.solved,
+      answersMissing: solved.missing,
+    });
   }
   if (aiExecution() === "cli") {
     res.status(503);
@@ -696,7 +983,7 @@ const extractQuestions = asyncHandler(async (req, res) => {
     }
   }
 
-  res.status(200).json({ success: true, questions, usage, cost, provider: usedProvider, fellBack });
+  res.status(200).json({ success: true, questions: cleanQuestions(questions), usage, cost, provider: usedProvider, fellBack });
 });
 
 // --- Streaming extraction (SSE): same model call, delivered incrementally so the
@@ -934,9 +1221,25 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
   // paid API below runs only if neither CLI produced questions.
   const viaCli = await extractWithCli(up.parts, instructions, { onText: mkOnText, signal: cliAbort.signal });
   if (viaCli) {
+    // The answers the paper does not give, solved with the pages in view.
+    const solved = await solveMissingAnswers({
+      questions: viaCli.questions,
+      parts: up.parts,
+      signal: cliAbort.signal,
+      onStatus: (message) => sse("status", { message }),
+    });
     clearInterval(hb);
-    await logAiUsage(req, viaCli.cost, viaCli.questions.length);
-    sse("done", { questions: viaCli.questions, cost: { model: viaCli.cost.model, cli: true }, provider: viaCli.provider, fellBack: false });
+    if (cliAbort.signal.aborted) return res.end();
+    await logAiUsage(req, viaCli.cost, solved.questions.length);
+    sse("done", {
+      questions: solved.questions,
+      cost: { model: viaCli.cost.model, cli: true },
+      provider: viaCli.provider,
+      fellBack: false,
+      documentKind: viaCli.documentKind,
+      answersSolved: solved.solved,
+      answersMissing: solved.missing,
+    });
     return res.end();
   }
   if (cliAbort.signal.aborted) {
@@ -989,7 +1292,7 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
     sse("error", { message: "AI cavabı oxunmadı. Yenidən cəhd edin." });
     return res.end();
   }
-  const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+  const questions = cleanQuestions(Array.isArray(parsed.questions) ? parsed.questions : []);
   const cost =
     usedProvider === "gemini"
       ? computeGeminiCost(result.usage, result.model)
@@ -1462,20 +1765,34 @@ const generateQuestionsStream = asyncHandler(async (req, res) => {
     };
   };
 
-  const viaCli = await questionsViaCli({
-    label: "generate",
-    system: `${GEN_SYSTEM_PROMPT}\n\n${CLI_EXTRACT_RULE}${instructionBlock(instructions)}`,
-    prompt: `MÜƏLLİMİN İSTƏYİ:\n${prompt}\n\nBu istəyə uyğun sualları YARAT.`,
-    files: [],
-    onText: mkOnText,
-    signal: abort.signal,
-  });
-  clearInterval(hb);
+  const status = (message) => sse("status", { message });
+  const viaCli = await generateWithCli(prompt, instructions, { onText: mkOnText, signal: abort.signal });
   if (viaCli) {
-    await logAiUsage(req, viaCli.cost, viaCli.questions.length);
-    sse("done", { questions: viaCli.questions, cost: { model: viaCli.cost.model, cli: true }, provider: viaCli.provider, generated: true });
+    // "20 sual" means 20: top a short set up, then let the AI fix what the rules flag.
+    const target = parseRequestedCount(prompt);
+    let qs = viaCli.questions;
+    if (target && qs.length < target && !abort.signal.aborted) {
+      status("Çatışmayan suallar hazırlanır…");
+      qs = await topUpGenerated({ prompt, questions: qs, target, signal: abort.signal });
+    }
+    const reviewed = await reviewGenerated({ questions: qs, prompt, signal: abort.signal, onStatus: status });
+    clearInterval(hb);
+    if (abort.signal.aborted) return res.end();
+    const short = target ? Math.max(0, target - reviewed.questions.length) : 0;
+    await logAiUsage(req, viaCli.cost, reviewed.questions.length);
+    sse("done", {
+      questions: reviewed.questions,
+      cost: { model: viaCli.cost.model, cli: true },
+      provider: viaCli.provider,
+      generated: true,
+      issues: reviewed.issues.length,
+      // Only claim "checked" when a review actually ran and left nothing flagged.
+      verified: reviewed.rounds > 0 && reviewed.issues.length === 0 && !short,
+      countInfo: target ? { requested: target, actual: reviewed.questions.length, short } : null,
+    });
     return res.end();
   }
+  clearInterval(hb);
   if (!abort.signal.aborted) {
     sse("error", { message: "AI hazırda sual yarada bilmədi. Bir az sonra yenidən cəhd edin və ya təsviri dəqiqləşdirin." });
   }

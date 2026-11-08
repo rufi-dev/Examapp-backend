@@ -146,6 +146,25 @@ const addClass = asyncHandler(async (req, res) => {
       return;
     }
 
+    // A second tap / retried request within a minute is the SAME class: return
+    // the one just made (filling in its cover if only this request carried one)
+    // instead of a duplicate.
+    if (label) {
+      const recentDup = await Class.findOne({
+        owner: req.user._id,
+        name: label,
+        _id: { $gte: mongoose.Types.ObjectId.createFromTime(Math.floor(Date.now() / 1000) - 60) },
+      });
+      if (recentDup) {
+        const cover = typeof coverImage === "string" ? coverImage.trim() : "";
+        if (cover && !recentDup.coverImage) {
+          recentDup.coverImage = cover;
+          await recentDup.save();
+        }
+        return res.status(201).json({ message: "Class has been saved", newClass: recentDup, duplicate: true });
+      }
+    }
+
     // Categories were removed — classes are now top-level (no tag).
     // Default OFF (public): a new class is open to everyone unless the teacher
     // turns on code-only access. Always written as a strict boolean.
@@ -277,6 +296,20 @@ const addExam = asyncHandler(async (req, res) => {
     return;
   }
   try {
+    // A second tap, or a request retried on a bad connection, within a minute is
+    // the SAME exam: hand back the one just made instead of a duplicate (teachers
+    // were left with several identical exams and no idea which was real).
+    const recentDup = await Exam.findOne({
+      owner: req.user._id,
+      class: classId,
+      name,
+      deletedAt: null,
+      _id: { $gte: mongoose.Types.ObjectId.createFromTime(Math.floor(Date.now() / 1000) - 60) },
+    });
+    if (recentDup) {
+      return res.status(201).json({ success: true, data: recentDup, duplicate: true });
+    }
+
     // Create a PDF entry only in PDF mode. Structured/paper exams have no PDF doc.
     let savedPdf = null;
     if (!isStructured && !isPaper) {
