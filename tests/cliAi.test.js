@@ -176,6 +176,49 @@ const ok = (cond, msg) => {
   c = calls();
   ok(d && d.provider === "codex-cli" && !c.some((x) => x.bin === "claude"), "claude stays stood down for the next request");
 
+  // 6b. Writing questions from a request (no file): Claude, live, marked generated.
+  for (const k of Object.keys(require.cache)) if (/controllers|helper/.test(k)) delete require.cache[k];
+  const gen = require("../controllers/aiController");
+  setMode("good", "good");
+  ev = await new Promise((resolve) => {
+    let body = "";
+    const res = { statusCode: 200, writableEnded: false, status() { return this; }, writeHead() {}, flushHeaders() {}, on() {}, write(s) { body += s; },
+      end() { resolve(body.split("\n\n").map((b) => [/^event: (\w+)$/m.exec(b)?.[1], /^data: (.*)$/m.exec(b)?.[1]]).filter((x) => x[0]).map(([e, j]) => [e, JSON.parse(j)])); } };
+    gen.generateQuestionsStream({ body: { prompt: "9-cu sinif: kvadrat tənliklər, 1 sual" }, params: { examId: "x" } }, res, (e) => resolve([["thrown", { message: e && e.message }]]));
+  });
+  d = done(ev);
+  c = calls();
+  ok(d && d.generated === true && d.provider === "claude-cli" && d.questions.length === 1, "generate: Claude writes questions, done is marked generated");
+  ok(c[0] && c[0].args[c[0].args.indexOf("--tools") + 1] === "" && !c[0].args.includes("--add-dir"), "generate: no file, no tools");
+  ok(ev.some((e) => e[0] === "question"), "generate: questions stream live");
+  // too-short request is refused before any CLI starts
+  setMode("good", "good");
+  const short = await new Promise((resolve) => {
+    const res = { status(code) { this.code = code; return this; }, writeHead() {}, flushHeaders() {}, on() {}, write() {}, end() {} };
+    gen.generateQuestionsStream({ body: { prompt: "abc" }, params: { examId: "x" } }, res, (e) => resolve({ code: res.code, msg: e && e.message }));
+  });
+  ok(short.code === 400 && calls().length === 0, "generate: a 3-letter request is refused, no CLI started");
+
+  // 6c. Photos of a worksheet: claude gives up, codex gets the image AS IS.
+  setMode("prose2", "good");
+  const PNG = Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000" + "1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082", "hex");
+  ev = await new Promise((resolve) => {
+    let body = "";
+    const res = { statusCode: 200, writableEnded: false, status() { return this; }, writeHead() {}, flushHeaders() {}, on() {}, write(s) { body += s; },
+      end() { resolve(body.split("\n\n").map((b) => [/^event: (\w+)$/m.exec(b)?.[1], /^data: (.*)$/m.exec(b)?.[1]]).filter((x) => x[0]).map(([e, j]) => [e, JSON.parse(j)])); } };
+    gen.extractQuestionsStream({ files: [{ buffer: PNG, mimetype: "image/png", originalname: "sehife-1.png" }, { buffer: PDF, mimetype: "application/pdf", originalname: "x.pdf" }], body: {}, params: { examId: "x" } }, res, (e) => resolve([["thrown", { message: e && e.message }]]));
+  });
+  d = done(ev);
+  const cx2 = calls().find((x) => x.bin === "codex");
+  ok(d && d.provider === "codex-cli", "photo + PDF upload is read by the CLIs");
+  ok(cx2 && cx2.images.some((f) => /attachment-1\.png$/.test(f)) && cx2.images.some((f) => /attachment-2-\d+\.png$/.test(f)) && cx2.imagesExist, "codex: the photo as is, the PDF as page images");
+  // a .docx is refused up front
+  const bad = await new Promise((resolve) => {
+    const res = { status(code) { this.code = code; return this; }, writeHead() {}, flushHeaders() {}, on() {}, write() {}, end() {} };
+    gen.extractQuestionsStream({ files: [{ buffer: Buffer.from("x"), mimetype: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", originalname: "a.docx" }], body: {}, params: { examId: "x" } }, res, (e) => resolve({ code: res.code, msg: e && e.message }));
+  });
+  ok(bad.code === 400 && /PDF/.test(bad.msg || ""), "a Word file is refused with a clear message");
+
   // 7. Both spent (codex's refusal buried after 30KB of stderr) → the paid API path.
   //    Fresh module state so claude is tried again.
   for (const k of Object.keys(require.cache)) if (/controllers|helper/.test(k)) delete require.cache[k];

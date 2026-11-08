@@ -181,10 +181,10 @@ const CLI_EXTRACT_RULE =
 /*
  * Try the subscription CLIs in AI_CLI_ORDER. Returns { questions, cost, provider }
  * from the first that produces questions, or null so the caller continues on the
- * paid API (or fails, in AI_EXECUTION=cli). `onText()` makes a fresh streamer for
- * each route, so questions appear live while Claude writes them.
+ * paid API (or fails). `onText()` makes a fresh streamer for each route, so
+ * questions appear live while Claude writes them.
  */
-async function extractWithCli(base64, instructions, { onText, signal } = {}) {
+async function questionsViaCli({ label, system, prompt, files = [], onText, signal }) {
   if (aiExecution() === "api") return null;
   for (const cli of cliOrder()) {
     if (signal?.aborted) return null;
@@ -193,10 +193,10 @@ async function extractWithCli(base64, instructions, { onText, signal } = {}) {
     try {
       const out = await runCliStructured({
         provider: cli,
-        system: `${SYSTEM_PROMPT}\n\n${CLI_EXTRACT_RULE}${instructionBlock(instructions)}`,
-        prompt: "Bu PDF-dəki BÜTÜN sualları, sənəddəki sırası ilə, sxemə uyğun JSON-a çıxar.",
+        system,
+        prompt,
         schema: EXTRACTION_SCHEMA,
-        files: [{ name: "exam.pdf", mime: "application/pdf", data: base64 }],
+        files,
         validate: (doc) => !!doc && Array.isArray(doc.questions),
         // The live preview parses the same hand-written JSON, so it gets the
         // same stray-backslash repair (else one `\sqrt` stalls the preview).
@@ -215,10 +215,10 @@ async function extractWithCli(base64, instructions, { onText, signal } = {}) {
       const secs = Math.round((Date.now() - started) / 1000);
       if (!questions.length) {
         // An unreadable page and a failed read look the same; another route may manage.
-        console.warn(`[AI-CLI] ${cli} read the PDF but returned no questions (${secs}s) — trying the next route`);
+        console.warn(`[AI-CLI] ${cli} ${label}: no questions (${secs}s) — trying the next route`);
         continue;
       }
-      console.log(`[AI-CLI] ${cli} extracted ${questions.length} questions in ${secs}s (${out.model})`);
+      console.log(`[AI-CLI] ${cli} ${label}: ${questions.length} questions in ${secs}s (${out.model})`);
       return {
         questions,
         provider: out.provider,
@@ -228,13 +228,107 @@ async function extractWithCli(base64, instructions, { onText, signal } = {}) {
       if (e?.code === "cli_cancelled") return null;
       if (e?.code === "cli_limit_reached" || e?.code === "cli_unavailable") standDown(cli, e);
       console.warn(
-        `[AI-CLI] ${cli} failed after ${Math.round((Date.now() - started) / 1000)}s: ${e?.code || ""} ${String(e?.message || "").slice(0, 200)}` +
+        `[AI-CLI] ${cli} ${label} failed after ${Math.round((Date.now() - started) / 1000)}s: ${e?.code || ""} ${String(e?.message || "").slice(0, 200)}` +
           (e?.stderr ? ` | stderr: ${String(e.stderr).slice(-300).replace(/\s+/g, " ")}` : "")
       );
     }
   }
   return null;
 }
+
+/* Questions out of the teacher's files (a PDF, or photos of a worksheet). */
+function extractWithCli(parts, instructions, opts = {}) {
+  const several = parts.length > 1 || parts.some((p) => p.mime !== "application/pdf");
+  return questionsViaCli({
+    label: "extract",
+    system: `${SYSTEM_PROMPT}\n\n${CLI_EXTRACT_RULE}${instructionBlock(instructions)}`,
+    prompt: several
+      ? "Əlavə olunmuş fayllardakı (PDF səhifələri və/və ya şəkillər) BÜTÜN sualları, sırası ilə, sxemə uyğun JSON-a çıxar."
+      : "Bu PDF-dəki BÜTÜN sualları, sənəddəki sırası ilə, sxemə uyğun JSON-a çıxar.",
+    files: parts,
+    ...opts,
+  });
+}
+
+/*
+ * The teacher's upload: one PDF, or up to 10 pages as PDFs/photos (a worksheet is
+ * screenshotted far more often than exported). The CLIs read all of them; the
+ * paid API fallback only takes a single PDF, so `pdfOnly` is its input or null.
+ */
+const AI_FILE_OK = (m) => m === "application/pdf" || /^image\/(png|jpe?g|webp|gif)$/.test(m);
+function uploadedParts(req) {
+  const list = Array.isArray(req.files) ? req.files : req.file ? [req.file] : [];
+  const files = list.filter((f) => f && f.buffer && f.buffer.length);
+  if (!files.length) return { error: "PDF və ya şəkil faylı lazımdır" };
+  if (files.length > 10) return { error: "Ən çox 10 fayl" };
+  if (files.some((f) => !AI_FILE_OK(String(f.mimetype || "").toLowerCase()))) {
+    return { error: "Yalnız PDF və ya şəkil (PNG, JPG, WEBP) faylları dəstəklənir" };
+  }
+  const parts = files.map((f) => ({
+    name: f.originalname || "",
+    mime: String(f.mimetype).toLowerCase(),
+    data: f.buffer.toString("base64"),
+  }));
+  return { parts, pdfOnly: parts.length === 1 && parts[0].mime === "application/pdf" ? parts[0].data : null };
+}
+const API_NEEDS_ONE_PDF =
+  "Şəkilləri və bir neçə faylı yalnız Claude / ChatGPT oxuya bilir, onlar isə hazırda əlçatan deyil. Bir az sonra yenidən cəhd edin və ya tək PDF yükləyin.";
+
+// Writing questions from the teacher's request: Examopia's generation rules
+// (helper text ported 2026-11-08), without its reading-passage / gap-fill /
+// manual-grading rules - BunkerMath has no such question types.
+const GEN_SYSTEM_PROMPT = `Sən imtahan sualları YARADAN AI köməkçisisən. Müəllimin təsvirinə əsasən suallar yarat və NƏTİCƏNİ YALNIZ verilən JSON sxemi ilə qaytar.
+
+QAYDALAR:
+- İSTƏNİLƏN FƏNN üçün sual yarat (riyaziyyat, fizika, kimya, biologiya, tarix, coğrafiya, informatika, ədəbiyyat, dillər və s.). Fənnə görə HEÇ VAXT imtina etmə.
+- Müəllimin istədiyi SAY və NÖV sualları yarat (məs. "10 qapalı riyaziyyat sualı").
+- DİL: müəllim hansı dildə istəyirsə, suallar O DİLDƏ olsun (məs. «rus dilində riyaziyyat» → suallar tam rusca; «ingilis dili» → ingiliscə). Dil göstərilməyibsə — Azərbaycan dilində.
+- SAY: müəllim neçə sual istəyirsə, DƏQİQ o qədər sual qaytar. «25 sual» dedisə 25 olmalıdır — nə 22, nə 26. Qaytarmazdan ƏVVƏL sualları say və uyğun gəlmirsə düzəlt.
+- BÖLGÜ: müəllim tiplərin sayını/nisbətini deyibsə, ona hərfi əməl et. «son 7-si açıq» → tam 7 ədəd Co. «yarısı uyğunluq» → qalan qapalı sualların yarısı «Cma» olmalıdır.
+  UYĞUNLUQ SUALI YAZMAQDAN ÇƏKİNMƏ: aşağıdakı uzun xəbərdarlıq onu NECƏ düzgün yazmaq barədədir — ondan qaçmaq üçün deyil. İstənilibsə, tələb olunan qədər «Cma» yaz.
+- Qapalı sual (Cm/Cs): "choices" massivində A–E variantları ver və düzgün variant(lar)ın indeksini "correct" massivinə yaz.
+- ⛔ TƏK SEÇİM (Cm) — YALNIZ BİR VARİANT DÜZGÜN OLA BİLƏR. Qaytarmazdan ƏVVƏL hər variantı ayrıca yoxla: «bu da sualın şərtinə uyğundurmu?». İkinci variant da uyğun gəlirsə — ya sualı dəqiqləşdir, ya həmin variantı açıq-aşkar yanlış biri ilə əvəz et, ya da tipi «Cs» et və BÜTÜN düzgünləri "correct"-ə yaz. Bu səhv ən çox qrammatikada olur (cümlə üzvləri, nitq hissələri, hallar, söz quruluşu), eləcə də «hansı doğrudur / hansı deyil» suallarında. Nümunə: «"Müəllim şagirdlərə tapşırıq verdi" cümləsində tamamlıq hansıdır?» tək seçimli ola BİLMƏZ — həm «şagirdlərə» (vasitəli tamamlıq), həm «tapşırıq» (vasitəsiz tamamlıq) düzgündür. Düzgün yazılış: «...cümləsində vasitəsiz tamamlıq hansıdır?» (yeganə cavab: tapşırıq) və ya Cs.
+- AÇIQ SUALIN CAVABI — BURADA ÇOX SƏHV EDİLİR:
+  Şagird cavabı KLAVİATURA ilə yazır və cavab hərfbəhərf uyğun gəlməlidir. Ona görə açıq sual YALNIZ o zaman uyğundur ki, cavabın QISA və BİR MƏNALI yazılışı olsun.
+  ⛔ ƏN VACİB QAYDA — AÇIQ-UÇLU (çoxcavablı) SUAL YARATMA: Əgər sualın ÇOX SAYDA fərqli düzgün cavabı ola bilərsə, onu AÇIQ (Co) ETMƏ. Nümunələr (BUNLARI Co ETMƏ): «bir yer bildirən isim yaz», «şəxs bildirən söz yaz», «konkret ismə bir nümunə göstər», «bir sifət de», «bir heyvan adı yaz». Belə suallarda minlərlə düzgün cavab var — sən yalnız 3-nü sadalayırsan, «beach/office/tree» yazan şagird HAQSIZ yerə səhv sayılır. Bunun əvəzinə: sualı ÇOXSEÇİMLİ (Cm) et və 4-5 variant ver (biri düzgün), VƏ YA sualı elə dəyiş ki, cavab BİRMƏNALI olsun (məs. «'kitab' sözünün cəm forması» → yeganə cavab). Açıq sual (Co) YALNIZ cavabı YEGANƏ və dəqiq müəyyən olan hallar üçündür: hesablanmış ədəd, konkret termin/tərif, tarixi tarix/ad, sualın birmənalı tələb etdiyi TƏK söz. Şübhə varsa — Co yox, Cm seç.
+  ⛔ İKİNCİ HAL — CAVABI TƏSVİR/MÜNASİBƏT/BƏRABƏRSİZLİK OLAN SUAL DA Co OLMAMALIDIR: cavab bir ANLAYIŞ, MÜNASİBƏT, BƏRABƏRSİZLİK və ya CÜMLƏ ilə ifadə olunursa (məs. «diskriminant mənfidir», «D < 0», «sıfırdan kiçikdir», «artır», «azalır», «dəyişmir», «tərs mütənasibdir») — bu, TƏK sözlü/ədədli olsa belə, şagird onu ONLARLA fərqli cür yazır («D<0», «mənfi», «mənfidir», «0-dan kiçik», «sıfırdan aşağı»...) və hərfbəhərf uyğun gəlmir. Xüsusən «necədir?», «nə baş verir?», «necə dəyişir?», «hansı haldadır?», «nə olur?» kimi soruşan suallar TƏSVİR istəyir → BUNLARI Co ETMƏ, «Cm» et. Nümunə: «Kvadrat tənliyin kökləri həqiqi olmadıqda diskriminant necədir?» → Cm, variantlar: «Mənfi (D<0)», «Sıfır (D=0)», «Müsbət (D>0)», «Müəyyən deyil». Yəni cavab bir SÖZ olsa da, əgər onu müxtəlif cür ifadə etmək olarsa → Co yox, Cm.
+  QAYDA SADƏ: Co-nu YALNIZ hamının EYNİ cür yazacağı bir işarə üçün seçː konkret ƏDƏD, konkret TƏK termin/söz, tarix/ad, yığcam düstur. Cavab bir izah, münasibət, bərabərsizlik və ya bir neçə sözlük ifadədirsə — HƏMİŞƏ Cm.
+  • ƏN YAXŞI açıq cavab — bir ƏDƏD (məs. 8, 50.24, -3) və ya qısa düstur (məs. x^2, cos(x), 2*a+b).
+  • Sual nə soruşursa, cavab O OLSUN. «Dairənin sahəsini tapın (r=4)» sualının cavabı ƏDƏDdir (50.24), düstur deyil. «Sahənin düsturunu yazın» sualının cavabı düsturdur.
+  • CÜMLƏ İLƏ CAVAB YAZMA. «uzunluğun və enin cəmini 2-yə vurmaq» kimi cavab qəbuledilməzdir — şagird onu eyni sözlərlə yaza bilməz. Belə hallarda sualı AÇIQ etmə: TIP "Cm" et və variantları ver.
+  • "openAnswers" massivinə şagirdin real yaza biləcəyi BÜTÜN formaları yaz — ən azı 3 variant olsun (mümkün olduqda):
+      – fərqli hərf işarələri (a*h/2, b*h/2, (1/2)*a*h, ah/2)
+      – sıra dəyişikliyi (2+x və x+2)
+      – onluq ayırıcı hər iki cür (0.5 və 0,5) — proqram onları özü eyniləşdirmir
+      – tam və yuvarlaqlaşdırılmış forma (16*pi, 50.24, 50.27)
+  • Cavab bir neçə ədəddirsə, ayırıcının hər variantını yaz (2,3 və 3,2 və "2; 3" və "2 и 3").
+  • İnteqralda +C, kökdə hər iki kök — cavabı natamam qoyma.
+- Açıq sual (Co): "choices" boş. BÜTÜN məqbul cavabları "openAnswers" MASSİVİNƏ yaz — HƏR məqbul cavab (sinonim/variant) AYRICA element olsun (məs: ["yaş","quru","dolu"]). Cavabları DÜZ MƏTN kimi yaz — LaTeX/$...$ dollar işarəsi VƏ YA hər hansı işarələmə İSTİFADƏ ETMƏ, şagird klaviaturada necə yazırsa elə yaz (məs: x+2, yox $x + 2$; 3/4, yox kəsr işarəsi). Riyazi cavablarda boşluqlu VƏ boşluqsuz formaları, eləcə də yerdəyişmiş ekvivalentləri variant kimi əlavə et (məs: ["x+2","x + 2","2+x"]). Nömrələmə, "və ya", "/", mötərizə İSTİFADƏ ETMƏ — bir sətirdə bir neçə cavab birləşdirmə. "openAnswer" sahəsinə isə birinci cavabı yaz. Qapalı suallarda "openAnswers" boş massiv [] olsun.
+- Çoxseçimlə sual (Cs): bir neçə düzgün variant olduqda TIP "Cs" olsun və "correct" massivinə BÜTÜN düzgün indeksləri yaz. Cavabı "2,5" kimi mətnə çevirib açıq sual etmə.
+- Uyğunluq sualı (Cma) — ƏN ÇOX SƏHV EDİLƏN YER, DİQQƏTLƏ OXU:
+  Proqram uyğunluq sualını YALNIZ boş nömrə→hərf şəbəkəsi kimi göstərir. Şagird ekranda ancaq bunu görür:
+      1 →  A B C D E
+      2 →  A B C D E
+  Yəni nömrələrin və hərflərin NƏ olduğu ekranda GÖRÜNMÜR. "pairs" sahəsinə yazdığın hər hansı məzmun EKRANA ÇIXMIR və İTİR.
+  Buna görə HƏR İKİ SİYAHININ MƏZMUNU tam şəkildə sualın "text" hissəsində yazılmalıdır:
+    • "text" = təlimat + nömrələnmiş siyahı (hər element AYRI sətirdə) + hərflənmiş siyahı (hər element AYRI sətirdə).
+    • "pairs" = YALNIZ uyğunluq cədvəli: "left" sadəcə nömrə ("1"), "right" sadəcə düzgün hərf(lər) ("b" və ya bir neçə olarsa "a, d").
+  DÜZGÜN NÜMUNƏ:
+    text: "Aşağıdakı alman samitlərini çıxış yerləri ilə uyğunlaşdırın.\\n1. [p]\\n2. [m]\\n3. [x]\\n\\na) dodaq (bilabial)\\nb) burun (nazal)\\nc) damaq arxası (velar)"
+    pairs: [{"left":"1","right":"a"},{"left":"2","right":"b"},{"left":"3","right":"c"}]
+  YANLIŞ (belə YAZMA): text: "Səsləri çıxış yerləri ilə uyğunlaşdırın." + pairs: [{"left":"1. [p]","right":"a"}] — burada nə səslər, nə də a/b/c-nin mənası şagirdə görünmür; sual cavabsızdır.
+  Hərf siyahısını yazmağı UNUTMA: "a)", "b)", "c)" nə deməkdirsə, mətndə açıq yazılmalıdır. Uyğunluğu "1b2d3c" kimi mətn cavaba çevirmə.
+  HƏRFLƏR: yalnız ingilis əlifbasının hərflərini işlət — a, b, c, d, e. Azərbaycan əlifbasına məxsus ç, ə, ğ, ı, ö, ş, ü hərflərini uyğunluq etiketi kimi İSTİFADƏ ETMƏ (proqram onları tanımır).
+- Uyğunluq sualından SONRA gələn suallarda "1 nömrəli səs", "2-ci variant" kimi əvvəlki sualın nömrələrinə İSTİNAD ETMƏ — hər sual öz-özünə tam başa düşülən olmalıdır.
+- Açıq sualı (Co) YALNIZ şagirdin əslən yazdığı cavablar üçün işlət: rəqəm, söz, düstur. Seçim və ya uyğunluq cavabını heç vaxt mətn kimi yazma.
+- RİYAZİYYAT (VACİB): hər düsturu/ifadəni mətnin İÇİNDƏ, öz yerində, tək dollar işarələri arasında LaTeX kimi yaz — $...$. Nümunələr: "3500-ün $\\\\frac{5}{7}$ hissəsini tapın.", "$x^{2}+1=0$ tənliyini həll et", "$\\\\sqrt{540}$ ədədi". "latex" sahəsini HEÇ VAXT işlətmə — həmişə "" saxla; bütün riyaziyyat mətnin içində $...$ ilə olur. QADAĞAN: $...$-siz açıq LaTeX yazma (məs. \\\\frac, \\\\sqrt, x^2 kimi) — belə yazsan şagird xam kodu görür. Açdığın hər $ üçün mütləq BAĞLAYAN $ qoy (balanslı olsun). Bütöv cümləni $...$ içinə ALMA — yalnız həqiqi düsturu. Adi rəqəm/aralıq/faiz/tarix riyaziyyat deyil ("20–30 arası" — $ ilə YOX). Seçim mətnində də riyaziyyatı $...$ ilə yaz, seçimin "latex"-i "" olsun.
+- Dırnaq işarəsi lazımdırsa adi " işlət — \\" kimi qaçış simvolu YAZMA.
+- Şəkil/qrafik tələb edən sual YARATMA (hasFigure həmişə false). Mümkün qədər mətnlə həll olunan suallar yarat.
+- Suallar aydın, düzgün və imtahan səviyyəsinə uyğun olsun.
+- HƏLLİ TƏLƏB OLUNAN AÇIQ SUAL (Cd): müəllim «həlli tələb olunan», «ətraflı yazın», «həllini yaz» kimi suallar istəyirsə, tipi "Cd" et; "choices" boş, yekun cavabı "openAnswer"/"openAnswers"-ə yaz (Co kimi).
+- CAVAB AÇARI SƏNİN İŞİNDİR: yaratdığın HƏR qapalı sualın (Cm/Cs) "correct" massivi DOLU olmalıdır, hər açıq sualın (Co/Cd) "openAnswers"-i də. Cavabı qaytarmazdan əvvəl özün həll edib yoxla.
+- "explanation": qısa həll yolu yaz (1–3 cümlə; riyaziyyat $...$ ilə). "latex" və variantların "latex"-i həmişə "".
+- "pairs" yalnız Cma üçündür (left = nömrə, right = hərf); başqa tiplərdə boş massiv. "hasFigure" həmişə false.`;
 
 const CLI_ONLY_UNAVAILABLE = "Abunə AI-ları (Claude / Codex) hazırda əlçatan deyil. Bir az sonra yenidən cəhd edin.";
 
@@ -525,22 +619,18 @@ async function extractWithGemini(base64, instructions = "") {
 // "claude" (default, higher quality, expensive) or "gemini" (cheaper). Returns
 // { questions: [...] } in the builder's shape for review (never auto-saved).
 const extractQuestions = asyncHandler(async (req, res) => {
-  if (!req.file || !req.file.buffer || !req.file.buffer.length) {
+  const up = uploadedParts(req);
+  if (up.error) {
     res.status(400);
-    throw new Error("PDF fayl lazımdır");
+    throw new Error(up.error);
   }
-  if (req.file.mimetype && req.file.mimetype !== "application/pdf") {
-    res.status(400);
-    throw new Error("Yalnız PDF fayl dəstəklənir");
-  }
-
-  const base64 = req.file.buffer.toString("base64");
+  const base64 = up.pdfOnly;
   const provider =
     String(req.body?.provider || "").toLowerCase() === "gemini" ? "gemini" : "claude";
   const instructions = clampInstr(req.body?.instructions);
 
   // The owner's subscriptions first; the paid API only if neither can do it.
-  const viaCli = await extractWithCli(base64, instructions);
+  const viaCli = await extractWithCli(up.parts, instructions);
   if (viaCli) {
     await logAiUsage(req, viaCli.cost, viaCli.questions.length);
     return res
@@ -550,6 +640,10 @@ const extractQuestions = asyncHandler(async (req, res) => {
   if (aiExecution() === "cli") {
     res.status(503);
     throw new Error(CLI_ONLY_UNAVAILABLE);
+  }
+  if (!base64) {
+    res.status(503);
+    throw new Error(API_NEEDS_ONE_PDF);
   }
 
   let questions = [];
@@ -791,15 +885,12 @@ async function streamClaude(base64, instructions, onText) {
 }
 
 const extractQuestionsStream = asyncHandler(async (req, res) => {
-  if (!req.file || !req.file.buffer || !req.file.buffer.length) {
+  const up = uploadedParts(req);
+  if (up.error) {
     res.status(400);
-    throw new Error("PDF fayl lazımdır");
+    throw new Error(up.error);
   }
-  if (req.file.mimetype && req.file.mimetype !== "application/pdf") {
-    res.status(400);
-    throw new Error("Yalnız PDF fayl dəstəklənir");
-  }
-  const base64 = req.file.buffer.toString("base64");
+  const base64 = up.pdfOnly;
   const provider =
     String(req.body?.provider || "").toLowerCase() === "gemini" ? "gemini" : "claude";
   const instructions = clampInstr(req.body?.instructions);
@@ -841,7 +932,7 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
 
   // The owner's subscriptions first (questions stream live from Claude); the
   // paid API below runs only if neither CLI produced questions.
-  const viaCli = await extractWithCli(base64, instructions, { onText: mkOnText, signal: cliAbort.signal });
+  const viaCli = await extractWithCli(up.parts, instructions, { onText: mkOnText, signal: cliAbort.signal });
   if (viaCli) {
     clearInterval(hb);
     await logAiUsage(req, viaCli.cost, viaCli.questions.length);
@@ -855,6 +946,11 @@ const extractQuestionsStream = asyncHandler(async (req, res) => {
   if (aiExecution() === "cli") {
     clearInterval(hb);
     sse("error", { message: CLI_ONLY_UNAVAILABLE });
+    return res.end();
+  }
+  if (!base64) {
+    clearInterval(hb);
+    sse("error", { message: API_NEEDS_ONE_PDF });
     return res.end();
   }
 
@@ -1323,7 +1419,71 @@ async function logPaperAiUsage(userId, examId, cost, questions) {
   }
 }
 
+// POST /api/quiz/generateQuestionsStream/:examId  { prompt, instructions? }
+// The teacher's request -> new questions, over SSE like extraction. Runs on the
+// subscription CLIs only: there is no paid generation route to fall back to.
+const generateQuestionsStream = asyncHandler(async (req, res) => {
+  const prompt = String(req.body?.prompt ?? "").trim().slice(0, 4000);
+  if (prompt.length < 5) {
+    res.status(400);
+    throw new Error("Bir neçə söz yazın — nə haqqında imtahan olsun?");
+  }
+  const instructions = clampInstr(req.body?.instructions);
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders?.();
+  const sse = (event, data) => {
+    try {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      /* client gone */
+    }
+  };
+  const hb = setInterval(() => {
+    try {
+      res.write(": ping\n\n");
+    } catch {
+      /* ignore */
+    }
+  }, 15000);
+  const abort = new AbortController();
+  res.on("close", () => {
+    if (!res.writableEnded) abort.abort();
+  });
+  const mkOnText = () => {
+    const streamer = makeQuestionStreamer();
+    return (full) => {
+      for (const q of streamer(full)) sse("question", q);
+    };
+  };
+
+  const viaCli = await questionsViaCli({
+    label: "generate",
+    system: `${GEN_SYSTEM_PROMPT}\n\n${CLI_EXTRACT_RULE}${instructionBlock(instructions)}`,
+    prompt: `MÜƏLLİMİN İSTƏYİ:\n${prompt}\n\nBu istəyə uyğun sualları YARAT.`,
+    files: [],
+    onText: mkOnText,
+    signal: abort.signal,
+  });
+  clearInterval(hb);
+  if (viaCli) {
+    await logAiUsage(req, viaCli.cost, viaCli.questions.length);
+    sse("done", { questions: viaCli.questions, cost: { model: viaCli.cost.model, cli: true }, provider: viaCli.provider, generated: true });
+    return res.end();
+  }
+  if (!abort.signal.aborted) {
+    sse("error", { message: "AI hazırda sual yarada bilmədi. Bir az sonra yenidən cəhd edin və ya təsviri dəqiqləşdirin." });
+  }
+  return res.end();
+});
+
 module.exports = {
+  generateQuestionsStream,
   extractQuestions,
   extractQuestionsStream,
   getAiUsage,

@@ -71,6 +71,7 @@ const {
 const {
   extractQuestions,
   extractQuestionsStream,
+  generateQuestionsStream,
   getAiUsage,
 } = require("../controllers/aiController");
 const {
@@ -123,7 +124,7 @@ router.post(
   "/extractQuestions/:examId",
   protect,
   teacherOnly,
-  memUpload.single("pdf"),
+  memUpload.array("pdf", 10),
   extractQuestions
 );
 // Same extraction, streamed over SSE so the teacher watches questions appear.
@@ -131,9 +132,11 @@ router.post(
   "/extractQuestionsStream/:examId",
   protect,
   teacherOnly,
-  memUpload.single("pdf"),
+  memUpload.array("pdf", 10),
   extractQuestionsStream
 );
+// AI: write new questions from the teacher's request (subscription CLIs).
+router.post("/generateQuestionsStream/:examId", protect, teacherOnly, generateQuestionsStream);
 // Admin-only AI spend dashboard data.
 router.get("/aiUsage", protect, adminOnly, getAiUsage);
 router.post("/addClass", protect, teacherOnly, addClass);
