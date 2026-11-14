@@ -26,6 +26,20 @@ const getVideos = asyncHandler(async (req, res) => {
   res.json(videos);
 });
 
+// GET /api/videos/public — PUBLIC (no sign-in): the newest 6 videos for the home
+// page's «Video dərslər» section. Only what a visitor needs to see a card (title,
+// YouTube id for the thumbnail, teacher's name); watching asks them to sign in.
+const PUBLIC_VIDEO_LIMIT = 6;
+const getPublicVideos = asyncHandler(async (req, res) => {
+  const videos = await Video.find({})
+    .sort({ createdAt: -1 })
+    .limit(PUBLIC_VIDEO_LIMIT)
+    .select("title videoId ownerName createdAt")
+    .lean();
+  res.set("Cache-Control", "public, max-age=60");
+  res.json(videos);
+});
+
 // POST /api/videos — teacher/admin adds a YouTube link.
 const addVideo = asyncHandler(async (req, res) => {
   const { title, url } = req.body;
@@ -59,4 +73,4 @@ const deleteVideo = asyncHandler(async (req, res) => {
   res.json({ id: req.params.id });
 });
 
-module.exports = { getVideos, addVideo, deleteVideo };
+module.exports = { getVideos, getPublicVideos, addVideo, deleteVideo };
