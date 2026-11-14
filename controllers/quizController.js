@@ -2848,7 +2848,11 @@ const reviewByResult = asyncHandler(async (req, res) => {
 
   // The student (owner of the result), an admin, or the TEACHER WHO OWNS THE
   // EXAM may view a review. Legacy exams with no owner stay open to any teacher.
-  const isOwner = result.userId?.toString() === user._id.toString();
+  // userId is POPULATED above, so compare its _id: a populated document's
+  // toString() is the whole record, not the id — that blocked EVERY student from
+  // their own review ("Bu nəticəyə icazəniz yoxdur") from 2026-06-20 to 2026-11-14.
+  const ownerId = result.userId && result.userId._id ? result.userId._id : result.userId;
+  const isOwner = !!ownerId && String(ownerId) === String(user._id);
   const examOwner = result.examId?.owner;
   const teacherOwnsExam =
     user.role === "teacher" && (!examOwner || String(examOwner) === String(user._id));
