@@ -143,6 +143,11 @@ app.use("/api/whatsapp", whatsappRoute)
 app.use("/api/videos", videoRoute)
 app.use("/api/health", healthRoute)
 app.use("/api/payments", examPaymentRoute)
+// Public visitor analytics ingest (POST) + the admin «Analitika» page (GET).
+app.use("/api/track", require("./routes/visitorRoute"))
+// Session recordings of teachers and students (every page, click and error),
+// admin-viewed on «Sessiyalar». Kept 3 days.
+app.use("/api/rec", require("./routes/recordingRoute"))
 app.use('/uploads', express.static('uploads'));
 
 app.get('/', (req, res) => {
@@ -205,6 +210,26 @@ mongoose
         const healthTick = beat("health-sampler", 5 * 60 * 1000, sampleHealth)
         setTimeout(healthTick, 90 * 1000)
         setInterval(healthTick, 5 * 60 * 1000)
+
+        // Visits older than a week become numbers: each finished day is summarised
+        // (VisitorDay: counts, the hour histogram, top sources) and only then are
+        // its rows — which carry IPs, user agents and journeys — deleted.
+        const visitorTick = beat("visitor-rollup", 24 * 60 * 60 * 1000, async () => {
+            try { await require("./jobs/visitorRollup").rollUpAndPruneVisitors() }
+            catch (e) { console.warn("[VISITORS] rollup error:", e && e.message) }
+        })
+        setTimeout(visitorTick, 15 * 60 * 1000)
+        setInterval(visitorTick, 24 * 60 * 60 * 1000)
+
+        // Session recordings are kept 3 days (RECORDINGS_KEEP_DAYS) and then
+        // removed completely, files and index, every hour whether or not anyone
+        // visits. Here, because the recordings volume is on this container.
+        const recordingSweepTick = beat("recording-sweep", 60 * 60 * 1000, async () => {
+            try { await require("./services/recordingStore").sweep() }
+            catch (e) { console.warn("[REC] sweep error:", e && e.message) }
+        })
+        setTimeout(recordingSweepTick, 4 * 60 * 1000)
+        setInterval(recordingSweepTick, 60 * 60 * 1000)
     })
     .catch((err) => {
         console.log(err)

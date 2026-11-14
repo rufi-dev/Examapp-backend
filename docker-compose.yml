@@ -22,11 +22,14 @@ services:
       # on every rebuild. CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)
       # comes from .env and needs no file at all.
       CLAUDE_CONFIG_DIR: /root/.claude
+      # Temporary session recordings (3 days, swept hourly by the app).
+      RECORDINGS_DIR: /app/recordings
     volumes:
       - uploads:/app/uploads # persist uploaded PDFs across rebuilds
       - wa_auth:/app/.wwebjs_auth # persist the linked WhatsApp session
       - cli_claude:/root/.claude # Claude CLI login/config; never in the image
       - cli_codex:/root/.codex # Codex CLI (ChatGPT) login; never in the image
+      - recordings:/app/recordings # temporary session recordings (3 days); not backed up
     networks:
       - web
 
@@ -56,5 +59,6 @@ volumes:
   wa_auth:
   cli_claude:
   cli_codex:
+  recordings:
   caddy_data:
   caddy_config:

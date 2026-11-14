@@ -1,0 +1,592 @@
+const asyncHandler = require("express-async-handler");
+const VisitorSession = require("../models/visitorSessionModel");
+const VisitorDay = require("../models/visitorDayModel");
+const User = require("../models/userModel");
+const Class = require("../models/classModel");
+const Exam = require("../models/examModel");
+
+// Keep a visit's journey and payload bounded so one abusive client can't bloat a
+// document. Older journey entries are dropped (we keep the most recent 60).
+const MAX_JOURNEY = 60;
+const clip = (v, n) => (typeof v === "string" ? v.slice(0, n) : undefined);
+
+// IPs whose visits are NOT recorded (the owner's own address, office, etc.) so
+// the analytics reflect real visitors, not us. Built-in default plus anything in
+// TRACK_EXCLUDE_IPS (comma-separated) in the env.
+const EXCLUDED_IPS = new Set(
+  ["188.92.22.147", "84.15.216.173", "84.15.218.179", "80.232.225.100", ...String(process.env.TRACK_EXCLUDE_IPS || "").split(",")]
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
+
+// ── Datacenter / bot exclusion ───────────────────────────────────────────────
+// Ad platforms (Meta) and clouds crawl every new link from their DATA CENTERS to
+// build previews and review ads — they'd otherwise inflate the counts and wreck
+// the bounce/conversion math. We drop them by IP range (real users come from
+// residential ISPs, not these blocks) plus obvious crawler user agents.
+const DC_CIDRS = [
+  // Meta / Facebook (AS32934)
+  "31.13.24.0/21", "31.13.64.0/18", "66.220.144.0/20", "66.220.152.0/21",
+  "69.63.176.0/20", "69.171.224.0/19", "173.252.64.0/18", "157.240.0.0/16",
+  "129.134.0.0/16", "204.15.20.0/22", "179.60.192.0/22", "185.60.216.0/22",
+  "57.141.0.0/16", "102.132.96.0/20",
+  // AWS (Amazon owns 3.0.0.0/8 outright) + the us-west-2 / us-east-1 blocks the
+  // observed ad-review crawlers run from.
+  "3.0.0.0/8", "13.52.0.0/16", "18.236.0.0/14", "18.244.0.0/15",
+  "34.208.0.0/12", "35.80.0.0/12", "44.192.0.0/10", "52.0.0.0/10",
+  "54.68.0.0/14", "54.144.0.0/12", "54.160.0.0/11", "54.184.0.0/13",
+  "54.200.0.0/13", "54.212.0.0/14", "100.20.0.0/14",
+  // GCP / Azure aggregates commonly used by crawlers
+  "34.64.0.0/10", "35.184.0.0/13", "20.0.0.0/8",
+];
+const DC_V6_PREFIXES = ["2a03:2880:"]; // Meta IPv6
+const CRAWLER_UA = /facebookexternalhit|facebookcatalog|meta-externalagent|(^|[^a-z])bot([^a-z]|$)|crawler|spider|slurp|bingpreview|whatsapp|telegrambot|headlesschrome|python-requests|axios\//i;
+
+const ipToLong = (ip) => {
+  const p = ip.split(".");
+  if (p.length !== 4) return null;
+  let n = 0;
+  for (const o of p) {
+    const v = Number(o);
+    if (!Number.isInteger(v) || v < 0 || v > 255) return null;
+    n = n * 256 + v;
+  }
+  return n >>> 0;
+};
+const inCidr = (ip, cidr) => {
+  const [range, bitsStr] = cidr.split("/");
+  const bits = Number(bitsStr);
+  const ipL = ipToLong(ip);
+  const rangeL = ipToLong(range);
+  if (ipL === null || rangeL === null) return false;
+  const mask = bits === 0 ? 0 : (~((1 << (32 - bits)) - 1)) >>> 0;
+  return (ipL & mask) === (rangeL & mask);
+};
+const normalizeIp = (ip) => (ip ? String(ip).replace(/^::ffff:/i, "").toLowerCase() : "");
+
+// Localhost / loopback — a developer or the admin hitting the site locally, never
+// a real visitor. Matches ::1, 127.x.x.x, ::ffff:127.x, 0.0.0.0 and "localhost".
+const LOCAL_IP_RE = /^(::1$|::ffff:127\.|127\.|localhost$|0\.0\.0\.0$)/i;
+const isLocalIp = (ip) => LOCAL_IP_RE.test(String(ip || "").trim());
+function isDatacenterIp(rawIp) {
+  const ip = normalizeIp(rawIp);
+  if (!ip) return false;
+  if (ip.includes(":")) return DC_V6_PREFIXES.some((p) => ip.startsWith(p));
+  return DC_CIDRS.some((c) => inCidr(ip, c));
+}
+
+// Behavioural catch that doesn't depend on IP lists: Instagram is a MOBILE-ONLY
+// app, so a real Instagram-ad click is never on a desktop browser. A DESKTOP
+// visit claiming an Instagram source is therefore Meta's ad-review crawler.
+function looksLikeAdCrawler(d) {
+  const ua = d && d.ua ? String(d.ua) : "";
+  if (!ua) return false;
+  const mobile = /Android|iPhone|iPad|iPod|Mobile|Instagram|FBAN|FBAV/i.test(ua);
+  if (mobile) return false;
+  const desktop = /Windows NT|Macintosh|Mac OS X|X11|Linux/i.test(ua);
+  const src = `${(d.affiliate || "")} ${(d.referrer || "")}`.toLowerCase();
+  const instagram = /instagram|(^|[^a-z])ig([^a-z]|$)/.test(src);
+  return desktop && instagram;
+}
+
+/*
+ * Public ingest. The site posts a small JSON payload (as text/plain, so no CORS
+ * preflight) on every page view and periodically while the tab is open. We upsert
+ * the visit row keyed by sessionId:
+ *  - first-touch fields (landing/referrer/affiliate/campaign) are written ONCE,
+ *  - IP/country/device refresh whenever supplied (client trace) with req.ip as a
+ *    server-side fallback,
+ *  - page_view extends the journey + bumps the counter,
+ *  - duration is kept as the max reported (active seconds on site).
+ * Always answers 204 fast; never trusts the body for anything but analytics.
+ */
+const track = asyncHandler(async (req, res) => {
+  // The route parses text/plain into a string; tolerate a pre-parsed object too.
+  let d = req.body;
+  if (typeof d === "string") {
+    try { d = JSON.parse(d); } catch { d = null; }
+  }
+  if (!d || typeof d !== "object") return res.sendStatus(204);
+
+  const sessionId = clip(d.session_id, 80);
+  if (!sessionId) return res.sendStatus(204);
+
+  const now = new Date();
+  const clientIp = clip(d.ip, 64);
+  // Silently drop our own traffic (matched on the client-reported IP or the
+  // server-observed one) so we never track ourselves.
+  if (EXCLUDED_IPS.has(clientIp) || EXCLUDED_IPS.has(req.ip)) return res.sendStatus(204);
+  // Drop localhost / loopback (a dev or the admin running the site locally).
+  if (isLocalIp(clientIp) || isLocalIp(req.ip)) return res.sendStatus(204);
+  // Drop ad-platform / cloud crawlers (Meta ad-review, link previews, scanners)
+  // so the counts reflect real humans, not bots.
+  if (isDatacenterIp(clientIp) || isDatacenterIp(req.ip) || CRAWLER_UA.test(d.ua || "") || looksLikeAdCrawler(d)) {
+    return res.sendStatus(204);
+  }
+  const path = clip(d.path, 300);
+
+  const set = { lastActivity: now };
+  // Refresh the IP only when the CLIENT supplies one (from /cdn-cgi/trace); a
+  // later event that carries no IP must NOT clobber a good one with req.ip.
+  if (clientIp) set.ip = clientIp;
+  if (d.country) set.country = clip(d.country, 80);
+  if (d.device) set.device = clip(d.device, 120);
+  if (d.ua) set.userAgent = clip(d.ua, 400);
+  if (d.event === "page_view" && path) set.lastPage = path;
+
+  // Render-timing funnel. "open" = HTML loaded (early script, before the bundle);
+  // "page_view" = the app painted. The gap between them is the pre-render bounce.
+  if (d.event === "open") set.opened = true;
+  if (d.event === "page_view") {
+    set.rendered = true;
+    const rm = Number(d.render_ms);
+    if (Number.isFinite(rm) && rm >= 0) set.renderMs = Math.min(Math.round(rm), 600000);
+  }
+  // Reliable visit↔account link: the browser sends the logged-in user's id/name.
+  // Set (not setOnInsert) so an anonymous visit that later logs in gets stamped.
+  const uid = clip(d.uid, 40);
+  if (uid && /^[a-f0-9]{24}$/i.test(uid)) {
+    set.userId = uid;
+    if (d.uname) set.userName = clip(d.uname, 120);
+  }
+
+  const setOnInsert = {
+    firstSeen: now,
+    landing: clip(d.landing, 300) || path || "",
+    referrer: clip(d.referrer, 400) || "(direct)",
+    affiliate: clip(d.affiliate, 200) || "(direct)",
+    campaign: clip(d.utm && d.utm.utm_campaign, 200) || "",
+  };
+  // Server-observed IP as the first-touch fallback (the real client IP behind
+  // Caddy, since trust proxy is on). Only applied on insert, and only when the
+  // client hasn't already sent one — so it never overrides the client value.
+  if (!clientIp && req.ip) setOnInsert.ip = req.ip;
+
+  const update = { $set: set, $setOnInsert: setOnInsert };
+
+  const dur = Number(d.duration);
+  if (Number.isFinite(dur) && dur > 0) update.$max = { durationSeconds: Math.min(dur, 86400) };
+
+  if (d.event === "page_view" && path) {
+    update.$push = { pages: { $each: [path], $slice: -MAX_JOURNEY } };
+    update.$inc = { pageViews: 1 };
+  }
+
+  try {
+    await VisitorSession.updateOne({ sessionId }, update, { upsert: true });
+  } catch {
+    // A race can insert the same new sessionId twice → duplicate-key. Retry once
+    // as a pure update (the row now exists); ignore anything else — analytics
+    // must never surface an error to a visitor.
+    try { await VisitorSession.updateOne({ sessionId }, { $set: set }); } catch { /* ignore */ }
+  }
+  return res.sendStatus(204);
+});
+
+// Map a source category to a filter on the stored affiliate/referrer/campaign.
+// Aligns with the badge classifier so "Instagram" catches ig / instagram.com /
+// l.instagram.com etc. "direct" = no meaningful source.
+const SOURCE_PATTERNS = {
+  instagram: "instagram|igsh|(^|[^a-z])ig([^a-z]|$)",
+  facebook: "facebook|fbclid|(^|[^a-z])fb([^a-z]|$)",
+  google: "google|gclid",
+  tiktok: "tiktok",
+  youtube: "youtube|youtu\\.be",
+};
+function sourceFilter(cat) {
+  if (!cat) return null;
+  if (cat === "direct") {
+    return { $or: [{ affiliate: { $in: [null, "", "(direct)"] } }, { affiliate: { $exists: false } }] };
+  }
+  const p = SOURCE_PATTERNS[cat];
+  const rx = p ? { $regex: p, $options: "i" } : { $regex: String(cat).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" };
+  return { $or: [{ affiliate: rx }, { referrer: rx }, { campaign: rx }] };
+}
+
+/*
+ * Admin list. Newest activity first, paginated, with optional filters:
+ *   ?source=instagram|facebook|google|tiktok|youtube|direct
+ *   ?unique=1   collapse to ONE row per IP (the latest) — hides the same device
+ *   ?from=YYYY-MM-DD&to=YYYY-MM-DD   date range on last activity
+ * Returns the rows plus totals so the page can show "showing X of N".
+ */
+const listVisitors = asyncHandler(async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+  const skip = (page - 1) * limit;
+  // Latest visit first by default; ?order=asc flips to oldest first.
+  const order = req.query.order === "asc" ? 1 : -1;
+
+  // Build the filter: date range + source category. Dates arrive as yyyy-mm-dd
+  // and mean AZERBAIJAN (UTC+4) days — otherwise, after local midnight, a visit
+  // falls into the previous UTC day and "today" would miss it. Anchor the day
+  // boundaries to +04:00 so the range matches what the admin sees on the clock.
+  const AZ = "+04:00";
+  const day = (s) => String(s || "").slice(0, 10); // yyyy-mm-dd
+  const filter = {};
+  const from = req.query.from ? new Date(`${day(req.query.from)}T00:00:00.000${AZ}`) : null;
+  const to = req.query.to ? new Date(`${day(req.query.to)}T23:59:59.999${AZ}`) : null;
+  if ((from && !isNaN(from)) || (to && !isNaN(to))) {
+    filter.lastActivity = {};
+    if (from && !isNaN(from)) filter.lastActivity.$gte = from;
+    if (to && !isNaN(to)) filter.lastActivity.$lte = to;
+  }
+  const srcF = sourceFilter(req.query.source);
+  if (srcF) Object.assign(filter, srcF);
+  filter.ip = { $not: LOCAL_IP_RE }; // hide localhost/loopback visits from analytics
+
+  const unique = req.query.unique === "1" || req.query.unique === "true";
+
+  let rows, total;
+  if (unique) {
+    // One row per IP: the most recent visit for each. Rows without an IP collapse
+    // under a single null bucket.
+    const base = [
+      { $match: filter },
+      { $sort: { lastActivity: -1 } },
+      { $group: { _id: "$ip", doc: { $first: "$$ROOT" } } },
+      { $replaceRoot: { newRoot: "$doc" } },
+    ];
+    const [countAgg, pageRows] = await Promise.all([
+      VisitorSession.aggregate([...base, { $count: "n" }]),
+      VisitorSession.aggregate([...base, { $sort: { lastActivity: order } }, { $skip: skip }, { $limit: limit }]),
+    ]);
+    total = countAgg[0]?.n || 0;
+    rows = pageRows;
+  } else {
+    [rows, total] = await Promise.all([
+      VisitorSession.find(filter).sort({ lastActivity: order }).skip(skip).limit(limit).lean(),
+      VisitorSession.countDocuments(filter),
+    ]);
+  }
+
+  // Detect which visits belong to a REGISTERED user by matching the visit IP
+  // against users' signup/last IP. One query for the whole page; a shared IP can
+  // map to several accounts, so we attach the list. `registered` = a real user.
+  const ips = [...new Set(rows.map((r) => r.ip).filter(Boolean))];
+  const byIp = {};
+  if (ips.length) {
+    const users = await User.find({ $or: [{ lastIp: { $in: ips } }, { signupIp: { $in: ips } }] })
+      .select("name lastIp signupIp")
+      .lean();
+    for (const u of users) {
+      for (const ip of [u.lastIp, u.signupIp]) {
+        if (!ip) continue;
+        if (!byIp[ip]) byIp[ip] = new Set();
+        byIp[ip].add(u.name);
+      }
+    }
+  }
+  const withUsers = rows.map((r) => {
+    const names = new Set();
+    if (r.userName) names.add(r.userName); // explicit (logged-in) — most reliable
+    if (r.ip && byIp[r.ip]) byIp[r.ip].forEach((n) => names.add(n)); // IP match
+    return { ...r, registeredUsers: [...names] };
+  });
+
+  res.status(200).json({ page, limit, total, order: order === 1 ? "asc" : "desc", rows: withUsers });
+});
+
+// Platform growth analytics: daily new registrations (by role), classes, and
+// exams (created vs "ready" = has questions), over a date range. Days are
+// bucketed in AZERBAIJAN time (UTC+4) so a day matches the admin's clock.
+const AZ_TZ = "+04:00";
+const dayKey = (s) => String(s || "").slice(0, 10);
+
+// Every yyyy-mm-dd from `fromKey` to `toKey` inclusive (as AZT calendar days).
+function dayRange(fromKey, toKey) {
+  const out = [];
+  let d = new Date(`${fromKey}T12:00:00.000${AZ_TZ}`);
+  const end = new Date(`${toKey}T12:00:00.000${AZ_TZ}`);
+  let guard = 0;
+  while (d <= end && guard < 800) {
+    out.push(
+      new Date(d.getTime() + 4 * 3600 * 1000).toISOString().slice(0, 10) // shift to AZT then take the date
+    );
+    d = new Date(d.getTime() + 24 * 3600 * 1000);
+    guard += 1;
+  }
+  return out;
+}
+
+const growth = asyncHandler(async (req, res) => {
+  const today = new Date(new Date().getTime() + 4 * 3600 * 1000).toISOString().slice(0, 10);
+  const fromKey = req.query.from ? dayKey(req.query.from) : dayKey(new Date(Date.now() - 29 * 864e5).toISOString());
+  const toKey = req.query.to ? dayKey(req.query.to) : today;
+  const from = new Date(`${fromKey}T00:00:00.000${AZ_TZ}`);
+  const to = new Date(`${toKey}T23:59:59.999${AZ_TZ}`);
+
+  const bucket = { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: AZ_TZ } };
+
+  const [usersByDay, classesByDay, examsByDay, totals] = await Promise.all([
+    User.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to } } },
+      { $group: { _id: { d: bucket, role: "$role" }, n: { $sum: 1 } } },
+    ]),
+    Class.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to }, deletedAt: null } },
+      { $group: { _id: bucket, n: { $sum: 1 } } },
+    ]),
+    Exam.aggregate([
+      { $match: { createdAt: { $gte: from, $lte: to }, deletedAt: null } },
+      { $lookup: { from: "questions", localField: "questions", foreignField: "_id", as: "q" } },
+      {
+        $project: {
+          d: bucket,
+          ready: {
+            $gt: [{ $size: { $ifNull: [{ $arrayElemAt: ["$q.correctAnswers", 0] }, []] } }, 0],
+          },
+        },
+      },
+      { $group: { _id: "$d", created: { $sum: 1 }, ready: { $sum: { $cond: ["$ready", 1, 0] } } } },
+    ]),
+    (async () => {
+      const [users, teachers, students, classes, exams] = await Promise.all([
+        User.countDocuments({}),
+        User.countDocuments({ role: "teacher" }),
+        User.countDocuments({ role: "student" }),
+        Class.countDocuments({ deletedAt: null }),
+        Exam.countDocuments({ deletedAt: null }),
+      ]);
+      // Ready exams overall (has questions).
+      const readyAgg = await Exam.aggregate([
+        { $match: { deletedAt: null } },
+        { $lookup: { from: "questions", localField: "questions", foreignField: "_id", as: "q" } },
+        { $project: { ready: { $gt: [{ $size: { $ifNull: [{ $arrayElemAt: ["$q.correctAnswers", 0] }, []] } }, 0] } } },
+        { $match: { ready: true } },
+        { $count: "n" },
+      ]);
+      return { users, teachers, students, classes, exams, examsReady: readyAgg[0]?.n || 0 };
+    })(),
+  ]);
+
+  const days = dayRange(fromKey, toKey);
+  const zero = () => days.map(() => 0);
+  const idx = new Map(days.map((d, i) => [d, i]));
+  const series = {
+    teachers: zero(),
+    students: zero(),
+    users: zero(),
+    classes: zero(),
+    examsCreated: zero(),
+    examsReady: zero(),
+  };
+
+  usersByDay.forEach((r) => {
+    const i = idx.get(r._id.d);
+    if (i == null) return;
+    series.users[i] += r.n;
+    if (r._id.role === "teacher") series.teachers[i] += r.n;
+    if (r._id.role === "student") series.students[i] += r.n;
+  });
+  classesByDay.forEach((r) => {
+    const i = idx.get(r._id);
+    if (i != null) series.classes[i] = r.n;
+  });
+  examsByDay.forEach((r) => {
+    const i = idx.get(r._id);
+    if (i != null) {
+      series.examsCreated[i] = r.created;
+      series.examsReady[i] = r.ready;
+    }
+  });
+
+  res.json({ from: fromKey, to: toKey, days, series, totals });
+});
+
+// GET /api/track/hourly — ADMIN only: visitor counts by HOUR OF DAY (0–23) in
+// Azerbaijan time, over the selected date range. `?unique=1` counts DISTINCT IPs
+// per hour instead of total visits; `?source=` filters by acquisition category.
+const hourly = asyncHandler(async (req, res) => {
+  const day = (s) => String(s || "").slice(0, 10);
+  const filter = {};
+  const from = req.query.from ? new Date(`${day(req.query.from)}T00:00:00.000${AZ_TZ}`) : null;
+  const to = req.query.to ? new Date(`${day(req.query.to)}T23:59:59.999${AZ_TZ}`) : null;
+  if ((from && !isNaN(from)) || (to && !isNaN(to))) {
+    filter.lastActivity = {};
+    if (from && !isNaN(from)) filter.lastActivity.$gte = from;
+    if (to && !isNaN(to)) filter.lastActivity.$lte = to;
+  }
+  const srcF = sourceFilter(req.query.source);
+  if (srcF) Object.assign(filter, srcF);
+  filter.ip = { $not: LOCAL_IP_RE }; // hide localhost/loopback visits from analytics
+  const unique = req.query.unique === "1" || req.query.unique === "true";
+
+  // Hour of day (0–23) anchored to Azerbaijan time.
+  const hourExpr = {
+    $toInt: { $dateToString: { format: "%H", date: "$lastActivity", timezone: AZ_TZ } },
+  };
+
+  const agg = unique
+    ? await VisitorSession.aggregate([
+        { $match: filter },
+        // one entry per (hour, ip) so a returning IP counts once per hour...
+        { $group: { _id: { h: hourExpr, ip: { $ifNull: ["$ip", "—"] } } } },
+        { $group: { _id: "$_id.h", count: { $sum: 1 } } },
+      ])
+    : await VisitorSession.aggregate([
+        { $match: filter },
+        { $group: { _id: hourExpr, count: { $sum: 1 } } },
+      ]);
+
+  const map = new Map(agg.map((r) => [r._id, r.count]));
+  const hours = Array.from({ length: 24 }, (_, h) => ({ hour: h, count: map.get(h) || 0 }));
+
+  /*
+   * The days whose rows are gone, added back from their summaries.
+   *
+   * Visits older than a week are deleted and kept as numbers. Reading only the
+   * rows would draw a chart that falls to zero a week back — which does not say
+   * "this data was summarised", it says "nobody visited", and that is a lie the
+   * chart tells confidently. The histogram is the one thing the summary keeps at
+   * full resolution precisely so this keeps working.
+   *
+   * Skipped when a source filter is on: the summary keeps top-N sources as
+   * counts, not per-hour breakdowns, so an hour chart filtered by source can
+   * only honestly cover the days that still have rows.
+   */
+  if (!srcF) {
+    const fromKey = from && !isNaN(from) ? dayKey(req.query.from) : null;
+    const toKey = to && !isNaN(to) ? dayKey(req.query.to) : null;
+    const q = {};
+    if (fromKey) q.$gte = fromKey;
+    if (toKey) q.$lte = toKey;
+    const summaries = await VisitorDay.find(Object.keys(q).length ? { day: q } : {})
+      .select("day hours hoursUnique")
+      .lean();
+    // A day that has BOTH a summary and rows would be counted twice: the summary
+    // is written the moment a day is over, the rows survive another week.
+    const live = new Set(
+      (await VisitorSession.distinct("lastActivity", filter)).map((d) =>
+        new Date(new Date(d).getTime() + 4 * 3600 * 1000).toISOString().slice(0, 10)
+      )
+    );
+    summaries.forEach((d) => {
+      if (live.has(d.day)) return;
+      const src = (unique ? d.hoursUnique : d.hours) || [];
+      for (let h = 0; h < 24; h += 1) hours[h].count += Number(src[h]) || 0;
+    });
+  }
+
+  const totalHits = hours.reduce((s, x) => s + x.count, 0);
+  const peak = hours.reduce((best, x) => (x.count > best.count ? x : best), { hour: 0, count: 0 });
+  res.json({ hours, total: totalHits, peakHour: peak.hour, unique });
+});
+
+/*
+ * The daily numbers, for ranges the rows no longer cover.
+ *
+ * The visitor LIST is a list of visits, and a summarised day has none — so
+ * rather than let that page render an empty table and imply nobody came, this
+ * serves what was kept. It also reports the retention cutoff, so the UI can say
+ * "individual visits are kept for 7 days" instead of leaving the reader to work
+ * out why older days look different.
+ */
+const visitorDays = asyncHandler(async (req, res) => {
+  const fromKey = req.query.from ? dayKey(req.query.from) : null;
+  const toKey = req.query.to ? dayKey(req.query.to) : null;
+  const q = {};
+  if (fromKey) q.$gte = fromKey;
+  if (toKey) q.$lte = toKey;
+
+  const days = await VisitorDay.find(Object.keys(q).length ? { day: q } : {})
+    .sort({ day: -1 })
+    .limit(400)
+    .lean();
+
+  const totals = days.reduce(
+    (acc, d) => ({
+      visits: acc.visits + (d.visits || 0),
+      uniqueIps: acc.uniqueIps + (d.uniqueIps || 0),
+      pageViews: acc.pageViews + (d.pageViews || 0),
+      signedIn: acc.signedIn + (d.signedIn || 0),
+      durationSeconds: acc.durationSeconds + (d.durationSeconds || 0),
+    }),
+    { visits: 0, uniqueIps: 0, pageViews: 0, signedIn: 0, durationSeconds: 0 }
+  );
+
+  res.json({
+    days,
+    totals,
+    // Days before this have numbers only — no individual visits, no IPs.
+    keepDays: 7,
+  });
+});
+
+/*
+ * The analytics page's traffic, for any range (2026-11-03). Every finished day
+ * is a VisitorDay summary (written the moment the day ends); today, and a
+ * finished day the roll-up has not reached yet, are summarised from their rows
+ * on the spot with the same code, so a range of any length draws true numbers
+ * instead of falling to zero a week back. Per day: visits, unique IPs that day,
+ * signed in, page views, time, opened vs rendered. For the whole range: the hour
+ * histogram (both kinds), and the top sources (grouped into the categories the
+ * list filters by), countries, devices and landing pages.
+ *
+ * "unique" is per day: a day's distinct IPs are kept, the addresses are not, so
+ * the same visitor on two days counts twice. The page says so.
+ */
+const SOURCE_KEYS = ["instagram", "facebook", "google", "tiktok", "youtube"];
+const SOURCE_RX = Object.fromEntries(SOURCE_KEYS.map((k) => [k, new RegExp(SOURCE_PATTERNS[k], "i")]));
+function sourceCategory(affiliate) {
+  const a = String(affiliate || "").trim();
+  if (!a || a === "(direct)") return "direct";
+  return SOURCE_KEYS.find((k) => SOURCE_RX[k].test(a)) || "other";
+}
+
+const overview = asyncHandler(async (req, res) => {
+  const { summarizeDay } = require("../jobs/visitorRollup");
+  const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const today = new Date(Date.now() + 4 * 3600 * 1000).toISOString().slice(0, 10);
+  const toKey = req.query.to ? dayKey(req.query.to) : today;
+  const fromKey = req.query.from ? dayKey(req.query.from) : toKey;
+  if (!DAY_RE.test(fromKey) || !DAY_RE.test(toKey) || fromKey > toKey) {
+    res.status(400);
+    throw new Error("Yanlış tarix aralığı");
+  }
+  const keys = dayRange(fromKey, toKey);
+  if (keys.length > 400) {
+    res.status(400);
+    throw new Error("Aralıq ən çox 400 gün ola bilər");
+  }
+  // Rows are kept a week: older days can only come from their summaries.
+  const rowsFrom = new Date(Date.now() + 4 * 3600 * 1000 - 8 * 864e5).toISOString().slice(0, 10);
+  const stored = new Map((await VisitorDay.find({ day: { $gte: fromKey, $lte: toKey } }).lean()).map((d) => [d.day, d]));
+
+  const empty = (day) => ({ day, visits: 0, uniqueIps: 0, signedIn: 0, pageViews: 0, durationSeconds: 0, opened: 0, rendered: 0, hours: [], hoursUnique: [], sources: [], countries: [], devices: [], landings: [] });
+  const days = [];
+  for (const k of keys) {
+    let d = k < today ? stored.get(k) : null;
+    if (!d && k <= today && k >= rowsFrom) d = await summarizeDay(k);
+    days.push(d || empty(k));
+  }
+
+  const sum = (f) => days.reduce((n, d) => n + (Number(d[f]) || 0), 0);
+  const hist = (f) => Array.from({ length: 24 }, (_, h) => days.reduce((n, d) => n + (Number((d[f] || [])[h]) || 0), 0));
+  const merge = (f, keyOf = (k) => k, top = 8) => {
+    const m = new Map();
+    for (const d of days) for (const b of d[f] || []) {
+      const k = keyOf(b.key);
+      if (!k) continue;
+      m.set(k, (m.get(k) || 0) + (Number(b.n) || 0));
+    }
+    return [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, top).map(([key, n]) => ({ key, n }));
+  };
+
+  res.json({
+    from: fromKey,
+    to: toKey,
+    today,
+    keepDays: 7,
+    days: days.map((d) => ({ day: d.day, visits: d.visits || 0, uniqueIps: d.uniqueIps || 0, signedIn: d.signedIn || 0, opened: d.opened || 0, rendered: d.rendered || 0 })),
+    totals: { visits: sum("visits"), uniqueIps: sum("uniqueIps"), signedIn: sum("signedIn"), pageViews: sum("pageViews"), durationSeconds: sum("durationSeconds"), opened: sum("opened"), rendered: sum("rendered") },
+    hours: hist("hours"),
+    hoursUnique: hist("hoursUnique"),
+    sources: merge("sources", sourceCategory, 7),
+    countries: merge("countries"),
+    devices: merge("devices", (k) => k, 6),
+    landings: merge("landings"),
+  });
+});
+
+module.exports = { track, listVisitors, growth, hourly, visitorDays, overview, sourceCategory, isDatacenterIp, looksLikeAdCrawler };

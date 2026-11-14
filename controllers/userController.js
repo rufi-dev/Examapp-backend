@@ -2,6 +2,7 @@ const asyncHandler = require("express-async-handler");
 const User = require("../models/userModel");
 const Enrollment = require("../models/enrollmentModel");
 const Class = require("../models/classModel");
+const VisitorSession = require("../models/visitorSessionModel");
 const bcrypt = require("bcryptjs");
 const { generateToken, hashToken, getToken } = require("../utils/index");
 const { recordDebug } = require("../utils/debugLog");
@@ -12,6 +13,24 @@ const crypto = require("crypto");
 const Token = require("../models/tokenModel");
 const Cryptr = require("cryptr");
 const { OAuth2Client } = require("google-auth-library");
+
+// Sanitise the client-supplied first-touch acquisition into a bounded shape.
+// Returns undefined when there is nothing meaningful to store (organic/direct).
+function cleanAcquisition(a) {
+  if (!a || typeof a !== "object") return undefined;
+  const s = (v, n) => (typeof v === "string" && v.trim() ? v.trim().slice(0, n) : undefined);
+  const out = {
+    source: s(a.source, 120),
+    medium: s(a.medium, 120),
+    campaign: s(a.campaign, 200),
+    referrer: s(a.referrer, 400),
+    landing: s(a.landing, 300),
+  };
+  const meaningful = out.source && out.source !== "(direct)";
+  if (!meaningful && !out.campaign && !out.referrer) return undefined;
+  out.at = new Date();
+  return out;
+}
 
 const cryptr = new Cryptr(process.env.CRYPTR_KEY);
 
@@ -59,6 +78,9 @@ const registerUser = asyncHandler(async (req, res) => {
       grade,
       userAgent,
       isVerified: true,
+      signupIp: req.ip,
+      lastIp: req.ip,
+      acquisition: cleanAcquisition(req.body.acquisition),
     });
 
     // Generate token
@@ -76,6 +98,7 @@ const registerUser = asyncHandler(async (req, res) => {
     if (user) {
       const {
         _id,
+        createdAt,
         name,
         email,
         phone,
@@ -88,6 +111,7 @@ const registerUser = asyncHandler(async (req, res) => {
       } = user;
       res.status(201).json({
         _id,
+        createdAt,
         name,
         email,
         phone,
@@ -189,6 +213,7 @@ const loginUser = asyncHandler(async (req, res) => {
       });
       const {
         _id,
+        createdAt,
         name,
         email,
         phone,
@@ -201,6 +226,7 @@ const loginUser = asyncHandler(async (req, res) => {
 
       res.status(200).json({
         _id,
+        createdAt,
         name,
         email,
         phone,
@@ -332,10 +358,11 @@ const loginWithCode = asyncHandler(async (req, res) => {
       secure: true,
     });
 
-    const { _id, name, email, phone, bio, photo, role, isVerified, userAgent } =
+    const { _id, createdAt, name, email, phone, bio, photo, role, isVerified, userAgent } =
       user;
     res.status(200).json({
       _id,
+      createdAt,
       name,
       email,
       phone,
@@ -450,6 +477,7 @@ const getUser = asyncHandler(async (req, res) => {
     if (user) {
       const {
         _id,
+        createdAt,
         name,
         email,
         phone,
@@ -466,6 +494,7 @@ const getUser = asyncHandler(async (req, res) => {
 
       res.status(200).json({
         _id,
+        createdAt,
         name,
         email,
         phone,
@@ -496,6 +525,8 @@ const getUserById = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
   const user = await User.findById(id)
+    // Never the password hash; IPs and where they came from only for an admin.
+    .select(req.user.role === "admin" ? "-password" : "-password -signupIp -lastIp -acquisition -lastActiveAt")
     .populate("exams")
     .populate({
       path: "results",
@@ -589,7 +620,39 @@ const getUsers = asyncHandler(async (req, res) => {
     }).distinct("student");
     filter = { _id: { $in: studentIds } };
   }
-  const users = await User.find(filter).sort("-createdAt").select("-password");
+  const isAdmin = req.user.role === "admin";
+  // IPs and where an account came from are admin-only analytics: a teacher's
+  // student list never carries them.
+  const users = await User.find(filter)
+    .sort("-createdAt")
+    .select(isAdmin ? "-password" : "-password -signupIp -lastIp -acquisition")
+    .lean();
+
+  // "Came from" — link each account to its earliest tagged visitor session with
+  // a real source, so the directory shows where a user arrived from even if they
+  // signed up before acquisition was captured at register (as long as they've
+  // since browsed while logged in, which stamps their id on the session).
+  if (isAdmin && users.length) {
+    const ids = users.map((u) => u._id);
+    const sessions = await VisitorSession.find({
+      userId: { $in: ids },
+      affiliate: { $exists: true, $nin: [null, "", "(direct)"] },
+    })
+      .sort({ firstSeen: 1 })
+      .select("userId affiliate campaign")
+      .lean();
+    const srcOf = new Map();
+    for (const s of sessions) {
+      const key = String(s.userId);
+      if (!srcOf.has(key)) srcOf.set(key, { source: s.affiliate, campaign: s.campaign || "" });
+    }
+    users.forEach((u) => {
+      if (!u.acquisition?.source && srcOf.has(String(u._id))) {
+        u.acquisitionMatched = srcOf.get(String(u._id));
+      }
+    });
+  }
+
   res.status(200).json(users || []);
 });
 
@@ -834,6 +897,9 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
       photo: picture,
       userAgent,
       isVerified: true,
+      signupIp: req.ip,
+      lastIp: req.ip,
+      acquisition: cleanAcquisition(req.body.acquisition),
     });
 
     if (newUser) {
@@ -851,6 +917,7 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
 
       const {
         _id,
+        createdAt,
         name,
         email,
         phone,
@@ -862,6 +929,7 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
       } = newUser;
       res.status(201).json({
         _id,
+        createdAt,
         name,
         email,
         phone,
@@ -898,10 +966,11 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
       secure: true,
     });
 
-    const { _id, name, email, phone, bio, photo, role, isVerified, userAgent } =
+    const { _id, createdAt, name, email, phone, bio, photo, role, isVerified, userAgent } =
       user;
     res.status(200).json({
       _id,
+      createdAt,
       name,
       email,
       phone,
@@ -913,6 +982,72 @@ const loginWithGoogle = asyncHandler(async (req, res) => {
       token,
     });
   }
+});
+
+// GET /api/users/setup-funnel — admin analytics («Analitika» → Müəllimlər): how
+// far each teacher has got in setting up, as a current-state snapshot. Ported
+// from Examopia (without its plans). Categories can overlap (a teacher may have
+// both an empty exam and no students). "finished" = fully set up: a class, an
+// exam with content, students, and no empty class or exam.
+const getSetupFunnel = asyncHandler(async (req, res) => {
+  const Exam = require("../models/examModel");
+  const teachers = await User.find({ role: "teacher" }).select("_id").lean();
+  const ids = teachers.map((t) => t._id);
+  const total = ids.length;
+  if (!total) {
+    return res.json({ total: 0, finished: 0, readyNoStudents: 0, notStarted: 0, emptyClass: 0, emptyExam: 0, noStudents: 0 });
+  }
+
+  const [classes, exams, enrolled] = await Promise.all([
+    Class.find({ owner: { $in: ids } }).select("_id owner").lean(),
+    // Each exam and whether it has content (an answer key, or a PDF).
+    Exam.aggregate([
+      { $match: { owner: { $in: ids }, deletedAt: null } },
+      { $lookup: { from: "questions", localField: "questions", foreignField: "_id", as: "q" } },
+      {
+        $project: {
+          owner: 1,
+          qcount: { $size: { $ifNull: [{ $arrayElemAt: ["$q.correctAnswers", 0] }, []] } },
+          hasPdf: { $cond: [{ $ifNull: ["$pdf", false] }, true, false] },
+        },
+      },
+    ]),
+    Enrollment.aggregate([
+      { $match: { status: "approved" } },
+      { $group: { _id: "$class", s: { $addToSet: "$student" } } },
+    ]),
+  ]);
+
+  const studentsOfClass = new Map(enrolled.map((r) => [String(r._id), r.s.map(String)]));
+  const per = new Map(ids.map((id) => [String(id), { classes: 0, emptyClass: false, students: new Set(), exams: 0, content: false, emptyExam: false }]));
+  for (const c of classes) {
+    const t = per.get(String(c.owner));
+    if (!t) continue;
+    t.classes += 1;
+    const s = studentsOfClass.get(String(c._id)) || [];
+    if (!s.length) t.emptyClass = true;
+    s.forEach((x) => t.students.add(x));
+  }
+  for (const e of exams) {
+    const t = per.get(String(e.owner));
+    if (!t) continue;
+    t.exams += 1;
+    if (e.qcount > 0 || e.hasPdf) t.content = true;
+    else t.emptyExam = true;
+  }
+
+  const out = { total, finished: 0, readyNoStudents: 0, notStarted: 0, emptyClass: 0, emptyExam: 0, noStudents: 0 };
+  for (const t of per.values()) {
+    const students = t.students.size;
+    if (!t.classes && !t.exams) out.notStarted += 1;
+    if (t.emptyClass) out.emptyClass += 1;
+    if (t.emptyExam) out.emptyExam += 1;
+    if (t.classes > 0 && students === 0) out.noStudents += 1;
+    // Built a class + a ready exam but never invited anyone — one step from active.
+    if (t.classes > 0 && t.content && students === 0) out.readyNoStudents += 1;
+    if (t.classes > 0 && t.content && students > 0 && !t.emptyClass && !t.emptyExam) out.finished += 1;
+  }
+  res.json(out);
 });
 
 module.exports = {
@@ -935,4 +1070,5 @@ module.exports = {
   loginWithCode,
   loginWithGoogle,
   getUserById,
+  getSetupFunnel,
 };

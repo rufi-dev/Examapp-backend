@@ -50,6 +50,18 @@ const protect = asyncHandler(async (req, res, next) => {
       throw new Error("User suspended, please contact support");
     }
 
+    // Track activity for the admin user list / analytics. Throttled to once every
+    // 10 minutes per user and deliberately NOT awaited, so an authenticated
+    // request never pays for an extra write (this runs on every API call). The
+    // same write refreshes the user's current IP (visitor↔user matching); req.ip
+    // is the real client IP (trust proxy is on behind Caddy).
+    const TEN_MIN = 10 * 60 * 1000;
+    if (!user.lastActiveAt || Date.now() - new Date(user.lastActiveAt).getTime() > TEN_MIN) {
+      const patch = { lastActiveAt: new Date() };
+      if (req.ip) patch.lastIp = req.ip;
+      User.updateOne({ _id: user._id }, { $set: patch }).catch(() => {});
+    }
+
     req.user = user;
     next();
   } catch (error) {

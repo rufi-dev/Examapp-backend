@@ -7,6 +7,9 @@ const Question = require("../models/questionModel");
 const Result = require("../models/resultModel");
 const Attempt = require("../models/attemptModel");
 const User = require("../models/userModel");
+// A user populated into a response: never the password hash, and never the
+// admin-only analytics (IPs, where the account came from).
+const USER_PRIVATE = "-password -signupIp -lastIp -acquisition -lastActiveAt";
 const Enrollment = require("../models/enrollmentModel");
 const PaperDraft = require("../models/paperDraftModel");
 const { readSheetImages, logPaperAiUsage } = require("./aiController");
@@ -2701,7 +2704,7 @@ const getResultsByExam = asyncHandler(async (req, res) => {
 
   const results = await Result.find({ examId })
     .populate("examId")
-    .populate("userId");
+    .populate("userId", USER_PRIVATE);
 
   if (!results) {
     res.status(404);
@@ -2811,7 +2814,7 @@ const getResultsByUserByExam = asyncHandler(async (req, res) => {
   const results = await Result.find({ userId: user._id, examId })
     .sort({ createdAt: 1 })
     .populate("examId")
-    .populate("userId");
+    .populate("userId", USER_PRIVATE);
 
   if (!results) {
     res.status(404);

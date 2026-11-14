@@ -101,7 +101,26 @@ const userSchema = Schema(
             onReport: { type: Boolean, default: true },    // end-of-exam PDF+Excel report
             excludedClasses: [{ type: Schema.Types.ObjectId, ref: "Class" }],
             excludedExams: [{ type: Schema.Types.ObjectId, ref: "Exam" }],
-        }
+        },
+        // Analytics (ported from Examopia, 2026-11-14).
+        // IPs for the admin directory: the address this account signed up from,
+        // and its most recent one (refreshed on authenticated activity, throttled).
+        // Also used to match a registered user to an anonymous visitor row by IP.
+        signupIp: { type: String },
+        lastIp: { type: String, index: true },
+        // Last authenticated request (throttled to one write per 10 minutes).
+        lastActiveAt: { type: Date },
+        // Marketing acquisition — WHERE this account came from, captured ONCE at
+        // sign-up from the visitor tracker's first-touch data (utm_source / ?ref /
+        // referring site). Absent for accounts created before this existed / organic.
+        acquisition: {
+            source: { type: String },   // e.g. "instagram", "facebook", "google"
+            medium: { type: String },   // utm_medium
+            campaign: { type: String }, // utm_campaign
+            referrer: { type: String },
+            landing: { type: String },  // first page of the visit
+            at: { type: Date },
+        },
     },
     {
         timestamps: true,
